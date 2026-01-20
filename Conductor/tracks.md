@@ -48,5 +48,14 @@ This file tracks all major tracks for the project. Each track has its own detail
 ## [x] Track: Observability Gaps
 *Link: [./conductor/tracks/observability_gaps_20260112/](./conductor/tracks/observability_gaps_20260112/)*
 *Priority: High*
-*Status: Implemented (observabilityService.jsw)*
-*Goal: Fix tracing and error handling gaps in matching engine.*
+## [ ] Track: Feature Adoption Log
+*Link: [./conductor/tracks/feature_adoption_log_20260120/](./conductor/tracks/feature_adoption_log_20260120/)*
+*Priority: High*
+*Goal: Visualize feature adoption and lifecycle to enable rapid shipping/disposal decisions.*
+*Status: Planning*
+
+## [/] Track: UI/UX Consistency & Standardization
+*Link: [./conductor/tracks/ui_standardization_20260120/](./conductor/tracks/ui_standardization_20260120/)*
+*Priority: High*
+*Goal: Unify Tailwind configs, icons, buttons, and theme logic across the platform.*
+*Status: In Progress (Phase 3 Complete, Phase 4: Component Refactoring)*

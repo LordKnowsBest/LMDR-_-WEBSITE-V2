@@ -1,0 +1,1130 @@
+/**
+ * Feature Adoption Service - Comprehensive Feature Lifecycle Management
+ * Tracks feature usage, analyzes adoption patterns, and provides insights
+ * for the "Rapid Shipping" feedback loop.
+ *
+ * Collections:
+ * - FeatureAdoptionLogs: Individual interaction events
+ * - FeatureRegistry: Feature metadata and lifecycle status
+ * - FeatureFunnels: Multi-step conversion funnel definitions
+ * - FeatureMetricsDaily: Pre-aggregated daily metrics for performance
+ */
+
+import wixData from 'wix-data';
+import { currentMember } from 'wix-members-backend';
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const CONFIG = {
+    collections: {
+        logs: 'FeatureAdoptionLogs',
+        registry: 'FeatureRegistry',
+        funnels: 'FeatureFunnels',
+        metricsDaily: 'FeatureMetricsDaily'
+    },
+    // Valid interaction actions
+    validActions: [
+        'view',           // Feature was viewed/loaded
+        'click',          // User clicked/interacted
+        'complete',       // User completed the feature's main action
+        'hover',          // User hovered (for engagement tracking)
+        'scroll_to',      // User scrolled to feature
+        'time_spent',     // Time tracking (in metadata.duration)
+        'error',          // Feature error occurred
+        'abandon',        // User abandoned mid-flow
+        'share',          // Feature shared
+        'repeat',         // Repeat usage
+        'first_use'       // First time user used feature
+    ],
+    // Lifecycle status thresholds
+    thresholds: {
+        newFeatureDays: 30,        // Feature is "New" for 30 days
+        adoptedMinUsers: 10,       // Min unique users for "Adopted"
+        adoptedMinInteractions: 50,// Min interactions for "Adopted"
+        matureMinDays: 90,         // Days for "Mature" status
+        atRiskDropPercent: 30,     // 30% drop triggers "At Risk"
+        deadDaysNoUse: 30          // 30 days no use = "Dead"
+    },
+    // Health score weights
+    healthWeights: {
+        usage: 40,       // Usage volume weight
+        completion: 30,  // Completion rate weight
+        errorFree: 30    // Error-free rate weight
+    }
+};
+
+// Feature lifecycle statuses
+export const FeatureCycles = {
+    NEW: 'New',          // < 30 days old
+    ADOPTED: 'Adopted',  // Steady usage > threshold
+    MATURE: 'Mature',    // Long stable history (90+ days)
+    AT_RISK: 'At Risk',  // Usage dropping significantly
+    DEAD: 'Dead',        // No usage in 30 days
+    DEPRECATED: 'Deprecated' // Marked for removal
+};
+
+// ============================================
+// AUTHORIZATION HELPERS
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+        const role = member.contactDetails?.customFields?.role || '';
+        return ['admin', 'super_admin'].includes(role.toLowerCase());
+    } catch (error) {
+        return false;
+    }
+}
+
+// ============================================
+// CORE LOGGING FUNCTIONS
+// ============================================
+
+/**
+ * Log a user interaction with a feature.
+ * @param {string} featureId - Unique ID of the feature (e.g., 'driver_search', 'interview_scheduler')
+ * @param {string} userId - ID of the user performing the action
+ * @param {string} action - Action performed (view, click, complete, error, etc.)
+ * @param {Object} [context] - Additional context data
+ * @param {string} [context.userRole] - Role: 'driver', 'carrier', 'recruiter', 'admin'
+ * @param {string} [context.sessionId] - Session identifier for grouping
+ * @param {string} [context.pageUrl] - Page URL where interaction occurred
+ * @param {string} [context.referrer] - Referring feature or page
+ * @param {number} [context.duration] - Time spent in milliseconds
+ * @param {Object} [context.metadata] - Any additional metadata
+ * @returns {Promise<Object>} - Result with success status and logId
+ */
+export async function logFeatureInteraction(featureId, userId, action, context = {}) {
+    // Validate required fields
+    if (!featureId || !userId || !action) {
+        console.warn('[FeatureAdoption] Missing required fields', { featureId, userId, action });
+        return { success: false, error: 'Missing required fields: featureId, userId, and action are required' };
+    }
+
+    // Validate action type
+    if (!CONFIG.validActions.includes(action)) {
+        console.warn('[FeatureAdoption] Invalid action type', { action, valid: CONFIG.validActions });
+        return { success: false, error: `Invalid action: ${action}. Valid actions: ${CONFIG.validActions.join(', ')}` };
+    }
+
+    const now = new Date();
+    const record = {
+        featureId: featureId.toLowerCase().trim(),
+        userId,
+        action,
+        userRole: context.userRole || 'unknown',
+        sessionId: context.sessionId || null,
+        pageUrl: context.pageUrl || null,
+        referrer: context.referrer || null,
+        duration: context.duration || null,
+        metadata: context.metadata || {},
+        timestamp: now,
+        date: now.toISOString().split('T')[0], // YYYY-MM-DD for aggregation
+        hour: now.getHours()
+    };
+
+    try {
+        const result = await wixData.insert(CONFIG.collections.logs, record, { suppressAuth: true });
+        return { success: true, logId: result._id };
+    } catch (error) {
+        // Handle collection not existing gracefully
+        if (error.message?.includes('does not exist')) {
+            console.warn('[FeatureAdoption] Collection not set up yet:', CONFIG.collections.logs);
+            return { success: false, error: 'Collection not initialized. Run setupCollections first.' };
+        }
+        console.error('[FeatureAdoption] Failed to log interaction:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Log a feature error event
+ * @param {string} featureId - Feature that errored
+ * @param {string} userId - User who encountered error
+ * @param {string} errorCode - Error code/type
+ * @param {string} errorMessage - Human-readable error message
+ * @param {Object} [context] - Additional error context
+ * @returns {Promise<Object>} - Result with success status
+ */
+export async function logFeatureError(featureId, userId, errorCode, errorMessage, context = {}) {
+    return logFeatureInteraction(featureId, userId, 'error', {
+        ...context,
+        metadata: {
+            ...context.metadata,
+            errorCode,
+            errorMessage,
+            stack: context.stack || null
+        }
+    });
+}
+
+/**
+ * Log a session summary with multiple feature interactions
+ * @param {string} sessionId - Session identifier
+ * @param {string} userId - User ID
+ * @param {Array<Object>} features - Array of { featureId, action, duration, metadata }
+ * @returns {Promise<Object>} - Result with success status and count
+ */
+export async function logFeatureSession(sessionId, userId, features) {
+    if (!sessionId || !userId || !Array.isArray(features) || features.length === 0) {
+        return { success: false, error: 'Invalid session data' };
+    }
+
+    const results = [];
+    for (const feat of features) {
+        const result = await logFeatureInteraction(feat.featureId, userId, feat.action, {
+            sessionId,
+            duration: feat.duration,
+            metadata: feat.metadata
+        });
+        results.push(result);
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    return {
+        success: successCount === features.length,
+        logged: successCount,
+        total: features.length,
+        errors: results.filter(r => !r.success).map(r => r.error)
+    };
+}
+
+// ============================================
+// ANALYTICS FUNCTIONS
+// ============================================
+
+/**
+ * Get comprehensive statistics for a feature
+ * @param {string} featureId - Feature to analyze (or 'all' for all features)
+ * @param {Object} options - Query options
+ * @param {string} [options.timeRange] - 'day', 'week', 'month', 'quarter', or number of days
+ * @param {string} [options.groupBy] - 'day', 'hour', 'action', 'userRole'
+ * @param {string} [options.userRole] - Filter by user role
+ * @returns {Promise<Object>} - Statistics object
+ */
+export async function getFeatureStats(featureId = 'all', options = {}) {
+    const { timeRange = 'month', groupBy = 'day', userRole = null } = options;
+
+    // Calculate date range
+    const now = new Date();
+    let startDate = new Date();
+    let days = 30;
+
+    if (typeof timeRange === 'number') {
+        days = timeRange;
+    } else {
+        switch (timeRange) {
+            case 'day': days = 1; break;
+            case 'week': days = 7; break;
+            case 'month': days = 30; break;
+            case 'quarter': days = 90; break;
+            default: days = 30;
+        }
+    }
+    startDate.setDate(startDate.getDate() - days);
+
+    try {
+        // Build query
+        let query = wixData.query(CONFIG.collections.logs)
+            .ge('timestamp', startDate)
+            .le('timestamp', now);
+
+        if (featureId !== 'all') {
+            query = query.eq('featureId', featureId.toLowerCase().trim());
+        }
+
+        if (userRole) {
+            query = query.eq('userRole', userRole);
+        }
+
+        const results = await query
+            .limit(1000)
+            .find({ suppressAuth: true });
+
+        // If querying 'all', aggregate by feature
+        if (featureId === 'all') {
+            return aggregateAllFeatures(results.items, groupBy);
+        }
+
+        // Single feature stats
+        return aggregateSingleFeature(featureId, results.items, groupBy);
+    } catch (error) {
+        console.error('[FeatureAdoption] Failed to get stats:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Compare multiple features on a specific metric
+ * @param {Array<string>} featureIds - Features to compare
+ * @param {string} metric - 'interactions', 'uniqueUsers', 'completionRate', 'errorRate'
+ * @param {string} timeRange - Time range for comparison
+ * @returns {Promise<Object>} - Comparison data
+ */
+export async function getFeatureComparison(featureIds, metric = 'interactions', timeRange = 'month') {
+    if (!Array.isArray(featureIds) || featureIds.length === 0) {
+        return { error: 'featureIds must be a non-empty array' };
+    }
+
+    const validMetrics = ['interactions', 'uniqueUsers', 'completionRate', 'errorRate', 'avgDuration'];
+    if (!validMetrics.includes(metric)) {
+        return { error: `Invalid metric. Valid: ${validMetrics.join(', ')}` };
+    }
+
+    const results = [];
+    for (const fid of featureIds) {
+        const stats = await getFeatureStats(fid, { timeRange });
+        if (!stats.error) {
+            let value;
+            switch (metric) {
+                case 'interactions': value = stats.totalInteractions; break;
+                case 'uniqueUsers': value = stats.uniqueUsers; break;
+                case 'completionRate': value = stats.completionRate; break;
+                case 'errorRate': value = stats.errorRate; break;
+                case 'avgDuration': value = stats.avgDuration; break;
+                default: value = stats.totalInteractions;
+            }
+            results.push({ featureId: fid, [metric]: value, raw: stats });
+        }
+    }
+
+    // Sort by metric value descending
+    results.sort((a, b) => (b[metric] || 0) - (a[metric] || 0));
+
+    return {
+        metric,
+        timeRange,
+        comparison: results,
+        winner: results[0]?.featureId || null
+    };
+}
+
+/**
+ * Analyze funnel conversion rates
+ * @param {string} funnelId - Funnel definition ID
+ * @param {string} timeRange - Time range for analysis
+ * @returns {Promise<Object>} - Funnel conversion data
+ */
+export async function getFunnelConversion(funnelId, timeRange = 'month') {
+    try {
+        // Get funnel definition
+        const funnelResult = await wixData.query(CONFIG.collections.funnels)
+            .eq('funnelId', funnelId)
+            .find({ suppressAuth: true });
+
+        if (funnelResult.items.length === 0) {
+            return { error: 'Funnel not found' };
+        }
+
+        const funnel = funnelResult.items[0];
+        const steps = funnel.steps; // Array of { featureId, action }
+
+        // Calculate date range
+        let days = timeRange === 'week' ? 7 : timeRange === 'month' ? 30 : 90;
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - days);
+
+        // Get all logs for funnel features
+        const featureIds = steps.map(s => s.featureId);
+        const logs = await wixData.query(CONFIG.collections.logs)
+            .ge('timestamp', startDate)
+            .hasSome('featureId', featureIds)
+            .limit(5000)
+            .find({ suppressAuth: true });
+
+        // Group logs by user to track progression
+        const userJourneys = {};
+        logs.items.forEach(log => {
+            if (!userJourneys[log.userId]) {
+                userJourneys[log.userId] = [];
+            }
+            userJourneys[log.userId].push({
+                featureId: log.featureId,
+                action: log.action,
+                timestamp: log.timestamp
+            });
+        });
+
+        // Calculate conversion at each step
+        const stepMetrics = steps.map((step, idx) => {
+            const usersAtStep = Object.keys(userJourneys).filter(userId => {
+                const journey = userJourneys[userId];
+                // Check if user completed this step
+                return journey.some(j =>
+                    j.featureId === step.featureId &&
+                    (step.action === '*' || j.action === step.action)
+                );
+            }).length;
+
+            return {
+                step: idx + 1,
+                name: step.name || step.featureId,
+                featureId: step.featureId,
+                action: step.action,
+                users: usersAtStep
+            };
+        });
+
+        // Calculate conversion rates
+        const totalUsersStep1 = stepMetrics[0]?.users || 1;
+        stepMetrics.forEach((step, idx) => {
+            step.absoluteRate = Math.round((step.users / totalUsersStep1) * 100);
+            if (idx > 0) {
+                const prevUsers = stepMetrics[idx - 1].users || 1;
+                step.stepRate = Math.round((step.users / prevUsers) * 100);
+            } else {
+                step.stepRate = 100;
+            }
+        });
+
+        return {
+            funnelId,
+            funnelName: funnel.name,
+            timeRange,
+            steps: stepMetrics,
+            overallConversion: stepMetrics[stepMetrics.length - 1]?.absoluteRate || 0,
+            dropOffStep: findDropOffStep(stepMetrics)
+        };
+    } catch (error) {
+        console.error('[FeatureAdoption] Funnel analysis failed:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Analyze cohort retention for a feature
+ * @param {string} featureId - Feature to analyze
+ * @param {string} cohortDate - Cohort start date (YYYY-MM-DD)
+ * @param {number} periods - Number of periods to analyze
+ * @returns {Promise<Object>} - Cohort retention data
+ */
+export async function getCohortRetention(featureId, cohortDate, periods = 8) {
+    try {
+        const cohortStart = new Date(cohortDate);
+        const cohortEnd = new Date(cohortDate);
+        cohortEnd.setDate(cohortEnd.getDate() + 7); // 1-week cohort window
+
+        // Get users who first used the feature in the cohort window
+        const initialLogs = await wixData.query(CONFIG.collections.logs)
+            .eq('featureId', featureId.toLowerCase())
+            .eq('action', 'first_use')
+            .ge('timestamp', cohortStart)
+            .lt('timestamp', cohortEnd)
+            .find({ suppressAuth: true });
+
+        const cohortUsers = new Set(initialLogs.items.map(l => l.userId));
+        const cohortSize = cohortUsers.size;
+
+        if (cohortSize === 0) {
+            return { error: 'No users in cohort', cohortDate, cohortSize: 0 };
+        }
+
+        // Track retention over periods (weeks)
+        const retention = [];
+        for (let period = 0; period < periods; period++) {
+            const periodStart = new Date(cohortStart);
+            periodStart.setDate(periodStart.getDate() + (period * 7));
+            const periodEnd = new Date(periodStart);
+            periodEnd.setDate(periodEnd.getDate() + 7);
+
+            const periodLogs = await wixData.query(CONFIG.collections.logs)
+                .eq('featureId', featureId.toLowerCase())
+                .ge('timestamp', periodStart)
+                .lt('timestamp', periodEnd)
+                .limit(1000)
+                .find({ suppressAuth: true });
+
+            const activeUsers = new Set(
+                periodLogs.items
+                    .filter(l => cohortUsers.has(l.userId))
+                    .map(l => l.userId)
+            );
+
+            retention.push({
+                period: period + 1,
+                week: `Week ${period + 1}`,
+                startDate: periodStart.toISOString().split('T')[0],
+                activeUsers: activeUsers.size,
+                retentionRate: Math.round((activeUsers.size / cohortSize) * 100)
+            });
+        }
+
+        return {
+            featureId,
+            cohortDate,
+            cohortSize,
+            periods: retention,
+            avgRetention: Math.round(retention.reduce((a, r) => a + r.retentionRate, 0) / retention.length)
+        };
+    } catch (error) {
+        console.error('[FeatureAdoption] Cohort analysis failed:', error);
+        return { error: error.message };
+    }
+}
+
+// ============================================
+// LIFECYCLE MANAGEMENT
+// ============================================
+
+/**
+ * Generate a full lifecycle report for all tracked features
+ * @returns {Promise<Array>} - Array of feature lifecycle data
+ */
+export async function getFeatureLifecycleReport() {
+    try {
+        // Get feature registry for metadata
+        const registryResult = await wixData.query(CONFIG.collections.registry)
+            .find({ suppressAuth: true })
+            .catch(() => ({ items: [] }));
+
+        const registry = {};
+        registryResult.items.forEach(f => {
+            registry[f.featureId] = f;
+        });
+
+        // Get recent logs for activity analysis
+        const now = new Date();
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        const sixtyDaysAgo = new Date();
+        sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+
+        // Current period (last 30 days)
+        const currentLogs = await wixData.query(CONFIG.collections.logs)
+            .ge('timestamp', thirtyDaysAgo)
+            .limit(2000)
+            .find({ suppressAuth: true });
+
+        // Previous period (30-60 days ago) for trend comparison
+        const previousLogs = await wixData.query(CONFIG.collections.logs)
+            .ge('timestamp', sixtyDaysAgo)
+            .lt('timestamp', thirtyDaysAgo)
+            .limit(2000)
+            .find({ suppressAuth: true });
+
+        // Aggregate current period
+        const currentStats = aggregateByFeature(currentLogs.items);
+        const previousStats = aggregateByFeature(previousLogs.items);
+
+        // Build lifecycle report
+        const features = new Set([
+            ...Object.keys(currentStats),
+            ...Object.keys(previousStats),
+            ...Object.keys(registry)
+        ]);
+
+        const report = [];
+        for (const featureId of features) {
+            const current = currentStats[featureId] || { count: 0, users: new Set(), errors: 0, completions: 0 };
+            const previous = previousStats[featureId] || { count: 0, users: new Set() };
+            const regData = registry[featureId] || {};
+
+            // Calculate lifecycle status
+            const status = calculateLifecycleStatus(featureId, current, previous, regData);
+
+            // Calculate health score
+            const healthScore = calculateHealthScore(current);
+
+            // Calculate trend
+            const trend = calculateTrend(current.count, previous.count);
+
+            report.push({
+                featureId,
+                displayName: regData.displayName || formatFeatureId(featureId),
+                status,
+                healthScore,
+                interactions30d: current.count,
+                uniqueUsers30d: current.users.size,
+                completionRate: current.count > 0 ? Math.round((current.completions / current.count) * 100) : 0,
+                errorRate: current.count > 0 ? Math.round((current.errors / current.count) * 100) : 0,
+                trend,
+                trendPercent: trend.percent,
+                lastUsed: current.lastUsed || null,
+                createdDate: regData.createdDate || null,
+                category: regData.category || 'uncategorized'
+            });
+        }
+
+        // Sort by status priority and then by interactions
+        const statusOrder = { 'At Risk': 0, 'Dead': 1, 'New': 2, 'Adopted': 3, 'Mature': 4 };
+        report.sort((a, b) => {
+            const statusDiff = (statusOrder[a.status] || 5) - (statusOrder[b.status] || 5);
+            if (statusDiff !== 0) return statusDiff;
+            return b.interactions30d - a.interactions30d;
+        });
+
+        return report;
+    } catch (error) {
+        console.error('[FeatureAdoption] Failed to generate report:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Calculate health score for a feature (0-100)
+ * @param {string} featureId - Feature to analyze
+ * @returns {Promise<Object>} - Health score breakdown
+ */
+export async function getFeatureHealthScore(featureId) {
+    try {
+        const stats = await getFeatureStats(featureId, { timeRange: 30 });
+        if (stats.error) return stats;
+
+        const score = calculateHealthScore({
+            count: stats.totalInteractions,
+            users: { size: stats.uniqueUsers },
+            completions: stats.completions || 0,
+            errors: stats.errors || 0
+        });
+
+        // Get expected users (could be from registry or default)
+        let expectedUsers = 50; // Default expectation
+        try {
+            const regResult = await wixData.query(CONFIG.collections.registry)
+                .eq('featureId', featureId)
+                .find({ suppressAuth: true });
+            if (regResult.items.length > 0 && regResult.items[0].expectedUsers) {
+                expectedUsers = regResult.items[0].expectedUsers;
+            }
+        } catch (e) {
+            // Registry may not exist
+        }
+
+        const usageScore = Math.min(100, Math.round((stats.uniqueUsers / expectedUsers) * 100));
+        const completionScore = stats.completionRate || 0;
+        const errorFreeScore = 100 - (stats.errorRate || 0);
+
+        return {
+            featureId,
+            overallScore: score,
+            breakdown: {
+                usageScore,
+                completionScore: Math.round(completionScore),
+                errorFreeScore: Math.round(errorFreeScore)
+            },
+            weights: CONFIG.healthWeights,
+            recommendation: getHealthRecommendation(score, { usageScore, completionScore, errorFreeScore })
+        };
+    } catch (error) {
+        console.error('[FeatureAdoption] Health score failed:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Get features that are at risk or need attention
+ * @param {number} threshold - Health score threshold (default 50)
+ * @returns {Promise<Array>} - Array of at-risk features
+ */
+export async function getAtRiskFeatures(threshold = 50) {
+    try {
+        const report = await getFeatureLifecycleReport();
+        if (report.error) return report;
+
+        return report.filter(f =>
+            f.status === FeatureCycles.AT_RISK ||
+            f.status === FeatureCycles.DEAD ||
+            f.healthScore < threshold
+        ).map(f => ({
+            ...f,
+            riskFactors: identifyRiskFactors(f)
+        }));
+    } catch (error) {
+        console.error('[FeatureAdoption] At-risk analysis failed:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Aggregate daily metrics (run as scheduled job)
+ * @returns {Promise<Object>} - Aggregation result
+ */
+export async function aggregateDailyMetrics() {
+    try {
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const dateStr = yesterday.toISOString().split('T')[0];
+
+        // Check if already aggregated
+        const existing = await wixData.query(CONFIG.collections.metricsDaily)
+            .eq('date', dateStr)
+            .find({ suppressAuth: true })
+            .catch(() => ({ items: [] }));
+
+        if (existing.items.length > 0) {
+            return { success: true, message: 'Already aggregated', date: dateStr };
+        }
+
+        // Get yesterday's logs
+        const dayStart = new Date(dateStr);
+        const dayEnd = new Date(dateStr);
+        dayEnd.setDate(dayEnd.getDate() + 1);
+
+        const logs = await wixData.query(CONFIG.collections.logs)
+            .ge('timestamp', dayStart)
+            .lt('timestamp', dayEnd)
+            .limit(5000)
+            .find({ suppressAuth: true });
+
+        // Aggregate by feature
+        const byFeature = aggregateByFeature(logs.items);
+
+        // Store aggregated metrics
+        const metricsToInsert = [];
+        for (const [featureId, stats] of Object.entries(byFeature)) {
+            metricsToInsert.push({
+                date: dateStr,
+                featureId,
+                interactions: stats.count,
+                uniqueUsers: stats.users.size,
+                completions: stats.completions,
+                errors: stats.errors,
+                avgDuration: stats.totalDuration > 0 ? Math.round(stats.totalDuration / stats.durCount) : null,
+                byAction: stats.actions,
+                byRole: stats.roles
+            });
+        }
+
+        // Batch insert
+        for (const metric of metricsToInsert) {
+            await wixData.insert(CONFIG.collections.metricsDaily, metric, { suppressAuth: true });
+        }
+
+        return {
+            success: true,
+            date: dateStr,
+            featuresProcessed: metricsToInsert.length,
+            totalInteractions: logs.items.length
+        };
+    } catch (error) {
+        console.error('[FeatureAdoption] Daily aggregation failed:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// ADMIN FUNCTIONS
+// ============================================
+
+/**
+ * Register a new feature in the registry
+ * @param {Object} featureData - Feature definition
+ * @param {string} featureData.featureId - Unique identifier
+ * @param {string} featureData.displayName - Human-readable name
+ * @param {string} [featureData.description] - Feature description
+ * @param {string} [featureData.category] - Category: 'core', 'engagement', 'conversion', 'admin'
+ * @param {number} [featureData.expectedUsers] - Expected monthly users
+ * @returns {Promise<Object>} - Created feature record
+ */
+export async function registerFeature(featureData) {
+    if (!featureData.featureId || !featureData.displayName) {
+        return { error: 'featureId and displayName are required' };
+    }
+
+    const record = {
+        featureId: featureData.featureId.toLowerCase().trim(),
+        displayName: featureData.displayName,
+        description: featureData.description || '',
+        category: featureData.category || 'uncategorized',
+        expectedUsers: featureData.expectedUsers || 50,
+        status: FeatureCycles.NEW,
+        createdDate: new Date(),
+        updatedDate: new Date()
+    };
+
+    try {
+        // Check if exists
+        const existing = await wixData.query(CONFIG.collections.registry)
+            .eq('featureId', record.featureId)
+            .find({ suppressAuth: true })
+            .catch(() => ({ items: [] }));
+
+        if (existing.items.length > 0) {
+            return { error: 'Feature already registered', existing: existing.items[0] };
+        }
+
+        const result = await wixData.insert(CONFIG.collections.registry, record, { suppressAuth: true });
+        return { success: true, feature: result };
+    } catch (error) {
+        console.error('[FeatureAdoption] Failed to register feature:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Update a feature's status manually
+ * @param {string} featureId - Feature to update
+ * @param {string} status - New status from FeatureCycles
+ * @param {string} [reason] - Reason for status change
+ * @returns {Promise<Object>} - Updated feature record
+ */
+export async function updateFeatureStatus(featureId, status, reason = '') {
+    if (!Object.values(FeatureCycles).includes(status)) {
+        return { error: `Invalid status. Valid: ${Object.values(FeatureCycles).join(', ')}` };
+    }
+
+    try {
+        const result = await wixData.query(CONFIG.collections.registry)
+            .eq('featureId', featureId.toLowerCase())
+            .find({ suppressAuth: true });
+
+        if (result.items.length === 0) {
+            return { error: 'Feature not found' };
+        }
+
+        const feature = result.items[0];
+        feature.status = status;
+        feature.statusReason = reason;
+        feature.updatedDate = new Date();
+
+        const updated = await wixData.update(CONFIG.collections.registry, feature, { suppressAuth: true });
+        return { success: true, feature: updated };
+    } catch (error) {
+        console.error('[FeatureAdoption] Failed to update status:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Define a conversion funnel
+ * @param {Object} funnelData - Funnel definition
+ * @param {string} funnelData.funnelId - Unique identifier
+ * @param {string} funnelData.name - Human-readable name
+ * @param {Array<Object>} funnelData.steps - Array of { featureId, action, name }
+ * @returns {Promise<Object>} - Created funnel record
+ */
+export async function defineFunnel(funnelData) {
+    if (!funnelData.funnelId || !funnelData.name || !Array.isArray(funnelData.steps)) {
+        return { error: 'funnelId, name, and steps array are required' };
+    }
+
+    const record = {
+        funnelId: funnelData.funnelId.toLowerCase().trim(),
+        name: funnelData.name,
+        description: funnelData.description || '',
+        steps: funnelData.steps.map((s, i) => ({
+            order: i + 1,
+            featureId: s.featureId.toLowerCase(),
+            action: s.action || 'complete',
+            name: s.name || s.featureId
+        })),
+        createdDate: new Date()
+    };
+
+    try {
+        // Check if exists
+        const existing = await wixData.query(CONFIG.collections.funnels)
+            .eq('funnelId', record.funnelId)
+            .find({ suppressAuth: true })
+            .catch(() => ({ items: [] }));
+
+        if (existing.items.length > 0) {
+            // Update existing
+            const updated = { ...existing.items[0], ...record, updatedDate: new Date() };
+            const result = await wixData.update(CONFIG.collections.funnels, updated, { suppressAuth: true });
+            return { success: true, funnel: result, updated: true };
+        }
+
+        const result = await wixData.insert(CONFIG.collections.funnels, record, { suppressAuth: true });
+        return { success: true, funnel: result };
+    } catch (error) {
+        console.error('[FeatureAdoption] Failed to define funnel:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Get all defined funnels
+ * @returns {Promise<Array>} - Array of funnel definitions
+ */
+export async function getFunnels() {
+    try {
+        const result = await wixData.query(CONFIG.collections.funnels)
+            .find({ suppressAuth: true });
+        return result.items;
+    } catch (error) {
+        console.error('[FeatureAdoption] Failed to get funnels:', error);
+        return { error: error.message };
+    }
+}
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+function aggregateByFeature(items) {
+    const stats = {};
+
+    items.forEach(log => {
+        const fid = log.featureId;
+        if (!stats[fid]) {
+            stats[fid] = {
+                count: 0,
+                users: new Set(),
+                errors: 0,
+                completions: 0,
+                actions: {},
+                roles: {},
+                totalDuration: 0,
+                durCount: 0,
+                lastUsed: null
+            };
+        }
+
+        stats[fid].count++;
+        stats[fid].users.add(log.userId);
+
+        if (log.action === 'error') stats[fid].errors++;
+        if (log.action === 'complete') stats[fid].completions++;
+
+        stats[fid].actions[log.action] = (stats[fid].actions[log.action] || 0) + 1;
+        stats[fid].roles[log.userRole] = (stats[fid].roles[log.userRole] || 0) + 1;
+
+        if (log.duration) {
+            stats[fid].totalDuration += log.duration;
+            stats[fid].durCount++;
+        }
+
+        if (!stats[fid].lastUsed || log.timestamp > stats[fid].lastUsed) {
+            stats[fid].lastUsed = log.timestamp;
+        }
+    });
+
+    return stats;
+}
+
+function aggregateAllFeatures(items, groupBy) {
+    const stats = aggregateByFeature(items);
+
+    return Object.entries(stats).map(([featureId, data]) => ({
+        featureId,
+        totalInteractions: data.count,
+        uniqueUsers: data.users.size,
+        completions: data.completions,
+        errors: data.errors,
+        completionRate: data.count > 0 ? Math.round((data.completions / data.count) * 100) : 0,
+        errorRate: data.count > 0 ? Math.round((data.errors / data.count) * 100) : 0,
+        avgDuration: data.durCount > 0 ? Math.round(data.totalDuration / data.durCount) : null,
+        lastUsed: data.lastUsed,
+        byAction: data.actions,
+        byRole: data.roles
+    })).sort((a, b) => b.totalInteractions - a.totalInteractions);
+}
+
+function aggregateSingleFeature(featureId, items, groupBy) {
+    const totalInteractions = items.length;
+    const uniqueUsers = new Set(items.map(i => i.userId)).size;
+
+    const actions = {};
+    const roles = {};
+    let completions = 0;
+    let errors = 0;
+    let totalDuration = 0;
+    let durCount = 0;
+
+    items.forEach(item => {
+        actions[item.action] = (actions[item.action] || 0) + 1;
+        roles[item.userRole] = (roles[item.userRole] || 0) + 1;
+
+        if (item.action === 'complete') completions++;
+        if (item.action === 'error') errors++;
+
+        if (item.duration) {
+            totalDuration += item.duration;
+            durCount++;
+        }
+    });
+
+    // Group by selected dimension
+    let grouped = {};
+    if (groupBy === 'day') {
+        items.forEach(item => {
+            const day = item.date || item.timestamp?.toISOString().split('T')[0];
+            if (!grouped[day]) grouped[day] = 0;
+            grouped[day]++;
+        });
+    } else if (groupBy === 'hour') {
+        items.forEach(item => {
+            const hour = item.hour || new Date(item.timestamp).getHours();
+            if (!grouped[hour]) grouped[hour] = 0;
+            grouped[hour]++;
+        });
+    } else if (groupBy === 'action') {
+        grouped = actions;
+    } else if (groupBy === 'userRole') {
+        grouped = roles;
+    }
+
+    return {
+        featureId,
+        totalInteractions,
+        uniqueUsers,
+        completions,
+        errors,
+        completionRate: totalInteractions > 0 ? Math.round((completions / totalInteractions) * 100) : 0,
+        errorRate: totalInteractions > 0 ? Math.round((errors / totalInteractions) * 100) : 0,
+        avgDuration: durCount > 0 ? Math.round(totalDuration / durCount) : null,
+        byAction: actions,
+        byRole: roles,
+        grouped,
+        groupedBy: groupBy
+    };
+}
+
+function calculateLifecycleStatus(featureId, current, previous, regData) {
+    // Check if manually deprecated
+    if (regData.status === FeatureCycles.DEPRECATED) {
+        return FeatureCycles.DEPRECATED;
+    }
+
+    // Check if Dead (no usage in 30 days)
+    if (current.count === 0) {
+        return FeatureCycles.DEAD;
+    }
+
+    // Check if New (created < 30 days ago)
+    if (regData.createdDate) {
+        const daysSinceCreation = (new Date() - new Date(regData.createdDate)) / (1000 * 60 * 60 * 24);
+        if (daysSinceCreation < CONFIG.thresholds.newFeatureDays) {
+            return FeatureCycles.NEW;
+        }
+    }
+
+    // Check if At Risk (usage dropped significantly)
+    if (previous.count > 0) {
+        const dropPercent = ((previous.count - current.count) / previous.count) * 100;
+        if (dropPercent >= CONFIG.thresholds.atRiskDropPercent) {
+            return FeatureCycles.AT_RISK;
+        }
+    }
+
+    // Check if Mature (90+ days old with stable usage)
+    if (regData.createdDate) {
+        const daysSinceCreation = (new Date() - new Date(regData.createdDate)) / (1000 * 60 * 60 * 24);
+        if (daysSinceCreation >= CONFIG.thresholds.matureMinDays &&
+            current.users.size >= CONFIG.thresholds.adoptedMinUsers) {
+            return FeatureCycles.MATURE;
+        }
+    }
+
+    // Check if Adopted (meeting thresholds)
+    if (current.users.size >= CONFIG.thresholds.adoptedMinUsers &&
+        current.count >= CONFIG.thresholds.adoptedMinInteractions) {
+        return FeatureCycles.ADOPTED;
+    }
+
+    // Default to At Risk if not meeting adoption thresholds
+    return current.count < 5 ? FeatureCycles.AT_RISK : FeatureCycles.NEW;
+}
+
+function calculateHealthScore(stats) {
+    // Expected baseline
+    const expectedUsers = 50;
+    const expectedCompletions = 0.3; // 30% completion rate is healthy
+
+    // Usage score (40%): How many users vs expected
+    const usageScore = Math.min(100, (stats.users.size / expectedUsers) * 100);
+
+    // Completion score (30%): Completion rate
+    const completionRate = stats.count > 0 ? stats.completions / stats.count : 0;
+    const completionScore = Math.min(100, (completionRate / expectedCompletions) * 100);
+
+    // Error-free score (30%): Inverse of error rate
+    const errorRate = stats.count > 0 ? stats.errors / stats.count : 0;
+    const errorFreeScore = Math.max(0, 100 - (errorRate * 100));
+
+    // Weighted average
+    const weights = CONFIG.healthWeights;
+    const score = Math.round(
+        (usageScore * weights.usage / 100) +
+        (completionScore * weights.completion / 100) +
+        (errorFreeScore * weights.errorFree / 100)
+    );
+
+    return Math.min(100, Math.max(0, score));
+}
+
+function calculateTrend(current, previous) {
+    if (previous === 0) {
+        return { direction: current > 0 ? 'up' : 'flat', percent: current > 0 ? 100 : 0 };
+    }
+
+    const change = ((current - previous) / previous) * 100;
+    return {
+        direction: change > 5 ? 'up' : change < -5 ? 'down' : 'flat',
+        percent: Math.round(change)
+    };
+}
+
+function findDropOffStep(stepMetrics) {
+    let maxDrop = 0;
+    let dropStep = null;
+
+    for (let i = 1; i < stepMetrics.length; i++) {
+        const drop = 100 - stepMetrics[i].stepRate;
+        if (drop > maxDrop) {
+            maxDrop = drop;
+            dropStep = {
+                step: i + 1,
+                name: stepMetrics[i].name,
+                dropPercent: Math.round(drop)
+            };
+        }
+    }
+
+    return dropStep;
+}
+
+function formatFeatureId(featureId) {
+    return featureId
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function getHealthRecommendation(score, breakdown) {
+    const recommendations = [];
+
+    if (breakdown.usageScore < 50) {
+        recommendations.push('Increase feature visibility - consider adding to navigation or homepage');
+    }
+    if (breakdown.completionScore < 50) {
+        recommendations.push('Simplify user flow - users are not completing the feature');
+    }
+    if (breakdown.errorFreeScore < 80) {
+        recommendations.push('Address errors - high error rate is blocking users');
+    }
+
+    if (score >= 80) {
+        return { status: 'healthy', message: 'Feature is performing well', actions: recommendations };
+    } else if (score >= 50) {
+        return { status: 'needs_attention', message: 'Feature could be improved', actions: recommendations };
+    } else {
+        return { status: 'critical', message: 'Feature needs immediate attention', actions: recommendations };
+    }
+}
+
+function identifyRiskFactors(feature) {
+    const factors = [];
+
+    if (feature.uniqueUsers30d < 5) {
+        factors.push('Very low user count');
+    }
+    if (feature.errorRate > 10) {
+        factors.push('High error rate');
+    }
+    if (feature.completionRate < 20) {
+        factors.push('Low completion rate');
+    }
+    if (feature.trend?.direction === 'down') {
+        factors.push(`Usage declining (${feature.trendPercent}%)`);
+    }
+    if (feature.status === FeatureCycles.DEAD) {
+        factors.push('No usage in 30 days');
+    }
+
+    return factors;
+}

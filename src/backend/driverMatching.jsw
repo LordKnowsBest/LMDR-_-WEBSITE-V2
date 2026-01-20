@@ -13,8 +13,9 @@ import { currentUser } from 'wix-users-backend';
 // import { getSubscription, checkViewQuota, recordProfileView } from 'backend/dummySub.jsw';
 import { getSubscription, checkViewQuota, recordProfileView } from 'backend/subscriptionService';
 import { calculateDriverMatchScore, generateDriverMatchRationale } from 'backend/driverScoring';
-import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
+import { startTrace, endTrace, log, logDatabase } from 'backend/observabilityService';
 import { withRetry } from 'backend/utils/retryUtils';
+import { logFeatureInteraction } from 'backend/featureAdoptionService';
 
 // ============================================================================
 // CONSTANTS
@@ -345,15 +346,15 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
 
     // Execute query with timing and retry
     const queryStartTime = Date.now();
-    
+
     // Wrap database query in retry logic
     const queryResult = await withRetry(async () => {
       return await query.find();
-    }, { 
+    }, {
       context: 'findMatchingDrivers_query',
       traceId
     });
-    
+
     const queryLatency = Date.now() - queryStartTime;
     let drivers = queryResult.items;
 
@@ -374,7 +375,7 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
         traceId,
         details: { filterCount: Object.keys(filters).length }
       });
-      
+
       return {
         success: true,
         matches: [],
@@ -387,10 +388,10 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
           totalPages: 0
         },
         subscription: {
-           plan_type: subscription.plan_type,
-           views_remaining: subscription.monthly_view_quota === -1 ? -1 : Math.max(0, subscription.monthly_view_quota - subscription.views_used_this_month),
-           views_used: subscription.views_used_this_month,
-           views_total: subscription.monthly_view_quota
+          plan_type: subscription.plan_type,
+          views_remaining: subscription.monthly_view_quota === -1 ? -1 : Math.max(0, subscription.monthly_view_quota - subscription.views_used_this_month),
+          views_used: subscription.views_used_this_month,
+          views_total: subscription.monthly_view_quota
         },
         traceId
       };
@@ -576,6 +577,14 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
       elapsed
     });
 
+    // Log for Feature Adoption Tracking
+    // Fire and forget - don't await strictly if performance matters, but await is safer for serverless
+    await logFeatureInteraction('recruiter_driver_search', accessCheck.userId, 'recruiter', 'search', {
+      filters: Object.keys(filters),
+      resultCount: paginatedResults.length,
+      carrierDot
+    });
+
     return {
       success: true,
       matches: paginatedResults,
@@ -714,6 +723,13 @@ export async function getDriverProfile(carrierDot, driverId, options = {}) {
     const viewsUsed = subscription.views_used_this_month + (quotaUsed ? 1 : 0);
     const viewsTotal = subscription.monthly_view_quota;
     const viewsRemaining = viewsTotal === -1 ? -1 : Math.max(0, viewsTotal - viewsUsed);
+
+    // Log Feature Adoption
+    await logFeatureInteraction('recruiter_view_profile', userId, 'recruiter', 'view', {
+      driverId,
+      carrierDot,
+      quotaUsed
+    });
 
     return {
       success: true,
