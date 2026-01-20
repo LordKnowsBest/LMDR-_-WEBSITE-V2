@@ -206,21 +206,38 @@ Permissions are defined in `src/backend/permissions.json`. Current config allows
 
 ### HTML Files
 
-**All HTML files MUST be placed in `src/public/`**
+**All HTML files are organized in `src/public/` subfolders by role:**
 
-This includes:
-- Admin dashboards (`ADMIN_*.html`)
-- Driver-facing pages (`DRIVER_*.html`)
-- Recruiter interfaces (`Recruiter_*.html`)
-- Email templates (`*_email.html`)
-- Landing pages and iframes
-- UI mockups and prototypes
+```
+src/public/
+├── admin/      # 10 files - Admin portal (ADMIN_*.html)
+├── recruiter/  # 9 files  - Recruiter portal (Recruiter*.html)
+├── driver/     # 5 files  - Driver portal (DRIVER_*.html, AI_MATCHING.html)
+├── carrier/    # 4 files  - Carrier portal (Carrier*.html)
+├── landing/    # 18 files - Landing & marketing pages
+├── utility/    # 11 files - System components, templates, emails
+├── _archive/   # Deprecated files (do not use)
+├── js/         # JavaScript modules
+├── __tests__/  # Test files
+└── [root]      # Shared config (lmdr-config.js, theme-*.js/css)
+```
 
-**Why `src/public/`?**
-- Wix Velo serves files from this directory
-- Consistent import path: `import { } from 'public/fileName';`
-- Required for postMessage bridges and iframe embeds
-- Enables proper asset bundling
+**Folder Contents:**
+| Folder | Files | Purpose |
+|--------|-------|---------|
+| `admin/` | 10 | Admin dashboards, system management, AI routing |
+| `recruiter/` | 9 | Recruiter dashboard, driver search, pipeline, telemetry |
+| `driver/` | 5 | Driver dashboard, job matching, applications |
+| `carrier/` | 4 | Carrier onboarding, preferences, directory |
+| `landing/` | 18 | Marketing pages, pricing, partner pages (ALLURE) |
+| `utility/` | 11 | Sidebars, templates, subscription pages, email |
+
+**Import paths for subfolders:**
+```javascript
+// From Wix page code, reference by subfolder path
+$w('#html1').src = 'public/admin/ADMIN_DASHBOARD.html';
+$w('#html2').src = 'public/driver/AI_MATCHING.html';
+```
 
 **DO NOT place HTML files in:**
 - `docs/` - Reserved for markdown documentation only
@@ -229,7 +246,7 @@ This includes:
 - `src/pages/` - Wix-managed page code only
 
 ### Test Files
-**All test files MUST be placed in `src/test/`**
+**All test files MUST be placed in `src/public/__tests__/`**
 - Naming convention: `*.test.js` or `*.spec.js`
 
 A Claude Code hook enforces this standard automatically.

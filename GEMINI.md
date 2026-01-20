@@ -172,87 +172,117 @@ Three automated jobs run on cron schedules:
 
 ## HTML COMPONENT INVENTORY
 
-All HTML files reside in `src/public/` (56 files total). Organized by category:
+HTML files are organized in `src/public/` subfolders by role (56 files total):
 
-### Admin Pages (10 files)
+```
+src/public/
+├── admin/      # 10 files - Admin portal pages
+├── recruiter/  # 9 files  - Recruiter portal pages
+├── driver/     # 5 files  - Driver portal pages
+├── carrier/    # 4 files  - Carrier portal pages
+├── landing/    # 18 files - Landing & marketing pages
+├── utility/    # 11 files - System components & templates
+├── _archive/   # 2 files  - Archived/deprecated files
+├── js/         # JavaScript modules
+├── __tests__/  # Test files
+└── [root]      # Shared resources (config, styles, sitemap)
+```
+
+### 🔴 Admin Pages (`src/public/admin/` - 10 files)
 | File | Purpose |
 |------|---------|
-| `ADMIN_AI_ROUTER.html` | AI routing configuration and management |
-| `ADMIN_AUDIT_LOG.html` | System audit log viewer |
-| `ADMIN_CARRIERS.html` | Carrier management dashboard |
-| `ADMIN_CONTENT.html` | Content management interface |
-| `ADMIN_DASHBOARD.html` | Main admin dashboard |
-| `ADMIN_DRIVERS.html` | Driver management dashboard |
-| `ADMIN_MATCHES.html` | Match monitoring and management |
-| `ADMIN_OBSERVABILITY.html` | System observability and monitoring |
-| `ADMIN_PROMPTS.html` | AI prompt management |
-| `Admin_Portal_Dashboard.html` | Alternative admin portal entry |
+| `ADMIN_DASHBOARD.html` | Main admin dashboard with stats, AI costs |
+| `ADMIN_DRIVERS.html` | Driver management, CRUD, bulk actions |
+| `ADMIN_CARRIERS.html` | Carrier management, FMCSA data |
+| `ADMIN_OBSERVABILITY.html` | System monitoring, logs, traces |
+| `ADMIN_MATCHES.html` | Match analytics dashboard |
+| `ADMIN_AUDIT_LOG.html` | Audit trail with filtering |
+| `ADMIN_AI_ROUTER.html` | Multi-provider LLM routing |
+| `ADMIN_PROMPTS.html` | AI prompt library |
+| `ADMIN_CONTENT.html` | Content moderation queue |
+| `Admin_Portal_Dashboard.html` | Alternate admin dashboard |
 
-### Recruiter Pages (10 files)
+### 🟢 Recruiter Pages (`src/public/recruiter/` - 9 files)
 | File | Purpose |
 |------|---------|
-| `RECRUITER_DRIVER_SEARCH.html` | AI-powered driver search interface |
-| `RecruiterDashboard.html` | Main recruiter dashboard |
-| `Recruiter_Console_Infograph.html` | Visual recruiter analytics |
-| `Recruiter_Pipeline_Page.html` | Candidate pipeline Kanban |
-| `Recruiter_Pricing.html` | Recruiter pricing display |
-| `Recruiter_Pricing_Page.html` | Detailed pricing page |
-| `Recruiter_Retention_Dashboard.html` | Driver retention analytics |
-| `Recruiter_Telemetry.html` | Recruiter performance telemetry |
-| `Recruiting_Landing_Page.html` | Recruiter marketing landing |
-| `Unified_Recruiter_Pricing.html` | Unified pricing overview |
+| `RecruiterDashboard.html` | Master recruiter dashboard |
+| `RECRUITER_DRIVER_SEARCH.html` | Driver search with AI matching |
+| `Recruiter_Telemetry.html` | Call center, WebRTC |
+| `Recruiter_Pipeline_Page.html` | Kanban pipeline board |
+| `Recruiter_Pricing.html` | Subscription pricing |
+| `Recruiter_Retention_Dashboard.html` | Churn prevention |
+| `Recruiter_Console_Infograph.html` | Console infographic |
+| `Recruiting_Landing_Page.html` | Recruiter landing page |
+| `Recruiter_Pricing_Page.html` | Detailed pricing |
 
-### Driver Pages (4 files)
+### 🔵 Driver Pages (`src/public/driver/` - 5 files)
 | File | Purpose |
 |------|---------|
-| `DRIVER_DASHBOARD.html` | Main driver dashboard |
-| `Driver Jobs.html` | Job listing page |
-| `Driver Opportunities - Your Next Career.html` | Career opportunities landing |
-| `Truck_Driver_Page.html` | Driver information page |
+| `AI_MATCHING.html` | Main AI matching interface (221KB) |
+| `DRIVER_DASHBOARD.html` | Driver application tracking |
+| `Driver Jobs.html` | Job listings display |
+| `Driver Opportunities - Your Next Career.html` | Career opportunities |
+| `Driver Retention Best Practices.html` | Educational content |
 
-### Carrier Pages (3 files)
+### 🟠 Carrier Pages (`src/public/carrier/` - 4 files)
 | File | Purpose |
 |------|---------|
-| `CARRIER_WEIGHT_PREFERENCES.html` | Carrier weight preference settings |
-| `Carrier Solutions - Retention-Focused.html` | Carrier retention solutions |
-| `Carrier_Welcome.html` | Carrier onboarding welcome |
+| `Trucking Companies.html` | Carrier directory |
+| `Carrier_Welcome.html` | Carrier onboarding |
+| `CARRIER_WEIGHT_PREFERENCES.html` | Hiring preferences |
+| `Carrier Solutions - Retention-Focused.html` | Carrier solutions |
 
-### Landing & Marketing Pages (17 files)
+### 🟣 Landing & Marketing Pages (`src/public/landing/` - 18 files)
 | File | Purpose |
 |------|---------|
-| `48-Hour CDL Driver Placement.html` | Speed placement marketing |
-| `AI vs Traditional Recruiting Methods.html` | AI comparison content |
-| `AI_MATCHING.html` | AI matching feature showcase |
-| `Apply for CDL Driving Jobs.html` | Driver application landing |
-| `CDL Class A Driver Recruitment.html` | Class A driver recruitment |
-| `CDL Driver Recruitment Pricing.html` | Pricing information |
-| `DOT Compliance in Driver Hiring.html` | Compliance content |
-| `Driver Retention Best Practices.html` | Retention content |
-| `Home Nightly - Regional CDL Careers.html` | Regional jobs landing |
-| `Last Mile Delivery Driver Staffing.html` | Last mile delivery focus |
-| `OTR Truck Driver Placement.html` | OTR placement landing |
+| `Homepage.HTML` | Main homepage |
+| `About_page.html` | About page |
+| `AI vs Traditional Recruiting Methods.html` | Comparison content |
+| `Quick Apply - Upload Your CDL & Resume.html` | Quick application |
+| `OTR Truck Driver Placement.html` | OTR placements |
+| `CDL Driver Recruitment Pricing.html` | Pricing page |
+| `Last Mile Delivery Driver Staffing.html` | Last mile staffing |
+| `DOT Compliance in Driver Hiring.html` | Compliance guide |
+| `Unified_Recruiter_Pricing.html` | Unified pricing |
+| `Apply for CDL Driving Jobs.html` | Job applications |
+| `ALLURE Refrigerated-Premium Opportunity.html` | Partner: ALLURE |
+| `ALLURE Onboarding.html` | Partner: ALLURE |
+| `Truck_Driver_Page.html` | Driver info page |
+| `lmdr-cdl-driver-landing-iframe-optimized.html` | Optimized landing |
+| `Rapid Response - Job Description.html` | Job description |
+| `48-Hour CDL Driver Placement.html` | Fast placement |
+| `Home Nightly - Regional CDL Careers.html` | Regional careers |
+| `CDL Class A Driver Recruitment.html` | Class A recruitment |
+
+### ⚙️ Utility & System Components (`src/public/utility/` - 11 files)
+| File | Purpose |
+|------|---------|
+| `Sidebar.html` | Navigation sidebar |
+| `SETTINGS_SIDEBAR.html` | Settings navigation |
+| `_TEMPLATE_Carrier_Staffing_Form.html` | Form template |
 | `PRICING PAGE TEMPLATE.html` | Pricing template |
-| `Quick Apply - Upload Your CDL & Resume.html` | Quick apply form |
-| `Rapid Response - Job Description.html` | Job description template |
-| `Trucking Companies.html` | Carrier directory/marketing |
-| `About_page.html` | About LMDR |
-| `lmdr-cdl-driver-landing-iframe-optimized.html` | Embeddable landing iframe |
+| `Orientation_Scheduler.html` | Scheduling interface |
+| `DQF_Compliance_Portal.html` | DOT compliance |
+| `Office_Management.html` | Office management |
+| `Subscription_Success.html` | Payment success |
+| `Subscription_Canceled.html` | Cancellation page |
+| `Placement_Success.html` | Success confirmation |
+| `application_confirmation_email.html` | Email template |
 
-### Operational & System Pages (12 files)
+### 📦 Shared Resources (`src/public/` root)
 | File | Purpose |
 |------|---------|
-| `ALLURE Onboarding.html` | ALLURE carrier onboarding |
-| `ALLURE Refrigerated-Premium Opportunity.html` | ALLURE specific opportunity |
-| `DQF_Compliance_Portal.html` | DQF compliance management |
-| `Office_Management.html` | Office management interface |
-| `Orientation_Scheduler.html` | Orientation scheduling |
-| `Placement_Success.html` | Placement success confirmation |
-| `SETTINGS_SIDEBAR.html` | Settings sidebar component |
-| `Sidebar.html` | Navigation sidebar component |
-| `Subscription_Canceled.html` | Subscription cancellation page |
-| `Subscription_Success.html` | Subscription success page |
-| `application_confirmation_email.html` | Email template |
-| `_TEMPLATE_Carrier_Staffing_Form.html` | Carrier form template |
+| `lmdr-config.js` | Site configuration constants |
+| `theme-utils.js` | Theme utilities |
+| `theme-styles.css` | Global theme styles |
+| `lastmiledrsitemap.xml` | XML sitemap |
+| `README.md` | Directory documentation |
+
+### 🗄️ Archive (`src/public/_archive/` - 2 files)
+| File | Purpose |
+|------|---------|
+| `Driver Management Dashboard.txt` | Deprecated - archived |
+| `Footer_CODE.txt` | Deprecated - archived |
 
 ---
 
