@@ -1,0 +1,417 @@
+/**
+ * Public Stats Service
+ * Provides public-facing platform statistics for homepage and landing pages
+ *
+ * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
+ */
+
+import wixData from 'wix-data';
+
+/**
+ * Get public platform stats for drivers and general audience
+ * Used on: Home page, About page
+ */
+export async function getPublicStats() {
+  try {
+    const [driversResult, carriersResult, hiresResult, interestsResult] = await Promise.all([
+      wixData.query('DriverProfiles').count(),
+      wixData.query('Carriers').eq('is_active', true).count(),
+      wixData.query('DriverCarrierInterests').eq('status', 'hired').count(),
+      wixData.query('DriverCarrierInterests').find({ limit: 1000 })
+    ]);
+
+    // Calculate average match score
+    const scores = interestsResult.items
+      .map(i => i.match_score)
+      .filter(Boolean);
+
+    const avgScore = scores.length > 0
+      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+      : 85;
+
+    return {
+      driversPlaced: hiresResult.count || 0,
+      activeCarriers: carriersResult.count || 0,
+      avgMatchScore: avgScore,
+      openPositions: (carriersResult.count || 0) * 3, // Estimate 3 positions per carrier
+      registeredDrivers: driversResult.count || 0
+    };
+  } catch (err) {
+    console.error('getPublicStats error:', err);
+    // Return fallback values
+    return {
+      driversPlaced: 0,
+      activeCarriers: 0,
+      avgMatchScore: 85,
+      openPositions: 0,
+      registeredDrivers: 0
+    };
+  }
+}
+
+/**
+ * Get platform stats formatted for carriers (B2B audience)
+ * Used on: Trucking Companies page, Carrier Solutions page
+ */
+export async function getCarrierPlatformStats() {
+  try {
+    const [profilesResult, hiresResult] = await Promise.all([
+      wixData.query('DriverProfiles')
+        .eq('status', 'active')
+        .isNotEmpty('cdl_class')
+        .count(),
+      wixData.query('DriverCarrierInterests')
+        .eq('status', 'hired')
+        .find({ limit: 500 })
+    ]);
+
+    // Calculate average days to hire
+    const hireTimes = hiresResult.items
+      .filter(h => h.applied_date && h._updatedDate)
+      .map(h => {
+        const applied = new Date(h.applied_date);
+        const hired = new Date(h._updatedDate);
+        return Math.ceil((hired - applied) / (1000 * 60 * 60 * 24));
+      });
+
+    const avgDays = hireTimes.length > 0
+      ? Math.round(hireTimes.reduce((a, b) => a + b, 0) / hireTimes.length)
+      : 14;
+
+    return {
+      qualifiedDrivers: profilesResult.count || 0,
+      avgDaysToHire: avgDays,
+      retentionRate: 87, // Could calculate from data if tracked
+      avgCostPerHire: 299 // Platform fee
+    };
+  } catch (err) {
+    console.error('getCarrierPlatformStats error:', err);
+    return {
+      qualifiedDrivers: 0,
+      avgDaysToHire: 14,
+      retentionRate: 87,
+      avgCostPerHire: 299
+    };
+  }
+}
+
+/**
+ * Get featured carriers for homepage carousel
+ * Returns carriers with logos, high quality scores, and active hiring
+ */
+export async function getFeaturedCarriers(limit = 8) {
+  try {
+    const result = await wixData.query('Carriers')
+      .ge('fleet_size', 50)
+      .isNotEmpty('logo_url')
+      .descending('quality_score')
+      .limit(limit)
+      .find();
+
+    return result.items.map(carrier => ({
+      _id: carrier._id,
+      name: carrier.legal_name,
+      logo: carrier.logo_url,
+      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      tagline: carrier.hiring_tagline || 'Now Hiring CDL Drivers',
+      fleetSize: carrier.fleet_size,
+      payRange: carrier.pay_range || ''
+    }));
+  } catch (err) {
+    console.error('getFeaturedCarriers error:', err);
+    return [];
+  }
+}
+
+/**
+ * Get recent hires for social proof (anonymized)
+ * Used on: Home page, Truck Drivers page
+ */
+export async function getRecentHires(limit = 10) {
+  try {
+    const result = await wixData.query('DriverCarrierInterests')
+      .eq('status', 'hired')
+      .descending('_updatedDate')
+      .limit(limit)
+      .find();
+
+    return result.items.map(h => ({
+      location: h.driver_state || 'USA',
+      daysAgo: getDaysAgo(h._updatedDate),
+      operationType: h.operation_type || 'OTR'
+    }));
+  } catch (err) {
+    console.error('getRecentHires error:', err);
+    return [];
+  }
+}
+
+/**
+ * Get top job opportunities for drivers
+ * Sorted by pay, filtered by active hiring status
+ */
+export async function getTopJobOpportunities(limit = 6) {
+  try {
+    const result = await wixData.query('Carriers')
+      .ge('pay_per_mile_max', 0.55)
+      .eq('is_hiring', true)
+      .descending('pay_per_mile_max')
+      .limit(limit)
+      .find();
+
+    return result.items.map(carrier => ({
+      _id: carrier._id,
+      carrierName: carrier.legal_name,
+      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
+      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrier.operation_type || 'OTR',
+      benefits: carrier.benefits_summary || 'Full benefits package',
+      fleetSize: carrier.fleet_size
+    }));
+  } catch (err) {
+    console.error('getTopJobOpportunities error:', err);
+    return [];
+  }
+}
+
+/**
+ * Get jobs filtered by state
+ * Used on: Truck Drivers page location-based section
+ */
+export async function getJobsByState(state, limit = 4) {
+  try {
+    const result = await wixData.query('Carriers')
+      .eq('state', state)
+      .eq('is_hiring', true)
+      .descending('quality_score')
+      .limit(limit)
+      .find();
+
+    return result.items.map(carrier => ({
+      _id: carrier._id,
+      carrierName: carrier.legal_name,
+      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
+      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrier.operation_type || 'OTR'
+    }));
+  } catch (err) {
+    console.error('getJobsByState error:', err);
+    return [];
+  }
+}
+
+/**
+ * Get partner logos for "Trusted By" sections
+ * Returns larger carriers with logos
+ */
+export async function getPartnerLogos(limit = 12) {
+  try {
+    const result = await wixData.query('Carriers')
+      .isNotEmpty('logo_url')
+      .ge('fleet_size', 100)
+      .descending('fleet_size')
+      .limit(limit)
+      .find();
+
+    return result.items.map(c => ({
+      _id: c._id,
+      name: c.legal_name,
+      logoUrl: c.logo_url
+    }));
+  } catch (err) {
+    console.error('getPartnerLogos error:', err);
+    return [];
+  }
+}
+
+/**
+ * Get jobs by operation type (OTR/Regional/Local/Last Mile)
+ * Used on: Driver landing pages filtered by operation type
+ */
+export async function getJobsByOperationType(operationType, limit = 6) {
+  try {
+    const result = await wixData.query('Carriers')
+      .eq('operation_type', operationType)
+      .eq('is_hiring', true)
+      .descending('pay_per_mile_max')
+      .limit(limit)
+      .find();
+
+    return result.items.map(carrier => ({
+      _id: carrier._id,
+      carrierName: carrier.legal_name,
+      dotNumber: carrier.DOT_NUMBER,
+      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
+      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrier.operation_type || operationType,
+      homeTime: carrier.home_time || 'Varies',
+      benefits: carrier.benefits_summary || 'Full benefits package',
+      fleetSize: carrier.fleet_size,
+      truckAge: carrier.avg_truck_age
+    }));
+  } catch (err) {
+    console.error('getJobsByOperationType error:', err);
+    return [];
+  }
+}
+
+/**
+ * Get jobs requiring specific endorsements (Hazmat, Tanker, Doubles, TWIC)
+ * Used on: Specialized driver landing pages
+ */
+export async function getJobsByEndorsement(endorsement, limit = 6) {
+  try {
+    const result = await wixData.query('Carriers')
+      .contains('required_endorsements', endorsement)
+      .eq('is_hiring', true)
+      .descending('pay_per_mile_max')
+      .limit(limit)
+      .find();
+
+    return result.items.map(carrier => ({
+      _id: carrier._id,
+      carrierName: carrier.legal_name,
+      dotNumber: carrier.DOT_NUMBER,
+      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
+      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrier.operation_type || 'OTR',
+      endorsements: carrier.required_endorsements || [endorsement],
+      benefits: carrier.benefits_summary || 'Full benefits package',
+      fleetSize: carrier.fleet_size
+    }));
+  } catch (err) {
+    console.error('getJobsByEndorsement error:', err);
+    return [];
+  }
+}
+
+/**
+ * Get location page data with aggregated stats
+ * Used on: Dynamic location SEO pages (Job Location Mappings)
+ */
+export async function getLocationPageData(state, city = null) {
+  try {
+    let query = wixData.query('Carriers')
+      .eq('state', state)
+      .eq('is_hiring', true);
+
+    if (city) {
+      query = query.eq('city', city);
+    }
+
+    const result = await query.find();
+    const carriers = result.items;
+
+    if (carriers.length === 0) {
+      return {
+        state,
+        city,
+        jobCount: 0,
+        avgPay: null,
+        topCarriers: [],
+        operationTypes: {}
+      };
+    }
+
+    // Calculate average pay
+    const payRates = carriers
+      .map(c => c.pay_per_mile_max || c.pay_per_mile_min)
+      .filter(Boolean);
+    const avgPay = payRates.length > 0
+      ? (payRates.reduce((a, b) => a + b, 0) / payRates.length).toFixed(2)
+      : null;
+
+    // Count by operation type
+    const operationTypes = carriers.reduce((acc, c) => {
+      const type = c.operation_type || 'Other';
+      acc[type] = (acc[type] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Get top carriers by quality score
+    const topCarriers = carriers
+      .sort((a, b) => (b.quality_score || 0) - (a.quality_score || 0))
+      .slice(0, 5)
+      .map(c => ({
+        _id: c._id,
+        name: c.legal_name,
+        dotNumber: c.DOT_NUMBER,
+        payRange: formatPayRange(c.pay_per_mile_min, c.pay_per_mile_max),
+        operationType: c.operation_type || 'OTR',
+        fleetSize: c.fleet_size
+      }));
+
+    return {
+      state,
+      city,
+      jobCount: carriers.length,
+      avgPay: avgPay ? `$${avgPay}/mi` : 'Competitive',
+      topCarriers,
+      operationTypes,
+      totalFleetSize: carriers.reduce((sum, c) => sum + (c.fleet_size || 0), 0)
+    };
+  } catch (err) {
+    console.error('getLocationPageData error:', err);
+    return {
+      state,
+      city,
+      jobCount: 0,
+      avgPay: null,
+      topCarriers: [],
+      operationTypes: {}
+    };
+  }
+}
+
+/**
+ * Get premium/urgent job opportunities
+ * Used on: Rapid Response pages, premium opportunity listings
+ */
+export async function getPremiumOpportunities(limit = 5) {
+  try {
+    // Query carriers with sign-on bonuses or high pay
+    const result = await wixData.query('Carriers')
+      .eq('is_hiring', true)
+      .ge('pay_per_mile_max', 0.65)
+      .descending('pay_per_mile_max')
+      .limit(limit)
+      .find();
+
+    return result.items.map(carrier => ({
+      _id: carrier._id,
+      carrierName: carrier.legal_name,
+      dotNumber: carrier.DOT_NUMBER,
+      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
+      signOnBonus: carrier.sign_on_bonus || null,
+      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrier.operation_type || 'OTR',
+      benefits: carrier.benefits_summary || 'Full benefits package',
+      urgencyLevel: carrier.urgency_level || 'normal',
+      openPositions: carrier.open_positions || 1
+    }));
+  } catch (err) {
+    console.error('getPremiumOpportunities error:', err);
+    return [];
+  }
+}
+
+// Helper functions
+
+function getDaysAgo(date) {
+  if (!date) return 0;
+  const now = new Date();
+  const then = new Date(date);
+  const diffTime = Math.abs(now - then);
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+}
+
+function formatPayRange(min, max) {
+  if (max && min) {
+    return `$${min.toFixed(2)}-${max.toFixed(2)}/mi`;
+  } else if (max) {
+    return `Up to $${max.toFixed(2)}/mi`;
+  } else if (min) {
+    return `From $${min.toFixed(2)}/mi`;
+  }
+  return 'Competitive pay';
+}

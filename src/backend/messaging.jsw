@@ -1,0 +1,255 @@
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { sendMessageNotification } from 'backend/emailService';
+
+// ============================================================================
+// SECURITY HELPERS
+// ============================================================================
+
+/**
+ * Validates that the sender has permission to message in this application context.
+ * - Drivers can only message on applications they created
+ * - Recruiters can only message on applications for their assigned carriers
+ */
+async function validateSenderPermission(applicationId, senderId, senderType) {
+    try {
+        const application = await wixData.get('DriverCarrierInterests', applicationId, { suppressAuth: true });
+        if (!application) {
+            console.warn('⚠️ Application not found:', applicationId);
+            return false;
+        }
+
+        if (senderType === 'driver') {
+            // Driver must own this application
+            const isOwner = application.driver_id === senderId;
+            if (!isOwner) {
+                console.warn('⚠️ Driver permission denied - not application owner');
+            }
+            return isOwner;
+        } else if (senderType === 'recruiter') {
+            // Recruiter must have access to this carrier
+            const recruiterAccess = await wixData.query('recruiterCarriers')
+                .eq('recruiter_id', senderId)
+                .eq('carrier_dot', application.carrier_dot)
+                .eq('is_active', true)
+                .find({ suppressAuth: true });
+
+            const hasAccess = recruiterAccess.items.length > 0;
+            if (!hasAccess) {
+                console.warn('⚠️ Recruiter permission denied - no carrier access');
+            }
+            return hasAccess;
+        }
+
+        return false;
+    } catch (error) {
+        console.error('Error validating sender permission:', error);
+        return false;
+    }
+}
+
+/**
+ * Sanitizes message content to prevent XSS and enforce limits.
+ */
+function sanitizeContent(content) {
+    if (!content || typeof content !== 'string') return '';
+
+    return content
+        .replace(/<[^>]*>/g, '')     // Strip HTML tags
+        .replace(/&[^;]+;/g, '')     // Strip HTML entities
+        .substring(0, 2000)          // Limit to 2000 chars
+        .trim();
+}
+
+/**
+ * Triggers an email notification for a new message.
+ * Fetches context from application and sends non-blocking notification.
+ */
+async function triggerMessageNotification(receiverId, senderId, senderType, applicationId, messageContent) {
+    try {
+        // Get application details for context
+        const application = await wixData.get('DriverCarrierInterests', applicationId, { suppressAuth: true });
+        if (!application) {
+            console.warn('⚠️ Cannot notify - application not found');
+            return;
+        }
+
+        // Determine sender/receiver names based on sender type
+        let senderName = 'Someone';
+        let recipientName = 'User';
+        let carrierName = application.carrier_name || '';
+        let isDriver = false;
+
+        if (senderType === 'driver') {
+            // Driver sent message -> notify recruiter
+            const driverProfile = await wixData.query('DriverProfiles')
+                .eq('user_id', senderId)
+                .limit(1)
+                .find({ suppressAuth: true });
+            if (driverProfile.items.length > 0) {
+                senderName = driverProfile.items[0].first_name || 'A driver';
+            }
+            isDriver = false; // Receiver is recruiter
+        } else {
+            // Recruiter sent message -> notify driver
+            senderName = carrierName || 'A recruiter';
+            isDriver = true; // Receiver is driver
+
+            // Get driver name for personalization
+            const driverProfile = await wixData.query('DriverProfiles')
+                .eq('user_id', receiverId)
+                .limit(1)
+                .find({ suppressAuth: true });
+            if (driverProfile.items.length > 0) {
+                recipientName = driverProfile.items[0].first_name || 'Driver';
+            }
+        }
+
+        // Send notification
+        await sendMessageNotification(receiverId, {
+            recipientName,
+            senderName,
+            messagePreview: messageContent,
+            carrierName,
+            isDriver
+        });
+
+        console.log(`📧 Message notification sent to ${receiverId}`);
+    } catch (error) {
+        console.error('❌ triggerMessageNotification error:', error);
+        throw error; // Re-throw so caller's .catch() handles it
+    }
+}
+
+// ============================================================================
+// EXPORTED FUNCTIONS
+// ============================================================================
+
+/**
+ * Sends a message from the current user (driver or recruiter).
+ * @param {string} applicationId - The ID of the application/match event.
+ * @param {string} content - The message text.
+ * @param {string} receiverId - ID of the receiving user.
+ * @param {string} senderType - 'driver' or 'recruiter'.
+ */
+export async function sendMessage(applicationId, content, receiverId, senderType) {
+    if (!applicationId || !content || !receiverId || !senderType) {
+        return { success: false, error: 'Missing required fields' };
+    }
+
+    try {
+        const userId = await getCurrentUserId();
+        if (!userId) {
+            return { success: false, error: 'Not authenticated' };
+        }
+
+        // Validate sender has permission
+        const hasPermission = await validateSenderPermission(applicationId, userId, senderType);
+        if (!hasPermission) {
+            return { success: false, error: 'Permission denied' };
+        }
+
+        // Sanitize content
+        const sanitizedContent = sanitizeContent(content);
+        if (!sanitizedContent) {
+            return { success: false, error: 'Message content is empty' };
+        }
+
+        const newMessage = {
+            application_id: applicationId,
+            content: sanitizedContent,
+            sender_id: userId,
+            receiver_id: receiverId,
+            sender_type: senderType,
+            timestamp: new Date(),
+            is_read: false
+        };
+
+        const result = await wixData.insert('Messages', newMessage);
+
+        // Send email notification (non-blocking)
+        triggerMessageNotification(receiverId, userId, senderType, applicationId, sanitizedContent)
+            .catch(err => console.warn('⚠️ Notification failed (non-critical):', err.message));
+
+        return { success: true, message: result };
+    } catch (error) {
+        console.error('Error sending message:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Retrieves the conversation for a specific application.
+ * @param {string} applicationId 
+ */
+export async function getConversation(applicationId) {
+    if (!applicationId) return { success: false, error: 'Missing applicationId' };
+
+    try {
+        const results = await wixData.query('Messages')
+            .eq('application_id', applicationId)
+            .ascending('timestamp')
+            .find();
+
+        return { success: true, messages: results.items };
+    } catch (error) {
+        console.error('Error fetching conversation:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets unread message count for the current user.
+ */
+export async function getUnreadCount() {
+    try {
+        const userId = await getCurrentUserId();
+        if (!userId) return { success: false, error: 'Not authenticated' };
+
+        const results = await wixData.query('Messages')
+            .eq('receiver_id', userId)
+            .eq('is_read', false)
+            .count();
+
+        return { success: true, count: results };
+    } catch (error) {
+        console.error('Error counting unread messages:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Marks all messages in a conversation as read for the receiver.
+ * @param {string} applicationId 
+ */
+export async function markAsRead(applicationId) {
+    try {
+        const userId = await getCurrentUserId();
+        if (!userId) return { success: false, error: 'Not authenticated' };
+
+        const unreadResults = await wixData.query('Messages')
+            .eq('application_id', applicationId)
+            .eq('receiver_id', userId)
+            .eq('is_read', false)
+            .find();
+
+        if (unreadResults.items.length > 0) {
+            const updates = unreadResults.items.map(msg => ({ ...msg, is_read: true }));
+            await wixData.bulkUpdate('Messages', updates);
+        }
+
+        return { success: true };
+    } catch (error) {
+        console.error('Error marking messages as read:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Helper to get current user ID
+async function getCurrentUserId() {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) {
+        return null;
+    }
+    return currentUser.id;
+}

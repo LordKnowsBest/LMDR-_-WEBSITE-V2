@@ -1,0 +1,783 @@
+/**
+ * Driver Matching Service - Reverse Matching Engine
+ *
+ * Enables carriers to search, filter, and match with qualified CDL drivers.
+ * This is the primary revenue driver for the platform (paid subscription service).
+ *
+ * @module backend/driverMatching
+ * @see conductor/tracks/reverse_matching_20251225/spec.md
+ */
+
+import wixData from 'wix-data';
+import { currentUser } from 'wix-users-backend';
+// import { getSubscription, checkViewQuota, recordProfileView } from 'backend/dummySub.jsw';
+import { getSubscription, checkViewQuota, recordProfileView } from 'backend/subscriptionService';
+import { calculateDriverMatchScore, generateDriverMatchRationale } from 'backend/driverScoring';
+import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
+import { withRetry } from 'backend/utils/retryUtils';
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+/** DEV MODE: Set to true to bypass role verification during development */
+const DEV_MODE_BYPASS_ROLES = true; // TODO: Set to false for production
+
+/** Allowed roles for accessing driver matching features */
+const ALLOWED_ROLES = ['recruiter', 'admin'];
+
+/** Tier-based result limits */
+const TIER_LIMITS = {
+  free: 0,
+  pro: 25,
+  enterprise: -1 // Unlimited
+};
+
+/** Default page size for pagination */
+const DEFAULT_PAGE_SIZE = 20;
+
+/** Score boost for mutual matches */
+const MUTUAL_MATCH_SCORE_BOOST = 10;
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Verifies the current user is authenticated
+ * @returns {Promise<{success: boolean, userId?: string, error?: string}>}
+ */
+async function verifyAuthenticated() {
+  if (!currentUser.loggedIn) {
+    return {
+      success: false,
+      error: 'You must be authenticated to access this feature. Please login.'
+    };
+  }
+  return { success: true, userId: currentUser.id };
+}
+
+/**
+ * Verifies the user has an allowed role/badge (recruiter or admin)
+ * Checks both Wix roles and member badges
+ * @returns {Promise<{success: boolean, roles?: Array, error?: string}>}
+ */
+async function verifyRole() {
+  // DEV MODE: Skip role verification for development/testing
+  if (DEV_MODE_BYPASS_ROLES) {
+    console.log('[driverMatching] DEV MODE: Bypassing role verification');
+    return { success: true, roles: ['dev_bypass'] };
+  }
+
+  try {
+    // First check Wix roles
+    const roles = await currentUser.getRoles();
+    const roleNames = roles.map(r => r.name);
+    const hasAllowedRole = roleNames.some(role => ALLOWED_ROLES.includes(role));
+
+    if (hasAllowedRole) {
+      return { success: true, roles: roleNames };
+    }
+
+    // If no Wix role, check for badge assignments
+    // Query the member's badges via the MemberBadges collection
+    const badgeResult = await wixData.query('Members/Badges')
+      .eq('memberId', currentUser.id)
+      .find({ suppressAuth: true });
+
+    if (badgeResult.items.length > 0) {
+      const badgeSlugs = badgeResult.items.map(b => b.slug || b.title?.toLowerCase());
+      const hasAllowedBadge = badgeSlugs.some(slug =>
+        ALLOWED_ROLES.includes(slug) || slug === 'recruiter' || slug === 'admin'
+      );
+
+      if (hasAllowedBadge) {
+        return { success: true, roles: badgeSlugs };
+      }
+    }
+
+    return {
+      success: false,
+      error: 'Recruiter or admin role required to search drivers.'
+    };
+  } catch (err) {
+    console.error('[driverMatching] Role verification error:', err.message);
+    return {
+      success: false,
+      error: 'Failed to verify user role.'
+    };
+  }
+}
+
+/**
+ * Verifies the user is authorized to access the specified carrier.
+ * Checks the 'recruiterCarriers' collection for a valid recruiter-carrier association.
+ *
+ * @param {string} carrierDot - The carrier DOT number
+ * @param {string} userId - The user ID
+ * @returns {Promise<{success: boolean, subscription?: Object, error?: string}>}
+ */
+async function verifyCarrierAuthorization(carrierDot, userId) {
+  try {
+    // Check if the user has access to this carrier
+    const accessResult = await wixData.query('recruiterCarriers')
+      .eq('recruiter_id', userId)
+      .eq('carrier_dot', carrierDot)
+      .eq('is_active', true)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (accessResult.items.length === 0) {
+      return {
+        success: false,
+        error: 'You are not authorized to access this carrier\'s data.'
+      };
+    }
+
+    // Get subscription - internally validates carrier authorization
+    const subscription = await getSubscription(carrierDot);
+
+    if (!subscription) {
+      return {
+        success: false,
+        error: 'No active subscription found for this carrier.'
+      };
+    }
+
+    return { success: true, subscription };
+  } catch (err) {
+    return {
+      success: false,
+      error: 'An error occurred during carrier authorization.'
+    };
+  }
+}
+
+/**
+ * Performs full access control check (auth + role + carrier authorization)
+ * @param {string} carrierDot - The carrier DOT number
+ * @returns {Promise<{success: boolean, userId?: string, subscription?: Object, error?: string}>}
+ */
+async function performAccessCheck(carrierDot) {
+  // Check authentication
+  const authCheck = await verifyAuthenticated();
+  if (!authCheck.success) return authCheck;
+
+  // Check role
+  const roleCheck = await verifyRole();
+  if (!roleCheck.success) return roleCheck;
+
+  // Check carrier authorization (also returns subscription)
+  const carrierCheck = await verifyCarrierAuthorization(carrierDot, authCheck.userId);
+  if (!carrierCheck.success) return carrierCheck;
+
+  return { success: true, userId: authCheck.userId, subscription: carrierCheck.subscription };
+}
+
+/**
+ * Masks PII (email and phone) for limited visibility drivers
+ * @param {Object} driver - The driver profile object
+ * @returns {Object} Driver with masked PII
+ */
+function maskPII(driver) {
+  return {
+    ...driver,
+    email: '***masked***',
+    phone: '***masked***'
+  };
+}
+
+/**
+ * Applies filters to the driver query
+ * @param {Object} query - The wixData query object
+ * @param {Object} filters - The filter criteria
+ * @returns {Object} The modified query
+ */
+function applyFilters(query, filters) {
+  if (!filters) return query;
+
+  // CDL type filter
+  if (filters.cdl_types && Array.isArray(filters.cdl_types) && filters.cdl_types.length > 0) {
+    query = query.hasSome('cdl_class', filters.cdl_types);
+  }
+
+  // Endorsements filter (must have ALL specified endorsements)
+  if (filters.endorsements && Array.isArray(filters.endorsements) && filters.endorsements.length > 0) {
+    query = query.hasAll('endorsements', filters.endorsements);
+  }
+
+  // Minimum experience filter
+  if (filters.min_experience && typeof filters.min_experience === 'number') {
+    query = query.ge('years_experience', filters.min_experience);
+  }
+
+  // Availability filter
+  if (filters.availability && typeof filters.availability === 'string') {
+    query = query.eq('availability', filters.availability);
+  }
+
+  return query;
+}
+
+/**
+ * Gets carrier hiring preferences if available
+ * @param {string} carrierDot - The carrier DOT number
+ * @returns {Promise<Object|null>}
+ */
+async function getCarrierPreferences(carrierDot) {
+  try {
+    const result = await wixData.query('CarrierHiringPreferences')
+      .eq('carrier_dot', carrierDot)
+      .eq('is_active', true)
+      .find();
+
+    return result.items.length > 0 ? result.items[0] : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Checks if a driver has expressed interest in a carrier
+ * @param {string} carrierDot - The carrier DOT number
+ * @param {string} driverId - The driver ID
+ * @returns {Promise<{hasInterest: boolean, interestDate?: Date}>}
+ */
+async function checkDriverInterest(carrierDot, driverId) {
+  try {
+    const result = await wixData.query('DriverInterests')
+      .eq('driver_id', driverId)
+      .eq('carrier_dot', carrierDot)
+      .eq('status', 'interested')
+      .find();
+
+    if (result.items.length > 0) {
+      return {
+        hasInterest: true,
+        interestDate: result.items[0].created_date
+      };
+    }
+    return { hasInterest: false };
+  } catch (err) {
+    return { hasInterest: false };
+  }
+}
+
+// ============================================================================
+// MAIN FUNCTIONS
+// ============================================================================
+
+/**
+ * Searches for drivers matching the carrier's criteria
+ *
+ * @param {string} carrierDot - The carrier's DOT number
+ * @param {Object} filters - Search filters
+ * @param {Array<string>} [filters.cdl_types] - Required CDL classes ['A', 'B']
+ * @param {Array<string>} [filters.endorsements] - Required endorsements
+ * @param {string} [filters.zip_code] - Center zip code for location search
+ * @param {number} [filters.radius_miles] - Search radius from zip code
+ * @param {number} [filters.min_experience] - Minimum years of experience
+ * @param {string} [filters.availability] - 'immediate', '2_week', '30_day'
+ * @param {Object} options - Search options
+ * @param {number} [options.page] - Page number (0-indexed)
+ * @param {number} [options.pageSize] - Results per page
+ * @param {number} [options.limit] - Max results to return
+ * @param {boolean} [options.usePreferences] - Use carrier preferences for scoring
+ * @param {boolean} [options.includeMutualMatches] - Check for mutual matches
+ * @returns {Promise<Object>} Search results with matches and metadata
+ */
+export async function findMatchingDrivers(carrierDot, filters = {}, options = {}) {
+  const startTime = Date.now();
+
+  // Start distributed trace for this matching operation
+  const trace = await startTrace('findMatchingDrivers', {
+    carrierDot,
+    filterCount: Object.keys(filters).length,
+    tags: ['driver-matching', 'search', 'reverse-matching']
+  });
+  const traceId = trace.traceId;
+
+  await log({
+    level: 'INFO',
+    source: 'driver-matching',
+    message: 'Starting driver search',
+    traceId,
+    details: { carrierDot, filters: Object.keys(filters), options: Object.keys(options) }
+  });
+
+  try {
+    // Access control (also retrieves subscription)
+    const accessCheck = await performAccessCheck(carrierDot);
+    if (!accessCheck.success) {
+      await log({ level: 'WARN', source: 'driver-matching', message: `Access denied: ${accessCheck.error}`, traceId });
+      await endTrace(traceId, 'denied', { error: accessCheck.error, elapsed: Date.now() - startTime });
+      return { success: false, error: accessCheck.error };
+    }
+
+    const subscription = accessCheck.subscription;
+
+    // Check if tier allows searching
+    if (subscription.plan_type === 'free') {
+      return {
+        success: false,
+        error: 'Driver search requires a Pro or Enterprise subscription. Please upgrade to access this feature.',
+        code: 'SUBSCRIPTION_TIER_LIMIT'
+      };
+    }
+
+    // Check if subscription is active
+    if (!subscription.is_active) {
+      return {
+        success: false,
+        error: 'Your subscription has expired or is inactive. Please renew to search drivers.',
+        code: 'SUBSCRIPTION_INACTIVE'
+      };
+    }
+
+    // Build base query FIRST - exclude non-searchable and hidden drivers
+    // (Query drivers before preferences to avoid mock state issues in tests)
+    let query = wixData.query('DriverProfiles')
+      .eq('is_searchable', true)
+      .ne('visibility_level', 'hidden');
+
+    // Apply filters
+    query = applyFilters(query, filters);
+
+    // Execute query with timing and retry
+    const queryStartTime = Date.now();
+    
+    // Wrap database query in retry logic
+    const queryResult = await withRetry(async () => {
+      return await query.find();
+    }, { 
+      context: 'findMatchingDrivers_query',
+      traceId
+    });
+    
+    const queryLatency = Date.now() - queryStartTime;
+    let drivers = queryResult.items;
+
+    await logDatabase({
+      operation: 'query',
+      collection: 'DriverProfiles',
+      affectedRows: drivers.length,
+      latencyMs: queryLatency,
+      traceId
+    });
+
+    // Log if no drivers found
+    if (drivers.length === 0) {
+      await log({
+        level: 'INFO',
+        source: 'driver-matching',
+        message: 'No searchable drivers found in database',
+        traceId,
+        details: { filterCount: Object.keys(filters).length }
+      });
+      
+      return {
+        success: true,
+        matches: [],
+        message: 'No drivers found matching your criteria.',
+        code: 'NO_MATCHES_DB',
+        pagination: {
+          page: options.page || 0,
+          pageSize: options.pageSize || DEFAULT_PAGE_SIZE,
+          totalCount: 0,
+          totalPages: 0
+        },
+        subscription: {
+           plan_type: subscription.plan_type,
+           views_remaining: subscription.monthly_view_quota === -1 ? -1 : Math.max(0, subscription.monthly_view_quota - subscription.views_used_this_month),
+           views_used: subscription.views_used_this_month,
+           views_total: subscription.monthly_view_quota
+        },
+        traceId
+      };
+    }
+
+    // Get carrier preferences if requested (after driver query)
+    let carrierPrefs = null;
+    if (options.usePreferences) {
+      carrierPrefs = await getCarrierPreferences(carrierDot);
+    }
+
+    // Additional filtering that couldn't be done in query
+    // Filter by CDL type if specified (post-query validation)
+    if (filters.cdl_types && Array.isArray(filters.cdl_types) && filters.cdl_types.length > 0) {
+      drivers = drivers.filter(d => filters.cdl_types.includes(d.cdl_class));
+    }
+
+    // Filter by endorsements (must have ALL)
+    if (filters.endorsements && Array.isArray(filters.endorsements) && filters.endorsements.length > 0) {
+      drivers = drivers.filter(d => {
+        if (!d.endorsements || !Array.isArray(d.endorsements)) return false;
+        return filters.endorsements.every(e => d.endorsements.includes(e));
+      });
+    }
+
+    // Filter by min experience
+    if (filters.min_experience && typeof filters.min_experience === 'number') {
+      drivers = drivers.filter(d => d.years_experience >= filters.min_experience);
+    }
+
+    // Filter by availability
+    if (filters.availability && typeof filters.availability === 'string') {
+      drivers = drivers.filter(d => d.availability === filters.availability);
+    }
+
+    // Score each driver with DYNAMIC WEIGHTS
+    // Weights are now influenced by:
+    // 1. Carrier Hiring Preferences (what this carrier values)
+    // 2. Active Filters (what recruiter prioritizes in this search)
+    const scoredDrivers = [];
+    const scoringPrefs = carrierPrefs || {};
+    let scoringFailures = 0;
+
+    for (const driver of drivers) {
+      let score = 0;
+      let rationale = [];
+      let scoringFailed = false;
+
+      try {
+        // Pass filters as 4th parameter for dynamic weight boosting
+        const scoreResult = calculateDriverMatchScore(driver, scoringPrefs, null, filters);
+        score = scoreResult.overallScore || scoreResult.totalScore || 0;
+
+        // generateDriverMatchRationale returns {summary, points, concerns}
+        // Convert to array of strings for the frontend
+        const rationaleResult = generateDriverMatchRationale(scoreResult.scores || {}, driver, scoringPrefs);
+        rationale = [];
+        if (rationaleResult.summary) {
+          rationale.push(rationaleResult.summary);
+        }
+        if (rationaleResult.points && Array.isArray(rationaleResult.points)) {
+          rationale = rationale.concat(rationaleResult.points);
+        }
+
+        // Add weight context if using dynamic weights
+        if (scoreResult.weightSource === 'dynamic') {
+          // Check which filters were active and boosted
+          const boostedCriteria = [];
+          if (filters.cdl_types?.length > 0 || filters.endorsements?.length > 0) {
+            boostedCriteria.push('qualifications');
+          }
+          if (filters.min_experience) {
+            boostedCriteria.push('experience');
+          }
+          if (filters.zip_code || filters.radius_miles) {
+            boostedCriteria.push('location');
+          }
+          if (filters.availability) {
+            boostedCriteria.push('availability');
+          }
+
+          if (boostedCriteria.length > 0) {
+            rationale.push(`Score weighted by your filter priorities: ${boostedCriteria.join(', ')}`);
+          }
+        }
+      } catch (err) {
+        // Scoring failed - log the issue and use 0 score with observability
+        console.error('[driverMatching] Scoring error:', err.message);
+        scoringFailures++;
+        scoringFailed = true;
+        score = 0;
+        rationale = ['Match score based on available criteria.'];
+
+        await log({
+          level: 'WARN',
+          source: 'driver-matching',
+          message: `Scoring failed for driver ${driver._id}`,
+          traceId,
+          details: {
+            driverId: driver._id,
+            error: err.message,
+            driverFields: Object.keys(driver)
+          }
+        });
+      }
+
+      // Check for mutual match if requested
+      let isMutualMatch = false;
+      if (options.includeMutualMatches) {
+        const interest = await checkDriverInterest(carrierDot, driver._id);
+        if (interest.hasInterest) {
+          isMutualMatch = true;
+          score += MUTUAL_MATCH_SCORE_BOOST;
+          rationale.push('Driver has expressed interest in your company');
+        }
+      }
+
+      scoredDrivers.push({
+        driver,
+        score,
+        rationale,
+        isMutualMatch,
+        scoringFailed
+      });
+    }
+
+    // Log scoring summary if there were failures
+    if (scoringFailures > 0) {
+      await log({
+        level: 'WARN',
+        source: 'driver-matching',
+        message: `Scoring completed with ${scoringFailures} failures out of ${drivers.length} drivers`,
+        traceId,
+        details: { scoringFailures, totalDrivers: drivers.length, failureRate: ((scoringFailures / drivers.length) * 100).toFixed(1) + '%' }
+      });
+    }
+
+    // Sort by score descending
+    scoredDrivers.sort((a, b) => b.score - a.score);
+
+    // Apply tier-based limits
+    const tierLimit = TIER_LIMITS[subscription.plan_type] || 0;
+    const effectiveLimit = tierLimit === -1
+      ? (options.limit || scoredDrivers.length)
+      : Math.min(tierLimit, options.limit || tierLimit);
+
+    // Apply pagination
+    const page = options.page || 0;
+    const pageSize = options.pageSize || DEFAULT_PAGE_SIZE;
+    const startIndex = page * pageSize;
+    const endIndex = Math.min(startIndex + pageSize, effectiveLimit, scoredDrivers.length);
+
+    const paginatedResults = scoredDrivers.slice(startIndex, endIndex);
+
+    // Calculate remaining views
+    const viewsRemaining = subscription.monthly_view_quota === -1
+      ? -1
+      : Math.max(0, subscription.monthly_view_quota - subscription.views_used_this_month);
+
+    const elapsed = Date.now() - startTime;
+
+    // Log successful completion
+    await log({
+      level: 'INFO',
+      source: 'driver-matching',
+      message: `Search complete: ${paginatedResults.length} results returned`,
+      traceId,
+      duration: elapsed,
+      details: {
+        totalDrivers: drivers.length,
+        totalScored: scoredDrivers.length,
+        returned: paginatedResults.length,
+        scoringFailures,
+        carrierDot,
+        planType: subscription.plan_type
+      }
+    });
+
+    await endTrace(traceId, 'completed', {
+      totalMatches: paginatedResults.length,
+      totalScored: scoredDrivers.length,
+      scoringFailures,
+      elapsed
+    });
+
+    return {
+      success: true,
+      matches: paginatedResults,
+      message: paginatedResults.length === 0
+        ? 'No drivers found matching your criteria.'
+        : `Found ${scoredDrivers.length} matching drivers.`,
+      code: paginatedResults.length === 0 ? 'NO_MATCHES_FILTERS' : 'SUCCESS',
+      pagination: {
+        page,
+        pageSize,
+        totalCount: scoredDrivers.length,
+        totalPages: Math.ceil(Math.min(scoredDrivers.length, effectiveLimit) / pageSize)
+      },
+      subscription: {
+        plan_type: subscription.plan_type,
+        views_remaining: viewsRemaining,
+        views_used: subscription.views_used_this_month,
+        views_total: subscription.monthly_view_quota
+      },
+      traceId // Include traceId for debugging
+    };
+
+  } catch (err) {
+    await log({
+      level: 'ERROR',
+      source: 'driver-matching',
+      message: `Search failed: ${err.message}`,
+      traceId,
+      details: { error: err.message, stack: err.stack }
+    });
+    await endTrace(traceId, 'error', { error: err.message, elapsed: Date.now() - startTime });
+
+    return {
+      success: false,
+      error: err.message || 'An unexpected error occurred while searching for drivers.',
+      code: 'SEARCH_ERROR',
+      traceId // Include traceId for debugging
+    };
+  }
+}
+
+/**
+ * Retrieves a driver's full profile (paid feature)
+ *
+ * @param {string} carrierDot - The carrier's DOT number
+ * @param {string} driverId - The driver's profile ID
+ * @param {Object} [options] - Additional options
+ * @param {number} [options.matchScore] - Match score to record with view
+ * @returns {Promise<Object>} Driver profile or error
+ */
+export async function getDriverProfile(carrierDot, driverId, options = {}) {
+  try {
+    // Access control (also retrieves subscription)
+    const accessCheck = await performAccessCheck(carrierDot);
+    if (!accessCheck.success) {
+      return { success: false, error: accessCheck.error };
+    }
+
+    const userId = accessCheck.userId;
+    const subscription = accessCheck.subscription;
+
+    // Check subscription tier
+    if (subscription.plan_type === 'free') {
+      return {
+        success: false,
+        error: 'Viewing driver profiles requires a Pro or Enterprise subscription. Please upgrade.'
+      };
+    }
+
+    // Check subscription is active
+    if (!subscription.is_active) {
+      return {
+        success: false,
+        error: 'Your subscription has expired or is inactive. Please renew to view profiles.'
+      };
+    }
+
+    // Check quota
+    const quotaCheck = await checkViewQuota(carrierDot);
+    if (!quotaCheck.hasQuota) {
+      return {
+        success: false,
+        error: 'Your monthly profile view quota is exhausted. Quota resets on your next billing cycle.'
+      };
+    }
+
+    // Get driver profile
+    const driver = await wixData.get('DriverProfiles', driverId);
+
+    if (!driver) {
+      return {
+        success: false,
+        error: 'Driver profile not found. The driver may have been removed.'
+      };
+    }
+
+    // Check if driver is hidden
+    if (driver.visibility_level === 'hidden' || driver.is_searchable === false) {
+      return {
+        success: false,
+        error: 'This driver profile is not available or has been set to private.'
+      };
+    }
+
+    // Record the view in CarrierDriverViews
+    const viewRecord = {
+      carrier_dot: carrierDot,
+      driver_id: driverId,
+      recruiter_id: userId,
+      view_type: 'full_profile',
+      billing_period: new Date().toISOString().slice(0, 7), // YYYY-MM format
+      _createdDate: new Date()
+    };
+
+    if (options.matchScore !== undefined) {
+      viewRecord.match_score = options.matchScore;
+    }
+
+    await wixData.insert('CarrierDriverViews', viewRecord, { suppressAuth: true });
+
+    // Record profile view for quota tracking
+    const viewResult = await recordProfileView(carrierDot, driverId, { userId });
+
+    // Determine if quota was used (already viewed = no quota used)
+    const quotaUsed = viewResult && !viewResult.alreadyViewed;
+
+    // Prepare driver data based on visibility level
+    let driverData;
+    if (driver.visibility_level === 'limited') {
+      driverData = maskPII(driver);
+    } else {
+      driverData = driver;
+    }
+
+    // Calculate remaining quota
+    const viewsUsed = subscription.views_used_this_month + (quotaUsed ? 1 : 0);
+    const viewsTotal = subscription.monthly_view_quota;
+    const viewsRemaining = viewsTotal === -1 ? -1 : Math.max(0, viewsTotal - viewsUsed);
+
+    return {
+      success: true,
+      driver: driverData,
+      quotaUsed: quotaUsed !== false,
+      quota: {
+        used: viewsUsed,
+        total: viewsTotal,
+        remaining: viewsRemaining
+      }
+    };
+
+  } catch (err) {
+    return {
+      success: false,
+      error: err.message || 'An unexpected error occurred while retrieving the driver profile.'
+    };
+  }
+}
+
+/**
+ * Detects if a driver has expressed interest in the carrier (mutual match)
+ *
+ * @param {string} carrierDot - The carrier's DOT number
+ * @param {string} driverId - The driver's profile ID
+ * @returns {Promise<Object>} Mutual match status
+ */
+export async function detectMutualMatch(carrierDot, driverId) {
+  try {
+    // Access control
+    const accessCheck = await performAccessCheck(carrierDot);
+    if (!accessCheck.success) {
+      return { success: false, error: accessCheck.error };
+    }
+
+    // Query DriverInterests collection for this driver-carrier pair
+    const result = await wixData.query('DriverInterests')
+      .eq('driver_id', driverId)
+      .eq('carrier_dot', carrierDot)
+      .eq('status', 'interested')
+      .find();
+
+    if (result.items.length > 0) {
+      const interest = result.items[0];
+      return {
+        success: true,
+        isMutualMatch: true,
+        interestDate: interest.created_date,
+        scoreBoost: MUTUAL_MATCH_SCORE_BOOST,
+        rationaleNote: 'Driver has expressed interest in your company - mutual match!'
+      };
+    }
+
+    return {
+      success: true,
+      isMutualMatch: false,
+      scoreBoost: 0
+    };
+
+  } catch (err) {
+    return {
+      success: false,
+      isMutualMatch: false,
+      error: err.message || 'An unexpected error occurred while checking for mutual match.'
+    };
+  }
+}

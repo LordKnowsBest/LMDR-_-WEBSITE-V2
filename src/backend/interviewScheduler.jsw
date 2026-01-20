@@ -1,0 +1,191 @@
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+/**
+ * Interview Scheduling Service (Phase 4I)
+ * Handles appointment states: REQUESTED -> PROPOSED -> CONFIRMED/CANCELLED
+ */
+
+const CONFIG = {
+    interviewsCollection: 'Interviews',
+    interestsCollection: 'DriverCarrierInterests',
+    messagesCollection: 'Messages',
+    STATUS: {
+        REQUESTED: 'REQUESTED',   // Recruiter asked for availability
+        PROPOSED: 'PROPOSED',     // One party suggested specific slots
+        CONFIRMED: 'CONFIRMED',   // Slot agreed upon
+        CANCELLED: 'CANCELLED'    // Appointment cancelled
+    }
+};
+
+/**
+ * Recruiter requests driver to provide availability
+ */
+export async function requestAvailability(applicationId) {
+    try {
+        const userId = wixUsersBackend.currentUser.id;
+        if (!userId) throw new Error('Not authenticated');
+
+        const application = await wixData.get(CONFIG.interestsCollection, applicationId);
+        if (!application) throw new Error('Application not found');
+
+        // Create or update interview record
+        const interviewData = {
+            application_id: applicationId,
+            driver_id: application.driver_id,
+            carrier_dot: application.carrier_dot,
+            status: CONFIG.STATUS.REQUESTED,
+            requested_by: userId,
+            requested_at: new Date()
+        };
+
+        // Check for existing interview
+        const existing = await wixData.query(CONFIG.interviewsCollection)
+            .eq('application_id', applicationId)
+            .find();
+
+        if (existing.items.length > 0) {
+            interviewData._id = existing.items[0]._id;
+            await wixData.update(CONFIG.interviewsCollection, interviewData);
+        } else {
+            await wixData.insert(CONFIG.interviewsCollection, interviewData);
+        }
+
+        // Send system message to chat
+        await sendSystemMessage(applicationId, 'ACTION_REQUIRED', {
+            action: 'PROVIDE_AVAILABILITY',
+            text: 'Recruiter requested your interview availability.'
+        }, application.driver_id);
+
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Error requesting availability:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Propose specific time slots (from either driver or recruiter)
+ * @param {string} applicationId 
+ * @param {Array} slots [{id: 1, start: Date, end: Date}]
+ */
+export async function proposeTimeSlots(applicationId, slots) {
+    try {
+        const userId = wixUsersBackend.currentUser.id;
+        const application = await wixData.get(CONFIG.interestsCollection, applicationId);
+        
+        const updateData = {
+            status: CONFIG.STATUS.PROPOSED,
+            proposed_slots: JSON.stringify(slots),
+            last_proposer_id: userId,
+            last_proposal_at: new Date()
+        };
+
+        const existing = await wixData.query(CONFIG.interviewsCollection)
+            .eq('application_id', applicationId)
+            .find();
+
+        if (existing.items.length === 0) throw new Error('Interview record not found');
+        
+        const interview = existing.items[0];
+        const finalData = { ...interview, ...updateData };
+        await wixData.update(CONFIG.interviewsCollection, finalData);
+
+        // Notify other party
+        const receiverId = userId === application.driver_id ? application._owner : application.driver_id;
+        await sendSystemMessage(applicationId, 'ACTION_REQUIRED', {
+            action: 'REVIEW_SLOTS',
+            slots: slots,
+            text: userId === application.driver_id ? 'Driver proposed interview times.' : 'Recruiter proposed interview times.'
+        }, receiverId);
+
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Error proposing slots:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Confirm a specific time slot
+ */
+export async function confirmTimeSlot(applicationId, slotIndex) {
+    try {
+        const userId = wixUsersBackend.currentUser.id;
+        const existing = await wixData.query(CONFIG.interviewsCollection)
+            .eq('application_id', applicationId)
+            .find();
+
+        if (existing.items.length === 0) throw new Error('Interview record not found');
+        const interview = existing.items[0];
+        
+        const slots = JSON.parse(interview.proposed_slots);
+        const selectedSlot = slots[slotIndex];
+
+        const updateData = {
+            ...interview,
+            status: CONFIG.STATUS.CONFIRMED,
+            confirmed_slot: JSON.stringify(selectedSlot),
+            confirmed_at: new Date(),
+            confirmed_by: userId
+        };
+
+        await wixData.update(CONFIG.interviewsCollection, updateData);
+
+        // System message for both
+        const application = await wixData.get(CONFIG.interestsCollection, applicationId);
+        const receiverId = userId === application.driver_id ? application._owner : application.driver_id;
+        
+        await sendSystemMessage(applicationId, 'INFO', {
+            text: `Interview Confirmed: ${new Date(selectedSlot.start).toLocaleString()}`,
+            details: selectedSlot
+        }, receiverId);
+
+        return { success: true, slot: selectedSlot };
+    } catch (error) {
+        console.error('❌ Error confirming slot:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get current interview state for an application
+ */
+export async function getInterviewState(applicationId) {
+    try {
+        const result = await wixData.query(CONFIG.interviewsCollection)
+            .eq('application_id', applicationId)
+            .find();
+            
+        if (result.items.length === 0) return { success: true, state: null };
+        
+        const interview = result.items[0];
+        if (interview.proposed_slots) interview.proposed_slots = JSON.parse(interview.proposed_slots);
+        if (interview.confirmed_slot) interview.confirmed_slot = JSON.parse(interview.confirmed_slot);
+        
+        return { success: true, state: interview };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Helper to send system-type messages to chat
+ */
+async function sendSystemMessage(applicationId, subType, payload, receiverId) {
+    const userId = wixUsersBackend.currentUser.id;
+    const systemMessage = {
+        application_id: applicationId,
+        content: payload.text,
+        sender_id: userId,
+        receiver_id: receiverId,
+        sender_type: 'system', // Special type for UI cards
+        timestamp: new Date(),
+        is_read: false,
+        metadata: JSON.stringify({
+            subType: subType, // INFO, ACTION_REQUIRED
+            payload: payload
+        })
+    };
+    return wixData.insert(CONFIG.messagesCollection, systemMessage);
+}

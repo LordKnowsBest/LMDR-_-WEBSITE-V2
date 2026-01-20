@@ -1,0 +1,740 @@
+// ============================================================================
+// ABANDONMENT EMAIL SERVICE - Checkout Recovery Email System
+// ============================================================================
+//
+// Handles automated email sequences for checkout abandonment recovery.
+// Integrates with Stripe webhooks to detect abandoned checkouts and sends
+// a 3-email sequence over 7 days to recover conversions.
+//
+// Email Sequence (B2B Best Practices - No discounts upfront):
+// - Email 1: 2 hours after abandonment - "Your checkout is waiting" + trust/social proof
+// - Email 2: 3 days after - Success story from other recruiters
+// - Email 3: 7 days after - Last chance + offer to schedule a call
+//
+// Collection: CheckoutAbandonment - tracks abandonment state and email status
+// ============================================================================
+
+import { triggeredEmails, contacts } from 'wix-crm-backend';
+import wixData from 'wix-data';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  // Collection name
+  collection: 'CheckoutAbandonment',
+  emailLogCollection: 'AbandonmentEmailLog',
+
+  // Email timing (in hours from abandonment)
+  emailTiming: {
+    email1: 2,      // 2 hours after abandonment
+    email2: 72,     // 3 days (72 hours)
+    email3: 168     // 7 days (168 hours)
+  },
+
+  // Wix Triggered Email Template IDs (must match IDs in Wix Dashboard > Triggered Emails)
+  // Create these templates at: Wix Dashboard > Marketing & SEO > Triggered Emails
+  emailTemplates: {
+    abandonment1: 'checkoutAbandonment1',  // 2hr - "Your checkout is waiting"
+    abandonment2: 'checkoutAbandonment2',  // 3 days - Social proof/success story
+    abandonment3: 'checkoutAbandonment3'   // 7 days - Last chance + call CTA
+  },
+
+  // Plan info for email content
+  planInfo: {
+    pro: {
+      name: 'LMDR Pro',
+      price: '$249/month',
+      displayName: 'Pro Plan'
+    },
+    enterprise: {
+      name: 'LMDR Enterprise',
+      price: '$749/month',
+      displayName: 'Enterprise Plan'
+    }
+  },
+
+  // Checkout URLs by plan type
+  checkoutUrls: {
+    pro: 'https://www.lastmiledr.app/pricing?plan=pro',
+    enterprise: 'https://www.lastmiledr.app/pricing?plan=enterprise'
+  },
+
+  // Calendly link for scheduling calls
+  calendlyUrl: 'https://calendly.com/lastmiledr/demo'
+};
+
+// ============================================================================
+// TRACK ABANDONED CHECKOUT (Called from Stripe Webhook)
+// ============================================================================
+
+/**
+ * Records an abandoned checkout session for email follow-up.
+ * Called from http-functions.js when checkout.session.expired event is received.
+ *
+ * @param {Object} session - Stripe checkout session object
+ * @returns {Promise<{success: boolean, abandonmentId?: string, error?: string}>}
+ */
+export async function trackAbandonedCheckout(session) {
+  try {
+    const email = session.customer_email;
+    const carrierDot = session.metadata?.carrier_dot;
+    const planType = determinePlanType(session);
+
+    if (!email) {
+      console.log('[AbandonmentEmail] No email in session, cannot track');
+      return { success: false, error: 'No email provided' };
+    }
+
+    console.log(`[AbandonmentEmail] Tracking abandonment for ${email}, plan: ${planType}`);
+
+    // Check if we already have an active abandonment for this email
+    const existing = await wixData.query(CONFIG.collection)
+      .eq('email', email)
+      .eq('recovered', false)
+      .descending('_createdDate')
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    // If there's a recent abandonment (within 24 hours), update it instead of creating new
+    if (existing.items.length > 0) {
+      const existingRecord = existing.items[0];
+      const hoursSinceCreated = (Date.now() - new Date(existingRecord._createdDate).getTime()) / (1000 * 60 * 60);
+
+      if (hoursSinceCreated < 24) {
+        // Update the existing record with new session info
+        const updated = await wixData.update(CONFIG.collection, {
+          ...existingRecord,
+          stripeSessionId: session.id,
+          planType: planType,
+          abandonedAt: new Date(),
+          lastAttemptUrl: session.url
+        }, { suppressAuth: true });
+
+        console.log(`[AbandonmentEmail] Updated existing abandonment ${updated._id} for ${email}`);
+        return { success: true, abandonmentId: updated._id, updated: true };
+      }
+    }
+
+    // Create new abandonment record
+    const abandonmentRecord = {
+      email: email,
+      carrierDot: carrierDot || '',
+      planType: planType,
+      stripeSessionId: session.id,
+      abandonedAt: new Date(),
+      lastAttemptUrl: session.url || '',
+
+      // Email tracking
+      email1Sent: false,
+      email1SentAt: null,
+      email2Sent: false,
+      email2SentAt: null,
+      email3Sent: false,
+      email3SentAt: null,
+
+      // Recovery status
+      recovered: false,
+      recoveredAt: null,
+      recoverySessionId: null,
+
+      // Contact info from metadata
+      contactName: session.metadata?.contact_name || '',
+      companyName: session.metadata?.company_name || ''
+    };
+
+    const result = await wixData.insert(CONFIG.collection, abandonmentRecord, { suppressAuth: true });
+
+    console.log(`[AbandonmentEmail] Created abandonment record ${result._id} for ${email}`);
+
+    // Ensure contact exists in CRM for email sending
+    await findOrCreateContact(email, abandonmentRecord.contactName);
+
+    return { success: true, abandonmentId: result._id };
+  } catch (error) {
+    console.error('[AbandonmentEmail] trackAbandonedCheckout error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// MARK CHECKOUT RECOVERED (Called from Stripe Webhook)
+// ============================================================================
+
+/**
+ * Marks an abandonment as recovered when checkout completes.
+ * Called from http-functions.js when checkout.session.completed is received.
+ *
+ * @param {string} email - Customer email
+ * @param {string} sessionId - Stripe session ID
+ * @returns {Promise<{success: boolean, wasAbandoned?: boolean}>}
+ */
+export async function markCheckoutRecovered(email, sessionId) {
+  try {
+    if (!email) {
+      return { success: false, error: 'No email provided' };
+    }
+
+    // Find active abandonment for this email
+    const result = await wixData.query(CONFIG.collection)
+      .eq('email', email)
+      .eq('recovered', false)
+      .descending('_createdDate')
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return { success: true, wasAbandoned: false };
+    }
+
+    const abandonment = result.items[0];
+
+    // Update as recovered
+    await wixData.update(CONFIG.collection, {
+      ...abandonment,
+      recovered: true,
+      recoveredAt: new Date(),
+      recoverySessionId: sessionId
+    }, { suppressAuth: true });
+
+    console.log(`[AbandonmentEmail] Marked abandonment ${abandonment._id} as recovered for ${email}`);
+
+    return { success: true, wasAbandoned: true, abandonmentId: abandonment._id };
+  } catch (error) {
+    console.error('[AbandonmentEmail] markCheckoutRecovered error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// PROCESS ABANDONMENT EMAILS - Scheduled Job Entry Point
+// ============================================================================
+
+/**
+ * Processes pending abandonment emails.
+ * Called by scheduled job every hour to send due emails.
+ * Add to jobs.config to run hourly.
+ *
+ * @returns {Promise<Object>} Stats about emails processed
+ */
+export async function processAbandonmentEmails() {
+  console.log('[AbandonmentEmail] Starting abandonment email processing...');
+
+  const stats = {
+    email1Sent: 0,
+    email2Sent: 0,
+    email3Sent: 0,
+    errors: 0,
+    skipped: 0
+  };
+
+  try {
+    // Get all unrecovered abandonments that still have emails to send
+    const abandonments = await wixData.query(CONFIG.collection)
+      .eq('recovered', false)
+      .eq('email3Sent', false)  // Only get records that haven't completed the sequence
+      .limit(100)
+      .find({ suppressAuth: true });
+
+    if (abandonments.items.length === 0) {
+      console.log('[AbandonmentEmail] No pending abandonments to process');
+      return { success: true, ...stats };
+    }
+
+    console.log(`[AbandonmentEmail] Processing ${abandonments.items.length} abandonments`);
+
+    for (const abandonment of abandonments.items) {
+      const result = await processAbandonmentRecord(abandonment);
+
+      if (result.emailSent === 1) stats.email1Sent++;
+      else if (result.emailSent === 2) stats.email2Sent++;
+      else if (result.emailSent === 3) stats.email3Sent++;
+      else if (result.skipped) stats.skipped++;
+
+      if (result.error) stats.errors++;
+
+      // Small delay between emails to avoid rate limits
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    console.log(`[AbandonmentEmail] Processing complete:`, stats);
+
+    return { success: true, ...stats };
+  } catch (error) {
+    console.error('[AbandonmentEmail] processAbandonmentEmails error:', error);
+    return { success: false, error: error.message, ...stats };
+  }
+}
+
+/**
+ * Process a single abandonment record and send appropriate email
+ * @private
+ */
+async function processAbandonmentRecord(abandonment) {
+  const now = new Date();
+  const abandonedAt = new Date(abandonment.abandonedAt);
+  const hoursSinceAbandonment = (now - abandonedAt) / (1000 * 60 * 60);
+
+  // Check which email to send based on timing and what's already sent
+  let emailToSend = null;
+
+  if (!abandonment.email1Sent && hoursSinceAbandonment >= CONFIG.emailTiming.email1) {
+    emailToSend = 1;
+  } else if (!abandonment.email2Sent && abandonment.email1Sent && hoursSinceAbandonment >= CONFIG.emailTiming.email2) {
+    emailToSend = 2;
+  } else if (!abandonment.email3Sent && abandonment.email2Sent && hoursSinceAbandonment >= CONFIG.emailTiming.email3) {
+    emailToSend = 3;
+  }
+
+  if (!emailToSend) {
+    return { skipped: true };
+  }
+
+  try {
+    let result;
+    const emailData = {
+      email: abandonment.email,
+      firstName: getFirstName(abandonment.contactName),
+      planType: abandonment.planType,
+      planName: getPlanDisplayName(abandonment.planType),
+      companyName: abandonment.companyName
+    };
+
+    // Send the appropriate email
+    switch (emailToSend) {
+      case 1:
+        result = await sendAbandonmentEmail1(emailData);
+        break;
+      case 2:
+        result = await sendAbandonmentEmail2(emailData);
+        break;
+      case 3:
+        result = await sendAbandonmentEmail3(emailData);
+        break;
+    }
+
+    if (result.success) {
+      // Update the abandonment record
+      await markEmailSent(abandonment._id, emailToSend);
+      console.log(`[AbandonmentEmail] Sent email ${emailToSend} to ${abandonment.email}`);
+      return { emailSent: emailToSend };
+    } else {
+      console.error(`[AbandonmentEmail] Failed to send email ${emailToSend} to ${abandonment.email}:`, result.error);
+      return { error: true };
+    }
+  } catch (error) {
+    console.error(`[AbandonmentEmail] Error processing ${abandonment._id}:`, error);
+    return { error: true };
+  }
+}
+
+// ============================================================================
+// SEND INDIVIDUAL EMAILS
+// ============================================================================
+
+/**
+ * Sends the immediate abandonment email (Email 1 - 2 hours).
+ * Content: "Your checkout is waiting" + address common concern + trust signal
+ *
+ * @param {Object} abandonmentData - Data from the abandonment record
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function sendAbandonmentEmail1(abandonmentData) {
+  const { email, firstName, planType, planName } = abandonmentData;
+
+  const variables = {
+    firstName: firstName || 'there',
+    planName: planName || getPlanDisplayName(planType),
+    planPrice: CONFIG.planInfo[planType]?.price || '$249/month',
+    checkoutUrl: CONFIG.checkoutUrls[planType] || CONFIG.checkoutUrls.pro,
+
+    // Email 1 specific - Trust/credibility focused (B2B best practice)
+    headline: 'Your checkout is waiting',
+    trustPoint: 'Over 500 carriers trust LMDR to find qualified CDL drivers',
+    addressConcern: 'We know hiring drivers is a big decision. That\'s why we offer a satisfaction guarantee - see results in your first 30 days or we\'ll work with you until you do.',
+    ctaText: 'Complete Your Signup'
+  };
+
+  return sendAbandonmentEmail(email, CONFIG.emailTemplates.abandonment1, variables);
+}
+
+/**
+ * Sends the 3-day follow-up email (Email 2).
+ * Content: Social proof / success story from other recruiters
+ *
+ * @param {Object} abandonmentData - Data from the abandonment record
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function sendAbandonmentEmail2(abandonmentData) {
+  const { email, firstName, planType, planName } = abandonmentData;
+
+  const variables = {
+    firstName: firstName || 'there',
+    planName: planName || getPlanDisplayName(planType),
+    checkoutUrl: CONFIG.checkoutUrls[planType] || CONFIG.checkoutUrls.pro,
+
+    // Email 2 specific - Social proof focused
+    headline: 'How other carriers are winning with LMDR',
+    testimonial: '"We filled 8 driver seats in our first month using LMDR. The AI matching actually finds drivers who fit our operation - OTR runs, hometime preferences, everything." - Fleet Manager, 150+ truck carrier',
+    keyMetric: 'Carriers using LMDR fill seats 3x faster than traditional job boards',
+    ctaText: 'Start Finding Drivers'
+  };
+
+  return sendAbandonmentEmail(email, CONFIG.emailTemplates.abandonment2, variables);
+}
+
+/**
+ * Sends the 7-day final reminder email (Email 3).
+ * Content: Last chance + offer to schedule a call (NOT discount)
+ *
+ * @param {Object} abandonmentData - Data from the abandonment record
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function sendAbandonmentEmail3(abandonmentData) {
+  const { email, firstName, planType, planName } = abandonmentData;
+
+  const variables = {
+    firstName: firstName || 'there',
+    planName: planName || getPlanDisplayName(planType),
+    checkoutUrl: CONFIG.checkoutUrls[planType] || CONFIG.checkoutUrls.pro,
+
+    // Email 3 specific - Call-to-action for human contact
+    headline: 'Still looking for drivers?',
+    personalNote: 'I noticed you started signing up but didn\'t finish. If you have questions about how LMDR works or whether it\'s right for your operation, I\'d be happy to walk you through it.',
+    callOffer: 'Schedule a quick 15-minute call with our team. No pressure - just answers to your questions.',
+    calendlyUrl: CONFIG.calendlyUrl,
+    ctaText: 'Schedule a Call',
+    secondaryCtaText: 'Or Complete Signup',
+    signatureName: 'The LMDR Team',
+    supportEmail: 'support@lastmiledr.app'
+  };
+
+  return sendAbandonmentEmail(email, CONFIG.emailTemplates.abandonment3, variables);
+}
+
+// ============================================================================
+// CORE EMAIL SENDING
+// ============================================================================
+
+/**
+ * Sends an abandonment recovery email to a contact.
+ * Creates or finds the contact first, then sends the triggered email.
+ *
+ * @param {string} email - Recipient email address
+ * @param {string} templateId - The triggered email template ID
+ * @param {Object} variables - Variables to pass to the email template
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+async function sendAbandonmentEmail(email, templateId, variables) {
+  try {
+    console.log(`[AbandonmentEmail] Sending ${templateId} to ${email}`);
+
+    // Find or create contact by email
+    let contactId = await findOrCreateContact(email, variables.firstName);
+
+    if (!contactId) {
+      console.error(`[AbandonmentEmail] Could not find/create contact for ${email}`);
+      return { success: false, error: 'Contact creation failed' };
+    }
+
+    // Send the triggered email
+    await triggeredEmails.emailContact(templateId, contactId, {
+      variables: variables
+    });
+
+    // Log the email send
+    await logEmailSend(null, templateId, email);
+
+    console.log(`[AbandonmentEmail] Email ${templateId} sent to ${email}`);
+    return { success: true };
+
+  } catch (error) {
+    console.error(`[AbandonmentEmail] Error sending ${templateId} to ${email}:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// CONTACT MANAGEMENT
+// ============================================================================
+
+/**
+ * Finds an existing contact by email or creates a new one.
+ *
+ * @param {string} email - Email address to find/create
+ * @param {string} firstName - First name for new contact
+ * @returns {Promise<string|null>} Contact ID or null on failure
+ */
+async function findOrCreateContact(email, firstName) {
+  try {
+    // Try to find existing contact
+    const queryResult = await contacts.queryContacts()
+      .eq('primaryInfo.email', email)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (queryResult.items.length > 0) {
+      return queryResult.items[0]._id;
+    }
+
+    // Create new contact
+    const newContact = await contacts.createContact({
+      name: {
+        first: firstName || 'Recruiter'
+      },
+      emails: [{ email: email, primary: true }],
+      labelKeys: ['custom.checkout-abandonment']
+    }, { suppressAuth: true });
+
+    console.log(`[AbandonmentEmail] Created contact ${newContact._id} for ${email}`);
+    return newContact._id;
+
+  } catch (error) {
+    console.error('[AbandonmentEmail] Error finding/creating contact:', error.message);
+
+    // Fallback: try appendOrCreateContact
+    try {
+      const result = await contacts.appendOrCreateContact({
+        emails: [{ email: email }]
+      }, { suppressAuth: true });
+      return result.contactId;
+    } catch (fallbackError) {
+      console.error('[AbandonmentEmail] Fallback contact creation failed:', fallbackError);
+      return null;
+    }
+  }
+}
+
+// ============================================================================
+// EMAIL LOGGING & TRACKING
+// ============================================================================
+
+/**
+ * Updates an abandonment record to mark an email as sent.
+ *
+ * @param {string} recordId - The _id of the CheckoutAbandonment record
+ * @param {number} emailNumber - Which email was sent (1, 2, or 3)
+ * @returns {Promise<boolean>} Success status
+ */
+export async function markEmailSent(recordId, emailNumber) {
+  try {
+    // Get the current record
+    const record = await wixData.get(CONFIG.collection, recordId, { suppressAuth: true });
+
+    if (!record) {
+      console.error(`[AbandonmentEmail] Record ${recordId} not found`);
+      return false;
+    }
+
+    const fieldName = `email${emailNumber}Sent`;
+    const dateName = `email${emailNumber}SentAt`;
+
+    await wixData.update(CONFIG.collection, {
+      ...record,
+      [fieldName]: true,
+      [dateName]: new Date()
+    }, { suppressAuth: true });
+
+    console.log(`[AbandonmentEmail] Marked email ${emailNumber} as sent for record ${recordId}`);
+    return true;
+
+  } catch (error) {
+    console.error(`[AbandonmentEmail] Error marking email ${emailNumber} sent:`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Log an email send for analytics
+ * @private
+ */
+async function logEmailSend(abandonmentId, templateId, recipientEmail) {
+  try {
+    await wixData.insert(CONFIG.emailLogCollection, {
+      abandonmentId: abandonmentId,
+      templateId: templateId,
+      recipientEmail: recipientEmail,
+      sentAt: new Date(),
+      emailType: 'checkout_abandonment'
+    }, { suppressAuth: true });
+  } catch (error) {
+    // Don't throw - logging failure shouldn't break email sending
+    console.error('[AbandonmentEmail] logEmailSend error:', error);
+  }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Determine plan type from Stripe session
+ */
+function determinePlanType(session) {
+  // Check metadata first
+  if (session.metadata?.plan_type) {
+    return session.metadata.plan_type;
+  }
+
+  // Check line items for price ID hints
+  const lineItems = session.line_items?.data || [];
+  for (const item of lineItems) {
+    const priceId = item.price?.id || '';
+    if (priceId.toLowerCase().includes('enterprise')) {
+      return 'enterprise';
+    }
+  }
+
+  // Default to pro
+  return 'pro';
+}
+
+/**
+ * Get display name for a plan type
+ */
+function getPlanDisplayName(planType) {
+  return CONFIG.planInfo[planType]?.displayName || 'Pro Plan';
+}
+
+/**
+ * Extract first name from full name
+ */
+function getFirstName(fullName) {
+  if (!fullName) return null;
+  return fullName.split(' ')[0];
+}
+
+// ============================================================================
+// ADMIN / REPORTING FUNCTIONS
+// ============================================================================
+
+/**
+ * Get abandonment statistics for dashboard
+ *
+ * @returns {Promise<Object>} Statistics about abandonment tracking
+ */
+export async function getAbandonmentStats() {
+  try {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
+
+    // Get total abandonments in last 30 days
+    const totalResult = await wixData.query(CONFIG.collection)
+      .ge('abandonedAt', thirtyDaysAgo)
+      .find({ suppressAuth: true });
+
+    const total = totalResult.items.length;
+
+    // Count recovered
+    const recovered = totalResult.items.filter(item => item.recovered).length;
+
+    // Count pending (not recovered, not all emails sent)
+    const pending = totalResult.items.filter(item => !item.recovered && !item.email3Sent).length;
+
+    // Count completed sequence but not recovered
+    const completedSequence = totalResult.items.filter(item => !item.recovered && item.email3Sent).length;
+
+    // Calculate recovery rate
+    const recoveryRate = total > 0 ? ((recovered / total) * 100).toFixed(1) : 0;
+
+    return {
+      success: true,
+      stats: {
+        total,
+        recovered,
+        pending,
+        completedSequence,
+        recoveryRate: `${recoveryRate}%`,
+        period: 'last_30_days'
+      }
+    };
+  } catch (error) {
+    console.error('[AbandonmentEmail] getAbandonmentStats error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Get list of recent abandonments for admin dashboard
+ *
+ * @param {number} limit - Max records to return
+ * @returns {Promise<Object>} { success, abandonments[] }
+ */
+export async function getRecentAbandonments(limit = 50) {
+  try {
+    const result = await wixData.query(CONFIG.collection)
+      .descending('abandonedAt')
+      .limit(limit)
+      .find({ suppressAuth: true });
+
+    return {
+      success: true,
+      abandonments: result.items.map(item => ({
+        id: item._id,
+        email: item.email,
+        planType: item.planType,
+        abandonedAt: item.abandonedAt,
+        email1Sent: item.email1Sent,
+        email2Sent: item.email2Sent,
+        email3Sent: item.email3Sent,
+        recovered: item.recovered,
+        recoveredAt: item.recoveredAt
+      }))
+    };
+  } catch (error) {
+    console.error('[AbandonmentEmail] getRecentAbandonments error:', error);
+    return { success: false, error: error.message, abandonments: [] };
+  }
+}
+
+/**
+ * Manually send a specific abandonment email (for testing)
+ *
+ * @param {string} abandonmentId - The abandonment record ID
+ * @param {number} emailNumber - 1, 2, or 3
+ * @returns {Promise<Object>} { success }
+ */
+export async function sendManualAbandonmentEmail(abandonmentId, emailNumber) {
+  try {
+    if (!abandonmentId || ![1, 2, 3].includes(emailNumber)) {
+      return { success: false, error: 'Invalid parameters' };
+    }
+
+    const abandonment = await wixData.get(CONFIG.collection, abandonmentId, { suppressAuth: true });
+
+    if (!abandonment) {
+      return { success: false, error: 'Abandonment not found' };
+    }
+
+    const emailData = {
+      email: abandonment.email,
+      firstName: getFirstName(abandonment.contactName),
+      planType: abandonment.planType,
+      planName: getPlanDisplayName(abandonment.planType),
+      companyName: abandonment.companyName
+    };
+
+    let result;
+    switch (emailNumber) {
+      case 1:
+        result = await sendAbandonmentEmail1(emailData);
+        break;
+      case 2:
+        result = await sendAbandonmentEmail2(emailData);
+        break;
+      case 3:
+        result = await sendAbandonmentEmail3(emailData);
+        break;
+    }
+
+    if (result.success) {
+      await markEmailSent(abandonmentId, emailNumber);
+    }
+
+    return result;
+  } catch (error) {
+    console.error('[AbandonmentEmail] sendManualAbandonmentEmail error:', error);
+    return { success: false, error: error.message };
+  }
+}

@@ -1,0 +1,276 @@
+import wixData from 'wix-data';
+import { log } from 'backend/observabilityService';
+
+// ===========================================
+// CONFIGURATION & CONSTANTS
+// ===========================================
+
+const RISK_THRESHOLDS = {
+    CRITICAL: 90,
+    HIGH: 70,
+    MEDIUM: 40
+};
+
+const RISK_LEVELS = {
+    CRITICAL: 'CRITICAL',
+    HIGH: 'HIGH',
+    MEDIUM: 'MEDIUM',
+    LOW: 'LOW'
+};
+
+const ROI_CONSTANTS = {
+    COST_PER_TURNOVER: 10000, // Industry avg $8.4k - $12k
+    BASELINE_RETENTION_RATE: 0.55 // North American benchmark
+};
+
+// Mock data generator for initial rollout/demo
+const MOCK_DATA = true;
+
+// ===========================================
+// CORE LOGIC
+// ===========================================
+
+/**
+ * Calculates retention risk score based on performance, finance, and BEHAVIOR
+ * @param {Object} metrics - Performance metrics (miles, on-time, safety, pay, sessions, dNPS)
+ * @returns {Object} { score, level, primaryFactor, actions }
+ */
+export function calculateRiskScore(metrics) {
+    let score = 0;
+    let factors = [];
+    let suggestedActions = [];
+
+    const {
+        miles_driven,
+        on_time_delivery_rate, // 0-100
+        safety_incidents,
+        home_time_days,
+        prev_miles_driven,
+        pay_volatility_index, // 0-100
+        avg_weekly_pay,
+        app_sessions_last_7d,
+        app_sessions_prev_7d,
+        dnps_score
+    } = metrics;
+
+    // 1. dNPS (User Sentiment) - IMMEDIATE CRITICAL OVERRIDE
+    if (dnps_score !== undefined && dnps_score <= 6) {
+        score = 95; // Immediate Critical
+        factors.unshift('Detractor (dNPS ' + dnps_score + ')'); // High priority
+        suggestedActions.push("Immediate Manager Call");
+    }
+
+    // 2. The "Silence Signal" (Engagement Drop)
+    if (app_sessions_prev_7d > 0) {
+        const activityDrop = (app_sessions_prev_7d - app_sessions_last_7d) / app_sessions_prev_7d;
+        if (activityDrop >= 0.50) {
+            score += 50;
+            factors.push('Silence Signal: 50%+ Activity Drop');
+            suggestedActions.push("Trigger Check-in (SMS)");
+        } else if (activityDrop >= 0.30) {
+            score += 20;
+            factors.push('Decreasing App Engagement');
+        }
+    }
+
+    // 3. Safety Impact
+    if (safety_incidents >= 2) {
+        score += 60;
+        factors.push('Multiple Safety Incidents');
+        suggestedActions.push("Schedule Safety Review");
+    } else if (safety_incidents === 1) {
+        score += 30;
+        factors.push('Safety Incident');
+    }
+
+    // 4. Financial Stability
+    if (pay_volatility_index > 25) {
+        score += 45;
+        factors.push('Extreme Pay Volatility (>25%)');
+        suggestedActions.push("Verify Pay / Payroll Audit");
+    } else if (pay_volatility_index > 15) {
+        score += 25;
+        factors.push('Unstable Pay Checks');
+    }
+
+    // 5. Burnout (Home Time)
+    if (home_time_days < 2) {
+        score += 30;
+        factors.push('Severe Burnout Risk (Low Home Time)');
+        suggestedActions.push("Schedule Time Off");
+    }
+
+    // Cap score at 100
+    score = Math.min(100, score);
+
+    // Determine Level
+    let level = RISK_LEVELS.LOW;
+    if (score >= RISK_THRESHOLDS.CRITICAL) level = RISK_LEVELS.CRITICAL;
+    else if (score >= RISK_THRESHOLDS.HIGH) level = RISK_LEVELS.HIGH;
+    else if (score >= RISK_THRESHOLDS.MEDIUM) level = RISK_LEVELS.MEDIUM;
+
+    return {
+        score,
+        level,
+        primaryFactor: factors.length > 0 ? factors[0] : 'Stable Operation',
+        allFactors: factors,
+        suggestedActions: suggestedActions.slice(0, 2) // Top 2 actions
+    };
+}
+
+// ===========================================
+// EXPORTED SERVICES
+// ===========================================
+
+/**
+ * Get aggregated retention dashboard data for a carrier
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Promise<Object>} Dashboard overview data with ROI & Prevention
+ */
+export async function getCarrierRetentionDashboard(carrierDot) {
+    try {
+        let drivers = [];
+
+        // In production, fetch from Wix Data
+        // const performanceResult = await wixData.query('DriverPerformance')...
+
+        if (MOCK_DATA) {
+            drivers = generateMockDrivers();
+        }
+
+        // Process data for dashboard
+        let totalScore = 0;
+        let highRiskCount = 0;
+        let riskDistribution = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
+        let processedDrivers = [];
+
+        let payVolatilitySum = 0;
+        let totalWeeklyPay = 0;
+
+        for (const record of drivers) {
+            const risk = calculateRiskScore(record);
+
+            // Update stats
+            totalScore += risk.score;
+            riskDistribution[risk.level]++;
+
+            payVolatilitySum += (record.pay_volatility_index || 0);
+            totalWeeklyPay += (record.avg_weekly_pay || 0);
+
+            if (risk.level === 'HIGH' || risk.level === 'CRITICAL') {
+                highRiskCount++;
+            }
+
+            processedDrivers.push({
+                driverId: record.driver_id,
+                driverName: record.driver_name || 'Driver',
+                metrics: {
+                    miles: record.miles_driven,
+                    safety: record.safety_incidents,
+                    homeTime: record.home_time_days,
+                    weeklyPay: record.avg_weekly_pay,
+                    payVolatility: record.pay_volatility_index,
+                    sessionsLast7: record.app_sessions_last_7d,
+                    dNPS: record.dnps_score
+                },
+                risk
+            });
+        }
+
+        const driverCount = drivers.length || 1;
+        const avgScore = Math.round(totalScore / driverCount);
+        const avgPayVolatility = Math.round(payVolatilitySum / driverCount);
+        const avgFleetPay = Math.round(totalWeeklyPay / driverCount);
+
+        // ROI CALCULATION
+        // Retention Rate = (100 - Avg Turnover Probability) / 100
+        const currentRetentionRate = (100 - (avgScore * 0.5)) / 100; // Simplified proxy
+        const improvement = Math.max(0, currentRetentionRate - ROI_CONSTANTS.BASELINE_RETENTION_RATE);
+        const driversSaved = Math.round(driverCount * improvement);
+        const costAvoided = driversSaved * ROI_CONSTANTS.COST_PER_TURNOVER;
+
+        // Sort by risk score descending
+        processedDrivers.sort((a, b) => b.risk.score - a.risk.score);
+
+        return {
+            success: true,
+            overview: {
+                avgRetentionScore: Math.round(currentRetentionRate * 100),
+                avgRiskScore: avgScore,
+                highRiskCount,
+                activeDrivers: driverCount,
+                riskDistribution,
+                roi: {
+                    costAvoided,
+                    driversSaved,
+                    baselineRate: ROI_CONSTANTS.BASELINE_RETENTION_RATE * 100
+                }
+            },
+            financialHealth: {
+                avgWeeklyPay: avgFleetPay,
+                avgPayVolatility,
+                volatilityStatus: avgPayVolatility > 15 ? 'UNSTABLE' : 'STABLE'
+            },
+            atRiskWatchlist: processedDrivers.filter(d => d.risk.score >= RISK_THRESHOLDS.MEDIUM),
+            allDrivers: processedDrivers
+        };
+
+    } catch (error) {
+        console.error('Error fetching retention dashboard:', error);
+        await log({ level: 'ERROR', source: 'retention-service', message: error.message });
+        throw new Error('Failed to load retention dashboard data.');
+    }
+}
+
+// ===========================================
+// MOCK DATA HELPER
+// ===========================================
+
+function generateMockDrivers() {
+    const mock = [];
+
+    // 1. Critical Risk - The "Silence Signal"
+    mock.push({
+        driver_id: 'd_silent_01', driver_name: 'David Ghost',
+        miles_driven: 2000, on_time_delivery_rate: 90, safety_incidents: 0, home_time_days: 3,
+        avg_weekly_pay: 1300, pay_volatility_index: 5,
+        app_sessions_last_7d: 1, app_sessions_prev_7d: 12, // HUGE DROP
+        dnps_score: 8
+    });
+
+    // 2. Critical Risk - Detractor (dNPS)
+    mock.push({
+        driver_id: 'd_nps_01', driver_name: 'Angry Adam',
+        miles_driven: 3000, on_time_delivery_rate: 99, safety_incidents: 0, home_time_days: 6,
+        avg_weekly_pay: 1500, pay_volatility_index: 2,
+        app_sessions_last_7d: 10, app_sessions_prev_7d: 10,
+        dnps_score: 4 // DETRACTOR
+    });
+
+    // 3. High Risk - Pay Volatility
+    mock.push({
+        driver_id: 'd_pay_01', driver_name: 'Sarah Volatile',
+        miles_driven: 2800, on_time_delivery_rate: 98, safety_incidents: 0, home_time_days: 5,
+        avg_weekly_pay: 1100, pay_volatility_index: 28,
+        app_sessions_last_7d: 8, app_sessions_prev_7d: 9,
+        dnps_score: 7
+    });
+
+    // 4-15. Normal Drivers
+    for (let i = 4; i <= 15; i++) {
+        mock.push({
+            driver_id: `d_norm_${i}`, driver_name: `Driver ${i}`,
+            miles_driven: 2800 + (Math.random() * 500),
+            on_time_delivery_rate: 96 + (Math.random() * 4),
+            safety_incidents: 0,
+            home_time_days: 5 + Math.floor(Math.random() * 4),
+            avg_weekly_pay: 1300 + (Math.random() * 400),
+            pay_volatility_index: Math.floor(Math.random() * 10),
+            app_sessions_last_7d: 8 + Math.floor(Math.random() * 5),
+            app_sessions_prev_7d: 8 + Math.floor(Math.random() * 5),
+            dnps_score: 8 + Math.floor(Math.random() * 2)
+        });
+    }
+
+    return mock;
+}

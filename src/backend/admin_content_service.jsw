@@ -1,0 +1,279 @@
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+// ============================================================================
+// HELPER: Admin Authorization
+// ============================================================================
+
+async function requireAdmin() {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) {
+        throw new Error('Unauthorized');
+    }
+
+    // Check if user is in AdminUsers collection
+    // This is a simplified check matching Phase 1 patterns
+    const email = await currentUser.getEmail();
+    const adminCheck = await wixData.query('AdminUsers')
+        .eq('email', email)
+        .eq('status', 'active')
+        .find({ suppressAuth: true });
+
+    if (adminCheck.items.length === 0) {
+        throw new Error('Forbidden: Admin access only');
+    }
+
+    return adminCheck.items[0];
+}
+
+async function logModerationAction(action, targetType, targetId, details) {
+    try {
+        const admin = await requireAdmin();
+        const auditEntry = {
+            timestamp: new Date(),
+            admin_email: admin.email,
+            action: action,
+            target_type: targetType,
+            target_id: targetId,
+            details: JSON.stringify(details),
+            ip_address: '0.0.0.0' // Not available in Velo backend context reliably
+        };
+        await wixData.insert('AdminAuditLog', auditEntry, { suppressAuth: true });
+    } catch (error) {
+        console.error('Failed to log audit entry:', error);
+        // Don't block the actual action if logging fails
+    }
+}
+
+// ============================================================================
+// MODERATION QUEUE
+// ============================================================================
+
+/**
+ * Get mixed queue of items needing moderation
+ * @param {Object} filters - { type: 'reviews'|'jobs'|'documents'|'all' }
+ */
+export async function getModerationQueue(filters = {}) {
+    await requireAdmin();
+
+    const queue = [];
+    const type = filters.type || 'all';
+
+    try {
+        // 1. REVIEWS
+        if (type === 'all' || type === 'reviews') {
+            const reviews = await wixData.query('CarrierReviews')
+                .eq('status', 'pending')
+                .limit(50)
+                .find({ suppressAuth: true });
+
+            queue.push(...reviews.items.map(item => ({
+                id: item._id,
+                type: 'review',
+                title: `Review for ${item.carrier_name || 'Carrier'}`,
+                subtitle: `By ${item.reviewer_name || 'Anonymous'}`,
+                status: 'pending',
+                timestamp: item._createdDate,
+                data: item
+            })));
+        }
+
+        // 2. JOB POSTINGS
+        if (type === 'all' || type === 'jobs') {
+            const jobs = await wixData.query('JobPostings')
+                .eq('status', 'pending')
+                .limit(50)
+                .find({ suppressAuth: true });
+
+            queue.push(...jobs.items.map(item => ({
+                id: item._id,
+                type: 'job',
+                title: item.title,
+                subtitle: item.carrier_name,
+                status: 'pending',
+                timestamp: item._createdDate,
+                data: item
+            })));
+        }
+
+        // 3. DOCUMENTS (From DriverProfiles)
+        // This is trickier as documents are fields on a profile, not separate rows.
+        // We simulate a queue item for each unverified document.
+        if (type === 'all' || type === 'documents') {
+            // Find profiles with pending documents
+            // Assuming we track status in fields like 'cdl_front_status'
+            // If fields don't exist yet, this query might fail or return nothing.
+            // Using a loose query for now or assuming fields exist.
+
+            // To make this robust without schema guarantees, we'll try a generic query or skip if complex.
+            // Implementation: We'll query for profiles updated recently and check status fields in memory 
+            // if we can't index them all.
+            // Ideally: .eq('cdl_verification_status', 'pending')
+
+            // Fallback for demo: Return empty for documents if specific fields aren't set up
+            try {
+                const profiles = await wixData.query('DriverProfiles')
+                    .eq('profile_status', 'active') // Only check active profiles
+                    .descending('updated_date')
+                    .limit(50)
+                    .find({ suppressAuth: true });
+
+                profiles.items.forEach(profile => {
+                    // Check CDL Front
+                    if (profile.cdl_front_image && (!profile.cdl_front_status || profile.cdl_front_status === 'pending')) {
+                        queue.push({
+                            id: profile._id,
+                            type: 'document',
+                            subtype: 'cdl_front',
+                            title: 'CDL Front',
+                            subtitle: profile.display_name,
+                            status: 'pending',
+                            timestamp: profile.updated_date,
+                            date: profile.cdl_front_image
+                        });
+                    }
+                    // Check CDL Back
+                    if (profile.cdl_back_image && (!profile.cdl_back_status || profile.cdl_back_status === 'pending')) {
+                        queue.push({
+                            id: profile._id,
+                            type: 'document',
+                            subtype: 'cdl_back',
+                            title: 'CDL Back',
+                            subtitle: profile.display_name,
+                            status: 'pending',
+                            timestamp: profile.updated_date,
+                            data: profile.cdl_back_image
+                        });
+                    }
+                    // Check Med Card
+                    if (profile.med_card_image && (!profile.med_card_status || profile.med_card_status === 'pending')) {
+                        queue.push({
+                            id: profile._id,
+                            type: 'document',
+                            subtype: 'med_card',
+                            title: 'medical Card',
+                            subtitle: profile.display_name,
+                            status: 'pending',
+                            timestamp: profile.updated_date,
+                            data: profile.med_card_image
+                        });
+                    }
+                });
+            } catch (e) {
+                console.warn('Document queue query failed (potentially schema mismatch)', e);
+            }
+        }
+
+        // Sort by timestamp descending
+        queue.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+        return {
+            items: queue,
+            total: queue.length
+        };
+
+    } catch (error) {
+        console.error('Error fetching moderation queue:', error);
+        throw new Error('Failed to fetch moderation queue');
+    }
+}
+
+// ============================================================================
+// MODERATION ACTIONS
+// ============================================================================
+
+export async function updateReviewStatus(reviewId, status, reason = '') {
+    await requireAdmin();
+    // Validate status: 'approved', 'rejected'
+
+    try {
+        const review = await wixData.get('CarrierReviews', reviewId, { suppressAuth: true });
+        if (!review) throw new Error('Review not found');
+
+        review.status = status;
+        review.moderation_reason = reason;
+        review.moderated_at = new Date();
+
+        await wixData.update('CarrierReviews', review, { suppressAuth: true });
+        await logModerationAction('updateReview', 'review', reviewId, { status, reason });
+
+        return { success: true };
+    } catch (error) {
+        console.error('Error updating review:', error);
+        throw error;
+    }
+}
+
+export async function updateJobStatus(jobId, status) {
+    await requireAdmin();
+    try {
+        const job = await wixData.get('JobPostings', jobId, { suppressAuth: true });
+        if (!job) throw new Error('Job not found');
+
+        job.status = status;
+        job.moderated_at = new Date();
+
+        await wixData.update('JobPostings', job, { suppressAuth: true });
+        await logModerationAction('updateJob', 'job', jobId, { status });
+
+        return { success: true };
+    } catch (error) {
+        console.error('Error updating job:', error);
+        throw error;
+    }
+}
+
+export async function updateDocumentStatus(driverId, docType, status, reason = '') {
+    await requireAdmin();
+    // docType: 'cdl_front', 'cdl_back', 'med_card'
+
+    try {
+        const profile = await wixData.get('DriverProfiles', driverId, { suppressAuth: true });
+        if (!profile) throw new Error('Driver profile not found');
+
+        // Construct field name dynamically
+        const statusField = `${docType}_status`;
+        const reasonField = `${docType}_rejection_reason`;
+
+        profile[statusField] = status;
+        if (status === 'rejected') {
+            profile[reasonField] = reason;
+        } else {
+            profile[reasonField] = null; // Clear reason if approved
+        }
+
+        // If all Critical docs are verified, maybe upgrade profile status?
+        // keeping it simple for now.
+
+        await wixData.update('DriverProfiles', profile, { suppressAuth: true });
+        await logModerationAction('updateDocument', 'driver_document', driverId, { docType, status, reason });
+
+        return { success: true };
+    } catch (error) {
+        console.error('Error updating document:', error);
+        throw error;
+    }
+}
+
+export async function getModerationStats() {
+    await requireAdmin();
+
+    try {
+        // Approximate counts for dashboard
+        const pendingReviews = await wixData.query('CarrierReviews').eq('status', 'pending').count({ suppressAuth: true });
+        const pendingJobs = await wixData.query('JobPostings').eq('status', 'pending').count({ suppressAuth: true });
+
+        // Documents is hard to count efficiently without specific index, returning sum of others for now
+        // or 0 if we assume they are handled ad-hoc
+
+        return {
+            pendingReviews,
+            pendingJobs,
+            pendingDocuments: 0, // Placeholder
+            totalPending: pendingReviews + pendingJobs
+        };
+    } catch (error) {
+        console.warn('Error fetching stats:', error);
+        return { totalPending: 0 };
+    }
+}

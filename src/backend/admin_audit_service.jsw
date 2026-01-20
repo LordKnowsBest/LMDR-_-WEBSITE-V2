@@ -1,0 +1,500 @@
+/**
+ * Admin Audit Service - Backend functions for Audit Log
+ * Provides comprehensive audit trail for all administrative actions
+ */
+
+import wixData from 'wix-data';
+import { currentMember } from 'wix-members-backend';
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const CONFIG = {
+    auditLogCollection: 'AdminAuditLog',
+    driversCollection: 'DriverProfiles',
+    carriersCollection: 'Carriers'
+};
+
+// Action categories for filtering
+const ACTION_CATEGORIES = {
+    driver: ['verifyDriver', 'suspendDriver', 'updateDriverStatus', 'bulkVerify', 'bulkSuspend', 'sendDriverEmail'],
+    carrier: ['flagCarrier', 'unflagCarrier', 'updateCarrierStatus', 'refreshEnrichment', 'bulkActivate', 'bulkDeactivate', 'bulkFlag'],
+    system: ['resolveAlert', 'updateSettings', 'exportData'],
+    auth: ['adminLogin', 'adminLogout', 'roleChange']
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const memberRole = member.contactDetails?.customFields?.role || '';
+
+        return adminRoles.includes(memberRole.toLowerCase());
+    } catch (error) {
+        console.error('Admin check failed:', error);
+        return false;
+    }
+}
+
+async function requireAdmin() {
+    const authorized = await isAdmin();
+    if (!authorized) {
+        throw new Error('Unauthorized: Admin access required');
+    }
+}
+
+async function isSuperAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        const memberRole = member.contactDetails?.customFields?.role || '';
+        return memberRole.toLowerCase() === 'super_admin';
+    } catch (error) {
+        return false;
+    }
+}
+
+// ============================================
+// AUDIT LOG QUERIES
+// ============================================
+
+/**
+ * Get paginated audit log entries with filters
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} - Audit log entries with pagination
+ */
+export async function getAuditLog(options = {}) {
+    await requireAdmin();
+
+    const {
+        filters = {},
+        page = 1,
+        pageSize = 50,
+        sortField = 'timestamp',
+        sortDirection = 'desc'
+    } = options;
+
+    try {
+        let query = wixData.query(CONFIG.auditLogCollection);
+
+        // Apply action filter
+        if (filters.action && filters.action !== 'all') {
+            query = query.eq('action', filters.action);
+        }
+
+        // Apply category filter
+        if (filters.category && filters.category !== 'all') {
+            const categoryActions = ACTION_CATEGORIES[filters.category] || [];
+            if (categoryActions.length > 0) {
+                query = query.hasSome('action', categoryActions);
+            }
+        }
+
+        // Apply target type filter
+        if (filters.targetType && filters.targetType !== 'all') {
+            query = query.eq('targetType', filters.targetType);
+        }
+
+        // Apply admin filter
+        if (filters.adminId && filters.adminId !== 'all') {
+            query = query.eq('adminId', filters.adminId);
+        }
+
+        // Apply date range filter
+        if (filters.dateFrom) {
+            query = query.ge('timestamp', new Date(filters.dateFrom));
+        }
+        if (filters.dateTo) {
+            const endDate = new Date(filters.dateTo);
+            endDate.setHours(23, 59, 59, 999);
+            query = query.le('timestamp', endDate);
+        }
+
+        // Apply search filter
+        if (filters.search) {
+            const searchTerm = filters.search.toLowerCase();
+            query = query.contains('adminEmail', searchTerm)
+                .or(wixData.query(CONFIG.auditLogCollection).contains('targetId', searchTerm));
+        }
+
+        // Apply sorting
+        if (sortDirection === 'asc') {
+            query = query.ascending(sortField);
+        } else {
+            query = query.descending(sortField);
+        }
+
+        // Apply pagination
+        const skip = (page - 1) * pageSize;
+        query = query.skip(skip).limit(pageSize);
+
+        // Execute query
+        const result = await query.find({ suppressAuth: true });
+
+        // Get total count for pagination
+        let countQuery = wixData.query(CONFIG.auditLogCollection);
+        if (filters.action && filters.action !== 'all') {
+            countQuery = countQuery.eq('action', filters.action);
+        }
+        if (filters.targetType && filters.targetType !== 'all') {
+            countQuery = countQuery.eq('targetType', filters.targetType);
+        }
+        if (filters.dateFrom) {
+            countQuery = countQuery.ge('timestamp', new Date(filters.dateFrom));
+        }
+        if (filters.dateTo) {
+            const endDate = new Date(filters.dateTo);
+            endDate.setHours(23, 59, 59, 999);
+            countQuery = countQuery.le('timestamp', endDate);
+        }
+        const countResult = await countQuery.count({ suppressAuth: true });
+
+        // Enrich entries with additional context
+        const enrichedEntries = await enrichAuditEntries(result.items);
+
+        return {
+            entries: enrichedEntries,
+            totalCount: countResult,
+            currentPage: page,
+            pageSize,
+            totalPages: Math.ceil(countResult / pageSize)
+        };
+
+    } catch (error) {
+        console.error('Error fetching audit log:', error);
+        throw new Error('Failed to fetch audit log');
+    }
+}
+
+/**
+ * Get audit log entry details
+ * @param {string} entryId - Audit entry ID
+ * @returns {Promise<Object>} - Detailed audit entry
+ */
+export async function getAuditEntryDetail(entryId) {
+    await requireAdmin();
+
+    try {
+        const entry = await wixData.get(CONFIG.auditLogCollection, entryId, { suppressAuth: true });
+        if (!entry) {
+            throw new Error('Audit entry not found');
+        }
+
+        // Get target entity details
+        let targetDetails = null;
+        if (entry.targetType === 'driver' && entry.targetId) {
+            try {
+                targetDetails = await wixData.get(CONFIG.driversCollection, entry.targetId);
+            } catch (e) {
+                targetDetails = { error: 'Target not found' };
+            }
+        } else if (entry.targetType === 'carrier' && entry.targetId) {
+            try {
+                targetDetails = await wixData.get(CONFIG.carriersCollection, entry.targetId);
+            } catch (e) {
+                targetDetails = { error: 'Target not found' };
+            }
+        }
+
+        // Get related entries (same target)
+        const relatedEntries = await wixData.query(CONFIG.auditLogCollection)
+            .eq('targetId', entry.targetId)
+            .ne('_id', entryId)
+            .descending('timestamp')
+            .limit(10)
+            .find({ suppressAuth: true });
+
+        return {
+            ...entry,
+            targetDetails,
+            relatedEntries: relatedEntries.items
+        };
+
+    } catch (error) {
+        console.error('Error fetching audit entry detail:', error);
+        throw new Error('Failed to fetch audit entry details');
+    }
+}
+
+/**
+ * Get audit statistics
+ * @returns {Promise<Object>} - Audit statistics
+ */
+export async function getAuditStats() {
+    await requireAdmin();
+
+    try {
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+        const [total, todayCount, weekCount, monthCount] = await Promise.all([
+            wixData.query(CONFIG.auditLogCollection).count({ suppressAuth: true }),
+            wixData.query(CONFIG.auditLogCollection).ge('timestamp', today).count({ suppressAuth: true }),
+            wixData.query(CONFIG.auditLogCollection).ge('timestamp', weekAgo).count({ suppressAuth: true }),
+            wixData.query(CONFIG.auditLogCollection).ge('timestamp', monthAgo).count({ suppressAuth: true })
+        ]);
+
+        // Get actions by type (this week)
+        const weekEntries = await wixData.query(CONFIG.auditLogCollection)
+            .ge('timestamp', weekAgo)
+            .limit(1000)
+            .find({ suppressAuth: true });
+
+        const actionCounts = {};
+        const adminCounts = {};
+        const targetTypeCounts = {};
+
+        for (const entry of weekEntries.items) {
+            actionCounts[entry.action] = (actionCounts[entry.action] || 0) + 1;
+            adminCounts[entry.adminEmail] = (adminCounts[entry.adminEmail] || 0) + 1;
+            targetTypeCounts[entry.targetType] = (targetTypeCounts[entry.targetType] || 0) + 1;
+        }
+
+        // Get top admins
+        const topAdmins = Object.entries(adminCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([email, count]) => ({ email, count }));
+
+        // Get top actions
+        const topActions = Object.entries(actionCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([action, count]) => ({ action, count }));
+
+        return {
+            total,
+            today: todayCount,
+            thisWeek: weekCount,
+            thisMonth: monthCount,
+            dailyAverage: Math.round(weekCount / 7),
+            topAdmins,
+            topActions,
+            targetTypeCounts
+        };
+
+    } catch (error) {
+        console.error('Error fetching audit stats:', error);
+        throw new Error('Failed to fetch audit statistics');
+    }
+}
+
+/**
+ * Get unique admins for filter dropdown
+ * @returns {Promise<Array>} - List of admin emails
+ */
+export async function getAdminList() {
+    await requireAdmin();
+
+    try {
+        const entries = await wixData.query(CONFIG.auditLogCollection)
+            .limit(1000)
+            .find({ suppressAuth: true });
+
+        const admins = new Set();
+        for (const entry of entries.items) {
+            if (entry.adminEmail && entry.adminEmail !== 'system') {
+                admins.add(entry.adminEmail);
+            }
+        }
+
+        return Array.from(admins).sort();
+
+    } catch (error) {
+        console.error('Error fetching admin list:', error);
+        return [];
+    }
+}
+
+/**
+ * Get unique actions for filter dropdown
+ * @returns {Promise<Array>} - List of action types
+ */
+export async function getActionList() {
+    await requireAdmin();
+
+    try {
+        const entries = await wixData.query(CONFIG.auditLogCollection)
+            .limit(1000)
+            .find({ suppressAuth: true });
+
+        const actions = new Set();
+        for (const entry of entries.items) {
+            if (entry.action) {
+                actions.add(entry.action);
+            }
+        }
+
+        return Array.from(actions).sort();
+
+    } catch (error) {
+        console.error('Error fetching action list:', error);
+        return [];
+    }
+}
+
+/**
+ * Export audit log to CSV
+ * @param {Object} filters - Filter options
+ * @returns {Promise<string>} - CSV string
+ */
+export async function exportAuditLogCSV(filters = {}) {
+    await requireAdmin();
+
+    // Only super admins can export audit logs
+    const superAdmin = await isSuperAdmin();
+    if (!superAdmin) {
+        throw new Error('Only super admins can export audit logs');
+    }
+
+    try {
+        let query = wixData.query(CONFIG.auditLogCollection);
+
+        if (filters.dateFrom) {
+            query = query.ge('timestamp', new Date(filters.dateFrom));
+        }
+        if (filters.dateTo) {
+            const endDate = new Date(filters.dateTo);
+            endDate.setHours(23, 59, 59, 999);
+            query = query.le('timestamp', endDate);
+        }
+        if (filters.action && filters.action !== 'all') {
+            query = query.eq('action', filters.action);
+        }
+
+        query = query.descending('timestamp').limit(5000);
+        const result = await query.find({ suppressAuth: true });
+
+        // Generate CSV
+        const headers = ['Timestamp', 'Action', 'Target Type', 'Target ID', 'Admin Email', 'Admin ID', 'Details'];
+        const rows = result.items.map(entry => [
+            entry.timestamp ? new Date(entry.timestamp).toISOString() : '',
+            entry.action || '',
+            entry.targetType || '',
+            entry.targetId || '',
+            entry.adminEmail || '',
+            entry.adminId || '',
+            entry.details ? JSON.stringify(entry.details) : ''
+        ]);
+
+        const csv = [
+            headers.join(','),
+            ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+        ].join('\n');
+
+        // Log the export action
+        await logAuditExport(filters, result.items.length);
+
+        return csv;
+
+    } catch (error) {
+        console.error('Error exporting audit log:', error);
+        throw new Error('Failed to export audit log');
+    }
+}
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Enrich audit entries with additional context
+ */
+async function enrichAuditEntries(entries) {
+    return entries.map(entry => ({
+        ...entry,
+        actionLabel: formatActionLabel(entry.action),
+        category: getActionCategory(entry.action),
+        relativeTime: getRelativeTime(entry.timestamp)
+    }));
+}
+
+/**
+ * Format action name for display
+ */
+function formatActionLabel(action) {
+    const labels = {
+        verifyDriver: 'Verify Driver',
+        suspendDriver: 'Suspend Driver',
+        updateDriverStatus: 'Update Driver Status',
+        bulkVerify: 'Bulk Verify Drivers',
+        bulkSuspend: 'Bulk Suspend Drivers',
+        sendDriverEmail: 'Send Driver Email',
+        flagCarrier: 'Flag Carrier',
+        unflagCarrier: 'Unflag Carrier',
+        updateCarrierStatus: 'Update Carrier Status',
+        refreshEnrichment: 'Refresh Enrichment',
+        bulkActivate: 'Bulk Activate Carriers',
+        bulkDeactivate: 'Bulk Deactivate Carriers',
+        bulkFlag: 'Bulk Flag Carriers',
+        resolveAlert: 'Resolve Alert',
+        updateSettings: 'Update Settings',
+        exportData: 'Export Data',
+        adminLogin: 'Admin Login',
+        adminLogout: 'Admin Logout',
+        roleChange: 'Role Change'
+    };
+
+    return labels[action] || action;
+}
+
+/**
+ * Get category for an action
+ */
+function getActionCategory(action) {
+    for (const [category, actions] of Object.entries(ACTION_CATEGORIES)) {
+        if (actions.includes(action)) {
+            return category;
+        }
+    }
+    return 'other';
+}
+
+/**
+ * Get relative time string
+ */
+function getRelativeTime(timestamp) {
+    if (!timestamp) return '';
+
+    const now = new Date();
+    const date = new Date(timestamp);
+    const diff = now - date;
+
+    if (diff < 60000) return 'Just now';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`;
+
+    return date.toLocaleDateString();
+}
+
+/**
+ * Log audit export action
+ */
+async function logAuditExport(filters, count) {
+    try {
+        const member = await currentMember.getMember();
+
+        await wixData.insert(CONFIG.auditLogCollection, {
+            action: 'exportAuditLog',
+            targetType: 'system',
+            targetId: null,
+            details: { filters, exportedCount: count },
+            adminId: member?._id || 'system',
+            adminEmail: member?.loginEmail || 'system',
+            timestamp: new Date()
+        }, { suppressAuth: true });
+    } catch (error) {
+        console.error('Failed to log audit export:', error);
+    }
+}

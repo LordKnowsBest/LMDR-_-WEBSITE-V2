@@ -1,0 +1,607 @@
+/**
+ * Content Service
+ * Provides blog posts, compliance guides, best practices, and partner content
+ *
+ * Used on: Blog pages, Content pages, Partner onboarding
+ * @see docs/MOBILE_IMPLEMENTATION_PLAN.md
+ */
+
+import wixData from 'wix-data';
+
+// ============================================================================
+// BLOG FUNCTIONS
+// ============================================================================
+
+/**
+ * Get blog posts with optional category filter
+ * Used on: Blog listing page
+ */
+export async function getBlogPosts(category = null, limit = 10, offset = 0) {
+  try {
+    let query = wixData.query('BlogPosts')
+      .eq('is_published', true)
+      .descending('published_date');
+
+    if (category && category !== 'all') {
+      query = query.eq('category', category);
+    }
+
+    const result = await query
+      .skip(offset)
+      .limit(limit)
+      .find();
+
+    return {
+      success: true,
+      posts: result.items.map(formatBlogPost),
+      totalCount: result.totalCount,
+      hasMore: offset + result.items.length < result.totalCount
+    };
+  } catch (err) {
+    console.error('getBlogPosts error:', err);
+    return { success: false, posts: [], totalCount: 0, error: err.message };
+  }
+}
+
+/**
+ * Get single blog post by slug
+ * Used on: Blog post detail page
+ */
+export async function getBlogPostBySlug(slug) {
+  try {
+    const result = await wixData.query('BlogPosts')
+      .eq('slug', slug)
+      .eq('is_published', true)
+      .find();
+
+    if (result.items.length === 0) {
+      return { success: false, error: 'Post not found' };
+    }
+
+    const post = result.items[0];
+
+    // Get related posts
+    const relatedResult = await wixData.query('BlogPosts')
+      .eq('category', post.category)
+      .eq('is_published', true)
+      .ne('_id', post._id)
+      .limit(3)
+      .find()
+      .catch(() => ({ items: [] }));
+
+    return {
+      success: true,
+      post: formatBlogPost(post, true),
+      relatedPosts: relatedResult.items.map(formatBlogPost)
+    };
+  } catch (err) {
+    console.error('getBlogPostBySlug error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Get featured blog post for hero section
+ */
+export async function getFeaturedBlogPost() {
+  try {
+    const result = await wixData.query('BlogPosts')
+      .eq('is_published', true)
+      .eq('is_featured', true)
+      .descending('published_date')
+      .limit(1)
+      .find();
+
+    if (result.items.length === 0) {
+      // Fallback to most recent post
+      const fallbackResult = await wixData.query('BlogPosts')
+        .eq('is_published', true)
+        .descending('published_date')
+        .limit(1)
+        .find();
+
+      if (fallbackResult.items.length === 0) {
+        return { success: false, error: 'No posts found' };
+      }
+
+      return { success: true, post: formatBlogPost(fallbackResult.items[0]) };
+    }
+
+    return { success: true, post: formatBlogPost(result.items[0]) };
+  } catch (err) {
+    console.error('getFeaturedBlogPost error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Get popular blog posts (by view count or featured)
+ */
+export async function getPopularBlogPosts(limit = 5) {
+  try {
+    const result = await wixData.query('BlogPosts')
+      .eq('is_published', true)
+      .descending('view_count')
+      .limit(limit)
+      .find();
+
+    return {
+      success: true,
+      posts: result.items.map(formatBlogPost)
+    };
+  } catch (err) {
+    console.error('getPopularBlogPosts error:', err);
+    return { success: false, posts: [] };
+  }
+}
+
+/**
+ * Get blog categories with post counts
+ */
+export async function getBlogCategories() {
+  try {
+    const result = await wixData.query('BlogCategories')
+      .ascending('display_order')
+      .find()
+      .catch(() => ({ items: [] }));
+
+    // If BlogCategories doesn't exist, derive from posts
+    if (result.items.length === 0) {
+      const postsResult = await wixData.query('BlogPosts')
+        .eq('is_published', true)
+        .find();
+
+      const categories = postsResult.items.reduce((acc, post) => {
+        const cat = post.category || 'General';
+        acc[cat] = (acc[cat] || 0) + 1;
+        return acc;
+      }, {});
+
+      return {
+        success: true,
+        categories: Object.entries(categories).map(([name, count]) => ({
+          name,
+          slug: name.toLowerCase().replace(/\s+/g, '-'),
+          postCount: count
+        }))
+      };
+    }
+
+    return {
+      success: true,
+      categories: result.items.map(cat => ({
+        name: cat.name,
+        slug: cat.slug,
+        description: cat.description,
+        postCount: cat.post_count || 0
+      }))
+    };
+  } catch (err) {
+    console.error('getBlogCategories error:', err);
+    return { success: false, categories: [] };
+  }
+}
+
+// ============================================================================
+// COMPLIANCE GUIDES
+// ============================================================================
+
+/**
+ * Get compliance guide by slug
+ * Used on: DOT Compliance page
+ */
+export async function getComplianceGuide(slug) {
+  try {
+    const result = await wixData.query('ComplianceGuides')
+      .eq('slug', slug)
+      .find()
+      .catch(() => ({ items: [] }));
+
+    if (result.items.length === 0) {
+      // Return default content if collection doesn't exist
+      return {
+        success: true,
+        guide: getDefaultComplianceContent(slug)
+      };
+    }
+
+    const guide = result.items[0];
+
+    return {
+      success: true,
+      guide: {
+        title: guide.title,
+        category: guide.category,
+        content: guide.content_html,
+        lastUpdated: guide.last_updated || guide._updatedDate,
+        author: guide.author,
+        relatedRegulations: guide.related_regulations || [],
+        downloadUrl: guide.download_url
+      }
+    };
+  } catch (err) {
+    console.error('getComplianceGuide error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Get all compliance guides for listing
+ */
+export async function getComplianceGuides() {
+  try {
+    const result = await wixData.query('ComplianceGuides')
+      .ascending('category')
+      .ascending('display_order')
+      .find()
+      .catch(() => ({ items: [] }));
+
+    if (result.items.length === 0) {
+      // Return default guides if collection doesn't exist
+      return {
+        success: true,
+        guides: getDefaultComplianceGuidesList()
+      };
+    }
+
+    return {
+      success: true,
+      guides: result.items.map(g => ({
+        title: g.title,
+        slug: g.slug,
+        category: g.category,
+        excerpt: g.excerpt,
+        lastUpdated: g.last_updated || g._updatedDate
+      }))
+    };
+  } catch (err) {
+    console.error('getComplianceGuides error:', err);
+    return { success: false, guides: [] };
+  }
+}
+
+// ============================================================================
+// BEST PRACTICES GUIDES
+// ============================================================================
+
+/**
+ * Get best practices guide by slug
+ * Used on: Driver Retention page, educational content
+ */
+export async function getBestPracticesGuide(slug) {
+  try {
+    const result = await wixData.query('BestPracticesGuides')
+      .eq('slug', slug)
+      .find()
+      .catch(() => ({ items: [] }));
+
+    if (result.items.length === 0) {
+      return {
+        success: true,
+        guide: getDefaultBestPracticesContent(slug)
+      };
+    }
+
+    const guide = result.items[0];
+
+    return {
+      success: true,
+      guide: {
+        title: guide.title,
+        audience: guide.audience,
+        sections: guide.sections || [],
+        author: guide.author,
+        publishedDate: guide.published_date,
+        downloadUrl: guide.download_url
+      }
+    };
+  } catch (err) {
+    console.error('getBestPracticesGuide error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+// ============================================================================
+// PARTNER ONBOARDING
+// ============================================================================
+
+/**
+ * Get partner onboarding data by partner code
+ * Used on: ALLURE Onboarding, partner-specific pages
+ */
+export async function getPartnerOnboarding(partnerCode) {
+  try {
+    const result = await wixData.query('PartnerOnboarding')
+      .eq('partner_code', partnerCode.toUpperCase())
+      .find()
+      .catch(() => ({ items: [] }));
+
+    if (result.items.length === 0) {
+      // Return generic onboarding if no partner-specific content
+      return {
+        success: true,
+        partner: getDefaultPartnerOnboarding(partnerCode)
+      };
+    }
+
+    const partner = result.items[0];
+
+    return {
+      success: true,
+      partner: {
+        code: partner.partner_code,
+        name: partner.partner_name,
+        welcomeMessage: partner.welcome_message,
+        onboardingSteps: partner.onboarding_steps || [],
+        customBranding: {
+          logoUrl: partner.logo_url,
+          primaryColor: partner.primary_color,
+          accentColor: partner.accent_color
+        },
+        contactInfo: {
+          name: partner.contact_name,
+          email: partner.contact_email,
+          phone: partner.contact_phone
+        },
+        benefits: partner.benefits || [],
+        requirements: partner.requirements || []
+      }
+    };
+  } catch (err) {
+    console.error('getPartnerOnboarding error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+// ============================================================================
+// INDUSTRY COMPARISONS
+// ============================================================================
+
+/**
+ * Get industry comparison data
+ * Used on: AI vs Traditional Recruiting page
+ */
+export async function getIndustryComparison(comparisonId = 'ai-vs-traditional') {
+  try {
+    const result = await wixData.query('IndustryComparisons')
+      .eq('comparison_id', comparisonId)
+      .find()
+      .catch(() => ({ items: [] }));
+
+    if (result.items.length === 0) {
+      return {
+        success: true,
+        comparison: getDefaultIndustryComparison(comparisonId)
+      };
+    }
+
+    const comparison = result.items[0];
+
+    return {
+      success: true,
+      comparison: {
+        title: comparison.comparison_title,
+        traditional: comparison.traditional_method,
+        ai: comparison.ai_method,
+        metrics: comparison.metrics || [],
+        caseStudies: comparison.case_studies || []
+      }
+    };
+  } catch (err) {
+    console.error('getIndustryComparison error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+// ============================================================================
+// FAQ FUNCTIONS
+// ============================================================================
+
+/**
+ * Get FAQs by category
+ * Used on: Pricing page, landing pages
+ */
+export async function getFAQs(category) {
+  try {
+    const result = await wixData.query('FAQs')
+      .eq('category', category)
+      .eq('is_active', true)
+      .ascending('display_order')
+      .find()
+      .catch(() => ({ items: [] }));
+
+    return {
+      success: true,
+      faqs: result.items.map(faq => ({
+        question: faq.question,
+        answer: faq.answer
+      }))
+    };
+  } catch (err) {
+    console.error('getFAQs error:', err);
+    return { success: false, faqs: [] };
+  }
+}
+
+// ============================================================================
+// PRICING FUNCTIONS
+// ============================================================================
+
+/**
+ * Get pricing tiers for display
+ * Used on: Pricing page, carrier solutions
+ */
+export async function getPricingTiers(customerType = 'carrier') {
+  try {
+    const result = await wixData.query('PricingTiers')
+      .eq('customer_type', customerType)
+      .eq('is_active', true)
+      .ascending('display_order')
+      .find()
+      .catch(() => ({ items: [] }));
+
+    if (result.items.length === 0) {
+      return {
+        success: true,
+        tiers: getDefaultPricingTiers(customerType)
+      };
+    }
+
+    return {
+      success: true,
+      tiers: result.items.map(tier => ({
+        name: tier.tier_name,
+        price: tier.price_display,
+        priceSubtext: tier.price_subtext,
+        description: tier.description,
+        features: tier.features || [],
+        ctaText: tier.cta_text || 'Get Started',
+        ctaLink: tier.cta_link || '/carrier-welcome',
+        isPopular: tier.is_popular,
+        badgeText: tier.badge_text
+      }))
+    };
+  } catch (err) {
+    console.error('getPricingTiers error:', err);
+    return { success: false, tiers: [] };
+  }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+function formatBlogPost(post, includeFullContent = false) {
+  return {
+    id: post._id,
+    title: post.title,
+    slug: post.slug,
+    excerpt: post.excerpt,
+    content: includeFullContent ? post.content : null,
+    featuredImage: post.featured_image,
+    author: post.author,
+    category: post.category,
+    tags: post.tags || [],
+    publishedDate: post.published_date,
+    readTime: estimateReadTime(post.content),
+    viewCount: post.view_count || 0
+  };
+}
+
+function estimateReadTime(content) {
+  if (!content) return '1 min';
+  const words = content.split(/\s+/).length;
+  const minutes = Math.ceil(words / 200);
+  return `${minutes} min read`;
+}
+
+// ============================================================================
+// DEFAULT CONTENT FALLBACKS
+// ============================================================================
+
+function getDefaultComplianceContent(slug) {
+  const defaults = {
+    'dot-hiring': {
+      title: 'DOT Compliance in Driver Hiring',
+      category: 'Hiring',
+      content: '<p>Content coming soon...</p>',
+      lastUpdated: new Date(),
+      relatedRegulations: ['49 CFR Part 391', 'FMCSA Safety Regulations']
+    }
+  };
+  return defaults[slug] || {
+    title: 'Compliance Guide',
+    category: 'General',
+    content: '<p>This guide is being updated.</p>',
+    lastUpdated: new Date()
+  };
+}
+
+function getDefaultComplianceGuidesList() {
+  return [
+    { title: 'DOT Hiring Requirements', slug: 'dot-hiring', category: 'Hiring', excerpt: 'Essential DOT compliance for driver hiring' },
+    { title: 'Driver Qualification File', slug: 'dqf', category: 'Documentation', excerpt: 'Required documents for driver files' },
+    { title: 'Drug & Alcohol Testing', slug: 'drug-alcohol', category: 'Testing', excerpt: 'DOT drug and alcohol testing requirements' }
+  ];
+}
+
+function getDefaultBestPracticesContent(slug) {
+  return {
+    title: 'Best Practices Guide',
+    audience: 'carrier',
+    sections: [
+      { title: 'Introduction', content: 'Guide content coming soon.' }
+    ],
+    publishedDate: new Date()
+  };
+}
+
+function getDefaultPartnerOnboarding(partnerCode) {
+  return {
+    code: partnerCode,
+    name: partnerCode,
+    welcomeMessage: `Welcome to LMDR! We're excited to partner with ${partnerCode}.`,
+    onboardingSteps: [
+      { step: 1, title: 'Create Account', description: 'Set up your carrier profile' },
+      { step: 2, title: 'Complete Profile', description: 'Add company details and job postings' },
+      { step: 3, title: 'Start Matching', description: 'Begin receiving qualified driver matches' }
+    ],
+    benefits: ['AI-powered matching', 'Qualified CDL drivers', 'Fast time-to-hire'],
+    requirements: []
+  };
+}
+
+function getDefaultIndustryComparison(comparisonId) {
+  return {
+    title: 'AI vs Traditional Recruiting',
+    traditional: {
+      description: 'Traditional recruiting methods',
+      metrics: { timeToHire: '30+ days', costPerHire: '$5,000+', qualityScore: 'Variable' }
+    },
+    ai: {
+      description: 'AI-powered matching',
+      metrics: { timeToHire: '7-14 days', costPerHire: '$299', qualityScore: '85%+ match' }
+    },
+    metrics: [
+      { name: 'Time to Hire', traditional: '30+ days', ai: '7-14 days' },
+      { name: 'Cost per Hire', traditional: '$5,000+', ai: '$299' },
+      { name: 'Driver Quality', traditional: 'Variable', ai: '85%+ match score' }
+    ]
+  };
+}
+
+function getDefaultPricingTiers(customerType) {
+  if (customerType === 'carrier') {
+    return [
+      {
+        name: 'Basic',
+        price: '$299',
+        priceSubtext: 'per hire',
+        description: 'Perfect for small fleets',
+        features: ['AI-matched drivers', 'FMCSA verified', 'Basic support'],
+        ctaText: 'Get Started',
+        isPopular: false
+      },
+      {
+        name: 'Pro',
+        price: '$199',
+        priceSubtext: 'per hire (5+ hires)',
+        description: 'For growing fleets',
+        features: ['Everything in Basic', 'Priority matching', 'Dedicated support', 'Analytics dashboard'],
+        ctaText: 'Go Pro',
+        isPopular: true,
+        badgeText: 'Most Popular'
+      },
+      {
+        name: 'Enterprise',
+        price: 'Custom',
+        priceSubtext: 'volume pricing',
+        description: 'For large operations',
+        features: ['Everything in Pro', 'Custom integrations', 'API access', 'Account manager'],
+        ctaText: 'Contact Sales',
+        isPopular: false
+      }
+    ];
+  }
+  return [];
+}

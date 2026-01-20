@@ -1,0 +1,404 @@
+import wixData from 'wix-data';
+import { getOrCreateDriverProfile, updateDriverPreferences, logCarrierInterest } from 'backend/driverProfiles';
+import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
+
+// ============================================================================
+// SHARED SCORING MODULE
+// ============================================================================
+const { calculateMatchScore, CONFIG: SCORING_CONFIG } = require('backend/scoring');
+
+const CONFIG = {
+  collectionsName: 'Carriers',
+  enrichmentsCollection: 'CarrierEnrichments',
+  
+  // MATCH LIMITS - Free vs Premium
+  freeUserMaxResults: 2,
+  premiumUserMaxResults: 10,
+  
+  defaultMaxDistance: 100
+};
+
+// ============================================================================
+// CACHE LOOKUP
+// ============================================================================
+
+async function getExistingEnrichments(dotNumbers) {
+  if (!dotNumbers || dotNumbers.length === 0) return {};
+  
+  try {
+    const dotStrings = dotNumbers.map(d => String(d));
+    
+    const result = await wixData.query(CONFIG.enrichmentsCollection)
+      .hasSome('dot_number', dotStrings)
+      .find();
+    
+    const enrichmentMap = {};
+    for (const item of result.items) {
+      const enrichedDate = item.enriched_date;
+      const daysSince = enrichedDate 
+        ? (Date.now() - new Date(enrichedDate).getTime()) / (1000 * 60 * 60 * 24)
+        : 999;
+      
+      if (daysSince <= 14) {
+        enrichmentMap[item.dot_number] = {
+          ...item,
+          fromCache: true,
+          cacheAge: Math.round(daysSince)
+        };
+      }
+    }
+    
+    console.log(`📦 Found ${Object.keys(enrichmentMap).length} cached enrichments`);
+    return enrichmentMap;
+    
+  } catch (error) {
+    console.error('Cache lookup error:', error.message);
+    return {};
+  }
+}
+
+// ============================================================================
+// MAIN EXPORTED FUNCTION - findMatchingCarriers
+// Now integrates with Driver Profile system
+// ============================================================================
+
+export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
+  const startTime = Date.now();
+
+  // Start distributed trace for this matching operation
+  const trace = await startTrace('findMatchingCarriers', {
+    isPremiumUser,
+    operationType: driverPrefs.operationType,
+    tags: ['carrier-matching', 'search']
+  });
+  const traceId = trace.traceId;
+
+  console.log('🚀 ===== BACKEND: findMatchingCarriers =====');
+  console.log('📋 Prefs received:', JSON.stringify(driverPrefs));
+  console.log('👤 Premium user:', isPremiumUser);
+  await log({ level: 'INFO', source: 'carrier-matching', message: 'Starting carrier match', traceId, details: { isPremiumUser, operationType: driverPrefs.operationType } });
+
+  const maxResults = isPremiumUser
+    ? CONFIG.premiumUserMaxResults
+    : CONFIG.freeUserMaxResults;
+
+  console.log(`📊 Max results to return: ${maxResults}`);
+  
+  // =========================================================================
+  // NEW: Update driver profile with search preferences
+  // =========================================================================
+  let driverProfile = null;
+  try {
+    const profileResult = await updateDriverPreferences(driverPrefs);
+    if (profileResult.success) {
+      driverProfile = profileResult.profile;
+      console.log(`👤 Updated driver profile: ${driverProfile._id}`);
+      console.log(`   Completeness: ${driverProfile.profile_completeness_score}%`);
+      console.log(`   Total searches: ${driverProfile.total_searches}`);
+    } else {
+      console.log(`⚠️ Profile update skipped: ${profileResult.error}`);
+    }
+  } catch (profileError) {
+    console.log('⚠️ Profile system unavailable:', profileError.message);
+    // Continue without profile - anonymous user
+  }
+  
+  try {
+    // STEP 1: Query the database
+    console.log('📌 Step 1: Querying Carriers collection...');
+    const queryStartTime = Date.now();
+    const query = wixData.query(CONFIG.collectionsName).limit(500);
+    const results = await query.find();
+    const queryLatency = Date.now() - queryStartTime;
+
+    await logDatabase({ operation: 'query', collection: CONFIG.collectionsName, affectedRows: results.items.length, latencyMs: queryLatency, traceId });
+
+    console.log(`📊 Step 2: Query complete. Found ${results.items.length} carriers`);
+    
+    if (results.items.length === 0) {
+      console.warn('⚠️ No carriers found in database');
+      await log({ level: 'WARN', source: 'carrier-matching', message: 'No carriers in database', traceId });
+      await endTrace(traceId, 'completed', { totalMatches: 0, elapsed: Date.now() - startTime });
+      return {
+        success: true,
+        matches: [],
+        totalScored: 0,
+        message: 'No carriers in database',
+        userTier: isPremiumUser ? 'premium' : 'free',
+        driverProfile: driverProfile ? { id: driverProfile._id, completeness: driverProfile.profile_completeness_score } : null
+      };
+    }
+    
+    // STEP 2: Log first raw carrier for debugging
+    console.log('🔍 Step 3: Sample raw carrier data:');
+    const sampleCarrier = results.items[0];
+    console.log('   Raw fields:', Object.keys(sampleCarrier).join(', '));
+    console.log('   dot_number:', sampleCarrier.dot_number);
+    console.log('   legal_name:', sampleCarrier.legal_name);
+    console.log('   phy_city:', sampleCarrier.phy_city);
+    console.log('   phy_state:', sampleCarrier.phy_state);
+    console.log('   phy_zip:', sampleCarrier.phy_zip);
+    
+    // STEP 3: Score all carriers
+    console.log('🧮 Step 4: Scoring carriers...');
+    const customWeights = driverPrefs.customWeights || SCORING_CONFIG.weights;
+    const scoredCarriers = results.items.map(rawCarrier => 
+      calculateMatchScore(driverPrefs, rawCarrier, customWeights)
+    );
+    
+    // STEP 4: Composite Scoring - Group divisions of the same carrier
+    console.log('🔄 Step 5: Performing composite grouping...');
+    const groupedCarriers = {};
+    for (const scored of scoredCarriers) {
+      const legalName = scored.carrier.LEGAL_NAME;
+      // Keep the best division match for each legal entity
+      if (!groupedCarriers[legalName] || scored.overallScore > groupedCarriers[legalName].overallScore) {
+        groupedCarriers[legalName] = scored;
+      }
+    }
+    const distinctCarriers = Object.values(groupedCarriers);
+
+    // STEP 5: Filter and sort
+    console.log('🔄 Step 6: Filtering and sorting...');
+    const validCarriers = distinctCarriers.filter(c => c.overallScore >= 10);
+    validCarriers.sort((a, b) => b.overallScore - a.overallScore);
+    
+    console.log(`   Total scored: ${scoredCarriers.length}`);
+    console.log(`   Distinct carriers: ${distinctCarriers.length}`);
+    console.log(`   Valid (score >= 10): ${validCarriers.length}`);
+    
+    const topMatches = validCarriers.slice(0, maxResults);
+    console.log(`   Returning top: ${topMatches.length}`);
+    
+    // STEP 6: Check enrichment cache & responsiveness
+    console.log('📦 Step 7: Checking enrichment cache & responsiveness...');
+    const dotNumbers = topMatches.map(m => m.carrier.DOT_NUMBER);
+    const { getRecruiterStats } = await import('backend/recruiterStats');
+    
+    let cachedEnrichments = {};
+    const responsivenessStats = {};
+    
+    try {
+      cachedEnrichments = await getExistingEnrichments(dotNumbers);
+      
+      // Get responsiveness for top matches
+      await Promise.all(dotNumbers.map(async (dot) => {
+        try {
+          const stats = await getRecruiterStats(dot);
+          responsivenessStats[dot] = stats;
+        } catch (e) {
+          console.warn(`Could not get stats for ${dot}:`, e.message);
+        }
+      }));
+    } catch (cacheErr) {
+      console.warn('⚠️ Cache/Stats lookup failed:', cacheErr.message);
+    }
+    
+    // STEP 7: Build final response
+    console.log('🏗️ Step 8: Building response...');
+    const matchesWithStatus = topMatches.map(m => {
+      const dotNum = String(m.carrier.DOT_NUMBER);
+      const cached = cachedEnrichments[dotNum];
+      
+      return {
+        ...m,
+        enrichment: cached || null,
+        needsEnrichment: !cached,
+        fromCache: !!cached,
+        recruiterStats: responsivenessStats[dotNum] || null
+      };
+    });
+
+    const needsFreshCount = matchesWithStatus.filter(m => m.needsEnrichment).length;
+    
+    // Log what we're returning
+    console.log('✅ Step 9: Response ready');
+    console.log(`   Matches: ${matchesWithStatus.length}`);
+    console.log(`   Cached: ${matchesWithStatus.length - needsFreshCount}`);
+    console.log(`   Need enrichment: ${needsFreshCount}`);
+    
+    if (matchesWithStatus.length > 0) {
+      console.log('🏆 Top match:');
+      const top = matchesWithStatus[0];
+      console.log(`   ${top.carrier.LEGAL_NAME} (DOT: ${top.carrier.DOT_NUMBER})`);
+      console.log(`   ${top.carrier.PHY_CITY}, ${top.carrier.PHY_STATE}`);
+      console.log(`   Score: ${top.overallScore}%`);
+    }
+
+    const elapsed = Date.now() - startTime;
+    await log({
+      level: 'INFO',
+      source: 'carrier-matching',
+      message: `Match complete: ${matchesWithStatus.length} results`,
+      traceId,
+      duration: elapsed,
+      details: { totalScored: scoredCarriers.length, totalMatches: validCarriers.length, returned: matchesWithStatus.length }
+    });
+    await endTrace(traceId, 'completed', { totalMatches: matchesWithStatus.length, totalScored: scoredCarriers.length, elapsed });
+
+    return {
+      success: true,
+      matches: matchesWithStatus,
+      totalScored: scoredCarriers.length,
+      totalMatches: validCarriers.length,
+      userTier: isPremiumUser ? 'premium' : 'free',
+      maxAllowed: maxResults,
+      cachedCount: matchesWithStatus.length - needsFreshCount,
+      needsEnrichmentCount: needsFreshCount,
+
+      // NEW: Include driver profile info for frontend personalization
+      driverProfile: driverProfile ? {
+        id: driverProfile._id,
+        displayName: driverProfile.display_name,
+        completeness: driverProfile.profile_completeness_score,
+        totalSearches: driverProfile.total_searches,
+        isComplete: driverProfile.is_complete,
+        missingFields: driverProfile.missing_fields
+      } : null,
+
+      upsellMessage: !isPremiumUser && validCarriers.length > maxResults
+        ? `${validCarriers.length - maxResults} more matches available! Sign up to see all your matches.`
+        : null
+    };
+
+  } catch (error) {
+    console.error('❌ BACKEND ERROR:', error);
+    console.error('   Message:', error.message);
+    console.error('   Stack:', error.stack);
+    await log({ level: 'ERROR', source: 'carrier-matching', message: `Match failed: ${error.message}`, traceId, details: { error: error.message } });
+    await endTrace(traceId, 'error', { error: error.message });
+
+    return {
+      success: false,
+      matches: [],
+      totalScored: 0,
+      error: error.message,
+      userTier: isPremiumUser ? 'premium' : 'free'
+    };
+  }
+}
+
+// ============================================================================
+// EXPORTED FUNCTION - logMatchEvent
+// Now uses the new DriverCarrierInterests system for logged-in users
+// Falls back to anonymous MatchEvents for non-logged-in users
+// ============================================================================
+
+export async function logMatchEvent(matchEvent) {
+  console.log('📝 Logging match event:', matchEvent.carrierName);
+  
+  // Try to use the new driver-linked system first
+  try {
+    const interestResult = await logCarrierInterest({
+      carrierDOT: matchEvent.carrierDOT,
+      carrierName: matchEvent.carrierName,
+      matchScore: matchEvent.matchScore,
+      action: matchEvent.action || 'interested'
+    });
+    
+    if (interestResult.success) {
+      console.log('✅ Interest logged to DriverCarrierInterests');
+      return { 
+        success: true, 
+        method: 'driver_linked',
+        isNew: interestResult.isNew
+      };
+    }
+    
+    // If user is anonymous, fall back to old system
+    if (interestResult.isAnonymous) {
+      console.log('👤 Anonymous user - falling back to MatchEvents');
+    }
+    
+  } catch (interestError) {
+    console.log('⚠️ Driver interest system unavailable:', interestError.message);
+  }
+  
+  // FALLBACK: Use the legacy MatchEvents collection for anonymous users
+  try {
+    const score = parseInt(matchEvent.matchScore);
+    const options = { suppressAuth: true };
+
+    await wixData.insert('MatchEvents', {
+      driver_zip: matchEvent.driverZip,
+      driver_name: matchEvent.driverName || 'Anonymous',
+      carrier_dot: String(matchEvent.carrierDOT),
+      carrier_name: matchEvent.carrierName,
+      match_score: isNaN(score) ? 0 : score,
+      action: matchEvent.action,
+      timestamp: new Date()
+    }, options);
+    
+    console.log('✅ Match event logged to MatchEvents (legacy)');
+    return { success: true, method: 'legacy' };
+    
+  } catch (error) {
+    console.error('❌ Error logging match:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// NEW EXPORTED FUNCTION - Get driver's saved carriers
+// ============================================================================
+
+export async function getDriverSavedCarriers() {
+  try {
+    // Import at runtime to avoid circular dependency
+    const { getDriverInterests } = await import('backend/driverProfiles');
+    
+    const result = await getDriverInterests();
+    
+    if (!result.success) {
+      return { success: false, carriers: [], error: result.error };
+    }
+    
+    // Enrich with carrier data
+    const dotNumbers = result.interests.map(i => i.carrier_dot);
+    
+    if (dotNumbers.length === 0) {
+      return { success: true, carriers: [], totalCount: 0 };
+    }
+    
+    // Get carrier details
+    const carrierResult = await wixData.query(CONFIG.collectionsName)
+      .hasSome('dot_number', dotNumbers)
+      .find();
+    
+    const carrierMap = {};
+    for (const carrier of carrierResult.items) {
+      carrierMap[carrier.dot_number] = normalizeCarrier(carrier);
+    }
+    
+    // Combine interests with carrier data
+    const enrichedCarriers = result.interests.map(interest => ({
+      ...interest,
+      carrier: carrierMap[interest.carrier_dot] || null
+    }));
+    
+    return {
+      success: true,
+      carriers: enrichedCarriers,
+      totalCount: result.totalCount
+    };
+    
+  } catch (error) {
+    console.error('❌ Error getting saved carriers:', error);
+    return { success: false, carriers: [], error: error.message };
+  }
+}
+
+/**
+ * Normalize carrier data structure
+ */
+function normalizeCarrier(carrier) {
+  return {
+    dot_number: carrier.dot_number,
+    legal_name: carrier.legal_name || carrier.title || 'Unknown Carrier',
+    phy_city: carrier.phy_city,
+    phy_state: carrier.phy_state,
+    nbr_power_unit: carrier.nbr_power_unit,
+    driver_total: carrier.driver_total,
+    ...carrier
+  };
+}

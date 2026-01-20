@@ -1,0 +1,518 @@
+/**
+ * Member Service
+ * Provides member dashboard data, notifications, and activity tracking
+ *
+ * Used on: Member Page, Dashboard components
+ * @see docs/MOBILE_IMPLEMENTATION_PLAN.md
+ */
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+
+/**
+ * Get comprehensive member dashboard data
+ * Returns profile summary, application stats, and quick actions
+ */
+export async function getMemberDashboard() {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const [profile, applications, notifications, activity] = await Promise.all([
+      getProfileSummary(userId),
+      getApplicationsSummary(userId),
+      getRecentNotifications(userId, 5),
+      getActivitySummary(userId)
+    ]);
+
+    return {
+      success: true,
+      profile,
+      applications,
+      notifications,
+      activity,
+      quickActions: generateQuickActions(profile, applications)
+    };
+  } catch (err) {
+    console.error('getMemberDashboard error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Get member profile summary with completeness score
+ */
+async function getProfileSummary(userId) {
+  try {
+    const result = await wixData.query('DriverProfiles')
+      .eq('user_id', userId)
+      .find();
+
+    if (result.items.length === 0) {
+      return {
+        exists: false,
+        completeness: 0,
+        missingFields: ['All profile fields'],
+        isDiscoverable: false
+      };
+    }
+
+    const profile = result.items[0];
+
+    return {
+      exists: true,
+      id: profile._id,
+      displayName: profile.display_name || 'Driver',
+      email: profile.email,
+      homeZip: profile.home_zip,
+      completeness: profile.profile_completeness_score || 0,
+      missingFields: profile.missing_fields || [],
+      isDiscoverable: profile.is_discoverable || false,
+      totalSearches: profile.total_searches || 0,
+      hasCdlFront: !!profile.cdl_front_image,
+      hasCdlBack: !!profile.cdl_back_image,
+      hasMedCard: !!profile.med_card_image,
+      hasResume: !!profile.resume_file,
+      lastUpdated: profile._updatedDate
+    };
+  } catch (err) {
+    console.error('getProfileSummary error:', err);
+    return { exists: false, completeness: 0, missingFields: [] };
+  }
+}
+
+/**
+ * Get summary of member's job applications
+ */
+async function getApplicationsSummary(userId) {
+  try {
+    const result = await wixData.query('DriverCarrierInterests')
+      .eq('driver_id', userId)
+      .descending('_createdDate')
+      .find();
+
+    const applications = result.items;
+
+    // Group by status
+    const byStatus = applications.reduce((acc, app) => {
+      const status = app.status || 'pending';
+      acc[status] = (acc[status] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Get recent activity (last 7 days)
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const recentActivity = applications.filter(app =>
+      new Date(app._updatedDate) > weekAgo
+    );
+
+    return {
+      total: applications.length,
+      byStatus,
+      activeCount: (byStatus.applied || 0) + (byStatus.interviewing || 0) + (byStatus.reviewing || 0),
+      recentActivityCount: recentActivity.length,
+      recentApplications: applications.slice(0, 5).map(app => ({
+        id: app._id,
+        carrierName: app.carrier_name,
+        carrierDOT: app.carrier_dot,
+        status: app.status || 'pending',
+        appliedDate: app.applied_date || app._createdDate,
+        lastUpdate: app._updatedDate,
+        matchScore: app.match_score
+      }))
+    };
+  } catch (err) {
+    console.error('getApplicationsSummary error:', err);
+    return { total: 0, byStatus: {}, activeCount: 0, recentApplications: [] };
+  }
+}
+
+/**
+ * Get member activity summary (profile views, match trends)
+ */
+async function getActivitySummary(userId) {
+  try {
+    // Try to get from MemberActivity collection if it exists
+    const activityResult = await wixData.query('MemberActivity')
+      .eq('member_id', userId)
+      .descending('_createdDate')
+      .limit(1)
+      .find()
+      .catch(() => ({ items: [] }));
+
+    if (activityResult.items.length > 0) {
+      const activity = activityResult.items[0];
+      return {
+        profileViews: activity.profile_views || 0,
+        profileViewsTrend: activity.profile_views_trend || 'stable',
+        lastActive: activity.last_active || new Date(),
+        searchesThisWeek: activity.searches_this_week || 0,
+        matchScoreTrend: activity.match_score_trend || 'stable'
+      };
+    }
+
+    // Fallback if MemberActivity collection doesn't exist
+    return {
+      profileViews: 0,
+      profileViewsTrend: 'stable',
+      lastActive: new Date(),
+      searchesThisWeek: 0,
+      matchScoreTrend: 'stable'
+    };
+  } catch (err) {
+    console.error('getActivitySummary error:', err);
+    return {
+      profileViews: 0,
+      profileViewsTrend: 'stable',
+      lastActive: new Date(),
+      searchesThisWeek: 0,
+      matchScoreTrend: 'stable'
+    };
+  }
+}
+
+/**
+ * Generate quick action recommendations based on profile state
+ */
+function generateQuickActions(profile, applications) {
+  const actions = [];
+
+  // Profile completion actions
+  if (!profile.exists) {
+    actions.push({
+      id: 'create_profile',
+      label: 'Create Your Profile',
+      description: 'Set up your driver profile to start matching',
+      priority: 'high',
+      url: '/ai-matching'
+    });
+  } else if (profile.completeness < 50) {
+    actions.push({
+      id: 'complete_profile',
+      label: 'Complete Your Profile',
+      description: `Your profile is ${profile.completeness}% complete`,
+      priority: 'high',
+      url: '/ai-matching'
+    });
+  }
+
+  // Document upload actions
+  if (profile.exists && !profile.hasCdlFront) {
+    actions.push({
+      id: 'upload_cdl',
+      label: 'Upload Your CDL',
+      description: 'Add your CDL for faster applications',
+      priority: 'medium',
+      url: '/quick-apply'
+    });
+  }
+
+  // Search action if no recent activity
+  if (applications.total === 0) {
+    actions.push({
+      id: 'find_matches',
+      label: 'Find Your Matches',
+      description: 'Discover carriers that fit your preferences',
+      priority: 'high',
+      url: '/ai-matching'
+    });
+  }
+
+  // Follow up on pending applications
+  if (applications.byStatus.applied > 0) {
+    actions.push({
+      id: 'check_applications',
+      label: 'Check Application Status',
+      description: `You have ${applications.byStatus.applied} pending applications`,
+      priority: 'medium',
+      url: '/driver-dashboard'
+    });
+  }
+
+  // Discoverability action
+  if (profile.exists && !profile.isDiscoverable && profile.completeness >= 70) {
+    actions.push({
+      id: 'enable_discovery',
+      label: 'Get Discovered by Recruiters',
+      description: 'Let carriers find you directly',
+      priority: 'low',
+      url: '/ai-matching'
+    });
+  }
+
+  return actions.slice(0, 4); // Return top 4 actions
+}
+
+/**
+ * Get member notifications
+ */
+export async function getMemberNotifications(limit = 20) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    // Try to query MemberNotifications collection
+    const result = await wixData.query('MemberNotifications')
+      .eq('member_id', userId)
+      .descending('created_date')
+      .limit(limit)
+      .find()
+      .catch(() => ({ items: [] }));
+
+    const unreadCount = result.items.filter(n => !n.is_read).length;
+
+    return {
+      success: true,
+      notifications: result.items.map(n => ({
+        id: n._id,
+        type: n.type,
+        title: n.title,
+        message: n.message,
+        isRead: n.is_read || false,
+        actionUrl: n.action_url,
+        createdDate: n.created_date || n._createdDate,
+        icon: getNotificationIcon(n.type)
+      })),
+      unreadCount,
+      totalCount: result.items.length
+    };
+  } catch (err) {
+    console.error('getMemberNotifications error:', err);
+    return { success: false, notifications: [], unreadCount: 0, error: err.message };
+  }
+}
+
+/**
+ * Mark a notification as read
+ */
+export async function markNotificationRead(notificationId) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    // Verify ownership
+    const notification = await wixData.get('MemberNotifications', notificationId);
+    if (!notification || notification.member_id !== userId) {
+      return { success: false, error: 'Notification not found' };
+    }
+
+    // Update
+    notification.is_read = true;
+    await wixData.update('MemberNotifications', notification);
+
+    return { success: true };
+  } catch (err) {
+    console.error('markNotificationRead error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Mark all notifications as read
+ */
+export async function markAllNotificationsRead() {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const result = await wixData.query('MemberNotifications')
+      .eq('member_id', userId)
+      .eq('is_read', false)
+      .find();
+
+    if (result.items.length > 0) {
+      const updates = result.items.map(n => ({ ...n, is_read: true }));
+      await wixData.bulkUpdate('MemberNotifications', updates);
+    }
+
+    return { success: true, markedCount: result.items.length };
+  } catch (err) {
+    console.error('markAllNotificationsRead error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Get member activity stats for dashboard widgets
+ */
+export async function getMemberActivityStats() {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    // Get applications over time
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const applicationsResult = await wixData.query('DriverCarrierInterests')
+      .eq('driver_id', userId)
+      .ge('_createdDate', thirtyDaysAgo)
+      .find();
+
+    // Group by week
+    const weeklyActivity = applicationsResult.items.reduce((acc, app) => {
+      const date = new Date(app._createdDate);
+      const weekStart = getWeekStart(date);
+      const key = weekStart.toISOString().split('T')[0];
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Calculate match score trend
+    const scores = applicationsResult.items
+      .map(a => a.match_score)
+      .filter(Boolean);
+    const avgScore = scores.length > 0
+      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+      : null;
+
+    return {
+      success: true,
+      stats: {
+        applicationsLast30Days: applicationsResult.items.length,
+        weeklyActivity,
+        avgMatchScore: avgScore,
+        topCarrierTypes: getTopCarrierTypes(applicationsResult.items)
+      }
+    };
+  } catch (err) {
+    console.error('getMemberActivityStats error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Create a notification for a member
+ * Internal use - called by other services
+ */
+export async function createNotification(userId, type, title, message, actionUrl = null) {
+  try {
+    const notification = {
+      member_id: userId,
+      type,
+      title,
+      message,
+      is_read: false,
+      action_url: actionUrl,
+      created_date: new Date()
+    };
+
+    await wixData.insert('MemberNotifications', notification);
+    return { success: true };
+  } catch (err) {
+    console.error('createNotification error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Update member's last active timestamp
+ */
+export async function updateLastActive() {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) return { success: false };
+
+    // Try to update or create MemberActivity record
+    const result = await wixData.query('MemberActivity')
+      .eq('member_id', userId)
+      .find()
+      .catch(() => ({ items: [] }));
+
+    if (result.items.length > 0) {
+      const activity = result.items[0];
+      activity.last_active = new Date();
+      await wixData.update('MemberActivity', activity);
+    } else {
+      await wixData.insert('MemberActivity', {
+        member_id: userId,
+        last_active: new Date(),
+        profile_views: 0,
+        searches_this_week: 0
+      }).catch(() => { /* Collection may not exist */ });
+    }
+
+    return { success: true };
+  } catch (err) {
+    // Silent fail - don't block user experience
+    return { success: false };
+  }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+async function getCurrentUserId() {
+  const currentUser = wixUsersBackend.currentUser;
+  if (!currentUser.loggedIn) {
+    return null;
+  }
+  return currentUser.id;
+}
+
+async function getRecentNotifications(userId, limit) {
+  try {
+    const result = await wixData.query('MemberNotifications')
+      .eq('member_id', userId)
+      .descending('created_date')
+      .limit(limit)
+      .find()
+      .catch(() => ({ items: [] }));
+
+    return result.items.map(n => ({
+      id: n._id,
+      type: n.type,
+      title: n.title,
+      message: n.message,
+      isRead: n.is_read || false,
+      actionUrl: n.action_url,
+      createdDate: n.created_date || n._createdDate
+    }));
+  } catch (err) {
+    return [];
+  }
+}
+
+function getNotificationIcon(type) {
+  const icons = {
+    'application_update': 'briefcase',
+    'message': 'envelope',
+    'match': 'star',
+    'profile': 'user',
+    'document': 'file',
+    'system': 'bell'
+  };
+  return icons[type] || 'bell';
+}
+
+function getWeekStart(date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = d.getDate() - day;
+  return new Date(d.setDate(diff));
+}
+
+function getTopCarrierTypes(applications) {
+  const types = applications.reduce((acc, app) => {
+    const type = app.operation_type || 'OTR';
+    acc[type] = (acc[type] || 0) + 1;
+    return acc;
+  }, {});
+
+  return Object.entries(types)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([type, count]) => ({ type, count }));
+}

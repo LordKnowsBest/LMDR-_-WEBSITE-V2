@@ -1,0 +1,277 @@
+// ============================================================================
+// CARRIER LEADS SERVICE - Handles inbound carrier staffing requests
+// ============================================================================
+
+import wixData from 'wix-data';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  leadsCollection: 'carrierStaffingRequests',
+  carriersCollection: 'Carriers',
+
+  // Lead status values
+  STATUS: {
+    NEW: 'new',
+    CONTACTED: 'contacted',
+    QUALIFIED: 'qualified',
+    IN_PROGRESS: 'in_progress',
+    CLOSED_WON: 'closed_won',
+    CLOSED_LOST: 'closed_lost'
+  },
+
+  // Staffing type values
+  STAFFING_TYPE: {
+    EMERGENCY: 'emergency',
+    STRATEGIC: 'strategic'
+  }
+};
+
+// ============================================================================
+// SUBMIT CARRIER STAFFING REQUEST
+// ============================================================================
+
+/**
+ * Submit a new carrier staffing request (lead)
+ * Called from the Last Mile Staffing landing page form
+ *
+ * @param {Object} leadData
+ * @param {string} leadData.companyName - Carrier company name
+ * @param {string} leadData.contactName - Contact person name
+ * @param {string} leadData.email - Contact email
+ * @param {string} leadData.phone - Contact phone
+ * @param {string} [leadData.dotNumber] - Optional DOT number
+ * @param {string} leadData.staffingType - 'emergency' or 'strategic'
+ * @param {string} leadData.driversNeeded - Number or range of drivers needed
+ * @param {Array<string>} leadData.driverTypes - Array of driver types/endorsements needed
+ * @param {string} [leadData.additionalNotes] - Optional notes
+ * @returns {Promise<{success: boolean, leadId?: string, error?: string}>}
+ */
+export async function submitCarrierStaffingRequest(leadData) {
+  try {
+    // Validate required fields
+    if (!leadData.companyName || !leadData.companyName.trim()) {
+      return { success: false, error: 'Company name is required' };
+    }
+    if (!leadData.contactName || !leadData.contactName.trim()) {
+      return { success: false, error: 'Contact name is required' };
+    }
+    if (!leadData.email || !leadData.email.trim()) {
+      return { success: false, error: 'Email is required' };
+    }
+    if (!leadData.phone || !leadData.phone.trim()) {
+      return { success: false, error: 'Phone number is required' };
+    }
+    if (!leadData.staffingType) {
+      return { success: false, error: 'Staffing type is required' };
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(leadData.email)) {
+      return { success: false, error: 'Please enter a valid email address' };
+    }
+
+    const now = new Date();
+
+    // Check if we can link to an existing carrier by DOT number
+    let linkedCarrierId = null;
+    if (leadData.dotNumber && leadData.dotNumber.trim()) {
+      try {
+        // Convert DOT number to number for query (Carriers collection stores dot_number as NUMBER)
+        const dotNumberAsNumber = parseInt(leadData.dotNumber.trim(), 10);
+
+        const carrierResult = await wixData.query(CONFIG.carriersCollection)
+          .eq('dot_number', dotNumberAsNumber)
+          .limit(1)
+          .find({ suppressAuth: true });
+
+        if (carrierResult.items.length > 0) {
+          linkedCarrierId = carrierResult.items[0]._id;
+          console.log(`✅ Linked to existing carrier: ${linkedCarrierId}`);
+        }
+      } catch (e) {
+        // Continue without linking - carrier lookup is optional
+        console.log('Carrier lookup skipped:', e.message);
+      }
+    }
+
+    // Build the lead record
+    const leadRecord = {
+      // Contact Information
+      company_name: leadData.companyName.trim(),
+      contact_name: leadData.contactName.trim(),
+      email: leadData.email.trim().toLowerCase(),
+      phone: leadData.phone.trim(),
+      dot_number: leadData.dotNumber ? leadData.dotNumber.trim() : null,
+
+      // Staffing Requirements
+      staffing_type: leadData.staffingType,
+      drivers_needed: leadData.driversNeeded || '',
+      driver_types: Array.isArray(leadData.driverTypes) ? leadData.driverTypes : [],
+      additional_notes: leadData.additionalNotes || '',
+
+      // Linking
+      linked_carrier_id: linkedCarrierId,
+
+      // Status & Tracking
+      status: CONFIG.STATUS.NEW,
+      submitted_date: now,
+      last_updated: now,
+
+      // Source tracking
+      source: 'landing_page',
+      source_url: leadData.sourceUrl || '/last-mile-staffing'
+    };
+
+    // Insert the lead
+    const inserted = await wixData.insert(CONFIG.leadsCollection, leadRecord, { suppressAuth: true });
+
+    console.log(`✅ New carrier staffing request submitted: ${inserted._id} from ${leadData.companyName}`);
+
+    return {
+      success: true,
+      leadId: inserted._id,
+      message: 'Your staffing request has been submitted. We will contact you within 24 hours.'
+    };
+
+  } catch (error) {
+    console.error('❌ Error submitting carrier staffing request:', error);
+    return {
+      success: false,
+      error: 'There was an error submitting your request. Please try again or call us directly.'
+    };
+  }
+}
+
+// ============================================================================
+// GET LEAD STATUS (for follow-up pages if needed)
+// ============================================================================
+
+/**
+ * Get the status of a submitted lead by ID
+ * @param {string} leadId - The lead ID
+ * @returns {Promise<{success: boolean, lead?: Object, error?: string}>}
+ */
+export async function getLeadStatus(leadId) {
+  try {
+    const lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
+
+    if (!lead) {
+      return { success: false, error: 'Lead not found' };
+    }
+
+    return {
+      success: true,
+      lead: {
+        id: lead._id,
+        companyName: lead.company_name,
+        status: lead.status,
+        submittedDate: lead.submitted_date,
+        lastUpdated: lead.last_updated
+      }
+    };
+  } catch (error) {
+    console.error('❌ Error getting lead status:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// ADMIN: GET ALL LEADS (for admin dashboard)
+// ============================================================================
+
+/**
+ * Get all carrier staffing requests for admin review
+ * @param {Object} options
+ * @param {string} [options.status] - Filter by status
+ * @param {number} [options.limit] - Max results (default 50)
+ * @param {number} [options.skip] - Skip results for pagination
+ * @returns {Promise<{success: boolean, leads?: Array, totalCount?: number, error?: string}>}
+ */
+export async function getCarrierLeads(options = {}) {
+  try {
+    let query = wixData.query(CONFIG.leadsCollection);
+
+    // Apply status filter if provided
+    if (options.status) {
+      query = query.eq('status', options.status);
+    }
+
+    // Sort by newest first
+    query = query.descending('submitted_date');
+
+    // Pagination
+    const limit = options.limit || 50;
+    const skip = options.skip || 0;
+    query = query.limit(limit).skip(skip);
+
+    const result = await query.find({ suppressAuth: true });
+
+    return {
+      success: true,
+      leads: result.items,
+      totalCount: result.totalCount,
+      hasMore: result.hasNext()
+    };
+  } catch (error) {
+    console.error('❌ Error getting carrier leads:', error);
+    return { success: false, error: error.message, leads: [] };
+  }
+}
+
+// ============================================================================
+// ADMIN: UPDATE LEAD STATUS
+// ============================================================================
+
+/**
+ * Update the status of a lead (admin function)
+ * @param {string} leadId - The lead ID
+ * @param {string} newStatus - The new status
+ * @param {string} [notes] - Optional notes about the status change
+ * @returns {Promise<{success: boolean, lead?: Object, error?: string}>}
+ */
+export async function updateLeadStatus(leadId, newStatus, notes = '') {
+  try {
+    const lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
+
+    if (!lead) {
+      return { success: false, error: 'Lead not found' };
+    }
+
+    const now = new Date();
+
+    // Build status history
+    let statusHistory = [];
+    try {
+      statusHistory = lead.status_history ? JSON.parse(lead.status_history) : [];
+    } catch (e) {
+      statusHistory = [];
+    }
+
+    statusHistory.push({
+      from: lead.status,
+      to: newStatus,
+      timestamp: now.toISOString(),
+      notes: notes
+    });
+
+    const updatedLead = {
+      ...lead,
+      status: newStatus,
+      last_updated: now,
+      status_history: JSON.stringify(statusHistory)
+    };
+
+    const updated = await wixData.update(CONFIG.leadsCollection, updatedLead, { suppressAuth: true });
+
+    console.log(`✅ Lead ${leadId} status updated: ${lead.status} → ${newStatus}`);
+
+    return { success: true, lead: updated };
+  } catch (error) {
+    console.error('❌ Error updating lead status:', error);
+    return { success: false, error: error.message };
+  }
+}

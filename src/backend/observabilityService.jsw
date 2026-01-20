@@ -1,0 +1,730 @@
+/**
+ * Observability Service - System logging and tracing for Super Admin
+ * Provides comprehensive visibility into system operations
+ */
+
+import wixData from 'wix-data';
+import { currentMember } from 'wix-members-backend';
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const CONFIG = {
+    collections: {
+        logs: 'SystemLogs',
+        traces: 'SystemTraces',
+        errors: 'SystemErrors',
+        metrics: 'SystemMetrics'
+    },
+    // Log levels
+    levels: {
+        DEBUG: 0,
+        INFO: 1,
+        WARN: 2,
+        ERROR: 3,
+        CRITICAL: 4
+    },
+    // Log sources/services
+    sources: [
+        'ai-enrichment',
+        'ai-router',
+        'carrier-matching',
+        'social-scanner',
+        'ocr-service',
+        'scheduler',
+        'auth',
+        'api',
+        'database',
+        'external-api',
+        'system'
+    ],
+    // Retention periods (days)
+    retention: {
+        debug: 1,
+        info: 7,
+        warn: 14,
+        error: 30,
+        critical: 90
+    }
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isSuperAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+        const role = member.contactDetails?.customFields?.role || '';
+        return role.toLowerCase() === 'super_admin';
+    } catch (error) {
+        return false;
+    }
+}
+
+async function requireSuperAdmin() {
+    if (!(await isSuperAdmin())) {
+        throw new Error('Unauthorized: Super Admin access required');
+    }
+}
+
+// ============================================
+// LOGGING FUNCTIONS
+// ============================================
+
+/**
+ * Log an event to the system (called by other services)
+ * @param {Object} logEntry - Log entry data
+ * @returns {Promise<Object>} - Created log entry
+ */
+export async function log(logEntry) {
+    const entry = {
+        timestamp: new Date(),
+        level: logEntry.level || 'INFO',
+        levelNum: CONFIG.levels[logEntry.level] || 1,
+        source: logEntry.source || 'system',
+        message: logEntry.message || '',
+        details: logEntry.details || {},
+        traceId: logEntry.traceId || generateTraceId(),
+        spanId: logEntry.spanId || generateSpanId(),
+        parentSpanId: logEntry.parentSpanId || null,
+        userId: logEntry.userId || null,
+        sessionId: logEntry.sessionId || null,
+        duration: logEntry.duration || null,
+        tags: logEntry.tags || []
+    };
+
+    // Try to persist logs, but don't fail if collections don't exist
+    try {
+        // Add to appropriate collection based on level
+        if (entry.level === 'ERROR' || entry.level === 'CRITICAL') {
+            try {
+                await wixData.insert(CONFIG.collections.errors, entry, { suppressAuth: true });
+            } catch (errInsertError) {
+                // Errors collection may not exist - continue
+            }
+        }
+
+        await wixData.insert(CONFIG.collections.logs, entry, { suppressAuth: true });
+    } catch (error) {
+        // Collection may not exist - silently handle to not break calling code
+        if (!error.message?.includes('does not exist')) {
+            console.error('[Observability] Failed to log:', error);
+        }
+    }
+
+    return entry;
+}
+
+/**
+ * Log an AI operation with full context
+ * @param {Object} aiLog - AI operation log data
+ * @returns {Promise<Object>} - Created log entry
+ */
+export async function logAIOperation(aiLog) {
+    const entry = {
+        level: aiLog.error ? 'ERROR' : 'INFO',
+        source: aiLog.source || 'ai-router',
+        message: `AI ${aiLog.operation}: ${aiLog.functionId}`,
+        details: {
+            functionId: aiLog.functionId,
+            provider: aiLog.provider,
+            model: aiLog.model,
+            inputTokens: aiLog.inputTokens,
+            outputTokens: aiLog.outputTokens,
+            totalTokens: aiLog.totalTokens,
+            latencyMs: aiLog.latencyMs,
+            cost: aiLog.cost,
+            usedFallback: aiLog.usedFallback,
+            promptId: aiLog.promptId,
+            request: sanitizeForLog(aiLog.request),
+            response: sanitizeForLog(aiLog.response),
+            error: aiLog.error
+        },
+        traceId: aiLog.traceId,
+        spanId: aiLog.spanId,
+        duration: aiLog.latencyMs,
+        tags: ['ai', aiLog.provider, aiLog.functionId]
+    };
+
+    return log(entry);
+}
+
+/**
+ * Log an external API call
+ * @param {Object} apiLog - API call log data
+ * @returns {Promise<Object>} - Created log entry
+ */
+export async function logExternalAPI(apiLog) {
+    const entry = {
+        level: apiLog.statusCode >= 400 ? 'ERROR' : 'INFO',
+        source: 'external-api',
+        message: `${apiLog.method} ${apiLog.endpoint} - ${apiLog.statusCode}`,
+        details: {
+            method: apiLog.method,
+            endpoint: apiLog.endpoint,
+            statusCode: apiLog.statusCode,
+            latencyMs: apiLog.latencyMs,
+            requestHeaders: sanitizeHeaders(apiLog.requestHeaders),
+            responseHeaders: sanitizeHeaders(apiLog.responseHeaders),
+            error: apiLog.error
+        },
+        traceId: apiLog.traceId,
+        spanId: apiLog.spanId,
+        duration: apiLog.latencyMs,
+        tags: ['external-api', apiLog.service]
+    };
+
+    return log(entry);
+}
+
+/**
+ * Log a database operation
+ * @param {Object} dbLog - Database operation log data
+ * @returns {Promise<Object>} - Created log entry
+ */
+export async function logDatabase(dbLog) {
+    const entry = {
+        level: dbLog.error ? 'ERROR' : 'DEBUG',
+        source: 'database',
+        message: `${dbLog.operation} on ${dbLog.collection}`,
+        details: {
+            operation: dbLog.operation,
+            collection: dbLog.collection,
+            query: dbLog.query,
+            affectedRows: dbLog.affectedRows,
+            latencyMs: dbLog.latencyMs,
+            error: dbLog.error
+        },
+        traceId: dbLog.traceId,
+        spanId: dbLog.spanId,
+        duration: dbLog.latencyMs,
+        tags: ['database', dbLog.collection]
+    };
+
+    return log(entry);
+}
+
+// ============================================
+// TRACING
+// ============================================
+
+/**
+ * Start a new trace
+ * @param {string} name - Trace name
+ * @param {Object} metadata - Additional metadata
+ * @returns {Promise<Object>} - Trace object
+ */
+export async function startTrace(name, metadata = {}) {
+    const trace = {
+        traceId: generateTraceId(),
+        name,
+        startTime: new Date(),
+        status: 'active',
+        spans: [],
+        metadata,
+        tags: metadata.tags || []
+    };
+
+    // Try to persist trace, but don't fail if collection doesn't exist
+    try {
+        await wixData.insert(CONFIG.collections.traces, trace, { suppressAuth: true });
+    } catch (error) {
+        // Collection may not exist yet - continue with in-memory trace
+        console.warn('[Observability] Could not persist trace (collection may not exist):', error.message);
+    }
+
+    return {
+        traceId: trace.traceId,
+        startSpan: (spanName) => startSpan(trace.traceId, spanName)
+    };
+}
+
+/**
+ * Start a span within a trace
+ * @param {string} traceId - Parent trace ID
+ * @param {string} name - Span name
+ * @param {string} parentSpanId - Parent span ID (optional)
+ * @returns {Object} - Span object with end function
+ */
+export function startSpan(traceId, name, parentSpanId = null) {
+    const spanId = generateSpanId();
+    const startTime = Date.now();
+
+    return {
+        traceId,
+        spanId,
+        parentSpanId,
+        name,
+        startTime,
+        end: async (status = 'success', metadata = {}) => {
+            const duration = Date.now() - startTime;
+            await log({
+                level: status === 'error' ? 'ERROR' : 'DEBUG',
+                source: 'trace',
+                message: `Span: ${name}`,
+                traceId,
+                spanId,
+                parentSpanId,
+                duration,
+                details: { status, ...metadata }
+            });
+            return { duration, status };
+        }
+    };
+}
+
+/**
+ * End a trace
+ * @param {string} traceId - Trace ID
+ * @param {string} status - Final status
+ * @param {Object} summary - Summary data
+ * @returns {Promise<Object>} - Updated trace
+ */
+export async function endTrace(traceId, status = 'completed', summary = {}) {
+    try {
+        const traces = await wixData.query(CONFIG.collections.traces)
+            .eq('traceId', traceId)
+            .find({ suppressAuth: true });
+
+        if (traces.items.length === 0) return null;
+
+        const trace = traces.items[0];
+        trace.endTime = new Date();
+        trace.status = status;
+        trace.duration = trace.endTime - trace.startTime;
+        trace.summary = summary;
+
+        return await wixData.update(CONFIG.collections.traces, trace, { suppressAuth: true });
+
+    } catch (error) {
+        // Collection may not exist - silently handle
+        if (error.message?.includes('does not exist')) {
+            console.warn('[Observability] Trace collection not found, skipping endTrace');
+            return null;
+        }
+        console.error('[Observability] Failed to end trace:', error);
+        return null;
+    }
+}
+
+// ============================================
+// QUERY FUNCTIONS (Super Admin)
+// ============================================
+
+/**
+ * Get system logs with filtering
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} - Logs with pagination
+ */
+export async function getLogs(options = {}) {
+    await requireSuperAdmin();
+
+    try {
+        let query = wixData.query(CONFIG.collections.logs);
+
+        // Apply filters
+        if (options.level) {
+            query = query.eq('level', options.level);
+        }
+
+        if (options.minLevel) {
+            query = query.ge('levelNum', CONFIG.levels[options.minLevel] || 0);
+        }
+
+        if (options.source) {
+            query = query.eq('source', options.source);
+        }
+
+        if (options.traceId) {
+            query = query.eq('traceId', options.traceId);
+        }
+
+        if (options.startDate) {
+            query = query.ge('timestamp', new Date(options.startDate));
+        }
+
+        if (options.endDate) {
+            query = query.le('timestamp', new Date(options.endDate));
+        }
+
+        if (options.search) {
+            query = query.contains('message', options.search);
+        }
+
+        if (options.tags && options.tags.length > 0) {
+            query = query.hasSome('tags', options.tags);
+        }
+
+        // Pagination
+        const skip = options.skip || 0;
+        const limit = Math.min(options.limit || 50, 100);
+
+        const result = await query
+            .descending('timestamp')
+            .skip(skip)
+            .limit(limit)
+            .find({ suppressAuth: true });
+
+        return {
+            items: result.items,
+            totalCount: result.totalCount,
+            hasMore: result.totalCount > skip + limit,
+            page: Math.floor(skip / limit) + 1,
+            pageSize: limit
+        };
+
+    } catch (error) {
+        console.error('[Observability] Error fetching logs:', error);
+        throw new Error('Failed to fetch logs');
+    }
+}
+
+/**
+ * Get errors with aggregations
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} - Errors with stats
+ */
+export async function getErrors(options = {}) {
+    await requireSuperAdmin();
+
+    try {
+        const now = new Date();
+        const period = options.period || 'day';
+        let startDate;
+
+        switch (period) {
+            case 'hour':
+                startDate = new Date(now.getTime() - 60 * 60 * 1000);
+                break;
+            case 'day':
+                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+                break;
+            case 'week':
+                startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+                break;
+            case 'month':
+                startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+                break;
+            default:
+                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        }
+
+        let query = wixData.query(CONFIG.collections.errors)
+            .ge('timestamp', startDate);
+
+        if (options.source) {
+            query = query.eq('source', options.source);
+        }
+
+        const result = await query
+            .descending('timestamp')
+            .limit(100)
+            .find({ suppressAuth: true });
+
+        // Aggregate by source
+        const bySource = {};
+        const byHour = {};
+
+        for (const error of result.items) {
+            // By source
+            bySource[error.source] = (bySource[error.source] || 0) + 1;
+
+            // By hour
+            const hourKey = new Date(error.timestamp).toISOString().slice(0, 13);
+            byHour[hourKey] = (byHour[hourKey] || 0) + 1;
+        }
+
+        return {
+            items: result.items,
+            totalCount: result.totalCount,
+            bySource,
+            byHour: Object.entries(byHour).map(([hour, count]) => ({ hour, count })),
+            period,
+            startDate
+        };
+
+    } catch (error) {
+        console.error('[Observability] Error fetching errors:', error);
+        throw new Error('Failed to fetch errors');
+    }
+}
+
+/**
+ * Get a trace with all its spans
+ * @param {string} traceId - Trace ID
+ * @returns {Promise<Object>} - Trace with spans
+ */
+export async function getTrace(traceId) {
+    await requireSuperAdmin();
+
+    try {
+        // Get trace
+        const traces = await wixData.query(CONFIG.collections.traces)
+            .eq('traceId', traceId)
+            .find({ suppressAuth: true });
+
+        if (traces.items.length === 0) {
+            throw new Error('Trace not found');
+        }
+
+        // Get all logs for this trace
+        const logs = await wixData.query(CONFIG.collections.logs)
+            .eq('traceId', traceId)
+            .ascending('timestamp')
+            .find({ suppressAuth: true });
+
+        return {
+            trace: traces.items[0],
+            logs: logs.items,
+            timeline: buildTimeline(logs.items)
+        };
+
+    } catch (error) {
+        console.error('[Observability] Error fetching trace:', error);
+        throw new Error('Failed to fetch trace');
+    }
+}
+
+/**
+ * Get system health metrics
+ * @param {string} period - Time period
+ * @returns {Promise<Object>} - Health metrics
+ */
+export async function getHealthMetrics(period = 'hour') {
+    await requireSuperAdmin();
+
+    try {
+        const now = new Date();
+        let startDate;
+
+        switch (period) {
+            case 'hour':
+                startDate = new Date(now.getTime() - 60 * 60 * 1000);
+                break;
+            case 'day':
+                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+                break;
+            default:
+                startDate = new Date(now.getTime() - 60 * 60 * 1000);
+        }
+
+        // Get recent logs
+        const logs = await wixData.query(CONFIG.collections.logs)
+            .ge('timestamp', startDate)
+            .find({ suppressAuth: true });
+
+        // Calculate metrics
+        let totalRequests = 0;
+        let totalErrors = 0;
+        let totalLatency = 0;
+        let latencyCount = 0;
+        const bySource = {};
+
+        for (const log of logs.items) {
+            totalRequests++;
+
+            if (log.level === 'ERROR' || log.level === 'CRITICAL') {
+                totalErrors++;
+            }
+
+            if (log.duration) {
+                totalLatency += log.duration;
+                latencyCount++;
+            }
+
+            bySource[log.source] = bySource[log.source] || { requests: 0, errors: 0 };
+            bySource[log.source].requests++;
+            if (log.level === 'ERROR' || log.level === 'CRITICAL') {
+                bySource[log.source].errors++;
+            }
+        }
+
+        const errorRate = totalRequests > 0 ? (totalErrors / totalRequests) * 100 : 0;
+        const avgLatency = latencyCount > 0 ? totalLatency / latencyCount : 0;
+
+        return {
+            period,
+            startDate,
+            endDate: now,
+            summary: {
+                totalRequests,
+                totalErrors,
+                errorRate: Math.round(errorRate * 100) / 100,
+                avgLatency: Math.round(avgLatency),
+                status: errorRate > 10 ? 'critical' : errorRate > 5 ? 'warning' : 'healthy'
+            },
+            bySource: Object.entries(bySource).map(([source, stats]) => ({
+                source,
+                ...stats,
+                errorRate: stats.requests > 0 ? Math.round((stats.errors / stats.requests) * 10000) / 100 : 0
+            }))
+        };
+
+    } catch (error) {
+        console.error('[Observability] Error fetching health metrics:', error);
+        throw new Error('Failed to fetch health metrics');
+    }
+}
+
+/**
+ * Get AI operation analytics
+ * @param {string} period - Time period
+ * @returns {Promise<Object>} - AI analytics
+ */
+export async function getAIAnalytics(period = 'day') {
+    await requireSuperAdmin();
+
+    try {
+        const now = new Date();
+        let startDate;
+
+        switch (period) {
+            case 'hour':
+                startDate = new Date(now.getTime() - 60 * 60 * 1000);
+                break;
+            case 'day':
+                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+                break;
+            case 'week':
+                startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+                break;
+            default:
+                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        }
+
+        // Get AI-related logs
+        const logs = await wixData.query(CONFIG.collections.logs)
+            .ge('timestamp', startDate)
+            .hasSome('tags', ['ai'])
+            .find({ suppressAuth: true });
+
+        const byProvider = {};
+        const byFunction = {};
+        let totalTokens = 0;
+        let totalCost = 0;
+        let totalLatency = 0;
+
+        for (const log of logs.items) {
+            const details = log.details || {};
+            const provider = details.provider || 'unknown';
+            const functionId = details.functionId || 'unknown';
+
+            // By provider
+            byProvider[provider] = byProvider[provider] || { requests: 0, tokens: 0, cost: 0, latency: 0 };
+            byProvider[provider].requests++;
+            byProvider[provider].tokens += details.totalTokens || 0;
+            byProvider[provider].cost += details.cost || 0;
+            byProvider[provider].latency += details.latencyMs || 0;
+
+            // By function
+            byFunction[functionId] = byFunction[functionId] || { requests: 0, tokens: 0, cost: 0, latency: 0 };
+            byFunction[functionId].requests++;
+            byFunction[functionId].tokens += details.totalTokens || 0;
+            byFunction[functionId].cost += details.cost || 0;
+            byFunction[functionId].latency += details.latencyMs || 0;
+
+            totalTokens += details.totalTokens || 0;
+            totalCost += details.cost || 0;
+            totalLatency += details.latencyMs || 0;
+        }
+
+        // Calculate averages
+        for (const provider of Object.values(byProvider)) {
+            provider.avgLatency = provider.requests > 0 ? Math.round(provider.latency / provider.requests) : 0;
+            provider.cost = Math.round(provider.cost * 100) / 100;
+        }
+
+        for (const func of Object.values(byFunction)) {
+            func.avgLatency = func.requests > 0 ? Math.round(func.latency / func.requests) : 0;
+            func.cost = Math.round(func.cost * 100) / 100;
+        }
+
+        return {
+            period,
+            startDate,
+            endDate: now,
+            summary: {
+                totalRequests: logs.items.length,
+                totalTokens,
+                totalCost: Math.round(totalCost * 100) / 100,
+                avgLatency: logs.items.length > 0 ? Math.round(totalLatency / logs.items.length) : 0
+            },
+            byProvider: Object.entries(byProvider).map(([name, stats]) => ({ provider: name, ...stats })),
+            byFunction: Object.entries(byFunction).map(([name, stats]) => ({ functionId: name, ...stats }))
+        };
+
+    } catch (error) {
+        console.error('[Observability] Error fetching AI analytics:', error);
+        throw new Error('Failed to fetch AI analytics');
+    }
+}
+
+/**
+ * Get available sources and log levels
+ * @returns {Promise<Object>} - Sources and levels
+ */
+export async function getLogMetadata() {
+    await requireSuperAdmin();
+
+    return {
+        sources: CONFIG.sources,
+        levels: Object.keys(CONFIG.levels)
+    };
+}
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+function generateTraceId() {
+    return 'tr_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+}
+
+function generateSpanId() {
+    return 'sp_' + Math.random().toString(36).substr(2, 12);
+}
+
+function sanitizeForLog(data) {
+    if (!data) return null;
+
+    // Truncate long strings
+    const maxLength = 1000;
+    const str = typeof data === 'string' ? data : JSON.stringify(data);
+
+    if (str.length > maxLength) {
+        return str.substring(0, maxLength) + '... [truncated]';
+    }
+
+    return data;
+}
+
+function sanitizeHeaders(headers) {
+    if (!headers) return null;
+
+    const sensitive = ['authorization', 'x-api-key', 'cookie', 'set-cookie'];
+    const sanitized = {};
+
+    for (const [key, value] of Object.entries(headers)) {
+        if (sensitive.includes(key.toLowerCase())) {
+            sanitized[key] = '[REDACTED]';
+        } else {
+            sanitized[key] = value;
+        }
+    }
+
+    return sanitized;
+}
+
+function buildTimeline(logs) {
+    return logs.map(log => ({
+        timestamp: log.timestamp,
+        spanId: log.spanId,
+        parentSpanId: log.parentSpanId,
+        message: log.message,
+        duration: log.duration,
+        level: log.level
+    }));
+}

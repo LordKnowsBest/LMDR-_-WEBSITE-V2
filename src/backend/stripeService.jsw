@@ -1,0 +1,690 @@
+// ============================================================================
+// STRIPE SERVICE - Subscription Billing Integration
+// Handles checkout sessions, customer portal, and subscription management
+// ============================================================================
+
+import { getSecret } from 'wix-secrets-backend';
+import wixData from 'wix-data';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  subscriptionsCollection: 'CarrierSubscriptions',
+  stripeEventsCollection: 'StripeEvents',
+  billingHistoryCollection: 'BillingHistory',
+
+  // Stripe API base URL
+  stripeApiBase: 'https://api.stripe.com/v1',
+
+  // Plan configurations
+  plans: {
+    pro: {
+      name: 'LMDR Pro',
+      monthlyQuota: 25,
+      features: ['driver_search', 'profile_view', 'messaging']
+    },
+    enterprise: {
+      name: 'LMDR Enterprise',
+      monthlyQuota: -1, // Unlimited
+      features: ['driver_search', 'profile_view', 'messaging', 'api_access', 'priority_support']
+    }
+  }
+};
+
+// ============================================================================
+// STRIPE CLIENT HELPERS
+// ============================================================================
+
+let cachedSecrets = null;
+
+/**
+ * Get Stripe secrets from Wix Secrets Manager
+ * Caches secrets for performance
+ */
+async function getStripeSecrets() {
+  if (cachedSecrets) {
+    return cachedSecrets;
+  }
+
+  try {
+    const [
+      secretKey,
+      publishableKey,
+      pricePro,
+      priceEnterprise,
+      pricePlacementDeposit,
+      webhookSecret,
+      priceProMonthly,
+      pricePro6Month,
+      priceEnterprise6Month
+    ] = await Promise.all([
+      getSecret('SECRET_KEY_STRIPE'),           // Your naming: SECRET_KEY_STRIPE
+      getSecret('PUBLISHABLE_STRIPE'),          // Your naming: PUBLISHABLE_STRIPE
+      getSecret('STRIPE_PRICE_PRO'),
+      getSecret('STRIPE_PRICE_ENTERPRISE'),
+      getSecret('STRIPE_PRICE_PLACEMENT_DEPOSIT').catch(() => null),
+      getSecret('STRIPE_WEBHOOK_SECRET').catch(() => null),
+      getSecret('STRIPE_PRICE_PRO_MONTHLY').catch(() => null),
+      getSecret('STRIPE_PRICE_PRO_6MONTH').catch(() => null),
+      getSecret('STRIPE_PRICE_ENTERPRISE_6MONTH').catch(() => null)
+    ]);
+
+    cachedSecrets = {
+      secretKey,
+      publishableKey,
+      pricePro,
+      priceEnterprise,
+      pricePlacementDeposit,
+      webhookSecret,
+      priceProMonthly,
+      pricePro6Month,
+      priceEnterprise6Month
+    };
+
+    return cachedSecrets;
+  } catch (error) {
+    console.error('[StripeService] Failed to get secrets:', error.message);
+    throw new Error('Stripe configuration error');
+  }
+}
+
+/**
+ * Make authenticated request to Stripe API
+ */
+async function stripeRequest(endpoint, method = 'GET', body = null) {
+  const secrets = await getStripeSecrets();
+
+  const options = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${secrets.secretKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    }
+  };
+
+  if (body) {
+    options.body = new URLSearchParams(body).toString();
+  }
+
+  const response = await fetch(`${CONFIG.stripeApiBase}${endpoint}`, options);
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error('[StripeService] API error:', data.error);
+    throw new Error(data.error?.message || 'Stripe API error');
+  }
+
+  return data;
+}
+
+// ============================================================================
+// CHECKOUT SESSION
+// ============================================================================
+
+/**
+ * Create a Stripe Checkout Session for subscription
+ * @param {string} priceId - 'pro' or 'enterprise' (or direct price ID)
+ * @param {string} carrierDot - Carrier DOT number for metadata
+ * @param {string} email - Customer email
+ * @param {string} successUrl - URL to redirect after successful payment
+ * @param {string} cancelUrl - URL to redirect if checkout is canceled
+ * @param {string} billingPeriod - 'monthly' or '6month' (optional, defaults to 'monthly')
+ * @returns {Object} { success, checkoutUrl, sessionId }
+ */
+export async function createCheckoutSession(priceId, carrierDot, email, successUrl, cancelUrl, billingPeriod = 'monthly') {
+  try {
+    if (!priceId || !carrierDot || !email) {
+      return { success: false, error: 'Missing required parameters' };
+    }
+
+    const secrets = await getStripeSecrets();
+
+    // Resolve price ID based on plan and billing period
+    let resolvedPriceId = priceId;
+
+    if (priceId === 'pro') {
+      if (billingPeriod === '6month' && secrets.pricePro6Month) {
+        resolvedPriceId = secrets.pricePro6Month;
+        console.log('[StripeService] Using Pro 6-month price');
+      } else {
+        // Use monthly price (priceProMonthly or pricePro as fallback)
+        resolvedPriceId = secrets.priceProMonthly || secrets.pricePro;
+        console.log('[StripeService] Using Pro monthly price');
+      }
+    } else if (priceId === 'enterprise') {
+      if (billingPeriod === '6month' && secrets.priceEnterprise6Month) {
+        resolvedPriceId = secrets.priceEnterprise6Month;
+        console.log('[StripeService] Using Enterprise 6-month price');
+      } else {
+        // Use monthly price
+        resolvedPriceId = secrets.priceEnterprise;
+        console.log('[StripeService] Using Enterprise monthly price');
+      }
+    }
+
+    if (!resolvedPriceId) {
+      return { success: false, error: 'Invalid price ID or billing period configuration' };
+    }
+
+    // Check if carrier already has an active subscription
+    const existing = await getSubscriptionByCarrier(carrierDot);
+    if (existing && existing.status === 'active') {
+      return {
+        success: false,
+        error: 'Carrier already has an active subscription',
+        existingSubscription: existing
+      };
+    }
+
+    // Create checkout session
+    const sessionData = await stripeRequest('/checkout/sessions', 'POST', {
+      'mode': 'subscription',
+      'payment_method_types[0]': 'card',
+      'line_items[0][price]': resolvedPriceId,
+      'line_items[0][quantity]': '1',
+      'customer_email': email,
+      'success_url': successUrl || 'https://www.lastmiledr.app/subscription-success?session_id={CHECKOUT_SESSION_ID}',
+      'cancel_url': cancelUrl || 'https://www.lastmiledr.app/subscription-canceled',
+      'metadata[carrier_dot]': carrierDot,
+      'metadata[source]': 'lmdr_platform',
+      'subscription_data[metadata][carrier_dot]': carrierDot
+    });
+
+    console.log(`[StripeService] Created checkout session ${sessionData.id} for carrier ${carrierDot}`);
+
+    return {
+      success: true,
+      checkoutUrl: sessionData.url,
+      sessionId: sessionData.id
+    };
+  } catch (error) {
+    console.error('[StripeService] createCheckoutSession error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// CUSTOMER PORTAL
+// ============================================================================
+
+/**
+ * Create a Stripe Customer Portal session for subscription management
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {string} returnUrl - URL to return to after portal session
+ * @returns {Object} { success, portalUrl }
+ */
+export async function createPortalSession(carrierDot, returnUrl) {
+  try {
+    if (!carrierDot) {
+      return { success: false, error: 'Carrier DOT required' };
+    }
+
+    // Get subscription to find customer ID
+    const subscription = await getSubscriptionByCarrier(carrierDot);
+
+    if (!subscription || !subscription.stripe_customer_id) {
+      return {
+        success: false,
+        error: 'No subscription found for this carrier',
+        errorCode: 'NO_SUBSCRIPTION'
+      };
+    }
+
+    // Create portal session
+    const portalData = await stripeRequest('/billing_portal/sessions', 'POST', {
+      'customer': subscription.stripe_customer_id,
+      'return_url': returnUrl || 'https://www.lastmiledr.app/recruiter-console'
+    });
+
+    console.log(`[StripeService] Created portal session for carrier ${carrierDot}`);
+
+    return {
+      success: true,
+      portalUrl: portalData.url
+    };
+  } catch (error) {
+    console.error('[StripeService] createPortalSession error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// SUBSCRIPTION QUERIES
+// ============================================================================
+
+/**
+ * Get subscription record by carrier DOT
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Object|null} Subscription record or null
+ */
+export async function getSubscriptionByCarrier(carrierDot) {
+  try {
+    const result = await wixData.query(CONFIG.subscriptionsCollection)
+      .eq('carrier_dot', String(carrierDot).trim())
+      .descending('_createdDate')
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return null;
+    }
+
+    return result.items[0];
+  } catch (error) {
+    console.error('[StripeService] getSubscriptionByCarrier error:', error);
+    return null;
+  }
+}
+
+/**
+ * Get full subscription details with usage stats
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Object} { success, subscription, usage }
+ */
+export async function getSubscriptionDetails(carrierDot) {
+  try {
+    const subscription = await getSubscriptionByCarrier(carrierDot);
+
+    if (!subscription) {
+      return {
+        success: true,
+        subscription: null,
+        tier: 'free',
+        usage: {
+          viewsUsed: 0,
+          viewsLimit: 5,
+          viewsRemaining: 5
+        }
+      };
+    }
+
+    // Determine plan tier
+    const tier = subscription.plan_type || 'free';
+    const planConfig = CONFIG.plans[tier] || { monthlyQuota: 5 };
+
+    // Calculate usage
+    const viewsUsed = subscription.views_used_this_month || 0;
+    const viewsLimit = planConfig.monthlyQuota === -1 ? Infinity : planConfig.monthlyQuota;
+    const viewsRemaining = planConfig.monthlyQuota === -1 ? Infinity : Math.max(0, viewsLimit - viewsUsed);
+
+    return {
+      success: true,
+      subscription: {
+        id: subscription._id,
+        stripeSubscriptionId: subscription.stripe_subscription_id,
+        stripeCustomerId: subscription.stripe_customer_id,
+        planType: tier,
+        status: subscription.status || 'active',
+        currentPeriodStart: subscription.current_period_start,
+        currentPeriodEnd: subscription.current_period_end,
+        cancelAtPeriodEnd: subscription.cancel_at_period_end || false,
+        createdDate: subscription._createdDate
+      },
+      tier,
+      usage: {
+        viewsUsed,
+        viewsLimit: planConfig.monthlyQuota === -1 ? 'unlimited' : viewsLimit,
+        viewsRemaining: planConfig.monthlyQuota === -1 ? 'unlimited' : viewsRemaining,
+        resetDate: subscription.quota_reset_date
+      },
+      features: planConfig.features || []
+    };
+  } catch (error) {
+    console.error('[StripeService] getSubscriptionDetails error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// SUBSCRIPTION MANAGEMENT (called by webhooks)
+// ============================================================================
+
+/**
+ * Create or update subscription record from Stripe webhook data
+ * @param {Object} stripeSubscription - Stripe subscription object
+ * @param {string} customerId - Stripe customer ID
+ * @returns {Object} { success, subscriptionId }
+ */
+export async function upsertSubscription(stripeSubscription, customerId) {
+  try {
+    const carrierDot = stripeSubscription.metadata?.carrier_dot;
+
+    if (!carrierDot) {
+      console.error('[StripeService] No carrier_dot in subscription metadata');
+      return { success: false, error: 'Missing carrier_dot metadata' };
+    }
+
+    // Determine plan type from price
+    const secrets = await getStripeSecrets();
+    const priceId = stripeSubscription.items?.data[0]?.price?.id;
+    let planType = 'pro'; // default
+
+    if (priceId === secrets.priceEnterprise) {
+      planType = 'enterprise';
+    } else if (priceId === secrets.pricePro) {
+      planType = 'pro';
+    }
+
+    const planConfig = CONFIG.plans[planType];
+
+    // Check for existing record
+    const existing = await getSubscriptionByCarrier(carrierDot);
+
+    const subscriptionData = {
+      carrier_dot: carrierDot,
+      stripe_subscription_id: stripeSubscription.id,
+      stripe_customer_id: customerId,
+      stripe_price_id: priceId,
+      plan_type: planType,
+      status: stripeSubscription.status,
+      current_period_start: new Date(stripeSubscription.current_period_start * 1000),
+      current_period_end: new Date(stripeSubscription.current_period_end * 1000),
+      cancel_at_period_end: stripeSubscription.cancel_at_period_end || false,
+      monthly_view_quota: planConfig.monthlyQuota,
+      views_used_this_month: existing?.views_used_this_month || 0,
+      quota_reset_date: new Date(stripeSubscription.current_period_end * 1000),
+      is_active: stripeSubscription.status === 'active'
+    };
+
+    let result;
+    if (existing) {
+      result = await wixData.update(CONFIG.subscriptionsCollection, {
+        ...existing,
+        ...subscriptionData
+      }, { suppressAuth: true });
+      console.log(`[StripeService] Updated subscription for carrier ${carrierDot}`);
+    } else {
+      result = await wixData.insert(CONFIG.subscriptionsCollection, subscriptionData, { suppressAuth: true });
+      console.log(`[StripeService] Created subscription for carrier ${carrierDot}`);
+    }
+
+    return { success: true, subscriptionId: result._id };
+  } catch (error) {
+    console.error('[StripeService] upsertSubscription error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Reset quota for a subscription (called on invoice.paid)
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Date} periodStart - New period start date
+ * @param {Date} periodEnd - New period end date
+ * @returns {Object} { success }
+ */
+export async function resetQuota(carrierDot, periodStart, periodEnd) {
+  try {
+    const subscription = await getSubscriptionByCarrier(carrierDot);
+
+    if (!subscription) {
+      return { success: false, error: 'Subscription not found' };
+    }
+
+    await wixData.update(CONFIG.subscriptionsCollection, {
+      ...subscription,
+      views_used_this_month: 0,
+      current_period_start: periodStart,
+      current_period_end: periodEnd,
+      quota_reset_date: periodEnd
+    }, { suppressAuth: true });
+
+    console.log(`[StripeService] Reset quota for carrier ${carrierDot}`);
+
+    return { success: true };
+  } catch (error) {
+    console.error('[StripeService] resetQuota error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Update subscription status (called on subscription events)
+ * @param {string} stripeSubscriptionId - Stripe subscription ID
+ * @param {string} status - New status
+ * @returns {Object} { success }
+ */
+export async function updateSubscriptionStatus(stripeSubscriptionId, status) {
+  try {
+    const result = await wixData.query(CONFIG.subscriptionsCollection)
+      .eq('stripe_subscription_id', stripeSubscriptionId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return { success: false, error: 'Subscription not found' };
+    }
+
+    const subscription = result.items[0];
+
+    await wixData.update(CONFIG.subscriptionsCollection, {
+      ...subscription,
+      status,
+      is_active: status === 'active'
+    }, { suppressAuth: true });
+
+    console.log(`[StripeService] Updated subscription ${stripeSubscriptionId} status to ${status}`);
+
+    return { success: true };
+  } catch (error) {
+    console.error('[StripeService] updateSubscriptionStatus error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// BILLING HISTORY
+// ============================================================================
+
+/**
+ * Record a billing event
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {string} eventType - Type of event (payment_succeeded, payment_failed, etc.)
+ * @param {Object} details - Event details
+ */
+export async function recordBillingEvent(carrierDot, eventType, details = {}) {
+  try {
+    await wixData.insert(CONFIG.billingHistoryCollection, {
+      carrier_dot: carrierDot,
+      event_type: eventType,
+      amount: details.amount || 0,
+      currency: details.currency || 'usd',
+      invoice_id: details.invoiceId,
+      description: details.description,
+      timestamp: new Date()
+    }, { suppressAuth: true });
+
+    console.log(`[StripeService] Recorded billing event ${eventType} for carrier ${carrierDot}`);
+  } catch (error) {
+    console.error('[StripeService] recordBillingEvent error:', error);
+  }
+}
+
+/**
+ * Get billing history for a carrier
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {number} limit - Maximum records to return
+ * @returns {Object} { success, history[] }
+ */
+export async function getBillingHistory(carrierDot, limit = 50) {
+  try {
+    const result = await wixData.query(CONFIG.billingHistoryCollection)
+      .eq('carrier_dot', String(carrierDot).trim())
+      .descending('timestamp')
+      .limit(limit)
+      .find({ suppressAuth: true });
+
+    return {
+      success: true,
+      history: result.items.map(item => ({
+        eventType: item.event_type,
+        amount: item.amount,
+        currency: item.currency,
+        invoiceId: item.invoice_id,
+        description: item.description,
+        timestamp: item.timestamp
+      }))
+    };
+  } catch (error) {
+    console.error('[StripeService] getBillingHistory error:', error);
+    return { success: false, error: error.message, history: [] };
+  }
+}
+
+// ============================================================================
+// STRIPE EVENT LOGGING (for idempotency)
+// ============================================================================
+
+/**
+ * Check if a Stripe event has already been processed
+ * @param {string} eventId - Stripe event ID
+ * @returns {boolean} True if already processed
+ */
+export async function isEventProcessed(eventId) {
+  try {
+    const result = await wixData.query(CONFIG.stripeEventsCollection)
+      .eq('event_id', eventId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    return result.items.length > 0;
+  } catch (error) {
+    console.error('[StripeService] isEventProcessed error:', error);
+    return false;
+  }
+}
+
+/**
+ * Log a processed Stripe event
+ * @param {string} eventId - Stripe event ID
+ * @param {string} eventType - Event type
+ * @param {Object} data - Event data summary
+ */
+export async function logStripeEvent(eventId, eventType, data = {}) {
+  try {
+    await wixData.insert(CONFIG.stripeEventsCollection, {
+      event_id: eventId,
+      event_type: eventType,
+      carrier_dot: data.carrierDot,
+      processed_at: new Date(),
+      data_summary: JSON.stringify(data).substring(0, 1000) // Limit size
+    }, { suppressAuth: true });
+
+    console.log(`[StripeService] Logged event ${eventId} (${eventType})`);
+  } catch (error) {
+    console.error('[StripeService] logStripeEvent error:', error);
+  }
+}
+
+// ============================================================================
+// PUBLISHABLE KEY (for frontend)
+// ============================================================================
+
+/**
+ * Get Stripe publishable key for frontend use
+ * @returns {Object} { success, publishableKey }
+ */
+export async function getPublishableKey() {
+  try {
+    const secrets = await getStripeSecrets();
+    return {
+      success: true,
+      publishableKey: secrets.publishableKey
+    };
+  } catch (error) {
+    console.error('[StripeService] getPublishableKey error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// PLACEMENT DEPOSIT CHECKOUT (Full Service / VelocityMatch)
+// ============================================================================
+
+/**
+ * Create a Stripe Checkout Session for placement deposit ($100/driver)
+ * This is a one-time payment, not a subscription
+ *
+ * @param {string} carrierDot - Carrier DOT number for metadata
+ * @param {string} email - Customer email
+ * @param {number} driverCount - Number of drivers to place (quantity)
+ * @param {string} successUrl - URL to redirect after successful payment
+ * @param {string} cancelUrl - URL to redirect if checkout is canceled
+ * @param {Object} formData - Additional form data for metadata
+ * @returns {Object} { success, checkoutUrl, sessionId }
+ */
+/**
+ * Retrieve a Stripe Checkout Session by ID
+ * Used to get session details on success page
+ * @param {string} sessionId - Stripe checkout session ID
+ * @returns {Object} { success, session }
+ */
+export async function getCheckoutSession(sessionId) {
+  try {
+    if (!sessionId) {
+      return { success: false, error: 'Session ID required' };
+    }
+
+    const session = await stripeRequest(`/checkout/sessions/${sessionId}`, 'GET');
+
+    return {
+      success: true,
+      session: {
+        id: session.id,
+        customerEmail: session.customer_email,
+        amountTotal: session.amount_total,
+        currency: session.currency,
+        paymentStatus: session.payment_status,
+        metadata: session.metadata || {}
+      }
+    };
+  } catch (error) {
+    console.error('[StripeService] getCheckoutSession error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+export async function createPlacementDepositCheckout(carrierDot, email, driverCount, successUrl, cancelUrl, formData = {}) {
+  try {
+    if (!carrierDot || !email || !driverCount) {
+      return { success: false, error: 'Missing required parameters' };
+    }
+
+    const secrets = await getStripeSecrets();
+
+    if (!secrets.pricePlacementDeposit) {
+      console.error('[StripeService] STRIPE_PRICE_PLACEMENT_DEPOSIT secret not configured');
+      return { success: false, error: 'Placement pricing not configured' };
+    }
+
+    // Create checkout session for one-time payment
+    const sessionData = await stripeRequest('/checkout/sessions', 'POST', {
+      'mode': 'payment',
+      'payment_method_types[0]': 'card',
+      'line_items[0][price]': secrets.pricePlacementDeposit,
+      'line_items[0][quantity]': String(driverCount),
+      'customer_email': email,
+      'success_url': successUrl || 'https://www.lastmiledr.app/placement-success?session_id={CHECKOUT_SESSION_ID}',
+      'cancel_url': cancelUrl || 'https://www.lastmiledr.app/pricing',
+      'metadata[carrier_dot]': carrierDot,
+      'metadata[service_type]': 'placement_deposit',
+      'metadata[driver_count]': String(driverCount),
+      'metadata[company_name]': formData.companyName || '',
+      'metadata[contact_name]': formData.contactName || '',
+      'metadata[phone]': formData.phone || '',
+      'metadata[source]': 'lmdr_velocitymatch'
+    });
+
+    console.log(`[StripeService] Created placement deposit checkout ${sessionData.id} for carrier ${carrierDot}, ${driverCount} drivers`);
+
+    return {
+      success: true,
+      checkoutUrl: sessionData.url,
+      sessionId: sessionData.id
+    };
+  } catch (error) {
+    console.error('[StripeService] createPlacementDepositCheckout error:', error);
+    return { success: false, error: error.message };
+  }
+}

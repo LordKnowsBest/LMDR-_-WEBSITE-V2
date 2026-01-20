@@ -1,0 +1,778 @@
+/**
+ * Admin Match Service - Backend functions for Match Management
+ * Provides match analytics, filtering, and driver interest tracking
+ */
+
+import wixData from 'wix-data';
+import { currentMember } from 'wix-members-backend';
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const CONFIG = {
+    collections: {
+        matches: 'MatchEvents',
+        interests: 'DriverCarrierInterests',
+        drivers: 'DriverProfiles',
+        carriers: 'Carriers',
+        auditLog: 'AdminAuditLog'
+    }
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const memberRole = member.contactDetails?.customFields?.role || '';
+
+        return adminRoles.includes(memberRole.toLowerCase());
+    } catch (error) {
+        console.error('Admin check failed:', error);
+        return false;
+    }
+}
+
+async function requireAdmin() {
+    const authorized = await isAdmin();
+    if (!authorized) {
+        throw new Error('Unauthorized: Admin access required');
+    }
+}
+
+async function isSuperAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        const memberRole = member.contactDetails?.customFields?.role || '';
+        return memberRole.toLowerCase() === 'super_admin';
+    } catch (error) {
+        return false;
+    }
+}
+
+// ============================================
+// MATCH LIST WITH FILTERS
+// ============================================
+
+/**
+ * Get paginated match events with filters
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} - Match events with pagination
+ */
+export async function getMatchesList(options = {}) {
+    await requireAdmin();
+
+    const {
+        filters = {},
+        page = 1,
+        pageSize = 50,
+        sortField = 'timestamp',
+        sortDirection = 'desc'
+    } = options;
+
+    try {
+        let query = wixData.query(CONFIG.collections.matches);
+
+        // Apply carrier filter
+        if (filters.carrierDOT) {
+            query = query.eq('carrier_dot', filters.carrierDOT);
+        }
+
+        // Apply carrier name search
+        if (filters.carrierName) {
+            query = query.contains('carrier_name', filters.carrierName);
+        }
+
+        // Apply driver name search
+        if (filters.driverName) {
+            query = query.contains('driver_name', filters.driverName);
+        }
+
+        // Apply score range filter
+        if (filters.minScore) {
+            query = query.ge('match_score', parseInt(filters.minScore));
+        }
+        if (filters.maxScore) {
+            query = query.le('match_score', parseInt(filters.maxScore));
+        }
+
+        // Apply action filter
+        if (filters.action && filters.action !== 'all') {
+            query = query.eq('action', filters.action);
+        }
+
+        // Apply date range filter
+        if (filters.dateFrom) {
+            query = query.ge('timestamp', new Date(filters.dateFrom));
+        }
+        if (filters.dateTo) {
+            const endDate = new Date(filters.dateTo);
+            endDate.setHours(23, 59, 59, 999);
+            query = query.le('timestamp', endDate);
+        }
+
+        // Apply sorting
+        if (sortDirection === 'asc') {
+            query = query.ascending(sortField);
+        } else {
+            query = query.descending(sortField);
+        }
+
+        // Apply pagination
+        const skip = (page - 1) * pageSize;
+        query = query.skip(skip).limit(pageSize);
+
+        // Execute query
+        const result = await query.find();
+
+        // Get total count
+        let countQuery = wixData.query(CONFIG.collections.matches);
+        if (filters.dateFrom) {
+            countQuery = countQuery.ge('timestamp', new Date(filters.dateFrom));
+        }
+        if (filters.dateTo) {
+            const endDate = new Date(filters.dateTo);
+            endDate.setHours(23, 59, 59, 999);
+            countQuery = countQuery.le('timestamp', endDate);
+        }
+        if (filters.minScore) {
+            countQuery = countQuery.ge('match_score', parseInt(filters.minScore));
+        }
+        const totalCount = await countQuery.count();
+
+        // Enrich matches with additional data
+        const enrichedMatches = await enrichMatches(result.items);
+
+        return {
+            matches: enrichedMatches,
+            totalCount,
+            currentPage: page,
+            pageSize,
+            totalPages: Math.ceil(totalCount / pageSize)
+        };
+
+    } catch (error) {
+        console.error('Error fetching matches:', error);
+        throw new Error('Failed to fetch matches');
+    }
+}
+
+/**
+ * Enrich match events with additional context
+ */
+async function enrichMatches(matches) {
+    return matches.map(match => ({
+        ...match,
+        scoreCategory: getScoreCategory(match.match_score),
+        relativeTime: getRelativeTime(match.timestamp),
+        actionLabel: formatActionLabel(match.action)
+    }));
+}
+
+function getScoreCategory(score) {
+    if (score >= 90) return { label: 'Excellent', color: 'green' };
+    if (score >= 75) return { label: 'Good', color: 'blue' };
+    if (score >= 60) return { label: 'Fair', color: 'yellow' };
+    return { label: 'Low', color: 'gray' };
+}
+
+function formatActionLabel(action) {
+    const labels = {
+        'interested': 'Showed Interest',
+        'viewed': 'Viewed Details',
+        'applied': 'Applied',
+        'saved': 'Saved',
+        'contacted': 'Contacted'
+    };
+    return labels[action] || action || 'Match';
+}
+
+function getRelativeTime(timestamp) {
+    if (!timestamp) return '';
+
+    const now = new Date();
+    const date = new Date(timestamp);
+    const diff = now - date;
+
+    if (diff < 60000) return 'Just now';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`;
+
+    return date.toLocaleDateString();
+}
+
+// ============================================
+// MATCH DETAIL
+// ============================================
+
+/**
+ * Get detailed match information
+ * @param {string} matchId - Match event ID
+ * @returns {Promise<Object>} - Match details with driver and carrier info
+ */
+export async function getMatchDetail(matchId) {
+    await requireAdmin();
+
+    try {
+        const match = await wixData.get(CONFIG.collections.matches, matchId);
+        if (!match) {
+            throw new Error('Match not found');
+        }
+
+        // Get related driver info if available
+        let driverInfo = null;
+        if (match.driver_name && match.driver_name !== 'Anonymous') {
+            const drivers = await wixData.query(CONFIG.collections.drivers)
+                .contains('firstName', match.driver_name.split(' ')[0])
+                .limit(1)
+                .find();
+            driverInfo = drivers.items[0] || null;
+        }
+
+        // Get carrier info
+        let carrierInfo = null;
+        if (match.carrier_dot) {
+            const carriers = await wixData.query(CONFIG.collections.carriers)
+                .eq('dot_number', String(match.carrier_dot))
+                .limit(1)
+                .find();
+            carrierInfo = carriers.items[0] || null;
+        }
+
+        // Get related matches (same driver or same carrier)
+        const relatedMatches = await wixData.query(CONFIG.collections.matches)
+            .eq('carrier_dot', match.carrier_dot)
+            .ne('_id', matchId)
+            .descending('timestamp')
+            .limit(10)
+            .find();
+
+        return {
+            ...match,
+            scoreCategory: getScoreCategory(match.match_score),
+            driverInfo,
+            carrierInfo,
+            relatedMatches: relatedMatches.items
+        };
+
+    } catch (error) {
+        console.error('Error fetching match detail:', error);
+        throw new Error('Failed to fetch match details');
+    }
+}
+
+// ============================================
+// DRIVER INTERESTS / APPLICATIONS
+// ============================================
+
+/**
+ * Get driver-carrier interests with filters
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} - Interests with pagination
+ */
+export async function getInterestsList(options = {}) {
+    await requireAdmin();
+
+    const {
+        filters = {},
+        page = 1,
+        pageSize = 50,
+        sortField = '_createdDate',
+        sortDirection = 'desc'
+    } = options;
+
+    try {
+        let query = wixData.query(CONFIG.collections.interests);
+
+        // Apply status filter
+        if (filters.status && filters.status !== 'all') {
+            query = query.eq('status', filters.status);
+        }
+
+        // Apply date range
+        if (filters.dateFrom) {
+            query = query.ge('_createdDate', new Date(filters.dateFrom));
+        }
+        if (filters.dateTo) {
+            const endDate = new Date(filters.dateTo);
+            endDate.setHours(23, 59, 59, 999);
+            query = query.le('_createdDate', endDate);
+        }
+
+        // Apply sorting
+        if (sortDirection === 'asc') {
+            query = query.ascending(sortField);
+        } else {
+            query = query.descending(sortField);
+        }
+
+        // Apply pagination
+        const skip = (page - 1) * pageSize;
+        query = query.skip(skip).limit(pageSize);
+
+        const result = await query.find();
+
+        // Get total count
+        const totalCount = await wixData.query(CONFIG.collections.interests).count();
+
+        // Enrich with driver and carrier details
+        const enrichedInterests = await enrichInterests(result.items);
+
+        return {
+            interests: enrichedInterests,
+            totalCount,
+            currentPage: page,
+            pageSize,
+            totalPages: Math.ceil(totalCount / pageSize)
+        };
+
+    } catch (error) {
+        console.error('Error fetching interests:', error);
+        throw new Error('Failed to fetch driver interests');
+    }
+}
+
+/**
+ * Enrich interests with driver and carrier data
+ */
+async function enrichInterests(interests) {
+    // Collect unique driver and carrier IDs
+    const driverIds = [...new Set(interests.map(i => i.driver_id).filter(Boolean))];
+    const carrierDOTs = [...new Set(interests.map(i => i.carrier_dot).filter(Boolean))];
+
+    // Fetch drivers
+    let driverMap = {};
+    if (driverIds.length > 0) {
+        const drivers = await wixData.query(CONFIG.collections.drivers)
+            .hasSome('_id', driverIds)
+            .find();
+        for (const driver of drivers.items) {
+            driverMap[driver._id] = driver;
+        }
+    }
+
+    // Fetch carriers
+    let carrierMap = {};
+    if (carrierDOTs.length > 0) {
+        const carriers = await wixData.query(CONFIG.collections.carriers)
+            .hasSome('dot_number', carrierDOTs)
+            .find();
+        for (const carrier of carriers.items) {
+            carrierMap[carrier.dot_number] = carrier;
+        }
+    }
+
+    return interests.map(interest => ({
+        ...interest,
+        driver: driverMap[interest.driver_id] || null,
+        carrier: carrierMap[interest.carrier_dot] || null,
+        statusLabel: formatInterestStatus(interest.status),
+        relativeTime: getRelativeTime(interest._createdDate)
+    }));
+}
+
+function formatInterestStatus(status) {
+    const labels = {
+        'interested': { label: 'Interested', color: 'blue' },
+        'applied': { label: 'Applied', color: 'purple' },
+        'in_review': { label: 'In Review', color: 'yellow' },
+        'accepted': { label: 'Accepted', color: 'green' },
+        'rejected': { label: 'Rejected', color: 'red' },
+        'hired': { label: 'Hired', color: 'green' }
+    };
+    return labels[status] || { label: status || 'Unknown', color: 'gray' };
+}
+
+// ============================================
+// MATCH STATISTICS
+// ============================================
+
+/**
+ * Get comprehensive match statistics
+ * @returns {Promise<Object>} - Match statistics
+ */
+export async function getMatchStats() {
+    await requireAdmin();
+
+    try {
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+        // Get match counts
+        const [total, todayCount, weekCount, monthCount] = await Promise.all([
+            wixData.query(CONFIG.collections.matches).count(),
+            wixData.query(CONFIG.collections.matches).ge('timestamp', today).count(),
+            wixData.query(CONFIG.collections.matches).ge('timestamp', weekAgo).count(),
+            wixData.query(CONFIG.collections.matches).ge('timestamp', monthAgo).count()
+        ]);
+
+        // Get interest counts
+        const [totalInterests, weekInterests, appliedCount] = await Promise.all([
+            wixData.query(CONFIG.collections.interests).count(),
+            wixData.query(CONFIG.collections.interests).ge('_createdDate', weekAgo).count(),
+            wixData.query(CONFIG.collections.interests).eq('status', 'applied').count()
+        ]);
+
+        // Calculate averages
+        const dailyAverage = Math.round(weekCount / 7);
+
+        // Get score distribution (sample last 1000 matches)
+        const recentMatches = await wixData.query(CONFIG.collections.matches)
+            .descending('timestamp')
+            .limit(1000)
+            .find();
+
+        const scoreDistribution = { excellent: 0, good: 0, fair: 0, low: 0 };
+        let totalScore = 0;
+
+        for (const match of recentMatches.items) {
+            const score = match.match_score || 0;
+            totalScore += score;
+
+            if (score >= 90) scoreDistribution.excellent++;
+            else if (score >= 75) scoreDistribution.good++;
+            else if (score >= 60) scoreDistribution.fair++;
+            else scoreDistribution.low++;
+        }
+
+        const averageScore = recentMatches.items.length > 0
+            ? Math.round(totalScore / recentMatches.items.length)
+            : 0;
+
+        // Get top carriers by match count
+        const carrierCounts = {};
+        for (const match of recentMatches.items) {
+            const name = match.carrier_name || 'Unknown';
+            carrierCounts[name] = (carrierCounts[name] || 0) + 1;
+        }
+
+        const topCarriers = Object.entries(carrierCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([name, count]) => ({ name, count }));
+
+        // Get action distribution
+        const actionCounts = {};
+        for (const match of recentMatches.items) {
+            const action = match.action || 'match';
+            actionCounts[action] = (actionCounts[action] || 0) + 1;
+        }
+
+        return {
+            matches: {
+                total,
+                today: todayCount,
+                thisWeek: weekCount,
+                thisMonth: monthCount,
+                dailyAverage,
+                averageScore
+            },
+            interests: {
+                total: totalInterests,
+                thisWeek: weekInterests,
+                applied: appliedCount,
+                conversionRate: total > 0 ? Math.round((totalInterests / total) * 100) : 0
+            },
+            scoreDistribution,
+            topCarriers,
+            actionCounts
+        };
+
+    } catch (error) {
+        console.error('Error fetching match stats:', error);
+        throw new Error('Failed to fetch match statistics');
+    }
+}
+
+// ============================================
+// MATCH TREND DATA (for charts)
+// ============================================
+
+/**
+ * Get match trend data for charts
+ * @param {string} period - 'week' or 'month'
+ * @returns {Promise<Object>} - Chart data
+ */
+export async function getMatchTrends(period = 'week') {
+    await requireAdmin();
+
+    try {
+        const now = new Date();
+        const days = period === 'month' ? 30 : 7;
+        const startDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+
+        // Get matches in period
+        const matches = await wixData.query(CONFIG.collections.matches)
+            .ge('timestamp', startDate)
+            .ascending('timestamp')
+            .limit(1000)
+            .find();
+
+        // Get interests in period
+        const interests = await wixData.query(CONFIG.collections.interests)
+            .ge('_createdDate', startDate)
+            .ascending('_createdDate')
+            .limit(1000)
+            .find();
+
+        // Group by day
+        const matchesByDay = {};
+        const interestsByDay = {};
+        const scoresByDay = {};
+
+        for (let i = 0; i < days; i++) {
+            const date = new Date(startDate.getTime() + i * 24 * 60 * 60 * 1000);
+            const key = date.toISOString().split('T')[0];
+            matchesByDay[key] = 0;
+            interestsByDay[key] = 0;
+            scoresByDay[key] = { total: 0, count: 0 };
+        }
+
+        for (const match of matches.items) {
+            const key = new Date(match.timestamp).toISOString().split('T')[0];
+            if (matchesByDay[key] !== undefined) {
+                matchesByDay[key]++;
+                scoresByDay[key].total += match.match_score || 0;
+                scoresByDay[key].count++;
+            }
+        }
+
+        for (const interest of interests.items) {
+            const key = new Date(interest._createdDate).toISOString().split('T')[0];
+            if (interestsByDay[key] !== undefined) {
+                interestsByDay[key]++;
+            }
+        }
+
+        // Calculate average scores by day
+        const avgScoresByDay = {};
+        for (const [key, data] of Object.entries(scoresByDay)) {
+            avgScoresByDay[key] = data.count > 0 ? Math.round(data.total / data.count) : 0;
+        }
+
+        return {
+            labels: Object.keys(matchesByDay),
+            matches: Object.values(matchesByDay),
+            interests: Object.values(interestsByDay),
+            avgScores: Object.values(avgScoresByDay)
+        };
+
+    } catch (error) {
+        console.error('Error fetching match trends:', error);
+        throw new Error('Failed to fetch match trends');
+    }
+}
+
+// ============================================
+// TOP MATCHES (for dashboard widgets)
+// ============================================
+
+/**
+ * Get top matches by score
+ * @param {number} limit - Number of matches to return
+ * @returns {Promise<Array>} - Top matches
+ */
+export async function getTopMatches(limit = 10) {
+    await requireAdmin();
+
+    try {
+        const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+        const matches = await wixData.query(CONFIG.collections.matches)
+            .ge('timestamp', weekAgo)
+            .descending('match_score')
+            .limit(limit)
+            .find();
+
+        return matches.items.map(match => ({
+            ...match,
+            scoreCategory: getScoreCategory(match.match_score),
+            relativeTime: getRelativeTime(match.timestamp)
+        }));
+
+    } catch (error) {
+        console.error('Error fetching top matches:', error);
+        return [];
+    }
+}
+
+// ============================================
+// CARRIER MATCH SUMMARY
+// ============================================
+
+/**
+ * Get match summary for a specific carrier
+ * @param {string} carrierDOT - Carrier DOT number
+ * @returns {Promise<Object>} - Carrier match summary
+ */
+export async function getCarrierMatchSummary(carrierDOT) {
+    await requireAdmin();
+
+    try {
+        const [matches, interests] = await Promise.all([
+            wixData.query(CONFIG.collections.matches)
+                .eq('carrier_dot', String(carrierDOT))
+                .descending('timestamp')
+                .limit(100)
+                .find(),
+            wixData.query(CONFIG.collections.interests)
+                .eq('carrier_dot', String(carrierDOT))
+                .find()
+        ]);
+
+        // Calculate stats
+        let totalScore = 0;
+        for (const match of matches.items) {
+            totalScore += match.match_score || 0;
+        }
+        const averageScore = matches.items.length > 0
+            ? Math.round(totalScore / matches.items.length)
+            : 0;
+
+        // Interest breakdown
+        const interestBreakdown = {};
+        for (const interest of interests.items) {
+            const status = interest.status || 'interested';
+            interestBreakdown[status] = (interestBreakdown[status] || 0) + 1;
+        }
+
+        return {
+            carrierDOT,
+            totalMatches: matches.totalCount,
+            averageScore,
+            recentMatches: matches.items.slice(0, 10),
+            totalInterests: interests.totalCount,
+            interestBreakdown
+        };
+
+    } catch (error) {
+        console.error('Error fetching carrier match summary:', error);
+        throw new Error('Failed to fetch carrier match summary');
+    }
+}
+
+// ============================================
+// EXPORT MATCHES
+// ============================================
+
+/**
+ * Export matches to CSV
+ * @param {Object} filters - Filter options
+ * @returns {Promise<string>} - CSV string
+ */
+export async function exportMatchesCSV(filters = {}) {
+    await requireAdmin();
+
+    const superAdmin = await isSuperAdmin();
+    if (!superAdmin) {
+        throw new Error('Only super admins can export match data');
+    }
+
+    try {
+        let query = wixData.query(CONFIG.collections.matches);
+
+        if (filters.dateFrom) {
+            query = query.ge('timestamp', new Date(filters.dateFrom));
+        }
+        if (filters.dateTo) {
+            const endDate = new Date(filters.dateTo);
+            endDate.setHours(23, 59, 59, 999);
+            query = query.le('timestamp', endDate);
+        }
+        if (filters.minScore) {
+            query = query.ge('match_score', parseInt(filters.minScore));
+        }
+
+        query = query.descending('timestamp').limit(5000);
+        const result = await query.find();
+
+        // Generate CSV
+        const headers = ['Timestamp', 'Driver Name', 'Driver ZIP', 'Carrier DOT', 'Carrier Name', 'Match Score', 'Action'];
+        const rows = result.items.map(match => [
+            match.timestamp ? new Date(match.timestamp).toISOString() : '',
+            match.driver_name || 'Anonymous',
+            match.driver_zip || '',
+            match.carrier_dot || '',
+            match.carrier_name || '',
+            match.match_score || 0,
+            match.action || 'match'
+        ]);
+
+        const csv = [
+            headers.join(','),
+            ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+        ].join('\n');
+
+        // Log the export action
+        await logExportAction('matches', filters, result.items.length);
+
+        return csv;
+
+    } catch (error) {
+        console.error('Error exporting matches:', error);
+        throw new Error('Failed to export matches');
+    }
+}
+
+/**
+ * Log export action to audit log
+ */
+async function logExportAction(exportType, filters, count) {
+    try {
+        const member = await currentMember.getMember();
+
+        await wixData.insert(CONFIG.collections.auditLog, {
+            action: 'exportData',
+            targetType: exportType,
+            targetId: null,
+            details: { filters, exportedCount: count },
+            adminId: member?._id || 'system',
+            adminEmail: member?.loginEmail || 'system',
+            timestamp: new Date()
+        }, { suppressAuth: true });
+    } catch (error) {
+        console.error('Failed to log export action:', error);
+    }
+}
+
+// ============================================
+// ACTION LIST (for filters)
+// ============================================
+
+/**
+ * Get unique actions for filter dropdown
+ * @returns {Promise<Array>} - List of action types
+ */
+export async function getActionList() {
+    await requireAdmin();
+
+    try {
+        const matches = await wixData.query(CONFIG.collections.matches)
+            .limit(1000)
+            .find();
+
+        const actions = new Set();
+        for (const match of matches.items) {
+            if (match.action) {
+                actions.add(match.action);
+            }
+        }
+
+        return Array.from(actions).sort();
+
+    } catch (error) {
+        console.error('Error fetching action list:', error);
+        return [];
+    }
+}

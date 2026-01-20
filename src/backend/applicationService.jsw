@@ -1,0 +1,691 @@
+// ============================================================================
+// APPLICATION SERVICE - Handles driver applications to carriers
+// ============================================================================
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { mediaManager } from 'wix-media-backend';
+import { sendApplicationConfirmation } from 'backend/emailService.jsw';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  interestsCollection: 'DriverCarrierInterests',
+  profilesCollection: 'DriverProfiles',
+
+  // Application status values
+  STATUS: {
+    INTERESTED: 'interested',
+    APPLIED: 'applied',
+    IN_REVIEW: 'in_review',
+    CONTACTED: 'contacted',
+    OFFER: 'offer',
+    HIRED: 'hired',
+    REJECTED: 'rejected',
+    WITHDRAWN: 'withdrawn'
+  }
+};
+
+// ============================================================================
+// HELPER: Get driver profile
+// ============================================================================
+
+async function getDriverProfile(userId) {
+  const result = await wixData.query(CONFIG.profilesCollection)
+    .eq('_owner', userId)
+    .limit(1)
+    .find({ suppressAuth: true });
+
+  return result.items.length > 0 ? result.items[0] : null;
+}
+
+// ============================================================================
+// HELPER: Upload base64 document to Wix Media
+// ============================================================================
+
+async function uploadDocument(base64Data, fileName, mimeType, folder) {
+  try {
+    // Extract the actual base64 content (remove data URL prefix)
+    const base64Content = base64Data.split(',')[1];
+
+    // Convert base64 to buffer
+    const buffer = Buffer.from(base64Content, 'base64');
+
+    // Upload to Wix Media Manager
+    const uploadResult = await mediaManager.upload(
+      `/driver-documents/${folder}`,
+      buffer,
+      fileName,
+      {
+        mediaOptions: {
+          mimeType: mimeType,
+          mediaType: mimeType.startsWith('image/') ? 'image' : 'document'
+        }
+      }
+    );
+
+    return {
+      success: true,
+      fileUrl: uploadResult.fileUrl,
+      fileName: fileName
+    };
+  } catch (error) {
+    console.error('Document upload error:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// ============================================================================
+// SUBMIT APPLICATION
+// ============================================================================
+
+/**
+ * Submit a formal application to a carrier
+ * Updates the interest record with application data and status
+ *
+ * @param {Object} applicationData
+ * @param {string} applicationData.carrierDOT - Carrier DOT number
+ * @param {string} applicationData.carrierName - Carrier name
+ * @param {string} applicationData.phone - Driver contact phone
+ * @param {string} applicationData.email - Driver contact email
+ * @param {string} applicationData.preferredContact - 'phone' or 'email'
+ * @param {string} applicationData.availability - When driver can start
+ * @param {string} applicationData.message - Optional message to recruiter
+ */
+export async function submitApplication(applicationData) {
+  try {
+    // DEBUG: Log received application data
+    console.log('=== BACKEND RECEIVED APPLICATION DATA ===');
+    console.log('firstName:', applicationData.firstName);
+    console.log('lastName:', applicationData.lastName);
+    console.log('dob:', applicationData.dob);
+    console.log('city:', applicationData.city);
+    console.log('state:', applicationData.state);
+    console.log('homeZip:', applicationData.homeZip);
+    console.log('cdlClass:', applicationData.cdlClass);
+    console.log('endorsements:', applicationData.endorsements);
+    console.log('yearsExperience:', applicationData.yearsExperience);
+    console.log('equipmentExperience:', applicationData.equipmentExperience);
+    console.log('mvrStatus:', applicationData.mvrStatus);
+    console.log('preferredRoutes:', applicationData.preferredRoutes);
+    console.log('homeTimePreference:', applicationData.homeTimePreference);
+    console.log('=== END BACKEND DEBUG ===');
+
+    const currentUser = await wixUsersBackend.currentUser;
+
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    const userId = currentUser.id;
+    const profile = await getDriverProfile(userId);
+
+    if (!profile) {
+      return { success: false, error: 'Driver profile not found' };
+    }
+
+    // Validate required fields
+    if (!applicationData.carrierDOT) {
+      return { success: false, error: 'Carrier DOT is required' };
+    }
+
+    if (!applicationData.phone && !applicationData.email) {
+      return { success: false, error: 'Phone or email is required' };
+    }
+
+    const now = new Date();
+
+    // Update DriverProfiles with application data
+    let profileUpdates = {};
+
+    // Track final document images for the application record
+    let cdlFrontImage = applicationData.existingProfileDocs?.cdl_front_image || null;
+    let cdlBackImage = applicationData.existingProfileDocs?.cdl_back_image || null;
+    let medCardImage = applicationData.existingProfileDocs?.med_card_image || null;
+    let resumeFile = applicationData.existingProfileDocs?.resume_file || null;
+
+    // ============================================================================
+    // DRIVER IDENTITY (NEW - matches seeded driver schema)
+    // ============================================================================
+    if (applicationData.firstName) {
+      profileUpdates.first_name = applicationData.firstName;
+    }
+    if (applicationData.lastName) {
+      profileUpdates.last_name = applicationData.lastName;
+    }
+    // Generate display_name from first + last
+    if (applicationData.firstName && applicationData.lastName) {
+      profileUpdates.display_name = `${applicationData.firstName} ${applicationData.lastName}`;
+    }
+    // Date of Birth (from OCR) - Convert string to Date object for Wix DATE field
+    if (applicationData.dob) {
+      profileUpdates.dob = new Date(applicationData.dob);
+      console.log('✅ DOB converted to Date:', profileUpdates.dob);
+    }
+
+    // ============================================================================
+    // LOCATION (NEW - matches seeded driver schema)
+    // ============================================================================
+    if (applicationData.city) {
+      profileUpdates.city = applicationData.city;
+    }
+    if (applicationData.state) {
+      profileUpdates.state = applicationData.state;
+    }
+    if (applicationData.homeZip) {
+      profileUpdates.home_zip = applicationData.homeZip;
+      profileUpdates.zip_code = applicationData.homeZip; // Also set zip_code for compatibility
+    }
+
+    // ============================================================================
+    // CDL DETAILS (existing + new fields)
+    // ============================================================================
+    if (applicationData.cdlNumber) {
+      profileUpdates.cdl_number = applicationData.cdlNumber;
+    }
+    if (applicationData.cdlExpiration) {
+      profileUpdates.cdl_expiration = new Date(applicationData.cdlExpiration);
+    }
+    if (applicationData.cdlClass) {
+      profileUpdates.cdl_class = applicationData.cdlClass;
+    }
+    if (applicationData.endorsements && Array.isArray(applicationData.endorsements)) {
+      profileUpdates.endorsements = applicationData.endorsements;
+    }
+    if (applicationData.medCardExpiration) {
+      profileUpdates.med_card_expiration = new Date(applicationData.medCardExpiration);
+    }
+
+    // ============================================================================
+    // EXPERIENCE (NEW - matches seeded driver schema)
+    // ============================================================================
+    if (applicationData.yearsExperience !== undefined && applicationData.yearsExperience !== null) {
+      profileUpdates.years_experience = applicationData.yearsExperience;
+    }
+    if (applicationData.equipmentExperience && Array.isArray(applicationData.equipmentExperience)) {
+      profileUpdates.equipment_experience = applicationData.equipmentExperience;
+    }
+    if (applicationData.mvrStatus) {
+      profileUpdates.mvr_status = applicationData.mvrStatus;
+    }
+
+    // ============================================================================
+    // PREFERENCES (NEW - matches seeded driver schema)
+    // ============================================================================
+    if (applicationData.preferredRoutes && Array.isArray(applicationData.preferredRoutes)) {
+      profileUpdates.preferred_routes = applicationData.preferredRoutes;
+      // Also set preferred_operation_type from first selected route
+      if (applicationData.preferredRoutes.length > 0) {
+        profileUpdates.preferred_operation_type = applicationData.preferredRoutes[0];
+      }
+    }
+    if (applicationData.homeTimePreference) {
+      profileUpdates.home_time_preference = applicationData.homeTimePreference;
+    }
+    if (applicationData.availability) {
+      profileUpdates.availability = applicationData.availability;
+    }
+
+    // ============================================================================
+    // CONTACT INFO (existing)
+    // ============================================================================
+    if (applicationData.phone) {
+      profileUpdates.phone = applicationData.phone;
+    }
+    if (applicationData.email) {
+      profileUpdates.email = applicationData.email;
+    }
+
+    // ============================================================================
+    // APPLICATION TRACKING & SEARCHABILITY
+    // ============================================================================
+    profileUpdates.application_date = now;
+    profileUpdates.docs_submitted = true;
+
+    // CRITICAL: Set searchability fields so recruiters can find this driver
+    // These fields are required by driverMatching.jsw query filters
+    profileUpdates.is_searchable = true;
+    profileUpdates.visibility_level = 'full';
+    profileUpdates.profile_status = 'active';
+
+    // Upload documents if provided
+    if (applicationData.documents) {
+      const uploadFolder = `${userId}/${Date.now()}`;
+
+      try {
+        // Upload CDL Front
+        if (applicationData.documents.cdlFront && applicationData.documents.cdlFront.data) {
+          console.log('Uploading CDL front...');
+          const cdlFrontResult = await uploadDocument(
+            applicationData.documents.cdlFront.data,
+            applicationData.documents.cdlFront.name,
+            applicationData.documents.cdlFront.type,
+            uploadFolder
+          );
+          console.log('CDL front result:', cdlFrontResult);
+          if (cdlFrontResult.success) {
+            profileUpdates.cdl_front_image = cdlFrontResult.fileUrl; // Store in image field
+            profileUpdates.cdl_front_url = cdlFrontResult.fileUrl;   // Also store in URL field for recruiter access
+            cdlFrontImage = cdlFrontResult.fileUrl;
+            console.log('✅ CDL front stored:', cdlFrontResult.fileUrl);
+          }
+        }
+
+        // Upload CDL Back
+        if (applicationData.documents.cdlBack && applicationData.documents.cdlBack.data) {
+          console.log('Uploading CDL back...');
+          const cdlBackResult = await uploadDocument(
+            applicationData.documents.cdlBack.data,
+            applicationData.documents.cdlBack.name,
+            applicationData.documents.cdlBack.type,
+            uploadFolder
+          );
+          console.log('CDL back result:', cdlBackResult);
+          if (cdlBackResult.success) {
+            profileUpdates.cdl_back_image = cdlBackResult.fileUrl; // Store in image field
+            profileUpdates.cdl_back_url = cdlBackResult.fileUrl;   // Also store in URL field for recruiter access
+            cdlBackImage = cdlBackResult.fileUrl;
+            console.log('✅ CDL back stored:', cdlBackResult.fileUrl);
+          }
+        }
+
+        // Upload Medical Card
+        if (applicationData.documents.medCard && applicationData.documents.medCard.data) {
+          console.log('Uploading medical card...');
+          const medCardResult = await uploadDocument(
+            applicationData.documents.medCard.data,
+            applicationData.documents.medCard.name,
+            applicationData.documents.medCard.type,
+            uploadFolder
+          );
+          console.log('Medical card result:', medCardResult);
+          if (medCardResult.success) {
+            profileUpdates.med_card_image = medCardResult.fileUrl; // Store in image field
+            profileUpdates.med_card_url = medCardResult.fileUrl;   // Also store in URL field for recruiter access
+            medCardImage = medCardResult.fileUrl;
+            console.log('✅ Med card stored:', medCardResult.fileUrl);
+          }
+        }
+
+        // Upload Resume
+        if (applicationData.documents.resume && applicationData.documents.resume.data) {
+          console.log('Uploading resume...');
+          const resumeResult = await uploadDocument(
+            applicationData.documents.resume.data,
+            applicationData.documents.resume.name,
+            applicationData.documents.resume.type,
+            uploadFolder
+          );
+          if (resumeResult.success) {
+            profileUpdates.resume_file = resumeResult.fileUrl; // Store in file field
+            resumeFile = resumeResult.fileUrl;
+          }
+        }
+
+        // Set docs_complete if all required docs are present
+        const hasAllDocs = (cdlFrontImage || applicationData.documents.cdlFront) &&
+                          (cdlBackImage || applicationData.documents.cdlBack) &&
+                          (medCardImage || applicationData.documents.medCard);
+        if (hasAllDocs) {
+          profileUpdates.docs_complete = true;
+        }
+      } catch (uploadError) {
+        console.error('Document upload error:', uploadError);
+        // Continue without documents - text fields will still be saved
+      }
+
+      // NOTE: OCR is now handled during document upload via extractDocumentOCR.
+      // The OCR data is passed from the frontend in cdlNumber, cdlExpiration, etc.
+      // This avoids running OCR twice and prevents 504 timeout errors.
+    }
+
+    // Update DriverProfiles
+    if (Object.keys(profileUpdates).length > 0) {
+      try {
+        profileUpdates.updated_date = now;
+        const updatedProfile = {
+          ...profile,
+          ...profileUpdates
+        };
+        console.log('Updating profile with:', Object.keys(profileUpdates));
+        await wixData.update(CONFIG.profilesCollection, updatedProfile, { suppressAuth: true });
+        console.log('Driver profile updated successfully');
+      } catch (profileError) {
+        console.error('Profile update error:', profileError);
+      }
+    }
+
+    // Find existing interest record
+    const existingInterest = await wixData.query(CONFIG.interestsCollection)
+      .eq('driver_id', profile._id)
+      .eq('carrier_dot', String(applicationData.carrierDOT))
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    // Check for duplicate submission - prevent re-applying if already in active pipeline
+    if (existingInterest.items.length > 0) {
+      const existing = existingInterest.items[0];
+      const activeStatuses = [CONFIG.STATUS.APPLIED, CONFIG.STATUS.IN_REVIEW, CONFIG.STATUS.CONTACTED, CONFIG.STATUS.OFFER, CONFIG.STATUS.HIRED];
+
+      if (activeStatuses.includes(existing.status)) {
+        console.log(`⚠️ Duplicate submission blocked: Driver already has status "${existing.status}" for DOT ${applicationData.carrierDOT}`);
+        return {
+          success: false,
+          error: 'You have already applied to this carrier',
+          existingStatus: existing.status,
+          applicationId: existing._id,
+          isDuplicate: true
+        };
+      }
+      // If status is 'interested', 'withdrawn', or 'rejected' - allow re-application
+    }
+
+    if (existingInterest.items.length === 0) {
+      // No existing interest - create new record with applied status
+      const newApplication = {
+        driver_id: profile._id,
+        carrier_dot: String(applicationData.carrierDOT),
+        carrier_name: applicationData.carrierName || '',
+        match_score: applicationData.matchScore || 0,
+        action: 'applied',
+        action_timestamp: now,
+        driver_zip_at_match: profile.home_zip || '',
+
+        // Application-specific fields
+        status: CONFIG.STATUS.APPLIED,
+        application_date: now,
+        contact_phone: applicationData.phone || '',
+        contact_email: applicationData.email || '',
+        preferred_contact: applicationData.preferredContact || 'phone',
+        availability: applicationData.availability || '',
+        driver_message: applicationData.message || '',
+        
+        // Documents (URLs stored in interest record for this specific application)
+        cdl_front_url: cdlFrontImage,
+        cdl_back_url: cdlBackImage,
+        med_card_url: medCardImage,
+        resume_url: resumeFile,
+
+        // Status history
+        status_history: JSON.stringify([{
+          status: CONFIG.STATUS.APPLIED,
+          timestamp: now.toISOString(),
+          note: 'Application submitted'
+        }]),
+
+        outcome: null,
+        outcome_date: null,
+        notes: null
+      };
+
+      const inserted = await wixData.insert(CONFIG.interestsCollection, newApplication, { suppressAuth: true });
+
+      console.log(`✅ New application submitted: Driver ${profile._id} → Carrier DOT ${applicationData.carrierDOT}`);
+
+      // Send confirmation email (async, don't await blocking return)
+      sendApplicationConfirmation(userId, {
+        driverName: profile.display_name || profile.driver_name || 'Driver',
+        carrierName: applicationData.carrierName,
+        carrierDot: applicationData.carrierDOT,
+        applicationId: inserted._id
+      }).catch(err => console.error('Email send failed:', err));
+
+      return {
+        success: true,
+        application: inserted,
+        isNew: true
+      };
+
+    } else {
+      // Update existing interest record to applied status
+      const existing = existingInterest.items[0];
+
+      // Parse existing status history or create new
+      let statusHistory = [];
+      try {
+        statusHistory = existing.status_history ? JSON.parse(existing.status_history) : [];
+      } catch (e) {
+        statusHistory = [];
+      }
+
+      // Add new status to history
+      statusHistory.push({
+        status: CONFIG.STATUS.APPLIED,
+        timestamp: now.toISOString(),
+        note: 'Application submitted'
+      });
+
+      const updatedApplication = {
+        ...existing,
+        action: 'applied',
+        action_timestamp: now,
+
+        // Application-specific fields
+        status: CONFIG.STATUS.APPLIED,
+        application_date: now,
+        contact_phone: applicationData.phone || existing.contact_phone || '',
+        contact_email: applicationData.email || existing.contact_email || '',
+        preferred_contact: applicationData.preferredContact || existing.preferred_contact || 'phone',
+        availability: applicationData.availability || '',
+        driver_message: applicationData.message || '',
+        
+        // Documents (Update if we have new ones or existing ones)
+        cdl_front_url: cdlFrontImage || existing.cdl_front_url,
+        cdl_back_url: cdlBackImage || existing.cdl_back_url,
+        med_card_url: medCardImage || existing.med_card_url,
+        resume_url: resumeFile || existing.resume_url,
+
+        // Update status history
+        status_history: JSON.stringify(statusHistory)
+      };
+
+      const updated = await wixData.update(CONFIG.interestsCollection, updatedApplication, { suppressAuth: true });
+
+      console.log(`✅ Application updated: Driver ${profile._id} → Carrier DOT ${applicationData.carrierDOT}`);
+
+      // Send confirmation email
+      sendApplicationConfirmation(userId, {
+        driverName: profile.display_name || profile.driver_name || 'Driver',
+        carrierName: applicationData.carrierName,
+        carrierDot: applicationData.carrierDOT,
+        applicationId: updated._id
+      }).catch(err => console.error('Email send failed:', err));
+
+      return {
+        success: true,
+        application: updated,
+        isNew: false
+      };
+    }
+
+  } catch (error) {
+    console.error('❌ Error submitting application:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET APPLICATION STATUS
+// ============================================================================
+
+/**
+ * Get the current status of an application
+ */
+export async function getApplicationStatus(carrierDOT) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    const userId = currentUser.id;
+    const profile = await getDriverProfile(userId);
+
+    if (!profile) {
+      return { success: false, error: 'Driver profile not found' };
+    }
+
+    const result = await wixData.query(CONFIG.interestsCollection)
+      .eq('driver_id', profile._id)
+      .eq('carrier_dot', String(carrierDOT))
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return { success: true, status: null, application: null };
+    }
+
+    const application = result.items[0];
+    let statusHistory = [];
+    try {
+      statusHistory = application.status_history ? JSON.parse(application.status_history) : [];
+    } catch (e) {
+      statusHistory = [];
+    }
+
+    return {
+      success: true,
+      status: application.status || application.action,
+      application: {
+        ...application,
+        status_history: statusHistory
+      }
+    };
+
+  } catch (error) {
+    console.error('❌ Error getting application status:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// WITHDRAW APPLICATION
+// ============================================================================
+
+/**
+ * Withdraw an application
+ */
+export async function withdrawApplication(carrierDOT) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    const userId = currentUser.id;
+    const profile = await getDriverProfile(userId);
+
+    if (!profile) {
+      return { success: false, error: 'Driver profile not found' };
+    }
+
+    const result = await wixData.query(CONFIG.interestsCollection)
+      .eq('driver_id', profile._id)
+      .eq('carrier_dot', String(carrierDOT))
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return { success: false, error: 'Application not found' };
+    }
+
+    const application = result.items[0];
+    const now = new Date();
+
+    // Parse existing status history
+    let statusHistory = [];
+    try {
+      statusHistory = application.status_history ? JSON.parse(application.status_history) : [];
+    } catch (e) {
+      statusHistory = [];
+    }
+
+    // Add withdrawal to history
+    statusHistory.push({
+      status: CONFIG.STATUS.WITHDRAWN,
+      timestamp: now.toISOString(),
+      note: 'Application withdrawn by driver'
+    });
+
+    const updatedApplication = {
+      ...application,
+      status: CONFIG.STATUS.WITHDRAWN,
+      outcome: 'withdrawn',
+      outcome_date: now,
+      status_history: JSON.stringify(statusHistory)
+    };
+
+    const updated = await wixData.update(CONFIG.interestsCollection, updatedApplication, { suppressAuth: true });
+
+    console.log(`🗑️ Application withdrawn: Driver ${profile._id} → Carrier DOT ${carrierDOT}`);
+
+    return { success: true, application: updated };
+
+  } catch (error) {
+    console.error('❌ Error withdrawing application:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET ALL DRIVER APPLICATIONS
+// ============================================================================
+
+/**
+ * Get all applications for the current driver
+ */
+export async function getDriverApplications() {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in', applications: [] };
+    }
+
+    const userId = currentUser.id;
+    const profile = await getDriverProfile(userId);
+
+    if (!profile) {
+      return { success: false, error: 'Driver profile not found', applications: [] };
+    }
+
+    const result = await wixData.query(CONFIG.interestsCollection)
+      .eq('driver_id', profile._id)
+      .descending('action_timestamp')
+      .limit(100)
+      .find({ suppressAuth: true });
+
+    // Parse status history for each application
+    const applications = result.items.map(app => {
+      let statusHistory = [];
+      try {
+        statusHistory = app.status_history ? JSON.parse(app.status_history) : [];
+      } catch (e) {
+        statusHistory = [];
+      }
+      return {
+        ...app,
+        status_history: statusHistory
+      };
+    });
+
+    console.log(`📋 Found ${applications.length} applications for driver ${profile._id}`);
+
+    return {
+      success: true,
+      applications,
+      totalCount: result.totalCount
+    };
+
+  } catch (error) {
+    console.error('❌ Error getting driver applications:', error);
+    return { success: false, error: error.message, applications: [] };
+  }
+}

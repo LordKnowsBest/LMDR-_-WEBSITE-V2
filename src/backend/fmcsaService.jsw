@@ -1,0 +1,1032 @@
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+import { log, logExternalAPI } from 'backend/observabilityService';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  // FMCSA API Settings
+  baseUrl: 'https://mobile.fmcsa.dot.gov/qc/services',
+  secretName: 'FMCSA_WEB_KEY',
+
+  // Cache Settings
+  safetyDataCollection: 'CarrierSafetyData',
+  cacheExpiryDays: 7, // FMCSA data is relatively stable
+
+  // Rate Limiting
+  maxRequestsPerMinute: 30,
+  requestDelayMs: 2000,
+
+  // Retry Settings
+  retry: {
+    maxAttempts: 3,
+    baseDelayMs: 1000,
+    maxDelayMs: 8000,
+    retryableStatuses: [429, 500, 502, 503, 504]
+  },
+
+  // Circuit Breaker Settings
+  circuitBreaker: {
+    failureThreshold: 5,
+    resetTimeoutMs: 60000,
+    halfOpenMaxAttempts: 2
+  },
+
+  // Request Timeout
+  timeout: {
+    requestMs: 15000
+  }
+};
+
+// ============================================================================
+// USER-FRIENDLY ERROR MESSAGES
+// ============================================================================
+
+const ERROR_MESSAGES = {
+  RATE_LIMITED: "Too many safety lookups. Please wait a moment.",
+  SERVICE_UNAVAILABLE: "FMCSA service is temporarily unavailable. Using cached data if available.",
+  TIMEOUT: "Safety lookup took too long. Please try again.",
+  CIRCUIT_OPEN: "FMCSA lookups paused due to service issues. Using cached data.",
+  NOT_FOUND: "Carrier not found in FMCSA database. Please verify the DOT number.",
+  API_ERROR: "Unable to retrieve safety data. Please try again later."
+};
+
+// ============================================================================
+// SAFETY RATING MAPPINGS
+// ============================================================================
+
+const SAFETY_RATING_MAP = {
+  'S': 'SATISFACTORY',
+  'C': 'CONDITIONAL',
+  'U': 'UNSATISFACTORY',
+  'N': 'NOT RATED'
+};
+
+const BASIC_NAMES = {
+  'Unsafe Driving': 'unsafe_driving',
+  'Hours-of-Service Compliance': 'hours_of_service',
+  'Driver Fitness': 'driver_fitness',
+  'Controlled Substances/Alcohol': 'drugs_alcohol',
+  'Vehicle Maintenance': 'vehicle_maintenance',
+  'Hazardous Materials Compliance': 'hazmat',
+  'Crash Indicator': 'crash_indicator'
+};
+
+// ============================================================================
+// CIRCUIT BREAKER STATE (Module Level)
+// ============================================================================
+
+let circuitState = {
+  status: 'CLOSED',  // CLOSED, OPEN, HALF_OPEN
+  failures: 0,
+  lastFailureTime: null,
+  halfOpenAttempts: 0,
+  openedAt: null
+};
+
+// ============================================================================
+// RATE LIMITING STATE (Module Level)
+// ============================================================================
+
+let requestTimestamps = [];
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Promise-based delay
+ * @param {number} ms - Milliseconds to wait
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Check if the circuit breaker allows requests
+ * @returns {{ allowed: boolean, reason?: string, retryAfterMs?: number }}
+ */
+function checkCircuit() {
+  const now = Date.now();
+
+  switch (circuitState.status) {
+    case 'CLOSED':
+      return { allowed: true };
+
+    case 'OPEN':
+      // Check if reset timeout has elapsed
+      const timeSinceOpened = now - circuitState.openedAt;
+      if (timeSinceOpened >= CONFIG.circuitBreaker.resetTimeoutMs) {
+        // Transition to HALF_OPEN to test recovery
+        circuitState.status = 'HALF_OPEN';
+        circuitState.halfOpenAttempts = 0;
+        console.log('🔄 FMCSA Circuit breaker: OPEN -> HALF_OPEN (testing recovery)');
+        return { allowed: true };
+      }
+      // Still in cooldown period
+      const retryAfterMs = CONFIG.circuitBreaker.resetTimeoutMs - timeSinceOpened;
+      return {
+        allowed: false,
+        reason: ERROR_MESSAGES.CIRCUIT_OPEN,
+        retryAfterMs
+      };
+
+    case 'HALF_OPEN':
+      // Allow limited requests to test if service has recovered
+      if (circuitState.halfOpenAttempts < CONFIG.circuitBreaker.halfOpenMaxAttempts) {
+        return { allowed: true };
+      }
+      return {
+        allowed: false,
+        reason: ERROR_MESSAGES.CIRCUIT_OPEN,
+        retryAfterMs: CONFIG.circuitBreaker.resetTimeoutMs
+      };
+
+    default:
+      return { allowed: true };
+  }
+}
+
+/**
+ * Record a successful request - handles HALF_OPEN -> CLOSED transition
+ */
+function recordSuccess() {
+  if (circuitState.status === 'HALF_OPEN') {
+    // Service has recovered - close circuit
+    circuitState.status = 'CLOSED';
+    circuitState.failures = 0;
+    circuitState.halfOpenAttempts = 0;
+    circuitState.openedAt = null;
+    console.log('✅ FMCSA Circuit breaker: HALF_OPEN -> CLOSED (service recovered)');
+  } else if (circuitState.status === 'CLOSED') {
+    // Decay failure count on success
+    if (circuitState.failures > 0) {
+      circuitState.failures = Math.max(0, circuitState.failures - 1);
+    }
+  }
+}
+
+/**
+ * Record a failed request - handles CLOSED -> OPEN transition
+ */
+function recordFailure() {
+  const now = Date.now();
+  circuitState.lastFailureTime = now;
+
+  if (circuitState.status === 'HALF_OPEN') {
+    circuitState.halfOpenAttempts++;
+    // Failure during recovery test - reopen circuit
+    circuitState.status = 'OPEN';
+    circuitState.openedAt = now;
+    console.log('❌ FMCSA Circuit breaker: HALF_OPEN -> OPEN (recovery failed)');
+  } else if (circuitState.status === 'CLOSED') {
+    circuitState.failures++;
+    console.log(`⚠️ FMCSA Circuit breaker: Failure recorded (${circuitState.failures}/${CONFIG.circuitBreaker.failureThreshold})`);
+
+    if (circuitState.failures >= CONFIG.circuitBreaker.failureThreshold) {
+      // Too many failures - open circuit
+      circuitState.status = 'OPEN';
+      circuitState.openedAt = now;
+      console.log('🔴 FMCSA Circuit breaker: CLOSED -> OPEN (threshold exceeded)');
+    }
+  }
+}
+
+/**
+ * Check if we're within rate limits
+ * @returns {{ allowed: boolean, remaining: number, retryAfterMs?: number }}
+ */
+function checkRateLimit() {
+  const now = Date.now();
+  const windowMs = 60000; // 1 minute window
+  const windowStart = now - windowMs;
+
+  // Clean up old timestamps outside the window
+  requestTimestamps = requestTimestamps.filter(timestamp => timestamp > windowStart);
+
+  // Check if at limit
+  const requestCount = requestTimestamps.length;
+  if (requestCount >= CONFIG.maxRequestsPerMinute) {
+    // Find the oldest request in the window to calculate retry time
+    const oldestRequest = Math.min(...requestTimestamps);
+    const retryAfterMs = (oldestRequest + windowMs) - now;
+
+    return {
+      allowed: false,
+      remaining: 0,
+      retryAfterMs: Math.max(0, retryAfterMs)
+    };
+  }
+
+  // Record this request
+  requestTimestamps.push(now);
+
+  return {
+    allowed: true,
+    remaining: CONFIG.maxRequestsPerMinute - requestTimestamps.length
+  };
+}
+
+/**
+ * Fetch with retry logic, exponential backoff, and timeout
+ * @param {string} url - URL to fetch
+ * @param {Object} options - Fetch options
+ * @param {string} traceId - Trace ID for logging
+ * @param {string} endpoint - Endpoint name for logging
+ * @returns {Promise<Response>}
+ */
+async function fetchWithRetry(url, options, traceId = null, endpoint = '') {
+  let lastError;
+
+  for (let attempt = 0; attempt < CONFIG.retry.maxAttempts; attempt++) {
+    const startTime = Date.now();
+
+    try {
+      // Create timeout promise
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('REQUEST_TIMEOUT')), CONFIG.timeout.requestMs);
+      });
+
+      // Race fetch against timeout
+      const response = await Promise.race([
+        fetch(url, options),
+        timeoutPromise
+      ]);
+
+      const latencyMs = Date.now() - startTime;
+
+      // Log the API call
+      await logExternalAPI({
+        method: options.method || 'GET',
+        endpoint,
+        statusCode: response.status,
+        latencyMs,
+        service: 'fmcsa',
+        error: response.ok ? null : `HTTP ${response.status}`,
+        traceId
+      });
+
+      // Success - record and return
+      if (response.ok) {
+        recordSuccess();
+        return response;
+      }
+
+      // Check if error is retryable
+      if (CONFIG.retry.retryableStatuses.includes(response.status)) {
+        const delay = Math.min(
+          CONFIG.retry.baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000,
+          CONFIG.retry.maxDelayMs
+        );
+        console.log(`⚠️ FMCSA API returned ${response.status}, retry ${attempt + 1}/${CONFIG.retry.maxAttempts} in ${Math.round(delay)}ms`);
+        await sleep(delay);
+        lastError = new Error(`API returned ${response.status}`);
+        continue;
+      }
+
+      // Non-retryable status - return as-is for caller to handle
+      return response;
+
+    } catch (error) {
+      const latencyMs = Date.now() - startTime;
+
+      if (error.message === 'REQUEST_TIMEOUT') {
+        console.log(`⚠️ FMCSA Request timed out, retry ${attempt + 1}/${CONFIG.retry.maxAttempts}`);
+        lastError = new Error(ERROR_MESSAGES.TIMEOUT);
+
+        await logExternalAPI({
+          method: options.method || 'GET',
+          endpoint,
+          statusCode: 0,
+          latencyMs,
+          service: 'fmcsa',
+          error: 'REQUEST_TIMEOUT',
+          traceId
+        });
+
+        // Add delay before retry on timeout
+        if (attempt < CONFIG.retry.maxAttempts - 1) {
+          const delay = CONFIG.retry.baseDelayMs * Math.pow(2, attempt);
+          await sleep(delay);
+        }
+        continue;
+      }
+
+      // Network error or other - log and throw
+      await logExternalAPI({
+        method: options.method || 'GET',
+        endpoint,
+        statusCode: 0,
+        latencyMs,
+        service: 'fmcsa',
+        error: error.message,
+        traceId
+      });
+
+      throw error;
+    }
+  }
+
+  // All retries exhausted - record failure and throw
+  recordFailure();
+  throw lastError || new Error('Max retries exceeded');
+}
+
+// ============================================================================
+// EXPORTED MONITORING FUNCTIONS
+// ============================================================================
+
+/**
+ * Get current circuit breaker status for monitoring
+ * @returns {Object} - Current circuit state and config
+ */
+export function getCircuitStatus() {
+  const now = Date.now();
+  let timeUntilReset = null;
+
+  if (circuitState.status === 'OPEN' && circuitState.openedAt) {
+    const timeSinceOpened = now - circuitState.openedAt;
+    timeUntilReset = Math.max(0, CONFIG.circuitBreaker.resetTimeoutMs - timeSinceOpened);
+  }
+
+  return {
+    status: circuitState.status,
+    failures: circuitState.failures,
+    lastFailureTime: circuitState.lastFailureTime,
+    halfOpenAttempts: circuitState.halfOpenAttempts,
+    openedAt: circuitState.openedAt,
+    timeUntilResetMs: timeUntilReset,
+    config: {
+      failureThreshold: CONFIG.circuitBreaker.failureThreshold,
+      resetTimeoutMs: CONFIG.circuitBreaker.resetTimeoutMs,
+      halfOpenMaxAttempts: CONFIG.circuitBreaker.halfOpenMaxAttempts
+    }
+  };
+}
+
+/**
+ * Get current rate limit status for monitoring
+ * @returns {Object} - Rate limit state
+ */
+export function getRateLimitStatus() {
+  const now = Date.now();
+  const windowMs = 60000;
+  const windowStart = now - windowMs;
+
+  // Count requests in current window
+  const recentRequests = requestTimestamps.filter(timestamp => timestamp > windowStart);
+
+  return {
+    requestsInWindow: recentRequests.length,
+    remaining: Math.max(0, CONFIG.maxRequestsPerMinute - recentRequests.length),
+    maxRequestsPerMinute: CONFIG.maxRequestsPerMinute,
+    windowMs: windowMs,
+    oldestRequestAge: recentRequests.length > 0
+      ? now - Math.min(...recentRequests)
+      : null
+  };
+}
+
+// ============================================================================
+// MAIN FUNCTION: GET CARRIER SAFETY DATA
+// ============================================================================
+
+/**
+ * Get comprehensive safety data for a carrier from FMCSA
+ * Checks cache first, fetches from API if stale/missing
+ * Includes circuit breaker and rate limiting protection
+ *
+ * @param {string|number} dotNumber - The carrier's DOT number
+ * @param {boolean} forceRefresh - Bypass cache and fetch fresh data
+ * @param {string} traceId - Trace ID for logging
+ * @returns {Promise<Object>} - Normalized safety data
+ */
+export async function getCarrierSafetyData(dotNumber, forceRefresh = false, traceId = null) {
+  const dot = String(dotNumber).trim();
+  const startTime = Date.now();
+  console.log(`🔍 FMCSA: Fetching safety data for DOT ${dot}`);
+  await log({ level: 'INFO', source: 'external-api', message: `FMCSA lookup for DOT ${dot}`, traceId });
+
+  try {
+    // 1. Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cached = await getCachedSafetyData(dot);
+      if (cached && !isStale(cached.fetched_date)) {
+        console.log(`✅ FMCSA: Using cached data for DOT ${dot} (${cached.cache_age_days} days old)`);
+        await log({ level: 'DEBUG', source: 'external-api', message: `FMCSA cache hit for DOT ${dot}`, traceId, details: { cacheAgeDays: cached.cache_age_days } });
+        return { ...cached, fromCache: true };
+      }
+    }
+
+    // 2. Check circuit breaker
+    const circuitCheck = checkCircuit();
+    if (!circuitCheck.allowed) {
+      console.log(`🔴 FMCSA Circuit breaker blocking request: ${circuitCheck.reason}`);
+      await log({ level: 'WARN', source: 'external-api', message: `FMCSA circuit breaker open for DOT ${dot}`, traceId, details: { retryAfterMs: circuitCheck.retryAfterMs } });
+
+      // Try to return stale cache data if available
+      const staleCache = await getCachedSafetyData(dot);
+      if (staleCache) {
+        console.log(`📦 FMCSA: Returning stale cached data due to circuit breaker`);
+        return {
+          ...staleCache,
+          fromCache: true,
+          staleData: true,
+          circuitBreakerActive: true,
+          userMessage: ERROR_MESSAGES.CIRCUIT_OPEN
+        };
+      }
+
+      return {
+        dot_number: dot,
+        error: true,
+        error_code: 'CIRCUIT_OPEN',
+        error_message: ERROR_MESSAGES.CIRCUIT_OPEN,
+        retryAfterMs: circuitCheck.retryAfterMs,
+        operating_status: 'UNKNOWN',
+        safety_rating: 'CHECK FMCSA',
+        safety_rating_display: ERROR_MESSAGES.SERVICE_UNAVAILABLE,
+        basics: {},
+        data_source: 'circuit-breaker-fallback',
+        fromCache: false
+      };
+    }
+
+    // 3. Check rate limit
+    const rateCheck = checkRateLimit();
+    if (!rateCheck.allowed) {
+      console.log(`⛔ FMCSA Rate limit exceeded (${CONFIG.maxRequestsPerMinute}/min)`);
+      await log({ level: 'WARN', source: 'external-api', message: `FMCSA rate limit exceeded for DOT ${dot}`, traceId, details: { retryAfterMs: rateCheck.retryAfterMs } });
+
+      // Try to return stale cache data if available
+      const staleCache = await getCachedSafetyData(dot);
+      if (staleCache) {
+        console.log(`📦 FMCSA: Returning stale cached data due to rate limit`);
+        return {
+          ...staleCache,
+          fromCache: true,
+          staleData: true,
+          rateLimited: true,
+          userMessage: ERROR_MESSAGES.RATE_LIMITED
+        };
+      }
+
+      return {
+        dot_number: dot,
+        error: true,
+        error_code: 'RATE_LIMITED',
+        error_message: ERROR_MESSAGES.RATE_LIMITED,
+        retryAfterMs: rateCheck.retryAfterMs,
+        operating_status: 'UNKNOWN',
+        safety_rating: 'CHECK FMCSA',
+        safety_rating_display: ERROR_MESSAGES.RATE_LIMITED,
+        basics: {},
+        data_source: 'rate-limit-fallback',
+        fromCache: false
+      };
+    }
+
+    // 4. Get API key
+    const webKey = await getSecret(CONFIG.secretName);
+    if (!webKey) {
+      throw new Error('FMCSA WebKey not found in Secrets Manager');
+    }
+
+    // 5. Fetch from FMCSA API (with retry logic)
+    const [carrierData, basicsData] = await Promise.all([
+      fetchCarrierInfo(dot, webKey, traceId),
+      fetchCarrierBasics(dot, webKey, traceId)
+    ]);
+
+    // 6. Normalize and combine data
+    const safetyData = normalizeApiResponse(dot, carrierData, basicsData);
+
+    // 7. Cache the results
+    await cacheSafetyData(safetyData);
+
+    const elapsed = Date.now() - startTime;
+    console.log(`✅ FMCSA: Fresh data fetched and cached for DOT ${dot}`);
+    await log({ level: 'INFO', source: 'external-api', message: `FMCSA data fetched for DOT ${dot}`, traceId, duration: elapsed, details: { safetyRating: safetyData.safety_rating } });
+    return { ...safetyData, fromCache: false };
+
+  } catch (error) {
+    console.error(`❌ FMCSA Error for DOT ${dot}:`, error.message);
+    await log({ level: 'ERROR', source: 'external-api', message: `FMCSA lookup failed for DOT ${dot}`, traceId, details: { error: error.message } });
+
+    // Determine user-friendly error message
+    let userMessage = ERROR_MESSAGES.API_ERROR;
+    let errorCode = 'API_ERROR';
+
+    if (error.message.includes('TIMEOUT') || error.message.includes('timed out')) {
+      userMessage = ERROR_MESSAGES.TIMEOUT;
+      errorCode = 'TIMEOUT';
+    } else if (error.message.includes('not found')) {
+      userMessage = ERROR_MESSAGES.NOT_FOUND;
+      errorCode = 'NOT_FOUND';
+    } else if (error.message.includes('429')) {
+      userMessage = ERROR_MESSAGES.RATE_LIMITED;
+      errorCode = 'RATE_LIMITED';
+    }
+
+    // Try to return stale cache data if available
+    const staleCache = await getCachedSafetyData(dot);
+    if (staleCache) {
+      console.log(`📦 FMCSA: Returning stale cached data after error`);
+      return {
+        ...staleCache,
+        fromCache: true,
+        staleData: true,
+        errorOccurred: true,
+        userMessage
+      };
+    }
+
+    // Return fallback with error flag
+    return {
+      dot_number: dot,
+      error: true,
+      error_code: errorCode,
+      error_message: error.message,
+      userMessage,
+      operating_status: 'UNKNOWN',
+      safety_rating: 'CHECK FMCSA',
+      safety_rating_display: 'Unable to verify - check FMCSA directly',
+      basics: {},
+      data_source: 'error-fallback',
+      fromCache: false
+    };
+  }
+}
+
+// ============================================================================
+// FMCSA API FETCH FUNCTIONS
+// ============================================================================
+
+/**
+ * Fetch basic carrier information from FMCSA
+ */
+async function fetchCarrierInfo(dotNumber, webKey, traceId = null) {
+  const url = `${CONFIG.baseUrl}/carriers/${dotNumber}?webKey=${webKey}`;
+  const endpoint = `/carriers/${dotNumber}`;
+
+  const response = await fetchWithRetry(
+    url,
+    {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    },
+    traceId,
+    endpoint
+  );
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error(`Carrier DOT ${dotNumber} not found in FMCSA database`);
+    }
+    throw new Error(`FMCSA API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return data.content?.carrier || data.carrier || data;
+}
+
+/**
+ * Fetch BASIC scores from FMCSA
+ */
+async function fetchCarrierBasics(dotNumber, webKey, traceId = null) {
+  const url = `${CONFIG.baseUrl}/carriers/${dotNumber}/basics?webKey=${webKey}`;
+  const endpoint = `/carriers/${dotNumber}/basics`;
+
+  try {
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      },
+      traceId,
+      endpoint
+    );
+
+    if (!response.ok) {
+      console.log(`BASIC scores not available for DOT ${dotNumber}`);
+      return null;
+    }
+
+    const data = await response.json();
+    return data.content?.basics || data.basics || [];
+
+  } catch (error) {
+    console.log(`Could not fetch BASIC scores: ${error.message}`);
+    return null;
+  }
+}
+
+// ============================================================================
+// DATA NORMALIZATION
+// ============================================================================
+
+/**
+ * Normalize FMCSA API response into consistent format
+ */
+function normalizeApiResponse(dotNumber, carrierData, basicsData) {
+  // Parse carrier info
+  const carrier = carrierData || {};
+
+  // Build BASIC scores object
+  const basics = {};
+  let hasAlerts = false;
+
+  if (basicsData && Array.isArray(basicsData)) {
+    for (const basic of basicsData) {
+      const name = basic.basicsType || basic.basicName || basic.name;
+      const key = BASIC_NAMES[name] || name?.toLowerCase().replace(/[^a-z]/g, '_');
+
+      if (key) {
+        basics[key] = {
+          percentile: basic.basicsValue || basic.percentile || 0,
+          alert: basic.basicsAlert === 'Y' || basic.alert === true,
+          threshold: basic.basicsThreshold || basic.threshold || null
+        };
+
+        if (basics[key].alert) hasAlerts = true;
+      }
+    }
+  }
+
+  // Map safety rating code to display string
+  const ratingCode = carrier.safetyRating || carrier.safety_rating || 'N';
+  const ratingDisplay = SAFETY_RATING_MAP[ratingCode] || ratingCode;
+
+  // Calculate inspection rates if available
+  const inspectionData = {
+    driver_oos_rate: parseFloat(carrier.driverOosRate) || null,
+    vehicle_oos_rate: parseFloat(carrier.vehicleOosRate) || null,
+    driver_inspections: parseInt(carrier.driverInsp) || 0,
+    vehicle_inspections: parseInt(carrier.vehicleInsp) || 0,
+    national_avg_driver_oos: 5.51, // National average as of 2024
+    national_avg_vehicle_oos: 20.72
+  };
+
+  // Build crash data if available
+  const crashData = {
+    total: parseInt(carrier.crashTotal) || 0,
+    fatal: parseInt(carrier.fatalCrash) || 0,
+    injury: parseInt(carrier.injCrash) || 0,
+    tow: parseInt(carrier.towawayCrash) || 0
+  };
+
+  return {
+    dot_number: String(dotNumber),
+
+    // Identity
+    legal_name: carrier.legalName || carrier.legal_name || 'Unknown',
+    dba_name: carrier.dbaName || carrier.dba_name || null,
+
+    // Status
+    operating_status: carrier.allowedToOperate === 'Y' ? 'AUTHORIZED' : 'NOT AUTHORIZED',
+    is_authorized: carrier.allowedToOperate === 'Y',
+
+    // Safety Rating
+    safety_rating: ratingDisplay,
+    safety_rating_code: ratingCode,
+    safety_rating_date: carrier.safetyRatingDate || carrier.safety_rating_date || null,
+    safety_review_date: carrier.safetyReviewDate || null,
+
+    // Fleet Info
+    total_drivers: parseInt(carrier.totalDrivers || carrier.driver_total) || 0,
+    total_power_units: parseInt(carrier.totalPowerUnits || carrier.nbr_power_unit) || 0,
+
+    // Location
+    phy_city: carrier.phyCity || carrier.phy_city || '',
+    phy_state: carrier.phyState || carrier.phy_state || '',
+    phy_zip: carrier.phyZip || carrier.phy_zip || '',
+
+    // Contact
+    telephone: carrier.telephone || null,
+
+    // MC Number
+    mc_number: carrier.mcNumber || carrier.mc_number || null,
+
+    // MCS-150 (last update date - indicates data freshness)
+    mcs150_date: carrier.mcs150Date || carrier.mcs150_date || null,
+    mcs150_mileage: parseInt(carrier.mcs150Mileage) || 0,
+    mcs150_mileage_year: carrier.mcs150MileageYear || null,
+
+    // BASIC Scores
+    basics: basics,
+    has_basic_alerts: hasAlerts,
+
+    // Inspection Data
+    inspections: inspectionData,
+
+    // Crash Data
+    crashes: crashData,
+
+    // Metadata
+    fetched_date: new Date(),
+    data_source: 'FMCSA_SAFER_API',
+    api_version: '1.0'
+  };
+}
+
+// ============================================================================
+// CACHE MANAGEMENT
+// ============================================================================
+
+/**
+ * Get cached safety data for a DOT number
+ */
+async function getCachedSafetyData(dotNumber) {
+  try {
+    const result = await wixData.query(CONFIG.safetyDataCollection)
+      .eq('dot_number', String(dotNumber))
+      .find();
+
+    if (result.items.length === 0) {
+      return null;
+    }
+
+    const cached = result.items[0];
+
+    // Calculate cache age
+    const fetchedDate = cached.fetched_date ? new Date(cached.fetched_date) : null;
+    const ageInDays = fetchedDate
+      ? (Date.now() - fetchedDate.getTime()) / (1000 * 60 * 60 * 24)
+      : 999;
+
+    // Parse JSON fields
+    return {
+      ...cached,
+      basics: typeof cached.basics === 'string' ? JSON.parse(cached.basics) : cached.basics || {},
+      inspections: typeof cached.inspections === 'string' ? JSON.parse(cached.inspections) : cached.inspections || {},
+      crashes: typeof cached.crashes === 'string' ? JSON.parse(cached.crashes) : cached.crashes || {},
+      cache_age_days: Math.round(ageInDays * 10) / 10
+    };
+
+  } catch (error) {
+    console.error('Cache lookup error:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Check if cached data is stale
+ */
+function isStale(fetchedDate) {
+  if (!fetchedDate) return true;
+  const daysSince = (Date.now() - new Date(fetchedDate).getTime()) / (1000 * 60 * 60 * 24);
+  return daysSince > CONFIG.cacheExpiryDays;
+}
+
+/**
+ * Save safety data to cache
+ */
+async function cacheSafetyData(safetyData) {
+  try {
+    const options = { suppressAuth: true };
+
+    // Check for existing record
+    const existing = await getCachedSafetyData(safetyData.dot_number);
+
+    // Prepare data for storage (stringify JSON fields)
+    const dataToStore = {
+      ...safetyData,
+      basics: JSON.stringify(safetyData.basics || {}),
+      inspections: JSON.stringify(safetyData.inspections || {}),
+      crashes: JSON.stringify(safetyData.crashes || {})
+    };
+
+    if (existing && existing._id) {
+      // Update existing
+      await wixData.update(CONFIG.safetyDataCollection, {
+        ...dataToStore,
+        _id: existing._id,
+        lookup_count: (existing.lookup_count || 0) + 1,
+        last_lookup_date: new Date()
+      }, options);
+      console.log(`📝 Updated cached safety data for DOT ${safetyData.dot_number}`);
+    } else {
+      // Insert new
+      await wixData.insert(CONFIG.safetyDataCollection, {
+        ...dataToStore,
+        lookup_count: 1,
+        last_lookup_date: new Date()
+      }, options);
+      console.log(`📝 Created new cached safety data for DOT ${safetyData.dot_number}`);
+    }
+
+  } catch (error) {
+    console.error('Failed to cache safety data:', error.message);
+  }
+}
+
+// ============================================================================
+// BATCH OPERATIONS
+// ============================================================================
+
+/**
+ * Get safety data for multiple carriers (with rate limiting)
+ * @param {Array<string|number>} dotNumbers - Array of DOT numbers
+ * @returns {Promise<Object>} - Map of DOT -> safety data
+ */
+export async function getMultipleCarriersSafetyData(dotNumbers) {
+  const results = {};
+
+  for (let i = 0; i < dotNumbers.length; i++) {
+    const dot = dotNumbers[i];
+
+    results[dot] = await getCarrierSafetyData(dot);
+
+    // Rate limiting delay (skip after last)
+    if (i < dotNumbers.length - 1) {
+      await sleep(CONFIG.requestDelayMs);
+    }
+  }
+
+  return results;
+}
+
+// ============================================================================
+// HELPER: BUILD SAFETY SUMMARY FOR DISPLAY
+// ============================================================================
+
+/**
+ * Generate a human-readable safety summary
+ * @param {Object} safetyData - Normalized safety data
+ * @returns {Object} - Display-ready summary
+ */
+export function buildSafetySummary(safetyData) {
+  if (!safetyData || safetyData.error) {
+    return {
+      rating_badge: '⚠️ UNKNOWN',
+      rating_color: 'gray',
+      summary_text: safetyData?.userMessage || 'Safety data unavailable. Check FMCSA SAFER directly.',
+      alerts: [],
+      positives: [],
+      fmcsa_link: `https://safer.fmcsa.dot.gov/query.asp?searchtype=ANY&query_type=queryCarrierSnapshot&query_param=USDOT&query_string=${safetyData?.dot_number || ''}`
+    };
+  }
+
+  const alerts = [];
+  const positives = [];
+
+  // Add stale data warning if applicable
+  if (safetyData.staleData) {
+    alerts.push('⚠️ Using cached data - live lookup temporarily unavailable');
+  }
+
+  // Rating assessment
+  let ratingBadge = '';
+  let ratingColor = '';
+
+  switch (safetyData.safety_rating) {
+    case 'SATISFACTORY':
+      ratingBadge = '✅ SATISFACTORY';
+      ratingColor = 'green';
+      positives.push('FMCSA Satisfactory safety rating');
+      break;
+    case 'CONDITIONAL':
+      ratingBadge = '⚠️ CONDITIONAL';
+      ratingColor = 'yellow';
+      alerts.push('FMCSA Conditional safety rating - review before applying');
+      break;
+    case 'UNSATISFACTORY':
+      ratingBadge = '❌ UNSATISFACTORY';
+      ratingColor = 'red';
+      alerts.push('FMCSA Unsatisfactory rating - serious safety concerns');
+      break;
+    default:
+      ratingBadge = '◯ NOT RATED';
+      ratingColor = 'gray';
+  }
+
+  // Authorization check
+  if (!safetyData.is_authorized) {
+    alerts.push('⚠️ Carrier is NOT AUTHORIZED to operate');
+    ratingColor = 'red';
+  }
+
+  // BASIC alerts
+  if (safetyData.has_basic_alerts) {
+    const alertBasics = Object.entries(safetyData.basics || {})
+      .filter(([_, data]) => data.alert)
+      .map(([name, _]) => name.replace(/_/g, ' '));
+
+    if (alertBasics.length > 0) {
+      alerts.push(`BASIC alerts: ${alertBasics.join(', ')}`);
+    }
+  }
+
+  // Inspection rates comparison
+  const insp = safetyData.inspections || {};
+  if (insp.driver_oos_rate !== null) {
+    if (insp.driver_oos_rate < insp.national_avg_driver_oos) {
+      positives.push(`Driver OOS rate ${insp.driver_oos_rate}% (better than ${insp.national_avg_driver_oos}% national avg)`);
+    } else if (insp.driver_oos_rate > insp.national_avg_driver_oos * 1.5) {
+      alerts.push(`High driver out-of-service rate: ${insp.driver_oos_rate}%`);
+    }
+  }
+
+  if (insp.vehicle_oos_rate !== null) {
+    if (insp.vehicle_oos_rate < insp.national_avg_vehicle_oos) {
+      positives.push(`Vehicle OOS rate ${insp.vehicle_oos_rate}% (better than ${insp.national_avg_vehicle_oos}% national avg)`);
+    } else if (insp.vehicle_oos_rate > insp.national_avg_vehicle_oos * 1.5) {
+      alerts.push(`High vehicle out-of-service rate: ${insp.vehicle_oos_rate}%`);
+    }
+  }
+
+  // Crash assessment
+  const crashes = safetyData.crashes || {};
+  if (crashes.fatal > 0) {
+    alerts.push(`${crashes.fatal} fatal crash(es) in past 24 months`);
+  }
+
+  // Build summary text
+  let summaryText = `${safetyData.legal_name} has a ${safetyData.safety_rating} safety rating from FMCSA.`;
+  if (safetyData.total_power_units > 0) {
+    summaryText += ` Fleet: ${safetyData.total_power_units} trucks, ${safetyData.total_drivers} drivers.`;
+  }
+
+  return {
+    rating_badge: ratingBadge,
+    rating_color: ratingColor,
+    summary_text: summaryText,
+    alerts: alerts,
+    positives: positives,
+    fmcsa_link: `https://safer.fmcsa.dot.gov/query.asp?searchtype=ANY&query_type=queryCarrierSnapshot&query_param=USDOT&query_string=${safetyData.dot_number}`
+  };
+}
+
+// ============================================================================
+// TEST FUNCTION
+// ============================================================================
+
+/**
+ * Test FMCSA API connection
+ */
+export async function testFmcsaConnection() {
+  try {
+    const webKey = await getSecret(CONFIG.secretName);
+    if (!webKey) {
+      return { success: false, error: 'FMCSA_WEB_KEY not found in Secrets Manager' };
+    }
+
+    // Check circuit breaker status
+    const circuitCheck = checkCircuit();
+    if (!circuitCheck.allowed) {
+      return {
+        success: false,
+        error: 'Circuit breaker is open',
+        circuitStatus: getCircuitStatus(),
+        rateLimitStatus: getRateLimitStatus()
+      };
+    }
+
+    // Test with a known DOT number (Werner Enterprises - large carrier)
+    const testDot = '133655';
+    const url = `${CONFIG.baseUrl}/carriers/${testDot}?webKey=${webKey}`;
+
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      },
+      null,
+      `/carriers/${testDot}`
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+      const carrierName = data.content?.carrier?.legalName || data.carrier?.legalName || 'Unknown';
+
+      return {
+        success: true,
+        message: `FMCSA API Connected Successfully`,
+        test_carrier: carrierName,
+        test_dot: testDot,
+        circuitStatus: getCircuitStatus(),
+        rateLimitStatus: getRateLimitStatus()
+      };
+    }
+
+    return {
+      success: false,
+      error: `API returned status ${response.status}`,
+      circuitStatus: getCircuitStatus(),
+      rateLimitStatus: getRateLimitStatus()
+    };
+
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+      circuitStatus: getCircuitStatus(),
+      rateLimitStatus: getRateLimitStatus()
+    };
+  }
+}

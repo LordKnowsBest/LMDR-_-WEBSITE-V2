@@ -1,0 +1,677 @@
+/**
+ * Carrier Admin Service - Backend functions for Admin Portal
+ * Handles carrier management, FMCSA data, enrichment status, and administrative operations
+ */
+
+import wixData from 'wix-data';
+import { currentMember } from 'wix-members-backend';
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const CONFIG = {
+    carriersCollection: 'Carriers',
+    safetyDataCollection: 'CarrierSafetyData',
+    enrichmentsCollection: 'CarrierEnrichments',
+    auditLogCollection: 'AdminAuditLog'
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+/**
+ * Check if current user has admin role
+ * @returns {Promise<boolean>}
+ */
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const memberRole = member.contactDetails?.customFields?.role || '';
+
+        return adminRoles.includes(memberRole.toLowerCase());
+    } catch (error) {
+        console.error('Admin check failed:', error);
+        return false;
+    }
+}
+
+/**
+ * Require admin access - throws if not authorized
+ */
+async function requireAdmin() {
+    const authorized = await isAdmin();
+    if (!authorized) {
+        throw new Error('Unauthorized: Admin access required');
+    }
+}
+
+// ============================================
+// CARRIER MANAGEMENT
+// ============================================
+
+/**
+ * Get paginated list of carriers with filters
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} - Carriers list with pagination info
+ */
+export async function getCarriersList(options = {}) {
+    await requireAdmin();
+
+    const {
+        filters = {},
+        page = 1,
+        pageSize = 25,
+        sortField = 'lastUpdated',
+        sortDirection = 'desc'
+    } = options;
+
+    try {
+        let query = wixData.query(CONFIG.carriersCollection);
+
+        // Apply search filter
+        if (filters.search) {
+            const searchTerm = filters.search.toLowerCase();
+            query = query.contains('legal_name', searchTerm)
+                .or(wixData.query(CONFIG.carriersCollection).contains('dot_number', searchTerm))
+                .or(wixData.query(CONFIG.carriersCollection).contains('phy_city', searchTerm));
+        }
+
+        // Apply status filter
+        if (filters.status && filters.status !== 'all') {
+            query = query.eq('status', filters.status);
+        }
+
+        // Apply fleet size filter
+        if (filters.fleetSize && filters.fleetSize !== 'all') {
+            switch (filters.fleetSize) {
+                case 'small':
+                    query = query.lt('nbr_power_unit', 50);
+                    break;
+                case 'medium':
+                    query = query.ge('nbr_power_unit', 50).lt('nbr_power_unit', 200);
+                    break;
+                case 'large':
+                    query = query.ge('nbr_power_unit', 200);
+                    break;
+            }
+        }
+
+        // Apply safety rating filter
+        if (filters.safetyRating && filters.safetyRating !== 'all') {
+            query = query.eq('safety_rating', filters.safetyRating);
+        }
+
+        // Apply state filter
+        if (filters.state && filters.state !== 'all') {
+            query = query.eq('phy_state', filters.state);
+        }
+
+        // Apply sorting
+        const sortFieldMap = {
+            name: 'legal_name',
+            fleetSize: 'nbr_power_unit',
+            lastUpdated: '_updatedDate',
+            safetyRating: 'safety_rating'
+        };
+        const dbSortField = sortFieldMap[sortField] || '_updatedDate';
+
+        if (sortDirection === 'asc') {
+            query = query.ascending(dbSortField);
+        } else {
+            query = query.descending(dbSortField);
+        }
+
+        // Apply pagination
+        const skip = (page - 1) * pageSize;
+        query = query.skip(skip).limit(pageSize);
+
+        // Execute query
+        const result = await query.find();
+
+        // Get total count
+        let countQuery = wixData.query(CONFIG.carriersCollection);
+        if (filters.status && filters.status !== 'all') {
+            countQuery = countQuery.eq('status', filters.status);
+        }
+        const countResult = await countQuery.count();
+
+        // Get enrichment status for these carriers
+        const dotNumbers = result.items.map(c => String(c.dot_number));
+        const enrichmentStatus = await getEnrichmentStatus(dotNumbers);
+
+        // Transform carriers for frontend
+        const carriers = result.items.map(carrier => ({
+            _id: carrier._id,
+            dotNumber: carrier.dot_number || '',
+            legalName: carrier.legal_name || carrier.title || 'Unknown',
+            dbaName: carrier.dba_name || null,
+            city: carrier.phy_city || '',
+            state: carrier.phy_state || '',
+            zip: carrier.phy_zip || '',
+            fleetSize: carrier.nbr_power_unit || 0,
+            driverCount: carrier.driver_total || 0,
+            status: carrier.status || 'active',
+            safetyRating: carrier.safety_rating || 'NOT RATED',
+            isAuthorized: carrier.is_authorized !== false,
+            enrichmentStatus: enrichmentStatus[carrier.dot_number] || 'none',
+            lastUpdated: carrier._updatedDate,
+            _createdDate: carrier._createdDate,
+            mcNumber: carrier.mc_number || null,
+            telephone: carrier.telephone || null,
+            operationType: carrier.operation_type || 'OTR'
+        }));
+
+        return {
+            carriers,
+            totalCount: countResult,
+            currentPage: page,
+            pageSize,
+            totalPages: Math.ceil(countResult / pageSize)
+        };
+
+    } catch (error) {
+        console.error('Error fetching carriers list:', error);
+        throw new Error('Failed to fetch carriers');
+    }
+}
+
+/**
+ * Get detailed carrier information
+ * @param {string} carrierId - Carrier ID
+ * @returns {Promise<Object>} - Carrier details
+ */
+export async function getCarrierDetail(carrierId) {
+    await requireAdmin();
+
+    try {
+        const carrier = await wixData.get(CONFIG.carriersCollection, carrierId);
+        if (!carrier) {
+            throw new Error('Carrier not found');
+        }
+
+        // Get safety data
+        let safetyData = null;
+        try {
+            const safetyResult = await wixData.query(CONFIG.safetyDataCollection)
+                .eq('dot_number', String(carrier.dot_number))
+                .find();
+            if (safetyResult.items.length > 0) {
+                safetyData = safetyResult.items[0];
+            }
+        } catch (e) {
+            console.warn('Could not fetch safety data:', e.message);
+        }
+
+        // Get enrichment data
+        let enrichment = null;
+        try {
+            const enrichmentResult = await wixData.query(CONFIG.enrichmentsCollection)
+                .eq('dot_number', String(carrier.dot_number))
+                .find();
+            if (enrichmentResult.items.length > 0) {
+                enrichment = enrichmentResult.items[0];
+            }
+        } catch (e) {
+            console.warn('Could not fetch enrichment:', e.message);
+        }
+
+        // Get match activity
+        const matchActivity = await wixData.query('MatchEvents')
+            .eq('carrier_dot', String(carrier.dot_number))
+            .descending('timestamp')
+            .limit(20)
+            .find();
+
+        // Get driver interests
+        const driverInterests = await wixData.query('DriverCarrierInterests')
+            .eq('carrier_dot', String(carrier.dot_number))
+            .descending('_createdDate')
+            .limit(20)
+            .find();
+
+        return {
+            ...carrier,
+            safetyData: safetyData ? {
+                safetyRating: safetyData.safety_rating,
+                isAuthorized: safetyData.is_authorized,
+                basics: typeof safetyData.basics === 'string' ? JSON.parse(safetyData.basics) : safetyData.basics,
+                inspections: typeof safetyData.inspections === 'string' ? JSON.parse(safetyData.inspections) : safetyData.inspections,
+                crashes: typeof safetyData.crashes === 'string' ? JSON.parse(safetyData.crashes) : safetyData.crashes,
+                lastFetched: safetyData.fetched_date
+            } : null,
+            enrichment: enrichment ? {
+                hasEnrichment: true,
+                enrichedDate: enrichment.enriched_date,
+                payInsights: enrichment.pay_insights,
+                driverSentiment: enrichment.driver_sentiment,
+                socialScore: enrichment.social_score,
+                cacheAge: enrichment.enriched_date
+                    ? Math.round((Date.now() - new Date(enrichment.enriched_date).getTime()) / (1000 * 60 * 60 * 24))
+                    : null
+            } : { hasEnrichment: false },
+            stats: {
+                totalMatches: matchActivity.totalCount,
+                recentMatches: matchActivity.items.length,
+                driverInterests: driverInterests.totalCount
+            },
+            matchActivity: matchActivity.items,
+            driverInterests: driverInterests.items
+        };
+
+    } catch (error) {
+        console.error('Error fetching carrier detail:', error);
+        throw new Error('Failed to fetch carrier details');
+    }
+}
+
+/**
+ * Update carrier status
+ * @param {string} carrierId - Carrier ID
+ * @param {string} status - New status
+ * @param {string} reason - Reason for status change
+ * @returns {Promise<Object>} - Updated carrier
+ */
+export async function updateCarrierStatus(carrierId, status, reason = '') {
+    await requireAdmin();
+
+    const validStatuses = ['active', 'inactive', 'suspended', 'pending_review'];
+    if (!validStatuses.includes(status)) {
+        throw new Error('Invalid status');
+    }
+
+    try {
+        const carrier = await wixData.get(CONFIG.carriersCollection, carrierId);
+        if (!carrier) {
+            throw new Error('Carrier not found');
+        }
+
+        const previousStatus = carrier.status;
+        carrier.status = status;
+        carrier.statusHistory = carrier.statusHistory || [];
+        carrier.statusHistory.push({
+            from: previousStatus,
+            to: status,
+            reason,
+            changedAt: new Date(),
+            changedBy: 'admin'
+        });
+
+        const updated = await wixData.update(CONFIG.carriersCollection, carrier);
+
+        // Log admin action
+        await logAdminAction('updateCarrierStatus', carrierId, {
+            dotNumber: carrier.dot_number,
+            previousStatus,
+            newStatus: status,
+            reason
+        });
+
+        return updated;
+
+    } catch (error) {
+        console.error('Error updating carrier status:', error);
+        throw new Error('Failed to update carrier status');
+    }
+}
+
+/**
+ * Flag carrier for review
+ * @param {string} carrierId - Carrier ID
+ * @param {string} reason - Flag reason
+ * @returns {Promise<Object>} - Updated carrier
+ */
+export async function flagCarrier(carrierId, reason = '') {
+    await requireAdmin();
+
+    try {
+        const carrier = await wixData.get(CONFIG.carriersCollection, carrierId);
+        if (!carrier) {
+            throw new Error('Carrier not found');
+        }
+
+        carrier.isFlagged = true;
+        carrier.flagReason = reason;
+        carrier.flaggedAt = new Date();
+        carrier.status = 'pending_review';
+
+        const updated = await wixData.update(CONFIG.carriersCollection, carrier);
+
+        await logAdminAction('flagCarrier', carrierId, {
+            dotNumber: carrier.dot_number,
+            reason
+        });
+
+        return updated;
+
+    } catch (error) {
+        console.error('Error flagging carrier:', error);
+        throw new Error('Failed to flag carrier');
+    }
+}
+
+/**
+ * Unflag carrier
+ * @param {string} carrierId - Carrier ID
+ * @returns {Promise<Object>} - Updated carrier
+ */
+export async function unflagCarrier(carrierId) {
+    await requireAdmin();
+
+    try {
+        const carrier = await wixData.get(CONFIG.carriersCollection, carrierId);
+        if (!carrier) {
+            throw new Error('Carrier not found');
+        }
+
+        carrier.isFlagged = false;
+        carrier.flagReason = null;
+        carrier.flaggedAt = null;
+        carrier.status = 'active';
+
+        const updated = await wixData.update(CONFIG.carriersCollection, carrier);
+
+        await logAdminAction('unflagCarrier', carrierId, {
+            dotNumber: carrier.dot_number
+        });
+
+        return updated;
+
+    } catch (error) {
+        console.error('Error unflagging carrier:', error);
+        throw new Error('Failed to unflag carrier');
+    }
+}
+
+/**
+ * Trigger enrichment refresh for carrier
+ * @param {string} carrierId - Carrier ID
+ * @returns {Promise<Object>} - Result
+ */
+export async function refreshCarrierEnrichment(carrierId) {
+    await requireAdmin();
+
+    try {
+        const carrier = await wixData.get(CONFIG.carriersCollection, carrierId);
+        if (!carrier) {
+            throw new Error('Carrier not found');
+        }
+
+        // Clear existing enrichment cache
+        const enrichmentResult = await wixData.query(CONFIG.enrichmentsCollection)
+            .eq('dot_number', String(carrier.dot_number))
+            .find();
+
+        if (enrichmentResult.items.length > 0) {
+            await wixData.remove(CONFIG.enrichmentsCollection, enrichmentResult.items[0]._id);
+        }
+
+        await logAdminAction('refreshEnrichment', carrierId, {
+            dotNumber: carrier.dot_number
+        });
+
+        return {
+            success: true,
+            message: 'Enrichment cache cleared. New enrichment will be fetched on next match.'
+        };
+
+    } catch (error) {
+        console.error('Error refreshing enrichment:', error);
+        throw new Error('Failed to refresh enrichment');
+    }
+}
+
+/**
+ * Bulk update carrier statuses
+ * @param {string[]} carrierIds - Array of carrier IDs
+ * @param {string} action - Action to perform
+ * @returns {Promise<Object>} - Result summary
+ */
+export async function bulkUpdateCarriers(carrierIds, action) {
+    await requireAdmin();
+
+    const results = { success: 0, failed: 0, errors: [] };
+
+    for (const carrierId of carrierIds) {
+        try {
+            switch (action) {
+                case 'activate':
+                    await updateCarrierStatus(carrierId, 'active', 'Bulk activation');
+                    break;
+                case 'deactivate':
+                    await updateCarrierStatus(carrierId, 'inactive', 'Bulk deactivation');
+                    break;
+                case 'flag':
+                    await flagCarrier(carrierId, 'Bulk flagged for review');
+                    break;
+                case 'unflag':
+                    await unflagCarrier(carrierId);
+                    break;
+                case 'refreshEnrichment':
+                    await refreshCarrierEnrichment(carrierId);
+                    break;
+                default:
+                    throw new Error('Invalid action');
+            }
+            results.success++;
+        } catch (error) {
+            results.failed++;
+            results.errors.push({ carrierId, error: error.message });
+        }
+    }
+
+    return results;
+}
+
+// ============================================
+// ANALYTICS & STATS
+// ============================================
+
+/**
+ * Get carrier statistics for dashboard
+ * @returns {Promise<Object>} - Stats object
+ */
+export async function getCarrierStats() {
+    await requireAdmin();
+
+    try {
+        // Total carriers
+        const totalResult = await wixData.query(CONFIG.carriersCollection).count();
+
+        // Active carriers
+        const activeResult = await wixData.query(CONFIG.carriersCollection)
+            .eq('status', 'active')
+            .count();
+
+        // Flagged for review
+        const flaggedResult = await wixData.query(CONFIG.carriersCollection)
+            .eq('isFlagged', true)
+            .count();
+
+        // Enriched carriers (have enrichment data)
+        const enrichedResult = await wixData.query(CONFIG.enrichmentsCollection).count();
+
+        // Fleet size breakdown
+        const smallFleet = await wixData.query(CONFIG.carriersCollection)
+            .lt('nbr_power_unit', 50)
+            .count();
+        const mediumFleet = await wixData.query(CONFIG.carriersCollection)
+            .ge('nbr_power_unit', 50)
+            .lt('nbr_power_unit', 200)
+            .count();
+        const largeFleet = await wixData.query(CONFIG.carriersCollection)
+            .ge('nbr_power_unit', 200)
+            .count();
+
+        // New this week
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        const newThisWeek = await wixData.query(CONFIG.carriersCollection)
+            .ge('_createdDate', weekAgo)
+            .count();
+
+        return {
+            total: totalResult,
+            active: activeResult,
+            activePercent: totalResult > 0 ? Math.round((activeResult / totalResult) * 100) : 0,
+            flagged: flaggedResult,
+            enriched: enrichedResult,
+            enrichedPercent: totalResult > 0 ? Math.round((enrichedResult / totalResult) * 100) : 0,
+            fleetBreakdown: {
+                small: smallFleet,
+                medium: mediumFleet,
+                large: largeFleet
+            },
+            newThisWeek
+        };
+
+    } catch (error) {
+        console.error('Error fetching carrier stats:', error);
+        throw new Error('Failed to fetch stats');
+    }
+}
+
+/**
+ * Get state distribution for carriers
+ * @returns {Promise<Array>} - State counts
+ */
+export async function getStateDistribution() {
+    await requireAdmin();
+
+    try {
+        const result = await wixData.query(CONFIG.carriersCollection)
+            .limit(1000)
+            .find();
+
+        const stateCounts = {};
+        for (const carrier of result.items) {
+            const state = carrier.phy_state || 'Unknown';
+            stateCounts[state] = (stateCounts[state] || 0) + 1;
+        }
+
+        return Object.entries(stateCounts)
+            .map(([state, count]) => ({ state, count }))
+            .sort((a, b) => b.count - a.count);
+
+    } catch (error) {
+        console.error('Error fetching state distribution:', error);
+        throw new Error('Failed to fetch state distribution');
+    }
+}
+
+// ============================================
+// EXPORT
+// ============================================
+
+/**
+ * Export carriers to CSV format
+ * @param {Object} filters - Filter options
+ * @returns {Promise<string>} - CSV string
+ */
+export async function exportCarriersCSV(filters = {}) {
+    await requireAdmin();
+
+    try {
+        let query = wixData.query(CONFIG.carriersCollection);
+
+        if (filters.status && filters.status !== 'all') {
+            query = query.eq('status', filters.status);
+        }
+        if (filters.state && filters.state !== 'all') {
+            query = query.eq('phy_state', filters.state);
+        }
+
+        const result = await query.limit(1000).find();
+
+        // Generate CSV
+        const headers = ['DOT Number', 'Legal Name', 'DBA', 'City', 'State', 'Fleet Size', 'Drivers', 'Safety Rating', 'Status', 'MC Number', 'Phone'];
+        const rows = result.items.map(c => [
+            c.dot_number || '',
+            c.legal_name || '',
+            c.dba_name || '',
+            c.phy_city || '',
+            c.phy_state || '',
+            c.nbr_power_unit || 0,
+            c.driver_total || 0,
+            c.safety_rating || 'NOT RATED',
+            c.status || 'active',
+            c.mc_number || '',
+            c.telephone || ''
+        ]);
+
+        const csv = [
+            headers.join(','),
+            ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+        ].join('\n');
+
+        return csv;
+
+    } catch (error) {
+        console.error('Error exporting carriers:', error);
+        throw new Error('Failed to export carriers');
+    }
+}
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Get enrichment status for multiple carriers
+ */
+async function getEnrichmentStatus(dotNumbers) {
+    if (!dotNumbers || dotNumbers.length === 0) return {};
+
+    try {
+        const result = await wixData.query(CONFIG.enrichmentsCollection)
+            .hasSome('dot_number', dotNumbers)
+            .find();
+
+        const statusMap = {};
+        const now = Date.now();
+
+        for (const enrichment of result.items) {
+            const enrichedDate = enrichment.enriched_date ? new Date(enrichment.enriched_date) : null;
+            const daysSince = enrichedDate ? (now - enrichedDate.getTime()) / (1000 * 60 * 60 * 24) : 999;
+
+            if (daysSince <= 7) {
+                statusMap[enrichment.dot_number] = 'fresh';
+            } else if (daysSince <= 14) {
+                statusMap[enrichment.dot_number] = 'stale';
+            } else {
+                statusMap[enrichment.dot_number] = 'expired';
+            }
+        }
+
+        return statusMap;
+
+    } catch (error) {
+        console.error('Error getting enrichment status:', error);
+        return {};
+    }
+}
+
+/**
+ * Log admin action for audit trail
+ */
+async function logAdminAction(action, targetId, details = {}) {
+    try {
+        const member = await currentMember.getMember();
+
+        await wixData.insert(CONFIG.auditLogCollection, {
+            action,
+            targetType: 'carrier',
+            targetId,
+            details,
+            adminId: member?._id || 'system',
+            adminEmail: member?.loginEmail || 'system',
+            timestamp: new Date()
+        }, { suppressAuth: true });
+    } catch (error) {
+        console.error('Failed to log admin action:', error);
+    }
+}

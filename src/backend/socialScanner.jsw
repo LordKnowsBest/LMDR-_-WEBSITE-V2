@@ -1,0 +1,579 @@
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import { log, logAIOperation } from 'backend/observabilityService';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  perplexityModel: 'sonar-pro', // The "Smart" model (slower but deeper)
+  perplexityEndpoint: 'https://api.perplexity.ai/chat/completions',
+  perplexitySecret: 'PERPLEXITY_API_KEY',
+  timeout: {
+    requestMs: 45000 // 45 seconds (Only run this in background jobs!)
+  },
+  retry: {
+    maxAttempts: 3,
+    baseDelayMs: 1000,
+    maxDelayMs: 8000,
+    retryableStatuses: [429, 500, 502, 503, 504]
+  },
+  circuitBreaker: {
+    failureThreshold: 5,
+    resetTimeoutMs: 60000,
+    halfOpenMaxAttempts: 2
+  },
+  rateLimit: {
+    maxRequestsPerMinute: 10,
+    windowMs: 60000
+  }
+};
+
+// ============================================================================
+// USER-FRIENDLY ERROR MESSAGES
+// ============================================================================
+
+const ERROR_MESSAGES = {
+  RATE_LIMITED: "Social scanning is temporarily limited. Please try again shortly.",
+  SERVICE_UNAVAILABLE: "Social scanning service is temporarily unavailable.",
+  TIMEOUT: "Social scan took too long. Please try again.",
+  CIRCUIT_OPEN: "Social scanning is paused due to service issues. Will retry automatically.",
+  API_ERROR: "We encountered a temporary issue with social scanning. Please try again.",
+  NETWORK_ERROR: "Network error during social scan. Please check your connection."
+};
+
+// ============================================================================
+// CIRCUIT BREAKER STATE
+// ============================================================================
+
+/**
+ * Circuit breaker state tracking
+ * States: CLOSED (normal), OPEN (blocking), HALF_OPEN (testing recovery)
+ */
+let circuitState = {
+  status: 'CLOSED',
+  failures: 0,
+  lastFailureTime: null,
+  halfOpenAttempts: 0,
+  openedAt: null
+};
+
+// ============================================================================
+// RATE LIMITING STATE
+// ============================================================================
+
+/**
+ * Request timestamps for rate limiting
+ * In production, this would be stored in Redis/database for distributed systems
+ */
+let requestTimestamps = [];
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Promise-based delay
+ * @param {number} ms - Milliseconds to sleep
+ * @returns {Promise<void>}
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Check if circuit breaker allows requests
+ * @returns {{ allowed: boolean, reason?: string, retryAfterMs?: number }}
+ */
+function checkCircuit() {
+  const now = Date.now();
+
+  switch (circuitState.status) {
+    case 'CLOSED':
+      return { allowed: true };
+
+    case 'OPEN':
+      // Check if recovery timeout has elapsed
+      const timeSinceOpened = now - circuitState.openedAt;
+      if (timeSinceOpened >= CONFIG.circuitBreaker.resetTimeoutMs) {
+        // Transition to HALF_OPEN to test recovery
+        circuitState.status = 'HALF_OPEN';
+        circuitState.halfOpenAttempts = 0;
+        console.log('🔄 Social Scanner Circuit: OPEN -> HALF_OPEN (testing recovery)');
+        return { allowed: true };
+      }
+      // Still in cooldown period
+      const retryAfterMs = CONFIG.circuitBreaker.resetTimeoutMs - timeSinceOpened;
+      return {
+        allowed: false,
+        reason: 'Circuit breaker is OPEN due to repeated failures',
+        retryAfterMs
+      };
+
+    case 'HALF_OPEN':
+      // Allow limited requests to test if service has recovered
+      if (circuitState.halfOpenAttempts < CONFIG.circuitBreaker.halfOpenMaxAttempts) {
+        return { allowed: true };
+      }
+      return {
+        allowed: false,
+        reason: 'Circuit breaker HALF_OPEN max attempts reached',
+        retryAfterMs: 5000
+      };
+
+    default:
+      return { allowed: true };
+  }
+}
+
+/**
+ * Record a successful request - handles HALF_OPEN -> CLOSED transition
+ */
+function recordSuccess() {
+  if (circuitState.status === 'HALF_OPEN') {
+    circuitState.halfOpenAttempts++;
+    console.log(`✅ Social Scanner Circuit: Success in HALF_OPEN (${circuitState.halfOpenAttempts}/${CONFIG.circuitBreaker.halfOpenMaxAttempts})`);
+
+    if (circuitState.halfOpenAttempts >= CONFIG.circuitBreaker.halfOpenMaxAttempts) {
+      // Service has recovered - close circuit
+      circuitState.status = 'CLOSED';
+      circuitState.failures = 0;
+      circuitState.halfOpenAttempts = 0;
+      circuitState.openedAt = null;
+      console.log('✅ Social Scanner Circuit: HALF_OPEN -> CLOSED (service recovered)');
+    }
+  } else if (circuitState.status === 'CLOSED') {
+    // Decay failure count on success
+    if (circuitState.failures > 0) {
+      circuitState.failures = Math.max(0, circuitState.failures - 1);
+    }
+  }
+}
+
+/**
+ * Record a failed request - handles CLOSED -> OPEN transition
+ */
+function recordFailure() {
+  const now = Date.now();
+  circuitState.lastFailureTime = now;
+
+  if (circuitState.status === 'HALF_OPEN') {
+    // Failure during recovery test - reopen circuit
+    circuitState.status = 'OPEN';
+    circuitState.openedAt = now;
+    circuitState.halfOpenAttempts = 0;
+    console.log('❌ Social Scanner Circuit: HALF_OPEN -> OPEN (recovery failed)');
+  } else if (circuitState.status === 'CLOSED') {
+    circuitState.failures++;
+    console.log(`⚠️ Social Scanner Circuit: Failure recorded (${circuitState.failures}/${CONFIG.circuitBreaker.failureThreshold})`);
+
+    if (circuitState.failures >= CONFIG.circuitBreaker.failureThreshold) {
+      // Too many failures - open circuit
+      circuitState.status = 'OPEN';
+      circuitState.openedAt = now;
+      console.log('🔴 Social Scanner Circuit: CLOSED -> OPEN (threshold exceeded)');
+    }
+  }
+}
+
+/**
+ * Check if request is within rate limits
+ * @returns {{ allowed: boolean, remaining: number, retryAfterMs?: number }}
+ */
+function checkRateLimit() {
+  const now = Date.now();
+  const windowStart = now - CONFIG.rateLimit.windowMs;
+
+  // Clean up old timestamps outside the window
+  requestTimestamps = requestTimestamps.filter(timestamp => timestamp > windowStart);
+
+  // Check if at limit
+  if (requestTimestamps.length >= CONFIG.rateLimit.maxRequestsPerMinute) {
+    // Find the oldest request in the window to calculate retry time
+    const oldestRequest = Math.min(...requestTimestamps);
+    const retryAfterMs = (oldestRequest + CONFIG.rateLimit.windowMs) - now;
+
+    return {
+      allowed: false,
+      remaining: 0,
+      retryAfterMs: Math.max(0, retryAfterMs)
+    };
+  }
+
+  // Record this request
+  requestTimestamps.push(now);
+
+  return {
+    allowed: true,
+    remaining: CONFIG.rateLimit.maxRequestsPerMinute - requestTimestamps.length
+  };
+}
+
+/**
+ * Fetch with retry logic, exponential backoff, and timeout
+ * @param {string} url - URL to fetch
+ * @param {Object} options - Fetch options
+ * @param {string} traceId - Trace ID for logging
+ * @returns {Promise<Response>}
+ */
+async function fetchWithRetry(url, options, traceId = null) {
+  let lastError;
+
+  for (let attempt = 0; attempt < CONFIG.retry.maxAttempts; attempt++) {
+    try {
+      // Create timeout promise
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('REQUEST_TIMEOUT')), CONFIG.timeout.requestMs);
+      });
+
+      // Race fetch against timeout
+      const response = await Promise.race([
+        fetch(url, options),
+        timeoutPromise
+      ]);
+
+      // Success - return response
+      if (response.ok) {
+        return response;
+      }
+
+      // Check if error is retryable
+      if (CONFIG.retry.retryableStatuses.includes(response.status)) {
+        const delay = Math.min(
+          CONFIG.retry.baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000,
+          CONFIG.retry.maxDelayMs
+        );
+        console.log(`⚠️ Perplexity API returned ${response.status}, retry ${attempt + 1}/${CONFIG.retry.maxAttempts} in ${Math.round(delay)}ms`);
+        await log({
+          level: 'WARN',
+          source: 'social-scanner',
+          message: `Perplexity API returned ${response.status}, retrying`,
+          traceId,
+          details: { status: response.status, attempt: attempt + 1, delayMs: Math.round(delay) }
+        });
+        await sleep(delay);
+        lastError = new Error(`API returned ${response.status}`);
+        continue;
+      }
+
+      // Non-retryable status - return as-is for caller to handle
+      return response;
+
+    } catch (error) {
+      if (error.message === 'REQUEST_TIMEOUT') {
+        console.log(`⚠️ Request timed out, retry ${attempt + 1}/${CONFIG.retry.maxAttempts}`);
+        await log({
+          level: 'WARN',
+          source: 'social-scanner',
+          message: 'Request timed out',
+          traceId,
+          details: { attempt: attempt + 1, timeoutMs: CONFIG.timeout.requestMs }
+        });
+        lastError = new Error('Request timed out');
+
+        // Add delay before retry on timeout
+        if (attempt < CONFIG.retry.maxAttempts - 1) {
+          const delay = CONFIG.retry.baseDelayMs * Math.pow(2, attempt);
+          await sleep(delay);
+        }
+        continue;
+      }
+      // Network error or other - could be transient, retry with backoff
+      console.log(`⚠️ Network error: ${error.message}, retry ${attempt + 1}/${CONFIG.retry.maxAttempts}`);
+      lastError = error;
+
+      if (attempt < CONFIG.retry.maxAttempts - 1) {
+        const delay = CONFIG.retry.baseDelayMs * Math.pow(2, attempt);
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw lastError || new Error('Max retries exceeded');
+}
+
+// ============================================================================
+// MAIN SOCIAL SCANNING FUNCTION
+// ============================================================================
+
+/**
+ * Scan social media for carrier intelligence
+ * Production-ready with timeout, retry, circuit breaker, and rate limiting
+ *
+ * @param {string} carrierName - Name of the carrier to scan
+ * @param {string} dotNumber - DOT number for the carrier
+ * @param {string} [traceId] - Optional trace ID for observability
+ * @returns {Promise<string|null>} Raw intelligence text or null on failure
+ */
+export async function scanSocialMedia(carrierName, dotNumber, traceId = null) {
+  const startTime = Date.now();
+  console.log(`🕵️ SOCIAL SNIPER: Scanning chatter for ${carrierName}...`);
+  await log({
+    level: 'INFO',
+    source: 'social-scanner',
+    message: `Starting social scan for ${carrierName} (DOT ${dotNumber})`,
+    traceId,
+    details: { carrierName, dotNumber }
+  });
+
+  // 1. Check rate limit first
+  const rateCheck = checkRateLimit();
+  if (!rateCheck.allowed) {
+    console.log(`⛔ Social Scanner: Rate limit exceeded`);
+    await log({
+      level: 'WARN',
+      source: 'social-scanner',
+      message: 'Rate limit exceeded for social scanning',
+      traceId,
+      details: { retryAfterMs: rateCheck.retryAfterMs, carrierName }
+    });
+    return null;
+  }
+
+  // 2. Check circuit breaker
+  const circuitCheck = checkCircuit();
+  if (!circuitCheck.allowed) {
+    console.log(`🔴 Social Scanner: Circuit breaker blocking - ${circuitCheck.reason}`);
+    await log({
+      level: 'WARN',
+      source: 'social-scanner',
+      message: 'Circuit breaker open for social scanning',
+      traceId,
+      details: { reason: circuitCheck.reason, retryAfterMs: circuitCheck.retryAfterMs, carrierName }
+    });
+    return null;
+  }
+
+  try {
+    const apiKey = await getSecret(CONFIG.perplexitySecret);
+
+    // THE "SNIPER" PROMPT
+    // We explicitly target Reddit, TruckersReport, and X using "site:" operators
+    // This mimics an "Agent" without the overhead of building one.
+    const query = `
+      Search site:reddit.com OR site:thetruckersreport.com OR site:twitter.com OR site:facebook.com
+      for "working at ${carrierName}" OR "${carrierName} driver reviews" OR "DOT ${dotNumber} reviews".
+
+      Focus on:
+      1. Recent complaints (2024-2025)
+      2. Pay transparency (actual CPM mentioned by drivers)
+      3. Equipment quality rumors
+      4. "Stay away" warnings
+
+      Ignore generic job postings. Look for REAL human discussion.
+    `;
+
+    // Use fetchWithRetry with timeout protection
+    const response = await fetchWithRetry(CONFIG.perplexityEndpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: CONFIG.perplexityModel,
+        messages: [
+          {
+            role: "system",
+            content: "You are a specialized Social Media Analyst. You summarize unstructured driver chatter into actionable intelligence. Be skeptical and blunt."
+          },
+          {
+            role: "user",
+            content: query
+          }
+        ],
+        max_tokens: 800,
+        temperature: 0.1 // Low temperature = stick to facts found
+      })
+    }, traceId);
+
+    const latencyMs = Date.now() - startTime;
+
+    if (!response.ok) {
+      await logAIOperation({
+        source: 'social-scanner',
+        operation: 'social-scan',
+        functionId: 'scanSocialMedia',
+        provider: 'perplexity',
+        model: CONFIG.perplexityModel,
+        latencyMs,
+        error: `HTTP ${response.status}`,
+        traceId
+      });
+      recordFailure();
+      throw new Error(`API Error: ${response.status}`);
+    }
+
+    const result = await response.json();
+    const rawIntel = result.choices?.[0]?.message?.content || 'No chatter found.';
+    const usage = result.usage || {};
+
+    console.log(`✅ SOCIAL SNIPER: Found intel for ${carrierName}`);
+
+    // Record success for circuit breaker
+    recordSuccess();
+
+    // Log successful AI operation
+    await logAIOperation({
+      source: 'social-scanner',
+      operation: 'social-scan',
+      functionId: 'scanSocialMedia',
+      provider: 'perplexity',
+      model: CONFIG.perplexityModel,
+      inputTokens: usage.prompt_tokens,
+      outputTokens: usage.completion_tokens,
+      totalTokens: usage.total_tokens,
+      latencyMs,
+      traceId
+    });
+
+    await log({
+      level: 'INFO',
+      source: 'social-scanner',
+      message: `Social scan completed successfully for ${carrierName}`,
+      traceId,
+      details: { carrierName, dotNumber, latencyMs, tokensUsed: usage.total_tokens }
+    });
+
+    return rawIntel;
+
+  } catch (error) {
+    const latencyMs = Date.now() - startTime;
+    console.error(`❌ SOCIAL SNIPER FAILED: ${error.message}`);
+
+    // Record failure for circuit breaker
+    recordFailure();
+
+    // Determine user-friendly error message
+    let userMessage = ERROR_MESSAGES.API_ERROR;
+    if (error.message === 'Request timed out' || error.message === 'REQUEST_TIMEOUT') {
+      userMessage = ERROR_MESSAGES.TIMEOUT;
+    } else if (error.message.includes('429')) {
+      userMessage = ERROR_MESSAGES.RATE_LIMITED;
+    } else if (error.message.includes('network') || error.message.includes('Network')) {
+      userMessage = ERROR_MESSAGES.NETWORK_ERROR;
+    }
+
+    await log({
+      level: 'ERROR',
+      source: 'social-scanner',
+      message: `Social scan failed for ${carrierName}`,
+      traceId,
+      details: { error: error.message, latencyMs, userMessage, carrierName, dotNumber }
+    });
+
+    return null; // Fail gracefully
+  }
+}
+
+// ============================================================================
+// MONITORING / STATUS FUNCTIONS
+// ============================================================================
+
+/**
+ * Get current circuit breaker status for monitoring
+ * @returns {Object} Circuit breaker state information
+ */
+export function getCircuitStatus() {
+  const now = Date.now();
+  let timeUntilReset = null;
+
+  if (circuitState.status === 'OPEN' && circuitState.openedAt) {
+    const elapsed = now - circuitState.openedAt;
+    timeUntilReset = Math.max(0, CONFIG.circuitBreaker.resetTimeoutMs - elapsed);
+  }
+
+  return {
+    status: circuitState.status,
+    failures: circuitState.failures,
+    lastFailureTime: circuitState.lastFailureTime,
+    halfOpenAttempts: circuitState.halfOpenAttempts,
+    openedAt: circuitState.openedAt,
+    timeUntilResetMs: timeUntilReset,
+    config: {
+      failureThreshold: CONFIG.circuitBreaker.failureThreshold,
+      resetTimeoutMs: CONFIG.circuitBreaker.resetTimeoutMs,
+      halfOpenMaxAttempts: CONFIG.circuitBreaker.halfOpenMaxAttempts
+    }
+  };
+}
+
+/**
+ * Get current rate limit status for monitoring
+ * @returns {Object} Rate limit state information
+ */
+export function getRateLimitStatus() {
+  const now = Date.now();
+  const windowStart = now - CONFIG.rateLimit.windowMs;
+
+  // Count requests in current window
+  const recentRequests = requestTimestamps.filter(timestamp => timestamp > windowStart);
+
+  let retryAfterMs = null;
+  if (recentRequests.length >= CONFIG.rateLimit.maxRequestsPerMinute && recentRequests.length > 0) {
+    const oldestRequest = Math.min(...recentRequests);
+    retryAfterMs = Math.max(0, (oldestRequest + CONFIG.rateLimit.windowMs) - now);
+  }
+
+  return {
+    requestsInWindow: recentRequests.length,
+    remaining: Math.max(0, CONFIG.rateLimit.maxRequestsPerMinute - recentRequests.length),
+    retryAfterMs,
+    config: {
+      maxRequestsPerMinute: CONFIG.rateLimit.maxRequestsPerMinute,
+      windowMs: CONFIG.rateLimit.windowMs
+    }
+  };
+}
+
+/**
+ * Get combined service health status
+ * @returns {Object} Overall service health information
+ */
+export function getServiceHealth() {
+  const circuit = getCircuitStatus();
+  const rateLimit = getRateLimitStatus();
+
+  let healthStatus = 'HEALTHY';
+  let issues = [];
+
+  if (circuit.status === 'OPEN') {
+    healthStatus = 'DEGRADED';
+    issues.push('Circuit breaker is OPEN due to repeated failures');
+  } else if (circuit.status === 'HALF_OPEN') {
+    healthStatus = 'RECOVERING';
+    issues.push('Circuit breaker is testing service recovery');
+  }
+
+  if (rateLimit.remaining === 0) {
+    if (healthStatus === 'HEALTHY') {
+      healthStatus = 'THROTTLED';
+    }
+    issues.push('Rate limit exhausted');
+  }
+
+  return {
+    status: healthStatus,
+    issues,
+    circuit,
+    rateLimit,
+    timestamp: new Date().toISOString()
+  };
+}
+
+/**
+ * Reset circuit breaker state (for testing/admin purposes)
+ * Should only be called by authorized admin functions
+ */
+export function resetCircuitBreaker() {
+  circuitState = {
+    status: 'CLOSED',
+    failures: 0,
+    lastFailureTime: null,
+    halfOpenAttempts: 0,
+    openedAt: null
+  };
+  console.log('🔧 Social Scanner Circuit: Manually reset to CLOSED');
+  return { success: true, message: 'Circuit breaker reset to CLOSED state' };
+}

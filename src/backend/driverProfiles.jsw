@@ -1,0 +1,920 @@
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { mediaManager } from 'wix-media-backend';
+import { extractInfoFromDocument } from 'backend/ocrService.jsw';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  profilesCollection: 'DriverProfiles',
+  interestsCollection: 'DriverCarrierInterests',
+  mediaFolder: '/driver-documents',
+  
+  // Profile Status Values
+  STATUS: {
+    ACTIVE: 'active',
+    INCOMPLETE: 'incomplete',
+    DORMANT: 'dormant'
+  },
+  
+  // Completeness scoring weights
+  COMPLETENESS_WEIGHTS: {
+    display_name: 10,
+    email: 10,
+    phone: 5,
+    home_zip: 15,
+    preferred_operation_type: 10,
+    min_cpm: 10,
+    years_experience: 10,
+    cdl_class: 10,
+    endorsements: 5,
+    clean_mvr: 5,
+    accidents_last_3_years: 5,
+    violations_last_3_years: 5
+  }
+};
+
+// ============================================================================
+// DOCUMENT UPLOAD HELPERS (Phase 4H)
+// ============================================================================
+
+/**
+ * Upload base64 encoded file to Wix Media Manager
+ * 
+ * @param {Object} fileObj { data: base64, name: string, type: string }
+ * @param {string} userId
+ * @returns {Promise<string>} File URL
+ */
+async function uploadToMediaManager(fileObj, userId) {
+    if (!fileObj || !fileObj.data) return null;
+
+    try {
+        // Strip base64 prefix if present
+        const base64Content = fileObj.data.split(';base64,').pop();
+        const buffer = Buffer.from(base64Content, 'base64');
+
+        // Define path in media manager: /driver-documents/{userId}/{filename}
+        const fileName = `${Date.now()}_${fileObj.name.replace(/\s+/g, '_')}`;
+        const filePath = `${CONFIG.mediaFolder}/${userId}`;
+
+        // Determine mediaType based on file mime type
+        // Wix requires 'image' for images, 'document' for PDFs/docs
+        const mimeType = fileObj.type || 'application/octet-stream';
+        let mediaType = 'document';
+        if (mimeType.startsWith('image/')) {
+            mediaType = 'image';
+        } else if (mimeType.startsWith('video/')) {
+            mediaType = 'video';
+        } else if (mimeType.startsWith('audio/')) {
+            mediaType = 'audio';
+        }
+
+        console.log(`📤 Uploading ${fileName} as ${mediaType} (${mimeType})`);
+
+        const uploadResult = await mediaManager.upload(
+            filePath,
+            buffer,
+            fileName,
+            {
+                mediaOptions: {
+                    mimeType: mimeType,
+                    mediaType: mediaType
+                },
+                metadataOptions: {
+                    isPrivate: false,
+                    isVisitorUpload: false
+                }
+            }
+        );
+
+        console.log(`✅ Uploaded: ${uploadResult.fileUrl}`);
+        return uploadResult.fileUrl;
+    } catch (error) {
+        console.error('❌ Media upload error:', error);
+        throw new Error('Failed to upload document to Media Manager');
+    }
+}
+
+// ============================================================================
+// PROFILE RETRIEVAL
+// ============================================================================
+
+/**
+ * Get or create a driver profile for the current logged-in user
+ * This is the main entry point for driver identity
+ * 
+ * @returns {Promise<Object>} Driver profile with computed fields
+ */
+export async function getOrCreateDriverProfile() {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      return { 
+        success: false, 
+        error: 'User not logged in',
+        profile: null 
+      };
+    }
+    
+    const userId = currentUser.id;
+    console.log(`👤 Getting profile for user: ${userId}`);
+    
+    // Check for existing profile
+    const existingProfile = await getProfileByUserId(userId);
+    
+    if (existingProfile) {
+      console.log(`✅ Found existing profile for user ${userId}`);
+      return {
+        success: true,
+        profile: enrichProfile(existingProfile),
+        isNew: false
+      };
+    }
+    
+    // Create new profile for first-time user
+    console.log(`📝 Creating new profile for user ${userId}`);
+    const newProfile = await createNewProfile(userId, currentUser);
+    
+    return {
+      success: true,
+      profile: enrichProfile(newProfile),
+      isNew: true
+    };
+    
+  } catch (error) {
+    console.error('❌ Error in getOrCreateDriverProfile:', error);
+    return {
+      success: false,
+      error: error.message,
+      profile: null
+    };
+  }
+}
+
+/**
+ * Get profile by Wix user ID
+ */
+async function getProfileByUserId(userId) {
+  try {
+    const result = await wixData.query(CONFIG.profilesCollection)
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+    
+    return result.items.length > 0 ? result.items[0] : null;
+  } catch (error) {
+    console.error('Profile lookup error:', error);
+    return null;
+  }
+}
+
+/**
+ * Get profile by profile ID (for admin/internal use)
+ */
+export async function getProfileById(profileId) {
+  try {
+    const result = await wixData.get(CONFIG.profilesCollection, profileId, { suppressAuth: true });
+    return result ? enrichProfile(result) : null;
+  } catch (error) {
+    console.error('Profile get error:', error);
+    return null;
+  }
+}
+
+// ============================================================================
+// PROFILE CREATION
+// ============================================================================
+
+/**
+ * Create a new driver profile for a user
+ */
+async function createNewProfile(userId, userObject) {
+  let userEmail = '';
+  
+  try {
+    userEmail = await userObject.getEmail();
+  } catch (e) {
+    console.log('Could not retrieve user email');
+  }
+  
+  const now = new Date();
+  
+  const profileData = {
+    // Identity - linked to Wix user via _owner system field
+    display_name: '',
+    email: userEmail,
+    phone: '',
+    
+    // Preferences - empty until first search
+    home_zip: '',
+    max_commute_miles: 50,
+    min_cpm: 0.50,
+    preferred_operation_type: 'no_preference',
+    max_turnover_percent: 90,
+    max_truck_age_years: 5,
+    fleet_size_preference: 'no_preference',
+    
+    // Qualifications - for future reverse matching
+    years_experience: null,
+    cdl_class: '',
+    endorsements: [],
+    clean_mvr: null,
+    accidents_last_3_years: null,
+    violations_last_3_years: null,
+    
+    // Persistent Documents (Phase 4C) - Image fields
+    cdl_front_image: null,
+    cdl_back_image: null,
+    med_card_image: null,
+    resume_file: null,
+    
+    // Engagement tracking
+    last_search_date: null,
+    total_searches: 0,
+    profile_completeness_score: 0,
+    
+    // Status
+    profile_status: CONFIG.STATUS.INCOMPLETE,
+    is_discoverable: false, // Opt-in privacy model
+    
+    // Timestamps
+    created_date: now,
+    updated_date: now
+  };
+  
+  const options = { suppressAuth: true };
+  const inserted = await wixData.insert(CONFIG.profilesCollection, profileData, options);
+  
+  console.log(`✅ Created new profile with ID: ${inserted._id}`);
+  return inserted;
+}
+
+// ============================================================================
+// PROFILE UPDATES
+// ============================================================================
+
+/**
+ * Update driver preferences (from search form)
+ * Called every time a driver searches
+ */
+export async function updateDriverPreferences(preferences) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+    
+    const userId = currentUser.id;
+    const profile = await getProfileByUserId(userId);
+    
+    if (!profile) {
+      return { success: false, error: 'Profile not found' };
+    }
+    
+    const now = new Date();
+    
+    // Update preferences
+    const updatedData = {
+      ...profile,
+      home_zip: preferences.homeZip || profile.home_zip,
+      max_commute_miles: preferences.maxDistance || profile.max_commute_miles,
+      min_cpm: preferences.minCPM || profile.min_cpm,
+      preferred_operation_type: preferences.operationType || profile.preferred_operation_type,
+      max_turnover_percent: preferences.maxTurnover || profile.max_turnover_percent,
+      max_truck_age_years: preferences.maxTruckAge || profile.max_truck_age_years,
+      fleet_size_preference: preferences.fleetSize || profile.fleet_size_preference,
+      
+      // Update display name if provided
+      display_name: preferences.driverName || profile.display_name,
+      
+      // Engagement metrics
+      last_search_date: now,
+      total_searches: (profile.total_searches || 0) + 1,
+      updated_date: now
+    };
+    
+    // Recalculate completeness
+    updatedData.profile_completeness_score = calculateCompleteness(updatedData);
+    
+    // Update status based on completeness
+    if (updatedData.profile_completeness_score >= 80) {
+      updatedData.profile_status = CONFIG.STATUS.ACTIVE;
+    } else if (updatedData.profile_completeness_score >= 30) {
+      updatedData.profile_status = CONFIG.STATUS.INCOMPLETE;
+    }
+    
+    const options = { suppressAuth: true };
+    const updated = await wixData.update(CONFIG.profilesCollection, updatedData, options);
+    
+    console.log(`✅ Updated preferences for user ${userId}`);
+    
+    return {
+      success: true,
+      profile: enrichProfile(updated)
+    };
+    
+  } catch (error) {
+    console.error('❌ Error updating preferences:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Update driver persistent documents
+ * Called after successful upload or application submission
+ */
+export async function updateDriverDocuments(docData) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+    
+    const userId = currentUser.id;
+    const profile = await getProfileByUserId(userId);
+    
+    if (!profile) {
+      return { success: false, error: 'Profile not found' };
+    }
+    
+    const now = new Date();
+    
+    const updatedData = {
+      ...profile,
+      updated_date: now
+    };
+
+    // Upload files to Media Manager and store in image fields (Phase 4H)
+    if (docData.cdlFront && docData.cdlFront.data) {
+      updatedData.cdl_front_image = await uploadToMediaManager(docData.cdlFront, userId);
+    } else if (typeof docData.cdlFront === 'string') {
+      updatedData.cdl_front_image = docData.cdlFront;
+    }
+
+    if (docData.cdlBack && docData.cdlBack.data) {
+      updatedData.cdl_back_image = await uploadToMediaManager(docData.cdlBack, userId);
+    } else if (typeof docData.cdlBack === 'string') {
+      updatedData.cdl_back_image = docData.cdlBack;
+    }
+
+    if (docData.medCard && docData.medCard.data) {
+      updatedData.med_card_image = await uploadToMediaManager(docData.medCard, userId);
+    } else if (typeof docData.medCard === 'string') {
+      updatedData.med_card_image = docData.medCard;
+    }
+
+    if (docData.resume && docData.resume.data) {
+      updatedData.resume_file = await uploadToMediaManager(docData.resume, userId);
+    } else if (typeof docData.resume === 'string') {
+      updatedData.resume_file = docData.resume;
+    }
+    
+    // Recalculate completeness
+    updatedData.profile_completeness_score = calculateCompleteness(updatedData);
+    
+    // Update status
+    if (updatedData.profile_completeness_score >= 80) {
+      updatedData.profile_status = CONFIG.STATUS.ACTIVE;
+    }
+    
+    const options = { suppressAuth: true };
+    const updated = await wixData.update(CONFIG.profilesCollection, updatedData, options);
+    
+    console.log(`✅ Updated documents for user ${userId}`);
+    
+    // OCR Processing (New for Phase 7)
+    // We run this AFTER storing the URLs so the user definitely has the docs saved
+    // but the extraction helps populate profile fields
+    const ocrPromises = [];
+
+    if (docData.cdlFront && docData.cdlFront.data) {
+        const base64 = docData.cdlFront.data.split(';base64,').pop();
+        ocrPromises.push(extractInfoFromDocument(base64, docData.cdlFront.type, 'CDL_FRONT'));
+    }
+
+    if (docData.medCard && docData.medCard.data) {
+        const base64 = docData.medCard.data.split(';base64,').pop();
+        ocrPromises.push(extractInfoFromDocument(base64, docData.medCard.type, 'MED_CARD'));
+    }
+
+    if (ocrPromises.length > 0) {
+        console.log(`🧠 Triggering OCR for ${ocrPromises.length} documents...`);
+        const ocrResults = await Promise.all(ocrPromises);
+        
+        ocrResults.forEach(res => {
+            if (res && !res.error) {
+                // CDL Data Mapping
+                if (res.licenseNumber) {
+                    if (!updatedData.display_name && res.fullName) updatedData.display_name = res.fullName;
+                    if (res.cdlClass) updatedData.cdl_class = res.cdlClass;
+                    if (res.expirationDate) updatedData.cdl_expiration_date = res.expirationDate;
+                    if (res.endorsements) updatedData.endorsements = res.endorsements;
+                }
+                // Med Card Data Mapping
+                if (res.certificateExpirationDate) {
+                    updatedData.med_card_expiration_date = res.certificateExpirationDate;
+                }
+            }
+        });
+
+        // Final save with OCR data
+        updatedData.profile_completeness_score = calculateCompleteness(updatedData);
+        if (updatedData.profile_completeness_score >= 80) updatedData.profile_status = CONFIG.STATUS.ACTIVE;
+        
+        await wixData.update(CONFIG.profilesCollection, updatedData, options);
+        console.log('✅ Profile enriched via OCR extraction');
+    }
+
+    return {
+      success: true,
+      profile: enrichProfile(updatedData)
+    };
+    
+  } catch (error) {
+    console.error('❌ Error updating documents:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Update driver qualifications (from profile page)
+ * Used for reverse matching
+ */
+export async function updateDriverQualifications(qualifications) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+    
+    const userId = currentUser.id;
+    const profile = await getProfileByUserId(userId);
+    
+    if (!profile) {
+      return { success: false, error: 'Profile not found' };
+    }
+    
+    const now = new Date();
+    
+    const updatedData = {
+      ...profile,
+      years_experience: qualifications.yearsExperience ?? profile.years_experience,
+      cdl_class: qualifications.cdlClass || profile.cdl_class,
+      endorsements: qualifications.endorsements || profile.endorsements,
+      clean_mvr: qualifications.cleanMVR ?? profile.clean_mvr,
+      accidents_last_3_years: qualifications.accidentsLast3Years ?? profile.accidents_last_3_years,
+      violations_last_3_years: qualifications.violationsLast3Years ?? profile.violations_last_3_years,
+      updated_date: now
+    };
+    
+    // Recalculate completeness
+    updatedData.profile_completeness_score = calculateCompleteness(updatedData);
+    
+    // Update status
+    if (updatedData.profile_completeness_score >= 80) {
+      updatedData.profile_status = CONFIG.STATUS.ACTIVE;
+    }
+    
+    const options = { suppressAuth: true };
+    const updated = await wixData.update(CONFIG.profilesCollection, updatedData, options);
+    
+    console.log(`✅ Updated qualifications for user ${userId}`);
+    
+    return {
+      success: true,
+      profile: enrichProfile(updated)
+    };
+    
+  } catch (error) {
+    console.error('❌ Error updating qualifications:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Toggle driver discoverability (opt-in for recruiters)
+ */
+export async function setDiscoverability(isDiscoverable) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+    
+    const userId = currentUser.id;
+    const profile = await getProfileByUserId(userId);
+    
+    if (!profile) {
+      return { success: false, error: 'Profile not found' };
+    }
+    
+    const updatedData = {
+      ...profile,
+      is_discoverable: Boolean(isDiscoverable),
+      updated_date: new Date()
+    };
+    
+    const options = { suppressAuth: true };
+    const updated = await wixData.update(CONFIG.profilesCollection, updatedData, options);
+    
+    console.log(`✅ Set discoverability to ${isDiscoverable} for user ${userId}`);
+    
+    return {
+      success: true,
+      profile: enrichProfile(updated)
+    };
+    
+  } catch (error) {
+    console.error('❌ Error setting discoverability:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// CARRIER INTEREST MANAGEMENT
+// ============================================================================
+
+/**
+ * Log when a driver expresses interest in a carrier
+ * Replaces the anonymous MatchEvents logging
+ */
+export async function logCarrierInterest(carrierData) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      // Fallback to anonymous logging for non-logged-in users
+      return { success: false, error: 'User not logged in', isAnonymous: true };
+    }
+    
+    const userId = currentUser.id;
+    const profile = await getProfileByUserId(userId);
+    
+    if (!profile) {
+      return { success: false, error: 'Profile not found' };
+    }
+    
+    const now = new Date();
+    
+    // Check for existing interest record
+    const existingInterest = await wixData.query(CONFIG.interestsCollection)
+      .eq('driver_id', profile._id)
+      .eq('carrier_dot', String(carrierData.carrierDOT))
+      .limit(1)
+      .find({ suppressAuth: true });
+    
+    if (existingInterest.items.length > 0) {
+      // Update existing record with new timestamp
+      const existing = existingInterest.items[0];
+      const updated = await wixData.update(CONFIG.interestsCollection, {
+        ...existing,
+        match_score: carrierData.matchScore || existing.match_score,
+        action: carrierData.action || 'interested',
+        action_timestamp: now
+      }, { suppressAuth: true });
+      
+      console.log(`📝 Updated existing interest for DOT ${carrierData.carrierDOT}`);
+      return { success: true, interest: updated, isUpdate: true };
+    }
+    
+    // Create new interest record
+    const interestData = {
+      driver_id: profile._id,
+      carrier_dot: String(carrierData.carrierDOT),
+      carrier_name: carrierData.carrierName || '',
+      match_score: carrierData.matchScore || 0,
+      action: carrierData.action || 'interested',
+      action_timestamp: now,
+      driver_zip_at_match: profile.home_zip || '',
+      outcome: null,
+      outcome_date: null,
+      notes: null
+    };
+    
+    const options = { suppressAuth: true };
+    const inserted = await wixData.insert(CONFIG.interestsCollection, interestData, options);
+    
+    console.log(`✅ Logged interest: Driver ${profile._id} → Carrier DOT ${carrierData.carrierDOT}`);
+    
+    return {
+      success: true,
+      interest: inserted,
+      isNew: true
+    };
+    
+  } catch (error) {
+    console.error('❌ Error logging carrier interest:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Get all carriers a driver has expressed interest in
+ */
+export async function getDriverInterests() {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in', interests: [] };
+    }
+    
+    const userId = currentUser.id;
+    const profile = await getProfileByUserId(userId);
+    
+    if (!profile) {
+      return { success: false, error: 'Profile not found', interests: [] };
+    }
+    
+    const result = await wixData.query(CONFIG.interestsCollection)
+      .eq('driver_id', profile._id)
+      .descending('action_timestamp')
+      .limit(100)
+      .find({ suppressAuth: true });
+    
+    console.log(`📋 Found ${result.items.length} interests for driver ${profile._id}`);
+    
+    return {
+      success: true,
+      interests: result.items,
+      totalCount: result.totalCount
+    };
+    
+  } catch (error) {
+    console.error('❌ Error getting driver interests:', error);
+    return { success: false, error: error.message, interests: [] };
+  }
+}
+
+/**
+ * Remove interest in a carrier
+ */
+export async function removeCarrierInterest(carrierDOT) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+    
+    const userId = currentUser.id;
+    const profile = await getProfileByUserId(userId);
+    
+    if (!profile) {
+      return { success: false, error: 'Profile not found' };
+    }
+    
+    const existing = await wixData.query(CONFIG.interestsCollection)
+      .eq('driver_id', profile._id)
+      .eq('carrier_dot', String(carrierDOT))
+      .limit(1)
+      .find({ suppressAuth: true });
+    
+    if (existing.items.length === 0) {
+      return { success: false, error: 'Interest not found' };
+    }
+    
+    await wixData.remove(CONFIG.interestsCollection, existing.items[0]._id, { suppressAuth: true });
+    
+    console.log(`🗑️ Removed interest for DOT ${carrierDOT}`);
+    return { success: true };
+    
+  } catch (error) {
+    console.error('❌ Error removing interest:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// ADMIN/ANALYTICS FUNCTIONS
+// ============================================================================
+
+/**
+ * Get interest signals for a specific carrier (for carrier dashboard)
+ * Only returns aggregate data, not individual driver info (privacy)
+ */
+export async function getCarrierInterestStats(carrierDOT) {
+  try {
+    const dotString = String(carrierDOT);
+    
+    const result = await wixData.query(CONFIG.interestsCollection)
+      .eq('carrier_dot', dotString)
+      .find({ suppressAuth: true });
+    
+    const interests = result.items;
+    
+    // Aggregate stats (no PII)
+    const stats = {
+      carrier_dot: dotString,
+      total_interests: interests.length,
+      interests_last_30_days: 0,
+      interests_last_7_days: 0,
+      avg_match_score: 0,
+      top_driver_zips: {}
+    };
+    
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    
+    let totalScore = 0;
+    
+    for (const interest of interests) {
+      const actionDate = new Date(interest.action_timestamp);
+      
+      if (actionDate >= thirtyDaysAgo) stats.interests_last_30_days++;
+      if (actionDate >= sevenDaysAgo) stats.interests_last_7_days++;
+      
+      totalScore += interest.match_score || 0;
+      
+      // Aggregate ZIPs (first 3 digits only for privacy)
+      const zipPrefix = (interest.driver_zip_at_match || '').substring(0, 3);
+      if (zipPrefix) {
+        stats.top_driver_zips[zipPrefix] = (stats.top_driver_zips[zipPrefix] || 0) + 1;
+      }
+    }
+    
+    stats.avg_match_score = interests.length > 0 
+      ? Math.round(totalScore / interests.length) 
+      : 0;
+    
+    // Convert ZIP counts to sorted array
+    stats.top_driver_zips = Object.entries(stats.top_driver_zips)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([zip, count]) => ({ zip_prefix: zip, count }));
+    
+    return { success: true, stats };
+    
+  } catch (error) {
+    console.error('❌ Error getting carrier stats:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Get platform-wide driver activity stats (for admin dashboard)
+ */
+export async function getDriverActivityStats() {
+  try {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    
+    // Get all profiles
+    const profileResult = await wixData.query(CONFIG.profilesCollection)
+      .find({ suppressAuth: true });
+    
+    const profiles = profileResult.items;
+    
+    // Calculate stats
+    const stats = {
+      total_profiles: profiles.length,
+      active_last_30_days: 0,
+      active_last_7_days: 0,
+      discoverable_profiles: 0,
+      complete_profiles: 0,
+      avg_completeness: 0,
+      avg_searches_per_driver: 0,
+      profile_status_breakdown: {
+        active: 0,
+        incomplete: 0,
+        dormant: 0
+      }
+    };
+    
+    let totalCompleteness = 0;
+    let totalSearches = 0;
+    
+    for (const profile of profiles) {
+      const lastSearch = profile.last_search_date ? new Date(profile.last_search_date) : null;
+      
+      if (lastSearch && lastSearch >= thirtyDaysAgo) stats.active_last_30_days++;
+      if (lastSearch && lastSearch >= sevenDaysAgo) stats.active_last_7_days++;
+      
+      if (profile.is_discoverable) stats.discoverable_profiles++;
+      if (profile.profile_completeness_score >= 80) stats.complete_profiles++;
+      
+      totalCompleteness += profile.profile_completeness_score || 0;
+      totalSearches += profile.total_searches || 0;
+      
+      const status = profile.profile_status || 'incomplete';
+      stats.profile_status_breakdown[status] = (stats.profile_status_breakdown[status] || 0) + 1;
+    }
+    
+    stats.avg_completeness = profiles.length > 0 
+      ? Math.round(totalCompleteness / profiles.length) 
+      : 0;
+    
+    stats.avg_searches_per_driver = profiles.length > 0 
+      ? Math.round((totalSearches / profiles.length) * 10) / 10 
+      : 0;
+    
+    // Get interest stats
+    const interestResult = await wixData.query(CONFIG.interestsCollection)
+      .ge('action_timestamp', thirtyDaysAgo)
+      .find({ suppressAuth: true });
+    
+    stats.total_interests_30_days = interestResult.totalCount;
+    
+    return { success: true, stats };
+    
+  } catch (error) {
+    console.error('❌ Error getting activity stats:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Calculate profile completeness score (0-100)
+ */
+function calculateCompleteness(profile) {
+  let score = 0;
+  const weights = CONFIG.COMPLETENESS_WEIGHTS;
+  
+  if (profile.display_name && profile.display_name.trim().length > 0) score += weights.display_name;
+  if (profile.email && profile.email.includes('@')) score += weights.email;
+  if (profile.phone && profile.phone.length >= 10) score += weights.phone;
+  if (profile.home_zip && profile.home_zip.length >= 5) score += weights.home_zip;
+  if (profile.preferred_operation_type && profile.preferred_operation_type !== 'no_preference') score += weights.preferred_operation_type;
+  if (profile.min_cpm && profile.min_cpm > 0) score += weights.min_cpm;
+  if (profile.years_experience !== null && profile.years_experience >= 0) score += weights.years_experience;
+  if (profile.cdl_class && profile.cdl_class.length > 0) score += weights.cdl_class;
+  if (profile.endorsements && profile.endorsements.length > 0) score += weights.endorsements;
+  if (profile.clean_mvr !== null) score += weights.clean_mvr;
+  if (profile.accidents_last_3_years !== null) score += weights.accidents_last_3_years;
+  if (profile.violations_last_3_years !== null) score += weights.violations_last_3_years;
+
+  // Bonus points for documents (Max 100 total still applies)
+  if (profile.cdl_front_image && profile.cdl_back_image) score += 10;
+  if (profile.med_card_image) score += 5;
+  
+  return Math.min(100, score);
+}
+
+/**
+ * Enrich profile with computed fields for frontend
+ */
+function enrichProfile(profile) {
+  if (!profile) return null;
+  
+  const completeness = calculateCompleteness(profile);
+  
+  // Determine what's missing for completeness nudges
+  const missingFields = [];
+  
+  if (!profile.display_name) missingFields.push('name');
+  if (!profile.home_zip) missingFields.push('home ZIP');
+  if (!profile.years_experience) missingFields.push('experience');
+  if (!profile.cdl_class) missingFields.push('CDL class');
+  if (!profile.cdl_front_image || !profile.cdl_back_image) missingFields.push('CDL photos');
+  if (!profile.med_card_image) missingFields.push('Medical Card');
+  
+  return {
+    ...profile,
+    profile_completeness_score: completeness,
+    missing_fields: missingFields,
+    is_complete: completeness >= 80,
+    can_be_discovered: profile.is_discoverable && completeness >= 50
+  };
+}
+
+// ============================================================================
+// TESTING
+// ============================================================================
+
+/**
+ * Test the driver profile system
+ */
+export async function testDriverProfileSystem() {
+  console.log('=== DRIVER PROFILE SYSTEM TEST ===');
+  
+  try {
+    // Test getOrCreate
+    const result = await getOrCreateDriverProfile();
+    console.log('getOrCreateDriverProfile:', result.success ? 'PASS' : 'FAIL');
+    
+    if (result.success) {
+      console.log('Profile ID:', result.profile._id);
+      console.log('Is New:', result.isNew);
+      console.log('Completeness:', result.profile.profile_completeness_score);
+    }
+    
+    return result;
+    
+  } catch (error) {
+    console.error('Test failed:', error);
+    return { success: false, error: error.message };
+  }
+}

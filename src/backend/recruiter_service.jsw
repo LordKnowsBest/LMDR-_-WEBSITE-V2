@@ -1,0 +1,926 @@
+// ============================================================================
+// RECRUITER SERVICE - Backend for Recruiter Operating System
+// Supports Agency Model: One recruiter can manage multiple carriers
+// ============================================================================
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { sendStatusUpdateNotification } from 'backend/emailService';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  recruiterProfilesCollection: 'recruiterProfiles',
+  recruiterCarriersCollection: 'recruiterCarriers',
+  interestsCollection: 'DriverCarrierInterests',
+  driverProfilesCollection: 'DriverProfiles',
+  carriersCollection: 'Carriers',
+
+  // Pipeline status values (matches DriverCarrierInterests statuses)
+  PIPELINE_STAGES: {
+    INTERESTED: 'interested',
+    APPLIED: 'applied',
+    IN_REVIEW: 'in_review',
+    CONTACTED: 'contacted',
+    OFFER: 'offer',
+    HIRED: 'hired',
+    REJECTED: 'rejected',
+    WITHDRAWN: 'withdrawn'
+  },
+
+  // Display order for Kanban columns
+  STAGE_ORDER: ['interested', 'applied', 'in_review', 'contacted', 'offer', 'hired']
+};
+
+// ============================================================================
+// HELPER: Get current user ID
+// ============================================================================
+
+async function getCurrentUserId() {
+  const currentUser = wixUsersBackend.currentUser;
+  if (!currentUser.loggedIn) {
+    return null;
+  }
+  return currentUser.id;
+}
+
+// ============================================================================
+// HELPER: Verify recruiter has access to carrier
+// ============================================================================
+
+async function verifyRecruiterAccess(carrierDOT) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const dotString = String(carrierDOT).trim();
+
+    // Check RecruiterCarriers for access
+    const result = await wixData.query(CONFIG.recruiterCarriersCollection)
+      .eq('recruiter_id', userId)
+      .eq('carrier_dot', dotString)
+      .eq('is_active', true)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return { success: false, error: 'No access to this carrier' };
+    }
+
+    return { success: true, carrierAccess: result.items[0] };
+  } catch (error) {
+    console.error('verifyRecruiterAccess error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET OR CREATE RECRUITER PROFILE
+// ============================================================================
+
+/**
+ * Get the logged-in user's recruiter profile
+ * Returns profile + list of carriers they have access to
+ */
+export async function getOrCreateRecruiterProfile() {
+  try {
+    const currentUser = wixUsersBackend.currentUser;
+
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    const userId = currentUser.id;
+    const userEmail = await currentUser.getEmail();
+
+    // Query for existing profile
+    const profileResult = await wixData.query(CONFIG.recruiterProfilesCollection)
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    let profile;
+
+    if (profileResult.items.length === 0) {
+      // Create new profile
+      const newProfile = {
+        display_name: '',
+        email: userEmail || '',
+        phone: '',
+        agency_name: '',
+        is_independent: true,
+        created_date: new Date(),
+        last_active_date: new Date(),
+        is_active: false, // SECURITY: Default to inactive/pending until admin approves
+        verification_status: 'pending'
+      };
+
+      profile = await wixData.insert(CONFIG.recruiterProfilesCollection, newProfile, { suppressAuth: true });
+      console.log('Created new recruiter profile');
+    } else {
+      profile = profileResult.items[0];
+
+      // Update last active date
+      await wixData.update(CONFIG.recruiterProfilesCollection, {
+        ...profile,
+        last_active_date: new Date()
+      }, { suppressAuth: true });
+    }
+
+    // Get carriers this recruiter has access to
+    const carriersResult = await wixData.query(CONFIG.recruiterCarriersCollection)
+      .eq('recruiter_id', userId)
+      .eq('is_active', true)
+      .descending('added_date')
+      .find({ suppressAuth: true });
+
+    const carriers = carriersResult.items;
+
+    // If they have carriers, get full carrier info for the first one
+    let defaultCarrier = null;
+    if (carriers.length > 0) {
+      const carrierInfo = await wixData.query(CONFIG.carriersCollection)
+        .eq('dot_number', carriers[0].carrier_dot)
+        .limit(1)
+        .find({ suppressAuth: true });
+
+      if (carrierInfo.items.length > 0) {
+        defaultCarrier = carrierInfo.items[0];
+      }
+    }
+
+    console.log(`Recruiter profile loaded with ${carriers.length} carriers`);
+
+    return {
+      success: true,
+      needsSetup: carriers.length === 0,
+      profile: profile,
+      carriers: carriers,
+      defaultCarrier: defaultCarrier,
+      defaultCarrierDOT: carriers.length > 0 ? carriers[0].carrier_dot : null
+    };
+
+  } catch (error) {
+    console.error('getOrCreateRecruiterProfile error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// ADD CARRIER TO RECRUITER'S PORTFOLIO
+// ============================================================================
+
+/**
+ * Add a carrier to the recruiter's portfolio
+ */
+export async function addCarrier(carrierDOT) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    const dotString = String(carrierDOT).trim();
+
+    // Check if carrier exists
+    const carrierResult = await wixData.query(CONFIG.carriersCollection)
+      .eq('dot_number', dotString)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (carrierResult.items.length === 0) {
+      return {
+        success: false,
+        error: `Carrier with DOT ${dotString} not found`
+      };
+    }
+
+    const carrier = carrierResult.items[0];
+
+    // Check if already added
+    const existingAccess = await wixData.query(CONFIG.recruiterCarriersCollection)
+      .eq('recruiter_id', userId)
+      .eq('carrier_dot', dotString)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (existingAccess.items.length > 0) {
+      const existing = existingAccess.items[0];
+      if (existing.is_active) {
+        return {
+          success: false,
+          error: 'This carrier is already in your portfolio'
+        };
+      } else {
+        // Reactivate
+        await wixData.update(CONFIG.recruiterCarriersCollection, {
+          ...existing,
+          is_active: true,
+          added_date: new Date()
+        }, { suppressAuth: true });
+
+        return {
+          success: true,
+          carrierAccess: existing,
+          carrierInfo: carrier,
+          reactivated: true
+        };
+      }
+    }
+
+    // Create new carrier access record
+    const newAccess = {
+      recruiter_id: userId,
+      carrier_dot: dotString,
+      carrier_name: carrier.legal_name || carrier.title || 'Unknown',
+      added_date: new Date(),
+      added_date: new Date(),
+      is_active: false, // SECURITY: Default to inactive/pending until ownership verified
+      verification_status: 'pending_verification'
+    };
+
+    const insertedAccess = await wixData.insert(CONFIG.recruiterCarriersCollection, newAccess, { suppressAuth: true });
+
+    console.log(`Recruiter added carrier ${dotString} to portfolio`);
+
+    return {
+      success: true,
+      carrierAccess: insertedAccess,
+      carrierInfo: carrier
+    };
+
+  } catch (error) {
+    console.error('addCarrier error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// REMOVE CARRIER FROM PORTFOLIO
+// ============================================================================
+
+/**
+ * Remove a carrier from the recruiter's portfolio
+ */
+export async function removeCarrier(carrierDOT) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    const dotString = String(carrierDOT).trim();
+
+    // Find the access record
+    const accessResult = await wixData.query(CONFIG.recruiterCarriersCollection)
+      .eq('recruiter_id', userId)
+      .eq('carrier_dot', dotString)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (accessResult.items.length === 0) {
+      return { success: false, error: 'Carrier not found in your portfolio' };
+    }
+
+    // Soft delete - set is_active to false
+    const access = accessResult.items[0];
+    await wixData.update(CONFIG.recruiterCarriersCollection, {
+      ...access,
+      is_active: false
+    }, { suppressAuth: true });
+
+    console.log(`Recruiter removed carrier ${dotString} from portfolio`);
+
+    return { success: true };
+
+  } catch (error) {
+    console.error('removeCarrier error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET RECRUITER'S CARRIERS
+// ============================================================================
+
+/**
+ * Get list of all carriers in recruiter's portfolio
+ */
+export async function getRecruiterCarriers() {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    // Get all carrier access records
+    const accessResult = await wixData.query(CONFIG.recruiterCarriersCollection)
+      .eq('recruiter_id', userId)
+      .eq('is_active', true)
+      .descending('added_date')
+      .find({ suppressAuth: true });
+
+    const carrierAccess = accessResult.items;
+
+    if (carrierAccess.length === 0) {
+      return {
+        success: true,
+        carriers: []
+      };
+    }
+
+    // Get full carrier info for each
+    const dotNumbers = carrierAccess.map(a => a.carrier_dot);
+    const carriersResult = await wixData.query(CONFIG.carriersCollection)
+      .hasSome('dot_number', dotNumbers)
+      .find({ suppressAuth: true });
+
+    // Create lookup map
+    const carrierMap = {};
+    carriersResult.items.forEach(c => {
+      carrierMap[c.dot_number] = c;
+    });
+
+    // Combine access with carrier info
+    const carriers = carrierAccess.map(access => {
+      const carrier = carrierMap[access.carrier_dot] || {};
+      return {
+        dot_number: access.carrier_dot,
+        carrier_name: access.carrier_name || carrier.legal_name || carrier.title || 'Unknown',
+        phy_city: carrier.phy_city,
+        phy_state: carrier.phy_state,
+        nbr_power_unit: carrier.nbr_power_unit,
+        driver_total: carrier.driver_total,
+        added_date: access.added_date
+      };
+    });
+
+    return {
+      success: true,
+      carriers: carriers
+    };
+
+  } catch (error) {
+    console.error('getRecruiterCarriers error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// VALIDATE CARRIER DOT
+// ============================================================================
+
+/**
+ * Validate a carrier DOT exists and return carrier info
+ */
+export async function validateCarrierDOT(carrierDOT) {
+  try {
+    const dotString = String(carrierDOT).trim();
+
+    const result = await wixData.query(CONFIG.carriersCollection)
+      .eq('dot_number', dotString)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return {
+        success: false,
+        error: `No carrier found with DOT ${dotString}`
+      };
+    }
+
+    const carrier = result.items[0];
+
+    return {
+      success: true,
+      carrier: {
+        dot_number: carrier.dot_number,
+        legal_name: carrier.legal_name || carrier.title || 'Unknown',
+        phy_city: carrier.phy_city,
+        phy_state: carrier.phy_state,
+        nbr_power_unit: carrier.nbr_power_unit,
+        driver_total: carrier.driver_total
+      }
+    };
+
+  } catch (error) {
+    console.error('validateCarrierDOT error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET PIPELINE CANDIDATES
+// ============================================================================
+
+/**
+ * Get all candidates in the pipeline for a carrier
+ */
+export async function getPipelineCandidates(carrierDOT, filters = {}) {
+  try {
+    // Verify access
+    const accessCheck = await verifyRecruiterAccess(carrierDOT);
+    if (!accessCheck.success) {
+      return accessCheck;
+    }
+
+    const dotString = String(carrierDOT).trim();
+
+    // Build query
+    let query = wixData.query(CONFIG.interestsCollection)
+      .eq('carrier_dot', dotString);
+
+    // Apply status filter if provided
+    if (filters.status && filters.status !== 'all') {
+      query = query.eq('status', filters.status);
+    }
+
+    // Exclude rejected/withdrawn from main view unless specifically requested
+    if (!filters.includeHidden) {
+      query = query.ne('status', CONFIG.PIPELINE_STAGES.REJECTED)
+        .ne('status', CONFIG.PIPELINE_STAGES.WITHDRAWN);
+    }
+
+    // Sort by most recent action
+    query = query.descending('action_timestamp');
+
+    const result = await query.find({ suppressAuth: true });
+    const interests = result.items;
+
+    // Get driver profile IDs
+    const driverIds = [...new Set(interests.map(i => i.driver_id).filter(Boolean))];
+
+    // Fetch driver profiles
+    let driverProfiles = {};
+    if (driverIds.length > 0) {
+      const profilesResult = await wixData.query(CONFIG.driverProfilesCollection)
+        .hasSome('_id', driverIds)
+        .find({ suppressAuth: true });
+
+      profilesResult.items.forEach(p => {
+        driverProfiles[p._id] = p;
+      });
+    }
+
+    // Combine interests with driver profiles
+    const candidates = interests.map(interest => {
+      const driver = driverProfiles[interest.driver_id] || {};
+
+      // Parse status history
+      let statusHistory = [];
+      try {
+        statusHistory = interest.status_history ? JSON.parse(interest.status_history) : [];
+      } catch (e) {
+        statusHistory = [];
+      }
+
+      return {
+        interestId: interest._id,
+        driverId: interest.driver_id,
+        status: interest.status || CONFIG.PIPELINE_STAGES.INTERESTED,
+        matchScore: interest.match_score || 0,
+        actionTimestamp: interest.action_timestamp,
+        applicationDate: interest.application_date,
+        recruiterNotes: interest.recruiter_notes || '',
+        recruiterResponseTime: interest.recruiter_response_time,
+        statusHistory: statusHistory,
+        contactPhone: interest.contact_phone,
+        contactEmail: interest.contact_email,
+        preferredContact: interest.preferred_contact,
+        availability: interest.availability,
+        driverMessage: interest.driver_message,
+        // Driver profile fields
+        driverName: driver.display_name || driver.driver_name || 'Unknown Driver',
+        driverEmail: driver.email || interest.contact_email || '',
+        driverPhone: driver.phone || interest.contact_phone || '',
+        homeZip: driver.home_zip || '',
+        yearsExperience: driver.years_experience,
+        cdlClass: driver.cdl_class,
+        endorsements: driver.endorsements,
+        cleanMvr: driver.clean_mvr
+      };
+    });
+
+    // Group by status
+    const groupedByStatus = {};
+    CONFIG.STAGE_ORDER.forEach(stage => {
+      groupedByStatus[stage] = [];
+    });
+
+    candidates.forEach(candidate => {
+      const stage = candidate.status || CONFIG.PIPELINE_STAGES.INTERESTED;
+      if (groupedByStatus[stage]) {
+        groupedByStatus[stage].push(candidate);
+      }
+    });
+
+    console.log(`Pipeline loaded: ${candidates.length} candidates for carrier ${dotString}`);
+
+    return {
+      success: true,
+      candidates: candidates,
+      groupedByStatus: groupedByStatus,
+      totalCount: candidates.length,
+      stageOrder: CONFIG.STAGE_ORDER
+    };
+
+  } catch (error) {
+    console.error('getPipelineCandidates error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// UPDATE CANDIDATE STATUS
+// ============================================================================
+
+/**
+ * Move a candidate to a new pipeline stage
+ */
+export async function updateCandidateStatus(interestId, newStatus, notes = '') {
+  try {
+    // Get the interest record
+    const interest = await wixData.get(CONFIG.interestsCollection, interestId, { suppressAuth: true });
+
+    if (!interest) {
+      return { success: false, error: 'Candidate record not found' };
+    }
+
+    // Verify access to this carrier
+    const accessCheck = await verifyRecruiterAccess(interest.carrier_dot);
+    if (!accessCheck.success) {
+      return accessCheck;
+    }
+
+    const now = new Date();
+
+    // Parse existing status history
+    let statusHistory = [];
+    try {
+      statusHistory = interest.status_history ? JSON.parse(interest.status_history) : [];
+    } catch (e) {
+      statusHistory = [];
+    }
+
+    // Add new status entry
+    statusHistory.push({
+      status: newStatus,
+      timestamp: now.toISOString(),
+      note: notes || `Status changed to ${newStatus}`,
+      actor: 'recruiter'
+    });
+
+    // Calculate recruiter response time if this is first recruiter action
+    let recruiterResponseTime = interest.recruiter_response_time;
+    if (!recruiterResponseTime && (newStatus === CONFIG.PIPELINE_STAGES.CONTACTED || newStatus === CONFIG.PIPELINE_STAGES.IN_REVIEW)) {
+      const startTime = interest.application_date || interest.action_timestamp;
+      if (startTime) {
+        const hoursElapsed = (now.getTime() - new Date(startTime).getTime()) / (1000 * 60 * 60);
+        recruiterResponseTime = Math.round(hoursElapsed * 10) / 10;
+      }
+    }
+
+    // Update the record
+    const updatedRecord = {
+      ...interest,
+      status: newStatus,
+      status_history: JSON.stringify(statusHistory),
+      action_timestamp: now,
+      recruiter_response_time: recruiterResponseTime
+    };
+
+    // Add outcome fields for terminal statuses
+    if (newStatus === CONFIG.PIPELINE_STAGES.HIRED ||
+        newStatus === CONFIG.PIPELINE_STAGES.REJECTED ||
+        newStatus === CONFIG.PIPELINE_STAGES.WITHDRAWN) {
+      updatedRecord.outcome = newStatus;
+      updatedRecord.outcome_date = now;
+    }
+
+    await wixData.update(CONFIG.interestsCollection, updatedRecord, { suppressAuth: true });
+
+    console.log(`Candidate ${interestId} moved to ${newStatus}`);
+
+    // Send email notification to driver (non-blocking)
+    try {
+      // Get driver profile to find user ID
+      if (interest.driver_id) {
+        const driverProfile = await wixData.get(CONFIG.driverProfilesCollection, interest.driver_id, { suppressAuth: true });
+
+        if (driverProfile && driverProfile._owner) {
+          // Get carrier name
+          let carrierName = 'the carrier';
+          const carrierResult = await wixData.query(CONFIG.carriersCollection)
+            .eq('dot_number', parseInt(interest.carrier_dot, 10))
+            .limit(1)
+            .find({ suppressAuth: true });
+
+          if (carrierResult.items.length > 0) {
+            carrierName = carrierResult.items[0].legal_name || carrierResult.items[0].title || carrierName;
+          }
+
+          // Send notification
+          await sendStatusUpdateNotification(driverProfile._owner, {
+            driverName: driverProfile.display_name || driverProfile.driver_name || 'Driver',
+            carrierName: carrierName,
+            newStatus: newStatus,
+            applicationId: interestId
+          });
+          console.log(`📧 Status notification sent to driver for ${newStatus}`);
+        }
+      }
+    } catch (emailError) {
+      // Don't fail the status update if email fails
+      console.error('⚠️ Failed to send status notification email:', emailError.message);
+    }
+
+    return {
+      success: true,
+      record: updatedRecord,
+      newStatus: newStatus,
+      responseTime: recruiterResponseTime
+    };
+
+  } catch (error) {
+    console.error('updateCandidateStatus error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET PIPELINE STATS
+// ============================================================================
+
+/**
+ * Get aggregate statistics for a carrier's pipeline
+ */
+export async function getPipelineStats(carrierDOT) {
+  try {
+    // Verify access
+    const accessCheck = await verifyRecruiterAccess(carrierDOT);
+    if (!accessCheck.success) {
+      return accessCheck;
+    }
+
+    const dotString = String(carrierDOT).trim();
+
+    // Get all interests for this carrier
+    const result = await wixData.query(CONFIG.interestsCollection)
+      .eq('carrier_dot', dotString)
+      .find({ suppressAuth: true });
+
+    const interests = result.items;
+
+    // Calculate stats
+    const stats = {
+      totalPipeline: 0,
+      byStage: {},
+      avgResponseTime: null,
+      responseTimes: [],
+      last7Days: 0,
+      last30Days: 0,
+      conversionRate: 0
+    };
+
+    // Initialize stage counts
+    CONFIG.STAGE_ORDER.forEach(stage => {
+      stats.byStage[stage] = 0;
+    });
+    stats.byStage.rejected = 0;
+    stats.byStage.withdrawn = 0;
+
+    const now = new Date();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    let hiredCount = 0;
+    let completedCount = 0;
+
+    interests.forEach(interest => {
+      const status = interest.status || CONFIG.PIPELINE_STAGES.INTERESTED;
+
+      // Count by stage
+      if (stats.byStage.hasOwnProperty(status)) {
+        stats.byStage[status]++;
+      }
+
+      // Exclude rejected/withdrawn from total pipeline count
+      if (status !== CONFIG.PIPELINE_STAGES.REJECTED &&
+          status !== CONFIG.PIPELINE_STAGES.WITHDRAWN) {
+        stats.totalPipeline++;
+      }
+
+      // Count recent interests
+      const actionDate = new Date(interest.action_timestamp);
+      if (actionDate >= sevenDaysAgo) {
+        stats.last7Days++;
+      }
+      if (actionDate >= thirtyDaysAgo) {
+        stats.last30Days++;
+      }
+
+      // Track response times
+      if (interest.recruiter_response_time) {
+        stats.responseTimes.push(interest.recruiter_response_time);
+      }
+
+      // Track conversion
+      if (status === CONFIG.PIPELINE_STAGES.HIRED) {
+        hiredCount++;
+      }
+      if (status === CONFIG.PIPELINE_STAGES.HIRED ||
+          status === CONFIG.PIPELINE_STAGES.REJECTED ||
+          status === CONFIG.PIPELINE_STAGES.WITHDRAWN) {
+        completedCount++;
+      }
+    });
+
+    // Calculate average response time
+    if (stats.responseTimes.length > 0) {
+      const sum = stats.responseTimes.reduce((a, b) => a + b, 0);
+      stats.avgResponseTime = Math.round((sum / stats.responseTimes.length) * 10) / 10;
+    }
+
+    // Calculate conversion rate
+    if (completedCount > 0) {
+      stats.conversionRate = Math.round((hiredCount / completedCount) * 100);
+    }
+
+    // Response time badge
+    if (stats.avgResponseTime !== null) {
+      if (stats.avgResponseTime < 4) {
+        stats.responseBadge = 'Lightning Responder';
+        stats.badgeColor = '#10b981';
+      } else if (stats.avgResponseTime < 24) {
+        stats.responseBadge = 'Fast Responder';
+        stats.badgeColor = '#3b82f6';
+      } else if (stats.avgResponseTime < 48) {
+        stats.responseBadge = 'Active Recruiter';
+        stats.badgeColor = '#6366f1';
+      }
+    }
+
+    delete stats.responseTimes;
+
+    console.log(`Pipeline stats loaded for carrier ${dotString}`);
+
+    return {
+      success: true,
+      stats: stats
+    };
+
+  } catch (error) {
+    console.error('getPipelineStats error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET CANDIDATE DETAILS
+// ============================================================================
+
+/**
+ * Get full details for a candidate
+ */
+export async function getCandidateDetails(interestId) {
+  try {
+    // Get the interest record
+    const interest = await wixData.get(CONFIG.interestsCollection, interestId, { suppressAuth: true });
+
+    if (!interest) {
+      return { success: false, error: 'Candidate record not found' };
+    }
+
+    // Verify access
+    const accessCheck = await verifyRecruiterAccess(interest.carrier_dot);
+    if (!accessCheck.success) {
+      return accessCheck;
+    }
+
+    // Get driver profile
+    let driverProfile = null;
+    if (interest.driver_id) {
+      driverProfile = await wixData.get(CONFIG.driverProfilesCollection, interest.driver_id, { suppressAuth: true });
+    }
+
+    // Parse status history
+    let statusHistory = [];
+    try {
+      statusHistory = interest.status_history ? JSON.parse(interest.status_history) : [];
+    } catch (e) {
+      statusHistory = [];
+    }
+
+    return {
+      success: true,
+      interest: {
+        ...interest,
+        status_history: statusHistory
+      },
+      driverProfile: driverProfile
+    };
+
+  } catch (error) {
+    console.error('getCandidateDetails error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// ADD RECRUITER NOTES
+// ============================================================================
+
+/**
+ * Add or update recruiter notes for a candidate
+ */
+export async function addRecruiterNotes(interestId, notes) {
+  try {
+    // Get the interest record
+    const interest = await wixData.get(CONFIG.interestsCollection, interestId, { suppressAuth: true });
+
+    if (!interest) {
+      return { success: false, error: 'Candidate record not found' };
+    }
+
+    // Verify access
+    const accessCheck = await verifyRecruiterAccess(interest.carrier_dot);
+    if (!accessCheck.success) {
+      return accessCheck;
+    }
+
+    // Update notes
+    const updatedRecord = {
+      ...interest,
+      recruiter_notes: notes
+    };
+
+    await wixData.update(CONFIG.interestsCollection, updatedRecord, { suppressAuth: true });
+
+    console.log(`Notes updated for candidate ${interestId}`);
+
+    return {
+      success: true,
+      interestId: interestId
+    };
+
+  } catch (error) {
+    console.error('addRecruiterNotes error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// UPDATE RECRUITER PROFILE
+// ============================================================================
+
+/**
+ * Update recruiter's profile info
+ */
+export async function updateRecruiterProfile(profileData) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    // Get existing profile
+    const result = await wixData.query(CONFIG.recruiterProfilesCollection)
+      .eq('_owner', userId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return { success: false, error: 'Profile not found' };
+    }
+
+    const profile = result.items[0];
+
+    // Update allowed fields
+    const updatedProfile = {
+      ...profile,
+      display_name: profileData.displayName || profile.display_name,
+      email: profileData.email || profile.email,
+      phone: profileData.phone || profile.phone,
+      agency_name: profileData.agencyName || profile.agency_name,
+      is_independent: profileData.isIndependent !== undefined ? profileData.isIndependent : profile.is_independent,
+      weight_preferences: profileData.weight_preferences || profile.weight_preferences
+    };
+
+    await wixData.update(CONFIG.recruiterProfilesCollection, updatedProfile, { suppressAuth: true });
+
+    console.log('Recruiter profile updated');
+
+    return {
+      success: true,
+      profile: updatedProfile
+    };
+
+  } catch (error) {
+    console.error('updateRecruiterProfile error:', error);
+    return { success: false, error: error.message };
+  }
+}

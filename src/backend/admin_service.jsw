@@ -1,0 +1,834 @@
+/**
+ * Admin Service - Backend functions for Admin Portal
+ * Handles driver management, analytics, and administrative operations
+ */
+
+import wixData from 'wix-data';
+import { currentMember } from 'wix-members-backend';
+import { triggeredEmails } from 'wix-crm-backend';
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+/**
+ * Check if current user has admin role
+ * @returns {Promise<boolean>}
+ */
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        // Check for admin role in member data
+        // Customize this based on your role implementation
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const memberRole = member.contactDetails?.customFields?.role || '';
+
+        return adminRoles.includes(memberRole.toLowerCase());
+    } catch (error) {
+        console.error('Admin check failed:', error);
+        return false;
+    }
+}
+
+/**
+ * Require admin access - throws if not authorized
+ */
+async function requireAdmin() {
+    const authorized = await isAdmin();
+    if (!authorized) {
+        throw new Error('Unauthorized: Admin access required');
+    }
+}
+
+// ============================================
+// DRIVER MANAGEMENT
+// ============================================
+
+/**
+ * Get paginated list of drivers with filters
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} - Drivers list with pagination info
+ */
+export async function getDriversList(options = {}) {
+    await requireAdmin();
+
+    const {
+        filters = {},
+        page = 1,
+        pageSize = 25,
+        sortField = 'lastActive',
+        sortDirection = 'desc'
+    } = options;
+
+    try {
+        let query = wixData.query('DriverProfiles');
+
+        // Apply search filter
+        if (filters.search) {
+            const searchTerm = filters.search.toLowerCase();
+            query = query.contains('firstName', searchTerm)
+                .or(wixData.query('DriverProfiles').contains('lastName', searchTerm))
+                .or(wixData.query('DriverProfiles').contains('email', searchTerm));
+        }
+
+        // Apply status filter
+        if (filters.status && filters.status !== 'all') {
+            query = query.eq('status', filters.status);
+        }
+
+        // Apply verification filter
+        if (filters.verification && filters.verification !== 'all') {
+            query = query.eq('verificationStatus', filters.verification);
+        }
+
+        // Apply tier filter
+        if (filters.tier && filters.tier !== 'all') {
+            query = query.eq('membershipTier', filters.tier);
+        }
+
+        // Apply sorting
+        const sortFieldMap = {
+            name: 'lastName',
+            profileCompletion: 'profileCompletion',
+            lastActive: '_updatedDate'
+        };
+        const dbSortField = sortFieldMap[sortField] || '_updatedDate';
+
+        if (sortDirection === 'asc') {
+            query = query.ascending(dbSortField);
+        } else {
+            query = query.descending(dbSortField);
+        }
+
+        // Apply pagination
+        const skip = (page - 1) * pageSize;
+        query = query.skip(skip).limit(pageSize);
+
+        // Execute query
+        const result = await query.find();
+
+        // Get total count (without pagination)
+        let countQuery = wixData.query('DriverProfiles');
+        if (filters.status && filters.status !== 'all') {
+            countQuery = countQuery.eq('status', filters.status);
+        }
+        if (filters.verification && filters.verification !== 'all') {
+            countQuery = countQuery.eq('verificationStatus', filters.verification);
+        }
+        const countResult = await countQuery.count();
+
+        // Transform drivers for frontend
+        const drivers = result.items.map(driver => ({
+            _id: driver._id,
+            firstName: driver.firstName || '',
+            lastName: driver.lastName || '',
+            email: driver.email || '',
+            phone: driver.phone || '',
+            status: driver.status || 'incomplete',
+            verificationStatus: driver.verificationStatus || 'unverified',
+            profileCompletion: calculateProfileCompletion(driver),
+            location: formatLocation(driver),
+            lastActive: driver._updatedDate,
+            _createdDate: driver._createdDate,
+            profileImage: driver.profileImage || null,
+            membershipTier: driver.membershipTier || 'free'
+        }));
+
+        return {
+            drivers,
+            totalCount: countResult,
+            currentPage: page,
+            pageSize,
+            totalPages: Math.ceil(countResult / pageSize)
+        };
+
+    } catch (error) {
+        console.error('Error fetching drivers list:', error);
+        throw new Error('Failed to fetch drivers');
+    }
+}
+
+/**
+ * Get detailed driver information
+ * @param {string} driverId - Driver ID
+ * @returns {Promise<Object>} - Driver details
+ */
+export async function getDriverDetail(driverId) {
+    await requireAdmin();
+
+    try {
+        const driver = await wixData.get('DriverProfiles', driverId);
+        if (!driver) {
+            throw new Error('Driver not found');
+        }
+
+        // Get application history
+        const applications = await wixData.query('DriverCarrierInterests')
+            .eq('driverId', driverId)
+            .descending('_createdDate')
+            .limit(20)
+            .find();
+
+        // Get match history
+        const matches = await wixData.query('MatchEvents')
+            .eq('driverId', driverId)
+            .descending('_createdDate')
+            .limit(20)
+            .find();
+
+        return {
+            ...driver,
+            profileCompletion: calculateProfileCompletion(driver),
+            location: formatLocation(driver),
+            applications: applications.items,
+            matchHistory: matches.items,
+            stats: {
+                totalApplications: applications.totalCount,
+                totalMatches: matches.totalCount
+            }
+        };
+
+    } catch (error) {
+        console.error('Error fetching driver detail:', error);
+        throw new Error('Failed to fetch driver details');
+    }
+}
+
+/**
+ * Update driver status
+ * @param {string} driverId - Driver ID
+ * @param {string} status - New status
+ * @param {string} reason - Reason for status change
+ * @returns {Promise<Object>} - Updated driver
+ */
+export async function updateDriverStatus(driverId, status, reason = '') {
+    await requireAdmin();
+
+    const validStatuses = ['active', 'pending', 'suspended', 'incomplete'];
+    if (!validStatuses.includes(status)) {
+        throw new Error('Invalid status');
+    }
+
+    try {
+        const driver = await wixData.get('DriverProfiles', driverId);
+        if (!driver) {
+            throw new Error('Driver not found');
+        }
+
+        const previousStatus = driver.status;
+        driver.status = status;
+        driver.statusHistory = driver.statusHistory || [];
+        driver.statusHistory.push({
+            from: previousStatus,
+            to: status,
+            reason,
+            changedAt: new Date(),
+            changedBy: 'admin' // Could enhance to include admin ID
+        });
+
+        const updated = await wixData.update('DriverProfiles', driver);
+
+        // Log admin action
+        await logAdminAction('updateDriverStatus', driverId, { previousStatus, newStatus: status, reason });
+
+        return updated;
+
+    } catch (error) {
+        console.error('Error updating driver status:', error);
+        throw new Error('Failed to update driver status');
+    }
+}
+
+/**
+ * Verify driver documents
+ * @param {string} driverId - Driver ID
+ * @returns {Promise<Object>} - Updated driver
+ */
+export async function verifyDriver(driverId) {
+    await requireAdmin();
+
+    try {
+        const driver = await wixData.get('DriverProfiles', driverId);
+        if (!driver) {
+            throw new Error('Driver not found');
+        }
+
+        driver.verificationStatus = 'verified';
+        driver.verifiedAt = new Date();
+        driver.status = 'active';
+
+        const updated = await wixData.update('DriverProfiles', driver);
+
+        // Log admin action
+        await logAdminAction('verifyDriver', driverId, {});
+
+        return updated;
+
+    } catch (error) {
+        console.error('Error verifying driver:', error);
+        throw new Error('Failed to verify driver');
+    }
+}
+
+/**
+ * Suspend driver account
+ * @param {string} driverId - Driver ID
+ * @param {string} reason - Suspension reason
+ * @returns {Promise<Object>} - Updated driver
+ */
+export async function suspendDriver(driverId, reason = '') {
+    await requireAdmin();
+
+    try {
+        return await updateDriverStatus(driverId, 'suspended', reason);
+    } catch (error) {
+        console.error('Error suspending driver:', error);
+        throw new Error('Failed to suspend driver');
+    }
+}
+
+/**
+ * Bulk update driver statuses
+ * @param {string[]} driverIds - Array of driver IDs
+ * @param {string} action - Action to perform
+ * @returns {Promise<Object>} - Result summary
+ */
+export async function bulkUpdateDrivers(driverIds, action) {
+    await requireAdmin();
+
+    const results = { success: 0, failed: 0, errors: [] };
+
+    for (const driverId of driverIds) {
+        try {
+            switch (action) {
+                case 'verify':
+                    await verifyDriver(driverId);
+                    break;
+                case 'suspend':
+                    await suspendDriver(driverId, 'Bulk suspension');
+                    break;
+                case 'activate':
+                    await updateDriverStatus(driverId, 'active', 'Bulk activation');
+                    break;
+                default:
+                    throw new Error('Invalid action');
+            }
+            results.success++;
+        } catch (error) {
+            results.failed++;
+            results.errors.push({ driverId, error: error.message });
+        }
+    }
+
+    return results;
+}
+
+// ============================================
+// ANALYTICS & STATS
+// ============================================
+
+/**
+ * Get driver statistics for dashboard
+ * @returns {Promise<Object>} - Stats object
+ */
+export async function getDriverStats() {
+    await requireAdmin();
+
+    try {
+        // Total drivers
+        const totalResult = await wixData.query('DriverProfiles').count();
+
+        // Active drivers
+        const activeResult = await wixData.query('DriverProfiles')
+            .eq('status', 'active')
+            .count();
+
+        // Pending verification
+        const pendingResult = await wixData.query('DriverProfiles')
+            .eq('verificationStatus', 'in_review')
+            .count();
+
+        // Expired documents (simplified - would need actual doc expiry tracking)
+        const expiredResult = await wixData.query('DriverProfiles')
+            .eq('verificationStatus', 'expired')
+            .count();
+
+        // New this week
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        const newThisWeek = await wixData.query('DriverProfiles')
+            .ge('_createdDate', weekAgo)
+            .count();
+
+        return {
+            total: totalResult,
+            active: activeResult,
+            activePercent: totalResult > 0 ? Math.round((activeResult / totalResult) * 100) : 0,
+            pending: pendingResult,
+            expiredDocs: expiredResult,
+            newThisWeek
+        };
+
+    } catch (error) {
+        console.error('Error fetching driver stats:', error);
+        throw new Error('Failed to fetch stats');
+    }
+}
+
+/**
+ * Get driver analytics over time
+ * @param {string} period - Time period (week, month, quarter)
+ * @returns {Promise<Object>} - Analytics data
+ */
+export async function getDriverAnalytics(period = 'month') {
+    await requireAdmin();
+
+    try {
+        const now = new Date();
+        let startDate;
+
+        switch (period) {
+            case 'week':
+                startDate = new Date(now.setDate(now.getDate() - 7));
+                break;
+            case 'quarter':
+                startDate = new Date(now.setMonth(now.getMonth() - 3));
+                break;
+            default: // month
+                startDate = new Date(now.setMonth(now.getMonth() - 1));
+        }
+
+        // Get registrations in period
+        const registrations = await wixData.query('DriverProfiles')
+            .ge('_createdDate', startDate)
+            .find();
+
+        // Group by day
+        const dailyRegistrations = {};
+        registrations.items.forEach(driver => {
+            const date = new Date(driver._createdDate).toISOString().split('T')[0];
+            dailyRegistrations[date] = (dailyRegistrations[date] || 0) + 1;
+        });
+
+        return {
+            period,
+            totalRegistrations: registrations.totalCount,
+            dailyBreakdown: dailyRegistrations
+        };
+
+    } catch (error) {
+        console.error('Error fetching analytics:', error);
+        throw new Error('Failed to fetch analytics');
+    }
+}
+
+// ============================================
+// EXPORT
+// ============================================
+
+/**
+ * Export drivers to CSV format
+ * @param {Object} filters - Filter options
+ * @returns {Promise<string>} - CSV string
+ */
+export async function exportDriversCSV(filters = {}) {
+    await requireAdmin();
+
+    try {
+        let query = wixData.query('DriverProfiles');
+
+        if (filters.status && filters.status !== 'all') {
+            query = query.eq('status', filters.status);
+        }
+        if (filters.verification && filters.verification !== 'all') {
+            query = query.eq('verificationStatus', filters.verification);
+        }
+
+        const result = await query.limit(1000).find();
+
+        // Generate CSV
+        const headers = ['ID', 'First Name', 'Last Name', 'Email', 'Status', 'Verification', 'Location', 'Joined Date'];
+        const rows = result.items.map(d => [
+            d._id,
+            d.firstName || '',
+            d.lastName || '',
+            d.email || '',
+            d.status || '',
+            d.verificationStatus || '',
+            formatLocation(d),
+            d._createdDate ? new Date(d._createdDate).toISOString() : ''
+        ]);
+
+        const csv = [
+            headers.join(','),
+            ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+        ].join('\n');
+
+        return csv;
+
+    } catch (error) {
+        console.error('Error exporting drivers:', error);
+        throw new Error('Failed to export drivers');
+    }
+}
+
+// ============================================
+// MESSAGING
+// ============================================
+
+/**
+ * Send email to driver
+ * @param {string} driverId - Driver ID
+ * @param {string} templateId - Email template ID
+ * @param {Object} variables - Template variables
+ * @returns {Promise<void>}
+ */
+export async function sendDriverEmail(driverId, templateId, variables = {}) {
+    await requireAdmin();
+
+    try {
+        const driver = await wixData.get('DriverProfiles', driverId);
+        if (!driver || !driver.email) {
+            throw new Error('Driver not found or no email');
+        }
+
+        await triggeredEmails.emailContact(templateId, driver._owner, {
+            variables: {
+                firstName: driver.firstName,
+                ...variables
+            }
+        });
+
+        // Log action
+        await logAdminAction('sendEmail', driverId, { templateId });
+
+    } catch (error) {
+        console.error('Error sending email:', error);
+        throw new Error('Failed to send email');
+    }
+}
+
+// ============================================
+// AUDIT LOGGING
+// ============================================
+
+/**
+ * Log admin action for audit trail
+ * @param {string} action - Action type
+ * @param {string} targetId - Target entity ID
+ * @param {Object} details - Action details
+ */
+async function logAdminAction(action, targetId, details = {}) {
+    try {
+        const member = await currentMember.getMember();
+
+        await wixData.insert('AdminAuditLog', {
+            action,
+            targetType: 'driver',
+            targetId,
+            details,
+            adminId: member?._id || 'system',
+            adminEmail: member?.loginEmail || 'system',
+            timestamp: new Date()
+        });
+    } catch (error) {
+        console.error('Failed to log admin action:', error);
+        // Don't throw - audit logging failure shouldn't block the action
+    }
+}
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Calculate profile completion percentage
+ */
+function calculateProfileCompletion(driver) {
+    const fields = [
+        'firstName', 'lastName', 'email', 'phone',
+        'cdlClass', 'yearsExperience', 'preferredRegion',
+        'equipmentExperience', 'homeZip'
+    ];
+
+    let completed = 0;
+    fields.forEach(field => {
+        if (driver[field] && String(driver[field]).trim() !== '') {
+            completed++;
+        }
+    });
+
+    return Math.round((completed / fields.length) * 100);
+}
+
+/**
+ * Format location from driver data
+ */
+function formatLocation(driver) {
+    const parts = [];
+    if (driver.city) parts.push(driver.city);
+    if (driver.state) parts.push(driver.state);
+    if (parts.length === 0 && driver.homeZip) {
+        return `ZIP: ${driver.homeZip}`;
+    }
+    return parts.join(', ') || 'Not specified';
+}
+
+// ============================================
+// CARRIER MANAGEMENT
+// ============================================
+
+/**
+ * Get paginated list of carriers with filters
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} - Carriers list with pagination info
+ */
+export async function getCarriersList(options = {}) {
+    await requireAdmin();
+
+    const {
+        filters = {},
+        page = 1,
+        pageSize = 25,
+        sortField = 'lastUpdated',
+        sortDirection = 'desc'
+    } = options;
+
+    try {
+        let query = wixData.query('Carriers');
+
+        // Apply search filter (DOT, Legal Name, MC)
+        if (filters.search) {
+            const searchTerm = filters.search; // Keep original case for some checks if needed, but contains is case-insensitive usually
+            // Note: DOT is Number type, so we try to parse it if looks like number
+            const asNumber = parseInt(searchTerm, 10);
+
+            let searchQuery = wixData.query('Carriers').contains('legal_name', searchTerm)
+                .or(wixData.query('Carriers').contains('phy_city', searchTerm))
+                .or(wixData.query('Carriers').contains('dba_name', searchTerm));
+
+            if (!isNaN(asNumber)) {
+                searchQuery = searchQuery.or(wixData.query('Carriers').eq('dot_number', asNumber));
+                searchQuery = searchQuery.or(wixData.query('Carriers').eq('mc_number', asNumber));
+            }
+
+            query = searchQuery;
+        }
+
+        // Apply status filter
+        if (filters.status && filters.status !== 'all') {
+            query = query.eq('admin_status', filters.status);
+        }
+
+        // Apply fleet size filter
+        if (filters.fleetSize && filters.fleetSize !== 'all') {
+            switch (filters.fleetSize) {
+                case 'small':
+                    query = query.lt('nbr_power_unit', 50);
+                    break;
+                case 'medium':
+                    query = query.ge('nbr_power_unit', 50).lt('nbr_power_unit', 200);
+                    break;
+                case 'large':
+                    query = query.ge('nbr_power_unit', 200);
+                    break;
+            }
+        }
+
+        // Apply safety rating filter
+        if (filters.safetyRating && filters.safetyRating !== 'all') {
+            query = query.eq('safety_rating', filters.safetyRating);
+        }
+
+        // Apply sorting
+        const sortFieldMap = {
+            name: 'legal_name',
+            fleetSize: 'nbr_power_unit',
+            lastUpdated: '_updatedDate',
+            safetyRating: 'safety_rating'
+        };
+        const dbSortField = sortFieldMap[sortField] || '_updatedDate';
+
+        if (sortDirection === 'asc') {
+            query = query.ascending(dbSortField);
+        } else {
+            query = query.descending(dbSortField);
+        }
+
+        // Apply pagination
+        const skip = (page - 1) * pageSize;
+        query = query.skip(skip).limit(pageSize);
+
+        // Execute query
+        const result = await query.find();
+
+        // Get total count
+        // Note: For complex search queries (OR), count() might need the same query construction
+        // For simplicity/performance, we might skip precise count on complex search or do a simpler count
+        let countQuery = wixData.query('Carriers');
+        if (filters.status && filters.status !== 'all') countQuery = countQuery.eq('admin_status', filters.status);
+        if (filters.safetyRating && filters.safetyRating !== 'all') countQuery = countQuery.eq('safety_rating', filters.safetyRating);
+        const countResult = await countQuery.count();
+
+        // Fetch Enrichment Status for these carriers
+        const dotNumbers = result.items.map(c => String(c.dot_number));
+        const enrichments = await getCarrierEnrichments(dotNumbers);
+
+        // Transform carriers for frontend
+        const carriers = result.items.map(carrier => ({
+            _id: carrier._id,
+            legalName: carrier.legal_name || 'Unknown',
+            dbaName: carrier.dba_name || '',
+            dotNumber: carrier.dot_number,
+            mcNumber: carrier.mc_number,
+            city: carrier.phy_city || '',
+            state: carrier.phy_state || '',
+            fleetSize: carrier.nbr_power_unit || 0,
+            driverCount: carrier.driver_total || 0,
+            safetyRating: carrier.safety_rating || 'NOT RATED',
+            status: carrier.admin_status || 'active',
+            isFlagged: carrier.is_flagged || false,
+            enrichmentStatus: enrichments[carrier.dot_number] ? 'Full' : 'None',
+            lastUpdated: carrier._updatedDate
+        }));
+
+        return {
+            carriers,
+            totalCount: countResult,
+            currentPage: page,
+            pageSize,
+            totalPages: Math.ceil(countResult / pageSize)
+        };
+
+    } catch (error) {
+        console.error('Error fetching carriers list:', error);
+        throw new Error('Failed to fetch carriers');
+    }
+}
+
+/**
+ * Helper to get enrichment status
+ */
+async function getCarrierEnrichments(dotNumbers) {
+    if (!dotNumbers.length) return {};
+    try {
+        const result = await wixData.query('CarrierEnrichments')
+            .hasSome('dot_number', dotNumbers)
+            .find();
+
+        const map = {};
+        result.items.forEach(item => {
+            map[item.dot_number] = item;
+        });
+        return map;
+    } catch (e) {
+        console.warn('Failed to fetch enrichments', e);
+        return {};
+    }
+}
+
+/**
+ * Get carrier dashboard stats
+ */
+export async function getCarrierStats() {
+    await requireAdmin();
+    try {
+        const total = await wixData.query('Carriers').count();
+        const flagged = await wixData.query('Carriers').eq('is_flagged', true).count();
+        const enriched = await wixData.query('CarrierEnrichments').count(); // Approx, or query distinct if possible
+        const active = await wixData.query('Carriers').ne('admin_status', 'inactive').count();
+
+        return {
+            total,
+            active,
+            activePercent: total > 0 ? Math.round((active / total) * 100) : 0,
+            flagged,
+            enriched,
+            enrichedPercent: total > 0 ? Math.round((enriched / total) * 100) : 0,
+            newThisWeek: 0 // Placeholder or impl if needed
+        };
+    } catch (error) {
+        console.error('Error fetching carrier stats:', error);
+        throw new Error('Failed to fetch carrier stats');
+    }
+}
+
+/**
+ * Get detailed carrier info
+ */
+export async function getCarrierDetail(carrierId) {
+    await requireAdmin();
+    try {
+        const carrier = await wixData.get('Carriers', carrierId);
+        if (!carrier) throw new Error('Carrier not found');
+
+        // Get enrichment
+        let enrichment = null;
+        if (carrier.dot_number) {
+            const enrichResult = await wixData.query('CarrierEnrichments')
+                .eq('dot_number', String(carrier.dot_number))
+                .find();
+            if (enrichResult.items.length > 0) enrichment = enrichResult.items[0];
+        }
+
+        return {
+            ...normalizeCarrier(carrier),
+            enrichment,
+            status: carrier.admin_status || 'active',
+            isFlagged: carrier.is_flagged || false
+        };
+    } catch (error) {
+        console.error('Error fetching carrier detail:', error);
+        throw new Error('Failed to fetch carrier detail');
+    }
+}
+
+/**
+ * Update carrier status/flag
+ */
+export async function updateCarrierStatus(carrierId, updates) {
+    await requireAdmin();
+    try {
+        const carrier = await wixData.get('Carriers', carrierId);
+        if (!carrier) throw new Error('Carrier not found');
+
+        let changed = false;
+        if (updates.status && updates.status !== carrier.admin_status) {
+            carrier.admin_status = updates.status;
+            changed = true;
+        }
+        if (typeof updates.isFlagged === 'boolean' && updates.isFlagged !== carrier.is_flagged) {
+            carrier.is_flagged = updates.isFlagged;
+            changed = true;
+        }
+
+        if (changed) {
+            await wixData.update('Carriers', carrier);
+            await logAdminAction('updateCarrier', carrierId, updates);
+        }
+
+        return carrier;
+    } catch (error) {
+        console.error('Error updating carrier:', error);
+        throw new Error('Failed to update carrier');
+    }
+}
+
+function normalizeCarrier(carrier) {
+    // Reuse the mapping logic matching frontend expectation
+    return {
+        _id: carrier._id,
+        legalName: carrier.legal_name,
+        dbaName: carrier.dba_name,
+        dotNumber: carrier.dot_number,
+        mcNumber: carrier.mc_number,
+        city: carrier.phy_city,
+        state: carrier.phy_state,
+        fleetSize: carrier.nbr_power_unit,
+        safetyRating: carrier.safety_rating,
+        // ... pass through other raw fields too
+        ...carrier
+    };
+}

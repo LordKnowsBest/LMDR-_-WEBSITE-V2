@@ -1,0 +1,602 @@
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+import { getCarrierSafetyData } from 'backend/fmcsaService';
+import { log, logAIOperation, logExternalAPI, startTrace, endTrace } from 'backend/observabilityService';
+
+// ============================================================================
+// CONFIGURATION - PRODUCTION-HARDENED 2025 STACK
+// ============================================================================
+const CONFIG = {
+  enrichmentsCollection: 'CarrierEnrichments',
+  
+  // Claude Configuration
+  claudeModel: 'claude-sonnet-4-20250514',  
+  claudeSecret: 'CLAUDE_API_KEY',
+  claudeEndpoint: 'https://api.anthropic.com/v1/messages',
+  
+  // Perplexity Configuration - USE FAST MODEL
+  perplexityModel: 'sonar-pro', 
+  perplexitySecret: 'PERPLEXITY_API_KEY',
+  perplexityEndpoint: 'https://api.perplexity.ai/chat/completions',
+  
+  // Timeouts & Limits
+  perplexityTimeoutMs: 25000,  
+  claudeTimeoutMs: 30000,      
+  maxTokens: 1200,
+  cacheExpiryDays: 14,
+  
+  // Feature Flags
+  enablePerplexity: true,      
+  fallbackToClaudeOnly: true   
+};
+
+// ============================================================================
+// MAIN ENRICHMENT PIPELINE - FAULT TOLERANT
+// ============================================================================
+
+export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialIntel = null) {
+  const dot = String(dotNumber).trim();
+  const startTime = Date.now();
+
+  // Start distributed trace for this enrichment pipeline
+  const trace = await startTrace('enrichCarrier', {
+    dotNumber: dot,
+    hasSocialIntel: !!socialIntel,
+    tags: ['ai-enrichment', 'pipeline']
+  });
+  const traceId = trace.traceId;
+
+  console.log(`🚀 Starting enrichment for DOT ${dot}`);
+  await log({ level: 'INFO', source: 'ai-enrichment', message: `Starting enrichment for DOT ${dot}`, traceId });
+
+  // STEP 1: Always fetch Federal Truth (FMCSA) first
+  let fmcsaData;
+  try {
+    fmcsaData = await getCarrierSafetyData(dot);
+    console.log(`✅ FMCSA data retrieved for DOT ${dot}`);
+  } catch (err) {
+    console.error(`⚠️ FMCSA Service failed for ${dot}:`, err.message);
+    await log({ level: 'WARN', source: 'ai-enrichment', message: `FMCSA service failed for DOT ${dot}`, traceId, details: { error: err.message } });
+    fmcsaData = { error: true, error_message: "FMCSA Service Unavailable" };
+  }
+
+  // TRANSFORM: Ensure data matches frontend expectations
+  const fmcsaForFrontend = transformFMCSAForFrontend(fmcsaData);
+
+  try {
+    // Check for fresh cache first - skip expensive API calls
+    const cached = await getCachedSentiment(dot);
+    if (cached && !isSentimentStale(cached.enriched_date)) {
+      console.log(`📦 Using cached enrichment for DOT ${dot} (${cached.cache_age_days} days old)`);
+      await log({ level: 'INFO', source: 'ai-enrichment', message: `Cache hit for DOT ${dot}`, traceId, details: { cacheAgeDays: cached.cache_age_days } });
+      await endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime });
+      return { ...cached, fmcsa: fmcsaForFrontend, fromCache: true };
+    }
+
+    // STEP 2: Attempt Perplexity research (with timeout protection)
+    const carrierName = fmcsaData?.legal_name || carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
+    const carrierLocation = `${fmcsaData?.phy_city || carrierData.PHY_CITY || ''}, ${fmcsaData?.phy_state || carrierData.PHY_STATE || ''}`;
+    
+    let rawResearch = '';
+    
+    // We run standard Perplexity research (Job/Pay data) unless specifically disabled
+    // socialIntel (Reddit gossip) is separate and additive
+    if (CONFIG.enablePerplexity) {
+      rawResearch = await fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId);
+    }
+    
+    // STEP 3: Synthesis via Claude (always runs)
+    // Pass socialIntel into the prompt builder
+    const { systemPrompt, userPrompt } = buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel);
+    
+    // Combine standard research + social intel for Claude's context
+    const combinedResearch = (rawResearch + "\n\n" + (socialIntel || "")).trim();
+
+    const enrichedData = await callClaudeSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
+    
+    // STEP 4: Persist and Return
+    await cacheSentimentEnrichment(enrichedData);
+
+    const elapsed = Date.now() - startTime;
+    console.log(`✅ Enrichment complete for DOT ${dot} in ${elapsed}ms`);
+
+    await log({ level: 'INFO', source: 'ai-enrichment', message: `Enrichment complete for DOT ${dot}`, traceId, duration: elapsed, details: { confidence: enrichedData.data_confidence } });
+    await endTrace(traceId, 'completed', { fromCache: false, elapsed, confidence: enrichedData.data_confidence });
+
+    return { ...enrichedData, fmcsa: fmcsaForFrontend, fromCache: false };
+
+  } catch (error) {
+    console.error(`❌ Enrichment Pipeline Error for DOT ${dot}:`, error.message);
+    await log({ level: 'ERROR', source: 'ai-enrichment', message: `Enrichment failed for DOT ${dot}`, traceId, details: { error: error.message } });
+    await endTrace(traceId, 'error', { error: error.message });
+    return generateFallbackEnrichment(dot, carrierData, driverPrefs, error.message, fmcsaForFrontend);
+  }
+}
+
+// ============================================================================
+// STAGE 1: PERPLEXITY RESEARCHER
+// ============================================================================
+
+async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId = null) {
+  const apiStartTime = Date.now();
+
+  try {
+    const apiKey = await getSecret(CONFIG.perplexitySecret);
+    if (!apiKey) {
+      console.warn('⚠️ Perplexity API key not configured');
+      return generateInternalResearchFallback(carrierName);
+    }
+
+    console.log(`🔍 Perplexity: Researching "${carrierName}"`);
+
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Perplexity timeout')), CONFIG.perplexityTimeoutMs);
+    });
+
+    const fetchPromise = fetch(CONFIG.perplexityEndpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: CONFIG.perplexityModel,
+        messages: [
+          {
+            role: "system",
+            content: "You are a trucking industry researcher. Provide factual, concise information about carrier jobs. Include source citations as [1], [2] etc. Be brief - max 300 words."
+          },
+          {
+            role: "user",
+            content: `Research CDL driver jobs at "${carrierName}" (${carrierLocation}). Find: current CPM pay range, any sign-on bonuses, typical home time, and 2-3 driver reviews or sentiment. Focus on 2024-2025 data only.`
+          }
+        ],
+        max_tokens: 600,
+        temperature: 0.2
+      })
+    });
+
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+    const latencyMs = Date.now() - apiStartTime;
+
+    if (!response.ok) {
+      console.warn(`⚠️ Perplexity API Error: ${response.status}`);
+      await logAIOperation({
+        source: 'ai-enrichment',
+        operation: 'research',
+        functionId: 'perplexity-research',
+        provider: 'perplexity',
+        model: CONFIG.perplexityModel,
+        latencyMs,
+        error: `HTTP ${response.status}`,
+        traceId
+      });
+      return generateInternalResearchFallback(carrierName);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content || '';
+    const usage = result.usage || {};
+
+    console.log(`✅ Perplexity returned ${content.length} chars`);
+
+    // Log successful AI operation
+    await logAIOperation({
+      source: 'ai-enrichment',
+      operation: 'research',
+      functionId: 'perplexity-research',
+      provider: 'perplexity',
+      model: CONFIG.perplexityModel,
+      inputTokens: usage.prompt_tokens,
+      outputTokens: usage.completion_tokens,
+      totalTokens: usage.total_tokens,
+      latencyMs,
+      traceId
+    });
+
+    return content;
+
+  } catch (e) {
+    const latencyMs = Date.now() - apiStartTime;
+    if (e.message === 'Perplexity timeout') {
+      console.warn(`⏱️ Perplexity timed out after ${CONFIG.perplexityTimeoutMs}ms - using fallback`);
+    } else {
+      console.error("⚠️ Perplexity fetch failed:", e.message);
+    }
+    await logAIOperation({
+      source: 'ai-enrichment',
+      operation: 'research',
+      functionId: 'perplexity-research',
+      provider: 'perplexity',
+      model: CONFIG.perplexityModel,
+      latencyMs,
+      error: e.message,
+      traceId
+    });
+    return generateInternalResearchFallback(carrierName);
+  }
+}
+
+function generateInternalResearchFallback(carrierName) {
+  return `Web research unavailable for ${carrierName}. Please infer typical industry standards for a carrier of this profile based on fleet size, location, and operation type. Note that specific pay rates and reviews could not be verified from external sources.`;
+}
+
+// ============================================================================
+// STAGE 2: CLAUDE PROMPT BUILDER
+// ============================================================================
+
+function buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel) {
+  const carrierName = fmcsaData?.legal_name || carrierData.LEGAL_NAME || 'Unknown';
+  const safetyRating = fmcsaData?.safety_rating || 'NOT RATED';
+  const fleetSize = fmcsaData?.total_power_units || carrierData?.NBR_POWER_UNIT || 0;
+  const driverCount = fmcsaData?.total_drivers || carrierData?.DRIVER_TOTAL || 0;
+  
+  // Determine fleet category
+  let fleetCategory = 'small';
+  if (fleetSize >= 500) fleetCategory = 'large';
+  else if (fleetSize >= 50) fleetCategory = 'medium';
+
+  const systemPrompt = `You are the Lead Data Analyst for LMDR (Last Mile Driver Recruiting).
+  Your job is to create concise, actionable intelligence summaries for CDL drivers evaluating carriers.
+  CORE RULES:
+  1. FMCSA safety data provided is VERIFIED TRUTH. Never contradict it.
+  2. Extract pay rates, sentiment, and job details from web research when available.
+  3. If "SOCIAL MEDIA INTEL" is provided, prioritize those unfiltered driver opinions for 'driver_sentiment' and 'pros/cons'.
+  4. Be honest about confidence levels - mark inferred data clearly.
+  5. Output ONLY valid JSON.
+  6. Keep the ai_summary to 2-3 sentences max.`;
+
+  // Inject Social Intel if present
+  let socialContext = "";
+  if (socialIntel && socialIntel.length > 10) {
+    socialContext = `
+    🔥 SOCIAL MEDIA INTEL (Reddit/Twitter/Forums):
+    "${socialIntel}"
+    (Use this strictly for sentiment, pros/cons, and culture analysis. It is raw and unfiltered.)
+    `;
+  }
+
+  const userPrompt = `VERIFIED FMCSA DATA (treat as ground truth):
+  - Carrier Name: ${carrierName}
+  - DOT Number: ${fmcsaData?.dot_number || 'Unknown'}
+  - Safety Rating: ${safetyRating}
+  - Fleet Size: ${fleetSize} power units (${fleetCategory} fleet)
+  - Driver Count: ${driverCount}
+  - Location: ${fmcsaData?.phy_city || carrierData?.PHY_CITY || 'Unknown'}, ${fmcsaData?.phy_state || carrierData?.PHY_STATE || 'Unknown'}
+
+  ${socialContext}
+
+  DRIVER PREFERENCES:
+  - Looking for: ${driverPrefs?.operationType || 'Any'} runs
+  - Min CPM: ${driverPrefs?.minCPM || 'Not specified'}
+
+  OUTPUT THIS EXACT JSON STRUCTURE:
+  {
+    "freight_types": "List main freight types or 'General Freight'",
+    "route_types": "OTR/Regional/Local/Dedicated",
+    "home_time": "Weekly/Every 2-3 weeks/Varies",
+    "pay_cpm_range": "Format as '$X.XX-$X.XX CPM' or 'Market rate'",
+    "sign_on_bonus": "Specific amount or 'None advertised'",
+    "benefits": "Health, 401k, PTO details or 'Standard benefits package'",
+    "hiring_status": "Actively Hiring/Unknown/Contact Carrier",
+    "driver_sentiment": "Positive/Mixed/Negative - Base on Social Intel if available",
+    "sentiment_pros": ["Positive 1", "Positive 2", "Positive 3"],
+    "sentiment_cons": ["Concern 1", "Concern 2", "Concern 3"],
+    "sources_found": ["List specific forums if in Social Intel, otherwise 'Web Search'"],
+    "data_confidence": "High/Medium/Low",
+    "ai_summary": "2-3 sentence summary combining safety record + social rumors + job appeal"
+  }`;
+
+  return { systemPrompt, userPrompt };
+}
+
+// ============================================================================
+// STAGE 3: CLAUDE SYNTHESIS ENGINE
+// ============================================================================
+
+async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber, traceId = null) {
+  const apiStartTime = Date.now();
+
+  const apiKey = await getSecret(CONFIG.claudeSecret);
+  if (!apiKey) {
+    throw new Error('Claude API key not configured');
+  }
+
+  console.log(`🤖 Claude: Synthesizing enrichment for DOT ${dotNumber}`);
+
+  const researchContext = research && research.length > 50
+    ? `\n\nWEB RESEARCH & SOCIAL FINDINGS:\n${research}`
+    : '\n\nNOTE: Limited web research available. Use industry knowledge to make reasonable inferences.';
+
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Claude timeout')), CONFIG.claudeTimeoutMs);
+  });
+
+  const fetchPromise = fetch(CONFIG.claudeEndpoint, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: CONFIG.claudeModel,
+      max_tokens: CONFIG.maxTokens,
+      system: system,
+      messages: [{
+        role: 'user',
+        content: `${user}${researchContext}`
+      }]
+    })
+  });
+
+  try {
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+    const latencyMs = Date.now() - apiStartTime;
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'No error details');
+      await logAIOperation({
+        source: 'ai-enrichment',
+        operation: 'synthesis',
+        functionId: 'claude-synthesis',
+        provider: 'anthropic',
+        model: CONFIG.claudeModel,
+        latencyMs,
+        error: `HTTP ${response.status}: ${errorText}`,
+        traceId
+      });
+      throw new Error(`Claude API Error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    const responseText = extractTextFromResponse(data);
+    const usage = data.usage || {};
+
+    console.log(`✅ Claude returned ${responseText.length} chars`);
+
+    // Log successful AI operation
+    await logAIOperation({
+      source: 'ai-enrichment',
+      operation: 'synthesis',
+      functionId: 'claude-synthesis',
+      provider: 'anthropic',
+      model: CONFIG.claudeModel,
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      totalTokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
+      latencyMs,
+      traceId
+    });
+
+    return parseSentimentResponse(responseText, dotNumber);
+
+  } catch (error) {
+    const latencyMs = Date.now() - apiStartTime;
+    await logAIOperation({
+      source: 'ai-enrichment',
+      operation: 'synthesis',
+      functionId: 'claude-synthesis',
+      provider: 'anthropic',
+      model: CONFIG.claudeModel,
+      latencyMs,
+      error: error.message,
+      traceId
+    });
+    throw error;
+  }
+}
+
+// ============================================================================
+// UTILITIES - RESPONSE PARSING
+// ============================================================================
+
+function transformFMCSAForFrontend(fmcsaData) {
+  if (!fmcsaData) return createEmptyFMCSAObject();
+
+  const inspections = fmcsaData.inspections || {};
+  const crashes = fmcsaData.crashes || {};
+  const basics = fmcsaData.basics || {};
+
+  return {
+    dot_number: fmcsaData.dot_number,
+    legal_name: fmcsaData.legal_name,
+    dba_name: fmcsaData.dba_name,
+    operating_status: fmcsaData.operating_status,
+    is_authorized: fmcsaData.is_authorized,
+    safety_rating: fmcsaData.safety_rating || 'UNKNOWN',
+    safety_rating_code: fmcsaData.safety_rating_code,
+    safety_rating_date: fmcsaData.safety_rating_date,
+    total_drivers: fmcsaData.total_drivers,
+    total_power_units: fmcsaData.total_power_units,
+    
+    inspections_24mo: {
+      total: (inspections.driver_inspections || 0) + (inspections.vehicle_inspections || 0),
+      driver_inspections: inspections.driver_inspections || 0,
+      vehicle_inspections: inspections.vehicle_inspections || 0,
+      driver_oos_rate: inspections.driver_oos_rate,
+      vehicle_oos_rate: inspections.vehicle_oos_rate,
+      national_avg_driver_oos: inspections.national_avg_driver_oos || 5.51,
+      national_avg_vehicle_oos: inspections.national_avg_vehicle_oos || 20.72
+    },
+    
+    crashes_24mo: {
+      total: crashes.total || 0,
+      fatal: crashes.fatal || 0,
+      injury: crashes.injury || 0,
+      tow: crashes.tow || 0
+    },
+    
+    basics: basics,
+    has_basic_alerts: fmcsaData.has_basic_alerts || false,
+    fetched_date: fmcsaData.fetched_date,
+    data_source: fmcsaData.data_source || 'FMCSA_SAFER_API',
+    fromCache: fmcsaData.fromCache || false,
+    cache_age_days: fmcsaData.cache_age_days,
+    error: fmcsaData.error || false,
+    error_message: fmcsaData.error_message
+  };
+}
+
+function createEmptyFMCSAObject() {
+  return {
+    dot_number: null,
+    safety_rating: 'UNKNOWN',
+    inspections_24mo: { total: 0, driver_oos_rate: null, vehicle_oos_rate: null },
+    crashes_24mo: { total: 0, fatal: 0 },
+    error: true
+  };
+}
+
+function extractTextFromResponse(data) {
+  if (!data.content || !Array.isArray(data.content)) return '';
+  return data.content
+    .filter(block => block.type === 'text')
+    .map(block => block.text)
+    .join('\n')
+    .trim();
+}
+
+function parseSentimentResponse(responseText, dotNumber) {
+  try {
+    let jsonStr = responseText.trim();
+    // Strip markdown code blocks if present
+    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) jsonStr = jsonMatch[1].trim();
+    
+    // Find JSON object
+    const jsonObjectMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (jsonObjectMatch) jsonStr = jsonObjectMatch[0];
+    
+    const parsed = JSON.parse(jsonStr);
+    
+    return {
+      dot_number: String(dotNumber),
+      freight_types: parsed.freight_types || 'General Freight',
+      route_types: parsed.route_types || 'Regional/OTR',
+      home_time: parsed.home_time || 'Contact Carrier',
+      pay_cpm_range: parsed.pay_cpm_range || 'Market Rate',
+      sign_on_bonus: parsed.sign_on_bonus || 'Contact Carrier',
+      benefits: parsed.benefits || 'Standard Package',
+      hiring_status: parsed.hiring_status || 'Unknown',
+      driver_sentiment: parsed.driver_sentiment || 'No Reviews',
+      sentiment_pros: JSON.stringify(parsed.sentiment_pros || []),
+      sentiment_cons: JSON.stringify(parsed.sentiment_cons || []),
+      sources_found: JSON.stringify(parsed.sources_found || ['FMCSA SAFER']),
+      data_confidence: parsed.data_confidence || 'Low',
+      ai_summary: parsed.ai_summary || 'Limited data available. Contact carrier for details.',
+      enriched_date: new Date(),
+      enrichment_version: 9, // Bumped version for Social Scanner support
+      source: 'claude-perplexity-hybrid-v3'
+    };
+  } catch (parseError) {
+    console.error('❌ Failed to parse Claude response:', parseError.message);
+    return {
+      dot_number: String(dotNumber),
+      ai_summary: "AI analysis incomplete. Please check FMCSA records and contact carrier directly.",
+      driver_sentiment: "Unavailable",
+      data_confidence: "None",
+      error: true,
+      enriched_date: new Date(),
+      enrichment_version: 9
+    };
+  }
+}
+
+// ============================================================================
+// CACHE MANAGEMENT
+// ============================================================================
+
+async function getCachedSentiment(dotNumber) {
+  try {
+    const result = await wixData.query(CONFIG.enrichmentsCollection)
+      .eq('dot_number', String(dotNumber))
+      .find();
+      
+    if (result.items.length === 0) return null;
+    
+    const cached = result.items[0];
+    const enrichedDate = cached.enriched_date ? new Date(cached.enriched_date) : null;
+    const ageInDays = enrichedDate 
+      ? (Date.now() - enrichedDate.getTime()) / (1000 * 60 * 60 * 24) 
+      : 999;
+      
+    return { ...cached, cache_age_days: Math.round(ageInDays * 10) / 10 };
+  } catch (error) {
+    console.error('Cache lookup error:', error.message);
+    return null;
+  }
+}
+
+function isSentimentStale(enrichedDate) {
+  if (!enrichedDate) return true;
+  const daysSince = (Date.now() - new Date(enrichedDate).getTime()) / (1000 * 60 * 60 * 24);
+  return daysSince > CONFIG.cacheExpiryDays;
+}
+
+async function cacheSentimentEnrichment(sentimentData) {
+  try {
+    const options = { suppressAuth: true };
+    const dataToCache = { ...sentimentData };
+    delete dataToCache.fmcsa; // FMCSA is cached separately
+    
+    const existing = await getCachedSentiment(sentimentData.dot_number);
+    
+    if (existing && existing._id) {
+      await wixData.update(CONFIG.enrichmentsCollection, {
+        ...dataToCache,
+        _id: existing._id,
+        match_count: (existing.match_count || 0) + 1,
+        last_matched_date: new Date()
+      }, options);
+      console.log(`📝 Updated cached enrichment for DOT ${sentimentData.dot_number}`);
+    } else {
+      await wixData.insert(CONFIG.enrichmentsCollection, {
+        ...dataToCache,
+        match_count: 1,
+        last_matched_date: new Date()
+      }, options);
+      console.log(`📝 Created new cached enrichment for DOT ${sentimentData.dot_number}`);
+    }
+  } catch (error) {
+    console.error('Failed to cache enrichment:', error.message);
+  }
+}
+
+// ============================================================================
+// FALLBACK ENRICHMENT
+// ============================================================================
+
+function generateFallbackEnrichment(dotNumber, carrierData, driverPrefs, errorMessage, fmcsaData) {
+  const carrierName = carrierData?.LEGAL_NAME || fmcsaData?.legal_name || 'This carrier';
+  const city = carrierData?.PHY_CITY || fmcsaData?.phy_city || 'their location';
+  const state = carrierData?.PHY_STATE || fmcsaData?.phy_state || '';
+  const fleetSize = carrierData?.NBR_POWER_UNIT || fmcsaData?.total_power_units || 0;
+  
+  let inferredRouteType = 'Regional/OTR';
+  if (fleetSize < 20) inferredRouteType = 'Regional/Local';
+  else if (fleetSize > 200) inferredRouteType = 'OTR/Dedicated';
+
+  return {
+    dot_number: String(dotNumber),
+    freight_types: 'General Freight',
+    route_types: inferredRouteType,
+    home_time: 'Contact Carrier',
+    pay_cpm_range: 'Market Rate ($0.55-0.70)',
+    sign_on_bonus: 'Contact for current offers',
+    benefits: 'Contact for details',
+    hiring_status: 'Contact Carrier',
+    driver_sentiment: 'No reviews available',
+    sentiment_pros: JSON.stringify([]),
+    sentiment_cons: JSON.stringify([]),
+    sources_found: JSON.stringify(['FMCSA SAFER']),
+    data_confidence: 'Low',
+    ai_summary: `${carrierName} is a ${fleetSize > 0 ? fleetSize + '-truck' : ''} carrier based in ${city}${state ? ', ' + state : ''}. AI research was temporarily unavailable. Check FMCSA safety records above and contact the carrier directly for job details.`,
+    fmcsa: fmcsaData,
+    error: true,
+    errorMessage: errorMessage,
+    enriched_date: new Date(),
+    enrichment_version: 9
+  };
+}

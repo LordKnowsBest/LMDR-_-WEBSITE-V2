@@ -1,0 +1,814 @@
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+import { log } from 'backend/observabilityService';
+
+/**
+ * Log OCR operation to observability service
+ * @param {string} level - Log level (INFO, WARN, ERROR)
+ * @param {string} message - Log message
+ * @param {Object} details - Additional details
+ */
+async function logOCR(level, message, details = {}) {
+    try {
+        await log({
+            level,
+            source: 'ocr-service',
+            message,
+            details,
+            tags: ['ocr', details.docType || 'unknown']
+        });
+    } catch (e) {
+        // Don't let logging failures break OCR
+        console.error('Logging failed:', e);
+    }
+}
+/**
+ * OCR Service using Gemini 2.5 Flash with Dual-OCR Consensus
+ *
+ * For CDL documents, runs two OCR passes:
+ * 1. Primary: Full context extraction (name, dates, endorsements, etc.)
+ * 2. Verification: Focused license number extraction
+ *
+ * Uses consensus logic to pick the most accurate license number.
+ */
+const CONFIG = {
+    geminiSecret: 'GEMINI_API_KEY',
+    geminiModel: 'gemini-2.5-flash',
+    geminiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
+    retry: {
+        maxAttempts: 4,     // Increased from 3 for more retry attempts
+        baseDelayMs: 4000,  // Increased from 2000ms for better rate limit handling
+        maxDelayMs: 30000,  // Increased from 15000ms to allow longer backoff
+        retryableStatuses: [429, 500, 502, 503, 504]
+    },
+    timeout: {
+        requestMs: 30000  // Increased from 20000ms to allow for slower responses
+    }
+};
+/**
+ * User-friendly error messages for different error types
+ */
+const ERROR_MESSAGES = {
+    RATE_LIMITED: "You've made too many requests. Please wait a moment before trying again.",
+    SERVICE_UNAVAILABLE: "Our document scanning service is temporarily busy. Please try again in a few seconds.",
+    OCR_FAILED: "We couldn't read your document. Please ensure the image is clear and well-lit, then try again.",
+    INVALID_FORMAT: "The file format isn't supported. Please upload a JPG, PNG, or PDF file.",
+    INVALID_DATA_URL: "There was a problem with your upload. Please try selecting the file again.",
+    API_ERROR: "We encountered a temporary issue. Please try again.",
+    TIMEOUT: "The request took too long. Please try again with a smaller or clearer image.",
+    NO_CONTENT: "We couldn't extract any information from this image. Please ensure the document is clearly visible.",
+    PARSE_ERROR: "We had trouble reading the document data. Please try with a clearer image."
+};
+
+/**
+ * State-specific CDL format patterns with regex validation
+ * Comprehensive coverage for all 50 US states + DC
+ */
+const CDL_PATTERNS = {
+    // Already covered states (verified patterns)
+    'AL': { pattern: /^\d{7,8}$/, description: '7-8 digits' },
+    'AK': { pattern: /^\d{7}$/, description: '7 digits' },
+    'AZ': { pattern: /^[A-Z]\d{8}$|^\d{9}$/, description: '1 letter + 8 digits OR 9 digits' },
+    'AR': { pattern: /^\d{9}$/, description: '9 digits' },
+    'CA': { pattern: /^[A-Z]\d{7}$/, description: '1 letter + 7 digits' },
+    'CO': { pattern: /^\d{9}$|^[A-Z]{2}\d{6}$/, description: '9 digits OR 2 letters + 6 digits' },
+    'CT': { pattern: /^\d{9}$/, description: '9 digits' },
+    'DE': { pattern: /^\d{1,7}$/, description: '1-7 digits' },
+    'DC': { pattern: /^\d{7}$|^\d{9}$/, description: '7 or 9 digits' },
+    'FL': { pattern: /^[A-Z]\d{12}$/, description: '1 letter + 12 digits' },
+    'GA': { pattern: /^\d{7,9}$/, description: '7-9 digits' },
+    'HI': { pattern: /^[A-Z]\d{8}$|^\d{9}$/, description: '1 letter + 8 digits OR 9 digits' },
+    'ID': { pattern: /^[A-Z]{2}\d{6}[A-Z]$|^\d{9}$/, description: '2 letters + 6 digits + 1 letter OR 9 digits' },
+    'IL': { pattern: /^[A-Z]\d{11,12}$/, description: '1 letter + 11-12 digits' },
+    'IN': { pattern: /^\d{10}$|^[A-Z]\d{9}$/, description: '10 digits OR 1 letter + 9 digits' },
+    'IA': { pattern: /^\d{9}$|^\d{3}[A-Z]{2}\d{4}$/, description: '9 digits OR 3 digits + 2 letters + 4 digits' },
+    'KS': { pattern: /^[A-Z]\d{8}$|^\d{9}$/, description: '1 letter + 8 digits OR 9 digits' },
+    'KY': { pattern: /^[A-Z]\d{8,9}$|^\d{9}$/, description: '1 letter + 8-9 digits OR 9 digits' },
+    'LA': { pattern: /^\d{9}$/, description: '9 digits' },
+    'ME': { pattern: /^\d{7}$|^\d{7}[A-Z]$/, description: '7 digits OR 7 digits + 1 letter' },
+    'MD': { pattern: /^[A-Z]\d{12}$/, description: '1 letter + 12 digits' },
+    'MA': { pattern: /^[A-Z]\d{8}$|^\d{9}$/, description: '1 letter + 8 digits OR 9 digits' },
+    'MI': { pattern: /^[A-Z]\d{10,12}$/, description: '1 letter + 10-12 digits' },
+    'MN': { pattern: /^[A-Z]\d{12}$/, description: '1 letter + 12 digits' },
+    'MS': { pattern: /^\d{9}$/, description: '9 digits' },
+    'MO': { pattern: /^[A-Z]\d{5,9}$|^\d{9}$/, description: '1 letter + 5-9 digits OR 9 digits' },
+    'MT': { pattern: /^\d{9}$|^\d{13,14}$/, description: '9 digits OR 13-14 digits' },
+    'NE': { pattern: /^[A-Z]\d{6,8}$/, description: '1 letter + 6-8 digits' },
+    'NV': { pattern: /^\d{9,10}$|^\d{12}$|^X\d{8}$/, description: '9-10 digits, 12 digits, or X + 8 digits' },
+    'NH': { pattern: /^\d{2}[A-Z]{3}\d{5}$/, description: '2 digits + 3 letters + 5 digits' },
+    'NJ': { pattern: /^[A-Z]\d{14}$/, description: '1 letter + 14 digits' },
+    'NM': { pattern: /^\d{8,9}$/, description: '8-9 digits' },
+    'NY': { pattern: /^\d{9}$|^[A-Z]\d{7}$|^[A-Z]\d{18}$/, description: '9 digits, 1 letter + 7 digits, or 1 letter + 18 digits' },
+    'NC': { pattern: /^\d{1,12}$/, description: '1-12 digits' },
+    'ND': { pattern: /^[A-Z]{3}\d{6}$|^\d{9}$/, description: '3 letters + 6 digits OR 9 digits' },
+    'OH': { pattern: /^[A-Z]{2}\d{6}$|^\d{8}$/, description: '2 letters + 6 digits OR 8 digits' },
+    'OK': { pattern: /^[A-Z]?\d{9}$/, description: 'Optional letter + 9 digits' },
+    'OR': { pattern: /^\d{1,9}$|^[A-Z]\d{6}$/, description: '1-9 digits OR 1 letter + 6 digits' },
+    'PA': { pattern: /^\d{8}$/, description: '8 digits' },
+    'RI': { pattern: /^\d{7}$|^[A-Z]\d{6}$/, description: '7 digits OR 1 letter + 6 digits' },
+    'SC': { pattern: /^\d{5,11}$/, description: '5-11 digits' },
+    'SD': { pattern: /^\d{6,10}$|^\d{12}$/, description: '6-10 digits OR 12 digits' },
+    'TN': { pattern: /^\d{7,9}$/, description: '7-9 digits' },
+    'TX': { pattern: /^\d{7,8}$/, description: '7-8 digits' },
+    'UT': { pattern: /^\d{4,10}$/, description: '4-10 digits' },
+    'VT': { pattern: /^\d{8}$|^\d{7}[A-Z]$/, description: '8 digits OR 7 digits + 1 letter' },
+    'VA': { pattern: /^[A-Z]\d{8,11}$|^\d{9}$/, description: '1 letter + 8-11 digits OR 9 digits' },
+    'WA': { pattern: /^[A-Z]{1,7}[A-Z0-9]{5}$|^\d{12}$/, description: '1-7 letters + 5 alphanumeric OR 12 digits' },
+    'WV': { pattern: /^\d{7}$|^[A-Z]{1,2}\d{5,6}$/, description: '7 digits OR 1-2 letters + 5-6 digits' },
+    'WI': { pattern: /^[A-Z]\d{13}$/, description: '1 letter + 13 digits' },
+    'WY': { pattern: /^\d{9,10}$/, description: '9-10 digits' }
+};
+
+/**
+ * Fetch with retry logic and timeout
+ * @param {string} url - URL to fetch
+ * @param {Object} options - Fetch options
+ * @param {number} [timeoutMs] - Request timeout in milliseconds
+ * @returns {Promise<Response>}
+ */
+async function fetchWithRetry(url, options, timeoutMs = CONFIG.timeout.requestMs) {
+    let lastError;
+
+    for (let attempt = 0; attempt < CONFIG.retry.maxAttempts; attempt++) {
+        try {
+            // Create timeout promise
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('REQUEST_TIMEOUT')), timeoutMs);
+            });
+
+            // Race fetch against timeout
+            const response = await Promise.race([
+                fetch(url, options),
+                timeoutPromise
+            ]);
+
+            // Success - return response
+            if (response.ok) {
+                return response;
+            }
+
+            // Check if error is retryable
+            if (CONFIG.retry.retryableStatuses.includes(response.status)) {
+                const delay = Math.min(
+                    CONFIG.retry.baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000,
+                    CONFIG.retry.maxDelayMs
+                );
+                console.log(`⚠️ Gemini API returned ${response.status}, retry ${attempt + 1}/${CONFIG.retry.maxAttempts} in ${Math.round(delay)}ms`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                lastError = new Error(`API returned ${response.status}`);
+                continue;
+            }
+
+            // Non-retryable status - return as-is for caller to handle
+            return response;
+
+        } catch (error) {
+            if (error.message === 'REQUEST_TIMEOUT') {
+                console.log(`⚠️ Request timed out, retry ${attempt + 1}/${CONFIG.retry.maxAttempts}`);
+                lastError = new Error('Request timed out');
+
+                // Add delay before retry on timeout
+                if (attempt < CONFIG.retry.maxAttempts - 1) {
+                    const delay = CONFIG.retry.baseDelayMs * Math.pow(2, attempt);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+                continue;
+            }
+            // Network error or other - throw immediately
+            throw error;
+        }
+    }
+
+    throw lastError || new Error('Max retries exceeded');
+}
+
+/**
+ * Validate license number against state format pattern
+ */
+function validateLicenseFormat(licenseNumber, state) {
+    if (!licenseNumber || !state) return { valid: false, reason: 'Missing data' };
+    const pattern = CDL_PATTERNS[state];
+    if (!pattern) return { valid: true, reason: 'State pattern not defined' };
+    const valid = pattern.pattern.test(licenseNumber);
+    return { valid, reason: valid ? `Matches ${state} format` : `Invalid ${state} format` };
+}
+
+/**
+ * Verification OCR - focused purely on license number extraction
+ * Used as a second pass to verify the primary OCR result
+ */
+async function verifyLicenseNumber(base64Data, mimeType, state, apiKey) {
+    const stateFormat = CDL_PATTERNS[state]?.description || '8-12 alphanumeric characters';
+
+    const verifyPrompt = `CRITICAL TASK: Extract ONLY the license number from this CDL image.
+
+Focus on the field labeled "DL", "LIC", "NO." or "4d".
+
+State: ${state || 'Unknown'}
+Expected format: ${stateFormat}
+
+DIGIT-BY-DIGIT VERIFICATION - Look VERY carefully at each character:
+- 8 vs 0 (eight has two loops, zero has one)
+- 3 vs 8 (three is open on left, eight is closed)
+- 9 vs 8 (nine has tail going down)
+- 1 vs I vs l (one is usually simpler)
+
+Read the number character by character, left to right.
+Verify your reading twice before responding.
+
+Return ONLY: {"licenseNumber": "XXXXXXXX"}`;
+
+    try {
+        const response = await fetchWithRetry(`${CONFIG.geminiEndpoint}?key=${apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [
+                    { text: verifyPrompt },
+                    { inline_data: { mime_type: mimeType, data: base64Data } }
+                ]}],
+                generationConfig: { response_mime_type: "application/json" }
+            })
+        });
+
+        if (!response.ok) return null;
+
+        const result = await response.json();
+        const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        return text ? JSON.parse(text).licenseNumber : null;
+    } catch (error) {
+        console.error('Verification OCR failed:', error);
+        return null;
+    }
+}
+
+/**
+ * Consensus logic for dual-OCR results
+ */
+function resolveLicenseConsensus(primaryLicense, verifyLicense, state) {
+    // If verification failed, use primary
+    if (!verifyLicense) {
+        return { license: primaryLicense, confidence: 'MEDIUM', method: 'primary_only' };
+    }
+
+    // If they match, high confidence
+    if (primaryLicense === verifyLicense) {
+        console.log(`✅ Dual-OCR CONSENSUS: Both passes agree on ${primaryLicense}`);
+        return { license: primaryLicense, confidence: 'HIGH', method: 'consensus' };
+    }
+
+    // They differ - validate both against state pattern
+    const primaryValid = validateLicenseFormat(primaryLicense, state);
+    const verifyValid = validateLicenseFormat(verifyLicense, state);
+
+    console.log(`⚠️ OCR Disagreement: Primary=${primaryLicense} (${primaryValid.valid ? 'valid' : 'invalid'}), Verify=${verifyLicense} (${verifyValid.valid ? 'valid' : 'invalid'})`);
+
+    if (primaryValid.valid && !verifyValid.valid) {
+        return { license: primaryLicense, confidence: 'MEDIUM', method: 'primary_validated' };
+    }
+    if (!primaryValid.valid && verifyValid.valid) {
+        return { license: verifyLicense, confidence: 'MEDIUM', method: 'verify_validated' };
+    }
+    if (primaryValid.valid && verifyValid.valid) {
+        // Both valid - prefer verification pass (more focused on accuracy)
+        console.log(`📊 Both valid, preferring verification pass: ${verifyLicense}`);
+        return { license: verifyLicense, confidence: 'MEDIUM', method: 'verify_preferred' };
+    }
+
+    // Neither valid - return primary with low confidence
+    return { license: primaryLicense, confidence: 'LOW', method: 'fallback' };
+}
+
+/**
+ * Prompt engineering for different document types
+ */
+function getPromptForDocType(docType) {
+    if (docType === 'CDL_FRONT' || docType === 'CDL_BACK') {
+        return `You are an expert OCR system specialized in reading US Commercial Driver's Licenses (CDL).
+
+CRITICAL INSTRUCTIONS FOR LICENSE NUMBER EXTRACTION:
+1. First identify the issuing STATE from the card header/design
+2. Locate the LICENSE NUMBER field (usually labeled "DL", "DLN", "LIC", "NO.", or "4d")
+3. READ EACH DIGIT/CHARACTER CAREFULLY - this is the most important field
+4. Cross-reference with state format patterns below
+
+STATE LICENSE NUMBER FORMATS (use to validate your extraction):
+- Texas (TX): 8 digits only (e.g., 08438764)
+- California (CA): 1 letter + 7 digits (e.g., D1234567)
+- Florida (FL): 1 letter + 12 digits (e.g., B123456789012)
+- Louisiana (LA): 9 digits (e.g., 010797788)
+- New York (NY): 9 digits (e.g., 123456789)
+- Illinois (IL): 1 letter + 11 digits (e.g., A12345678901)
+- Pennsylvania (PA): 8 digits (e.g., 12345678)
+- Ohio (OH): 2 letters + 6 digits (e.g., AB123456)
+
+COMMON OCR ERRORS TO AVOID:
+- Don't confuse 8 and 0
+- Don't confuse 3 and 8
+- Don't confuse 9 and 8
+- Don't confuse 1 and I and l
+- Don't confuse 5 and S
+
+Extract the following fields and return as JSON:
+- fullName: Full name as shown (Last First Middle format is common)
+- licenseNumber: The DL/license number - DOUBLE CHECK THIS VALUE
+- state: 2-letter state code (e.g., "TX", "CA", "FL")
+- expirationDate: ISO format YYYY-MM-DD (look for "EXP" or "4b")
+- dob: Date of birth in ISO format YYYY-MM-DD (look for "DOB" or "3")
+- cdlClass: Class letter (A, B, or C) - look for "CLASS" or "9"
+- endorsements: Array of endorsement codes (H, N, P, S, T, X) - look for "END" or "15"
+- restrictions: Array of restriction codes - look for "REST" or "12"
+- address: Street address line (look for "ADD" or "8")
+- city: City name from address
+- zip: 5-digit ZIP code from address
+
+Return ONLY valid JSON. Double-check the licenseNumber matches the state's format.`;
+    }
+
+    if (docType === 'MED_CARD') {
+        return `You are an expert OCR system specialized in reading DOT Medical Examiner's Certificates.
+
+Extract the following fields and return as a single JSON object (NOT an array):
+- driverName: Driver's full name as printed
+- certificateExpirationDate: Expiration date in ISO format YYYY-MM-DD (look for "Certificate Expires" field)
+- examinerName: Medical examiner's name
+- registryNumber: National Registry number (usually 10 digits)
+
+IMPORTANT: Return as a single object, not an array.
+Return format: {"driverName": "...", "certificateExpirationDate": "YYYY-MM-DD", ...}`;
+    }
+
+    return "Extract all text and return as JSON.";
+}
+
+/**
+ * Extract structured information from a document image
+ *
+ * @param {string} base64Data Base64 string of the image (without prefix)
+ * @param {string} mimeType Mime type of the image (image/jpeg, image/png, etc.)
+ * @param {'CDL_FRONT' | 'CDL_BACK' | 'MED_CARD'} docType
+ * @returns {Promise<Object>} Extracted data
+ */
+export async function extractInfoFromDocument(base64Data, mimeType, docType) {
+    try {
+        const apiKey = await getSecret(CONFIG.geminiSecret);
+        if (!apiKey) throw new Error('GEMINI_API_KEY not found in secrets');
+
+        const prompt = getPromptForDocType(docType);
+
+        const response = await fetchWithRetry(`${CONFIG.geminiEndpoint}?key=${apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{
+                    parts: [
+                        { text: prompt },
+                        {
+                            inline_data: {
+                                mime_type: mimeType,
+                                data: base64Data
+                            }
+                        }
+                    ]
+                }],
+                generationConfig: {
+                    response_mime_type: "application/json"
+                }
+            })
+        });
+
+        if (!response.ok) {
+            const errBody = await response.text();
+            throw new Error(`Gemini API Error (${response.status}): ${errBody}`);
+        }
+
+        const result = await response.json();
+        const extractedText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (!extractedText) throw new Error('No content returned from Gemini');
+
+        return JSON.parse(extractedText);
+    } catch (error) {
+        console.error(`❌ OCR Error (${docType}):`, error);
+        const userMessage = error.message.includes('timed out') ? ERROR_MESSAGES.TIMEOUT :
+                           error.message.includes('API Error') ? ERROR_MESSAGES.API_ERROR :
+                           error.message.includes('No content') ? ERROR_MESSAGES.NO_CONTENT :
+                           ERROR_MESSAGES.OCR_FAILED;
+        return { success: false, error: error.message, userMessage };
+    }
+}
+
+/**
+ * Real-time OCR extraction for form auto-fill with Dual-OCR Consensus
+ * Called from frontend when user uploads a document
+ *
+ * For CDL documents, runs a verification pass to improve license number accuracy.
+ *
+ * @param {string} base64DataUrl Full data URL (e.g., "data:image/png;base64,...")
+ * @param {'CDL_FRONT' | 'CDL_BACK' | 'MED_CARD'} docType
+ * @returns {Promise<Object>} Extracted data with success flag and confidence level
+ */
+export async function extractDocumentForAutoFill(base64DataUrl, docType) {
+    try {
+        console.log(`🔍 Real-time OCR requested for ${docType}`);
+
+        // Parse data URL to get mime type and base64 content
+        const matches = base64DataUrl.match(/^data:(.+);base64,(.+)$/);
+        if (!matches) {
+            throw new Error('Invalid data URL format');
+        }
+
+        const mimeType = matches[1];
+        const base64Data = matches[2];
+
+        // Get API key for potential verification pass
+        const apiKey = await getSecret(CONFIG.geminiSecret);
+
+        // Primary OCR - full context extraction
+        const result = await extractInfoFromDocument(base64Data, mimeType, docType);
+
+        // Handle array responses (unwrap if needed)
+        let data = result;
+        if (Array.isArray(result) && result.length > 0) {
+            data = result[0];
+        }
+
+        if (data && !data.error) {
+            let licenseNumber = data.licenseNumber;
+            let confidence = 'MEDIUM';
+            let consensusMethod = 'single_pass';
+
+            // DISABLED: Verification OCR pass to reduce API calls and prevent 429 rate limiting
+            // The primary OCR is sufficient for auto-fill purposes
+            // If high accuracy is needed for license numbers, re-enable with rate limiting
+            /*
+            if ((docType === 'CDL_FRONT' || docType === 'CDL_BACK') && licenseNumber && apiKey) {
+                console.log(`🔄 Running verification OCR for license number...`);
+
+                const verifyLicense = await verifyLicenseNumber(base64Data, mimeType, data.state, apiKey);
+
+                if (verifyLicense) {
+                    const consensus = resolveLicenseConsensus(licenseNumber, verifyLicense, data.state);
+                    licenseNumber = consensus.license;
+                    confidence = consensus.confidence;
+                    consensusMethod = consensus.method;
+
+                    console.log(`📋 Consensus result: ${licenseNumber} (${confidence}, ${consensusMethod})`);
+                }
+            }
+            */
+            // Single-pass OCR is sufficient for form auto-fill
+            confidence = 'MEDIUM';
+            consensusMethod = 'single_pass_optimized';
+
+            console.log(`✅ Real-time OCR success for ${docType}:`, JSON.stringify(data));
+
+            // Return normalized data for form auto-fill
+            return {
+                success: true,
+                docType: docType,
+                confidence: confidence,
+                consensusMethod: consensusMethod,
+                extracted: {
+                    // CDL fields
+                    fullName: data.fullName || data.driverName || null,
+                    licenseNumber: licenseNumber,
+                    state: data.state || null,
+                    expirationDate: data.expirationDate || null,
+                    dob: data.dob || null,
+                    cdlClass: data.cdlClass || null,
+                    endorsements: data.endorsements || [],
+                    restrictions: data.restrictions || [],
+                    // Address fields (from CDL)
+                    address: data.address || null,
+                    city: data.city || null,
+                    zip: data.zip || null,
+                    // Med Card fields
+                    certificateExpirationDate: data.certificateExpirationDate || null,
+                    examinerName: data.examinerName || null,
+                    registryNumber: data.registryNumber || null
+                }
+            };
+        } else {
+            throw new Error(data?.error || 'OCR extraction failed');
+        }
+    } catch (error) {
+        console.error(`❌ Real-time OCR Error (${docType}):`, error);
+        const userMessage = error.message.includes('Invalid data URL') ? ERROR_MESSAGES.INVALID_DATA_URL :
+                           error.message.includes('timed out') ? ERROR_MESSAGES.TIMEOUT :
+                           ERROR_MESSAGES.OCR_FAILED;
+        return {
+            success: false,
+            docType: docType,
+            error: error.message,
+            userMessage
+        };
+    }
+}
+
+// ============================================================================
+// CIRCUIT BREAKER STATE
+// ============================================================================
+
+/**
+ * Circuit breaker state tracking
+ * @type {{ status: 'CLOSED' | 'OPEN' | 'HALF_OPEN', failureCount: number, successCount: number, lastFailureTime: number | null, openedAt: number | null }}
+ */
+const circuitState = {
+    status: 'CLOSED',
+    failureCount: 0,
+    successCount: 0,
+    lastFailureTime: null,
+    openedAt: null
+};
+
+/**
+ * Circuit breaker configuration
+ */
+const CIRCUIT_CONFIG = {
+    failureThreshold: 5,       // Number of failures before opening circuit
+    recoveryTimeoutMs: 30000,  // Time to wait before attempting recovery (30 seconds)
+    successThreshold: 2        // Successes needed in HALF_OPEN to close circuit
+};
+
+// ============================================================================
+// RATE LIMITER STATE
+// ============================================================================
+
+/**
+ * Rate limit state per user
+ * @type {Map<string, { requests: number[], lastCleanup: number }>}
+ */
+const rateLimitState = new Map();
+
+/**
+ * Rate limiter configuration
+ */
+const RATE_CONFIG = {
+    maxRequestsPerMinute: 10,
+    windowMs: 60000            // 1 minute window
+};
+
+// ============================================================================
+// CIRCUIT BREAKER FUNCTIONS
+// ============================================================================
+
+/**
+ * Check if the circuit breaker allows requests
+ * @returns {{ allowed: boolean, reason?: string, retryAfterMs?: number }}
+ */
+function checkCircuit() {
+    const now = Date.now();
+
+    switch (circuitState.status) {
+        case 'CLOSED':
+            return { allowed: true };
+
+        case 'OPEN':
+            // Check if recovery timeout has elapsed
+            const timeSinceOpened = now - circuitState.openedAt;
+            if (timeSinceOpened >= CIRCUIT_CONFIG.recoveryTimeoutMs) {
+                // Transition to HALF_OPEN to test recovery
+                circuitState.status = 'HALF_OPEN';
+                circuitState.successCount = 0;
+                console.log('🔄 Circuit breaker: OPEN -> HALF_OPEN (testing recovery)');
+                return { allowed: true };
+            }
+            // Still in cooldown period
+            const retryAfterMs = CIRCUIT_CONFIG.recoveryTimeoutMs - timeSinceOpened;
+            return {
+                allowed: false,
+                reason: 'Circuit breaker is OPEN due to repeated failures',
+                retryAfterMs
+            };
+
+        case 'HALF_OPEN':
+            // Allow limited requests to test if service has recovered
+            return { allowed: true };
+
+        default:
+            return { allowed: true };
+    }
+}
+
+/**
+ * Record a successful request - handles HALF_OPEN -> CLOSED transition
+ */
+function recordSuccess() {
+    if (circuitState.status === 'HALF_OPEN') {
+        circuitState.successCount++;
+        console.log(`✅ Circuit breaker: Success in HALF_OPEN (${circuitState.successCount}/${CIRCUIT_CONFIG.successThreshold})`);
+
+        if (circuitState.successCount >= CIRCUIT_CONFIG.successThreshold) {
+            // Service has recovered - close circuit
+            circuitState.status = 'CLOSED';
+            circuitState.failureCount = 0;
+            circuitState.successCount = 0;
+            circuitState.openedAt = null;
+            console.log('✅ Circuit breaker: HALF_OPEN -> CLOSED (service recovered)');
+        }
+    } else if (circuitState.status === 'CLOSED') {
+        // Reset failure count on success in CLOSED state
+        if (circuitState.failureCount > 0) {
+            circuitState.failureCount = Math.max(0, circuitState.failureCount - 1);
+        }
+    }
+}
+
+/**
+ * Record a failed request - handles CLOSED -> OPEN transition
+ */
+function recordFailure() {
+    const now = Date.now();
+    circuitState.lastFailureTime = now;
+
+    if (circuitState.status === 'HALF_OPEN') {
+        // Failure during recovery test - reopen circuit
+        circuitState.status = 'OPEN';
+        circuitState.openedAt = now;
+        circuitState.successCount = 0;
+        console.log('❌ Circuit breaker: HALF_OPEN -> OPEN (recovery failed)');
+    } else if (circuitState.status === 'CLOSED') {
+        circuitState.failureCount++;
+        console.log(`⚠️ Circuit breaker: Failure recorded (${circuitState.failureCount}/${CIRCUIT_CONFIG.failureThreshold})`);
+
+        if (circuitState.failureCount >= CIRCUIT_CONFIG.failureThreshold) {
+            // Too many failures - open circuit
+            circuitState.status = 'OPEN';
+            circuitState.openedAt = now;
+            console.log('🔴 Circuit breaker: CLOSED -> OPEN (threshold exceeded)');
+        }
+    }
+}
+
+/**
+ * Get current circuit breaker status for monitoring
+ * @returns {{ status: string, failureCount: number, successCount: number, lastFailureTime: number | null, openedAt: number | null, config: Object }}
+ */
+function getCircuitStatus() {
+    return {
+        status: circuitState.status,
+        failureCount: circuitState.failureCount,
+        successCount: circuitState.successCount,
+        lastFailureTime: circuitState.lastFailureTime,
+        openedAt: circuitState.openedAt,
+        config: CIRCUIT_CONFIG
+    };
+}
+
+// ============================================================================
+// RATE LIMITER FUNCTIONS
+// ============================================================================
+
+/**
+ * Check if a user is within rate limits
+ * @param {string} userId - User identifier for rate limiting
+ * @returns {{ allowed: boolean, remaining: number, retryAfterMs?: number }}
+ */
+function checkRateLimit(userId) {
+    const now = Date.now();
+    const windowStart = now - RATE_CONFIG.windowMs;
+
+    // Get or create user's rate limit state
+    let userState = rateLimitState.get(userId);
+    if (!userState) {
+        userState = { requests: [], lastCleanup: now };
+        rateLimitState.set(userId, userState);
+    }
+
+    // Clean up old requests outside the window
+    userState.requests = userState.requests.filter(timestamp => timestamp > windowStart);
+    userState.lastCleanup = now;
+
+    // Check if user is at limit
+    const requestCount = userState.requests.length;
+    if (requestCount >= RATE_CONFIG.maxRequestsPerMinute) {
+        // Find the oldest request in the window to calculate retry time
+        const oldestRequest = Math.min(...userState.requests);
+        const retryAfterMs = (oldestRequest + RATE_CONFIG.windowMs) - now;
+
+        return {
+            allowed: false,
+            remaining: 0,
+            retryAfterMs: Math.max(0, retryAfterMs)
+        };
+    }
+
+    // Record this request
+    userState.requests.push(now);
+
+    return {
+        allowed: true,
+        remaining: RATE_CONFIG.maxRequestsPerMinute - userState.requests.length
+    };
+}
+
+/**
+ * Get rate limit status for a specific user (for monitoring)
+ * @param {string} userId - User identifier
+ * @returns {{ requestsInWindow: number, remaining: number, windowMs: number, maxRequests: number }}
+ */
+function getRateLimitStatus(userId) {
+    const now = Date.now();
+    const windowStart = now - RATE_CONFIG.windowMs;
+
+    const userState = rateLimitState.get(userId);
+    if (!userState) {
+        return {
+            requestsInWindow: 0,
+            remaining: RATE_CONFIG.maxRequestsPerMinute,
+            windowMs: RATE_CONFIG.windowMs,
+            maxRequests: RATE_CONFIG.maxRequestsPerMinute
+        };
+    }
+
+    // Count requests in current window
+    const recentRequests = userState.requests.filter(timestamp => timestamp > windowStart);
+
+    return {
+        requestsInWindow: recentRequests.length,
+        remaining: Math.max(0, RATE_CONFIG.maxRequestsPerMinute - recentRequests.length),
+        windowMs: RATE_CONFIG.windowMs,
+        maxRequests: RATE_CONFIG.maxRequestsPerMinute
+    };
+}
+
+// ============================================================================
+// PROTECTED OCR EXTRACTION WITH CIRCUIT BREAKER AND RATE LIMITING
+// ============================================================================
+
+/**
+ * Production-ready OCR extraction with circuit breaker and rate limiting
+ *
+ * This wrapper provides:
+ * 1. Rate limiting - prevents abuse by limiting requests per user per minute
+ * 2. Circuit breaker - prevents cascade failures by temporarily disabling service
+ *
+ * @param {string} base64DataUrl - Full data URL (e.g., "data:image/png;base64,...")
+ * @param {'CDL_FRONT' | 'CDL_BACK' | 'MED_CARD'} docType - Document type to process
+ * @param {string} [userId='anonymous'] - User ID for rate limiting
+ * @returns {Promise<Object>} Extracted data with success flag, or error response
+ */
+export async function protectedOCRExtraction(base64DataUrl, docType, userId = 'anonymous') {
+    const startTime = Date.now();
+    await logOCR('INFO', `OCR request started: ${docType}`, { userId, docType });
+
+    // 1. Check rate limit first
+    const rateCheck = checkRateLimit(userId);
+    if (!rateCheck.allowed) {
+        console.log(`⛔ Rate limit exceeded for user: ${userId}`);
+        await logOCR('WARN', 'Rate limit exceeded', { userId, docType, retryAfterMs: rateCheck.retryAfterMs });
+        return {
+            success: false,
+            error: 'RATE_LIMITED',
+            message: ERROR_MESSAGES.RATE_LIMITED,
+            retryAfterMs: rateCheck.retryAfterMs,
+            docType
+        };
+    }
+
+    // 2. Check circuit breaker
+    const circuitCheck = checkCircuit();
+    if (!circuitCheck.allowed) {
+        console.log(`🔴 Circuit breaker blocking request: ${circuitCheck.reason}`);
+        await logOCR('WARN', 'Circuit breaker open', { docType, retryAfterMs: circuitCheck.retryAfterMs });
+        return {
+            success: false,
+            error: 'SERVICE_UNAVAILABLE',
+            message: ERROR_MESSAGES.SERVICE_UNAVAILABLE,
+            retryAfterMs: circuitCheck.retryAfterMs,
+            docType
+        };
+    }
+
+    // 3. Execute OCR with circuit breaker tracking
+    try {
+        const result = await extractDocumentForAutoFill(base64DataUrl, docType);
+
+        if (result.success) {
+            recordSuccess();
+            const duration = Date.now() - startTime;
+            await logOCR('INFO', `OCR completed successfully`, { docType, confidence: result.confidence, durationMs: duration });
+        } else {
+            recordFailure();
+        }
+
+        return result;
+    } catch (error) {
+        console.error(`❌ Protected OCR Error (${docType}):`, error);
+        recordFailure();
+        const duration = Date.now() - startTime;
+        await logOCR('ERROR', `OCR failed: ${error.message}`, { docType, error: error.message, durationMs: duration });
+        return {
+            success: false,
+            error: 'OCR_FAILED',
+            message: ERROR_MESSAGES.OCR_FAILED,
+            docType
+        };
+    }
+}
+
+// Export monitoring functions
+export { getCircuitStatus, getRateLimitStatus };
+

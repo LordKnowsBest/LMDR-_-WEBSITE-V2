@@ -1,0 +1,650 @@
+/**
+ * Prompt Library Service - Backend functions for managing AI prompts
+ * Provides CRUD operations for system prompts with version history
+ * Super Admin has full read/write access
+ */
+
+import wixData from 'wix-data';
+import { currentMember } from 'wix-members-backend';
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const CONFIG = {
+    collections: {
+        prompts: 'PromptLibrary',
+        versions: 'PromptVersions',
+        auditLog: 'AdminAuditLog'
+    },
+    // Prompt categories for organization
+    categories: [
+        { id: 'enrichment', name: 'Carrier Enrichment', description: 'Prompts for AI carrier analysis' },
+        { id: 'research', name: 'Web Research', description: 'Prompts for web data gathering' },
+        { id: 'social', name: 'Social Analysis', description: 'Prompts for social media scanning' },
+        { id: 'ocr', name: 'Document OCR', description: 'Prompts for document extraction' },
+        { id: 'chat', name: 'Chat/Support', description: 'Prompts for driver/admin chat' },
+        { id: 'classification', name: 'Classification', description: 'Prompts for content classification' },
+        { id: 'extraction', name: 'Data Extraction', description: 'Prompts for structured data extraction' },
+        { id: 'other', name: 'Other', description: 'Miscellaneous prompts' }
+    ],
+    // Default prompts (seeded on first run)
+    defaultPrompts: [
+        {
+            promptId: 'carrier_synthesis',
+            name: 'Carrier Synthesis',
+            category: 'enrichment',
+            description: 'Main prompt for synthesizing carrier intelligence from multiple data sources',
+            systemPrompt: `You are the Lead Data Analyst for LMDR (Last Mile Driver Recruiting).
+Your job is to create concise, actionable intelligence summaries for CDL drivers evaluating carriers.
+CORE RULES:
+1. FMCSA safety data provided is VERIFIED TRUTH. Never contradict it.
+2. Extract pay rates, sentiment, and job details from web research when available.
+3. If "SOCIAL MEDIA INTEL" is provided, prioritize those unfiltered driver opinions for 'driver_sentiment' and 'pros/cons'.
+4. Be concise - drivers want quick, scannable insights.
+5. Always include a confidence score based on data quality.`,
+            userPromptTemplate: `Analyze this carrier for a CDL driver:\n\nCarrier: {{carrierName}}\nDOT: {{dotNumber}}\nFleet Size: {{fleetSize}}\nLocation: {{location}}\n\nFMCSA Data:\n{{fmcsaData}}\n\nWeb Research:\n{{webResearch}}\n\nSocial Intel:\n{{socialIntel}}`,
+            variables: ['carrierName', 'dotNumber', 'fleetSize', 'location', 'fmcsaData', 'webResearch', 'socialIntel'],
+            provider: 'anthropic',
+            model: 'claude-sonnet-4-20250514',
+            isActive: true
+        },
+        {
+            promptId: 'web_research',
+            name: 'Web Research Query',
+            category: 'research',
+            description: 'Prompt for Perplexity to gather carrier job information',
+            systemPrompt: 'You are a trucking industry researcher. Provide factual, concise information about carrier jobs. Include source citations as [1], [2] etc. Be brief - max 300 words.',
+            userPromptTemplate: 'Research CDL driver jobs at "{{carrierName}}" ({{location}}). Find: current CPM pay range, any sign-on bonuses, typical home time, and 2-3 driver reviews or sentiment. Focus on 2024-2025 data only.',
+            variables: ['carrierName', 'location'],
+            provider: 'perplexity',
+            model: 'sonar-pro',
+            isActive: true
+        },
+        {
+            promptId: 'social_scanner',
+            name: 'Social Media Scanner',
+            category: 'social',
+            description: 'Prompt for analyzing driver chatter on social media',
+            systemPrompt: 'You are a specialized Social Media Analyst. You summarize unstructured driver chatter into actionable intelligence. Be skeptical and blunt.',
+            userPromptTemplate: 'Analyze recent driver discussions about {{carrierName}}:\n\n{{rawContent}}\n\nProvide: Overall sentiment (positive/negative/mixed), key complaints, key praises, and any red flags.',
+            variables: ['carrierName', 'rawContent'],
+            provider: 'perplexity',
+            model: 'sonar-pro',
+            isActive: true
+        },
+        {
+            promptId: 'cdl_ocr',
+            name: 'CDL Document OCR',
+            category: 'ocr',
+            description: 'Prompt for extracting data from CDL license images',
+            systemPrompt: 'You are an expert document data extractor. Extract all visible text and structured data from the provided CDL (Commercial Driver License) image.',
+            userPromptTemplate: 'Extract the following from this CDL image:\n- Full legal name\n- License number\n- State of issue\n- License class (A, B, C)\n- Endorsements (list all)\n- Restrictions (list all)\n- Issue date\n- Expiration date\n- Date of birth\n\nReturn as JSON. If a field is not visible, use null.',
+            variables: [],
+            provider: 'google',
+            model: 'gemini-1.5-flash',
+            isActive: true
+        },
+        {
+            promptId: 'med_card_ocr',
+            name: 'Medical Card OCR',
+            category: 'ocr',
+            description: 'Prompt for extracting data from DOT medical card images',
+            systemPrompt: 'You are an expert document data extractor specializing in DOT medical certificates.',
+            userPromptTemplate: 'Extract the following from this DOT Medical Examiner Certificate:\n- Driver name\n- Examiner name and credentials\n- Exam date\n- Expiration date\n- Medical certification status\n- Any restrictions or conditions\n- National Registry number\n\nReturn as JSON. If a field is not visible, use null.',
+            variables: [],
+            provider: 'google',
+            model: 'gemini-1.5-flash',
+            isActive: true
+        }
+    ]
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isSuperAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        const role = member.contactDetails?.customFields?.role || '';
+        return role.toLowerCase() === 'super_admin';
+    } catch (error) {
+        console.error('[PromptLibrary] Super admin check failed:', error);
+        return false;
+    }
+}
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const role = member.contactDetails?.customFields?.role || '';
+        return adminRoles.includes(role.toLowerCase());
+    } catch (error) {
+        console.error('[PromptLibrary] Admin check failed:', error);
+        return false;
+    }
+}
+
+async function requireSuperAdmin() {
+    const authorized = await isSuperAdmin();
+    if (!authorized) {
+        throw new Error('Unauthorized: Super Admin access required');
+    }
+}
+
+async function requireAdmin() {
+    const authorized = await isAdmin();
+    if (!authorized) {
+        throw new Error('Unauthorized: Admin access required');
+    }
+}
+
+async function getCurrentAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        return {
+            id: member?._id || 'system',
+            email: member?.loginEmail || 'system@lmdr.com'
+        };
+    } catch {
+        return { id: 'system', email: 'system@lmdr.com' };
+    }
+}
+
+// ============================================
+// PROMPT CRUD OPERATIONS
+// ============================================
+
+/**
+ * Get all prompts (Admin read access)
+ * @param {Object} options - Filter options
+ * @returns {Promise<Object>} - Prompts list with metadata
+ */
+export async function getPrompts(options = {}) {
+    await requireAdmin();
+
+    try {
+        let query = wixData.query(CONFIG.collections.prompts);
+
+        if (options.category) {
+            query = query.eq('category', options.category);
+        }
+
+        if (options.isActive !== undefined) {
+            query = query.eq('isActive', options.isActive);
+        }
+
+        if (options.search) {
+            query = query.contains('name', options.search);
+        }
+
+        const result = await query
+            .ascending('category')
+            .ascending('name')
+            .find({ suppressAuth: true });
+
+        return {
+            items: result.items,
+            totalCount: result.totalCount,
+            categories: CONFIG.categories
+        };
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error fetching prompts:', error);
+        throw new Error('Failed to fetch prompts');
+    }
+}
+
+/**
+ * Get a single prompt by ID (Admin read access)
+ * @param {string} promptId - Prompt ID
+ * @returns {Promise<Object>} - Prompt with version history
+ */
+export async function getPrompt(promptId) {
+    await requireAdmin();
+
+    try {
+        const prompt = await wixData.query(CONFIG.collections.prompts)
+            .eq('promptId', promptId)
+            .find({ suppressAuth: true });
+
+        if (prompt.items.length === 0) {
+            throw new Error('Prompt not found');
+        }
+
+        // Get version history
+        const versions = await wixData.query(CONFIG.collections.versions)
+            .eq('promptId', promptId)
+            .descending('version')
+            .limit(10)
+            .find({ suppressAuth: true });
+
+        return {
+            prompt: prompt.items[0],
+            versions: versions.items
+        };
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error fetching prompt:', error);
+        throw new Error('Failed to fetch prompt');
+    }
+}
+
+/**
+ * Create a new prompt (Super Admin only)
+ * @param {Object} promptData - Prompt data
+ * @returns {Promise<Object>} - Created prompt
+ */
+export async function createPrompt(promptData) {
+    await requireSuperAdmin();
+
+    try {
+        const admin = await getCurrentAdmin();
+
+        // Validate required fields
+        if (!promptData.promptId || !promptData.name || !promptData.systemPrompt) {
+            throw new Error('Missing required fields: promptId, name, systemPrompt');
+        }
+
+        // Check for duplicate promptId
+        const existing = await wixData.query(CONFIG.collections.prompts)
+            .eq('promptId', promptData.promptId)
+            .find({ suppressAuth: true });
+
+        if (existing.items.length > 0) {
+            throw new Error('Prompt ID already exists');
+        }
+
+        const newPrompt = {
+            promptId: promptData.promptId,
+            name: promptData.name,
+            category: promptData.category || 'other',
+            description: promptData.description || '',
+            systemPrompt: promptData.systemPrompt,
+            userPromptTemplate: promptData.userPromptTemplate || '',
+            variables: promptData.variables || [],
+            provider: promptData.provider || 'anthropic',
+            model: promptData.model || 'claude-sonnet-4-20250514',
+            isActive: promptData.isActive !== false,
+            version: 1,
+            createdAt: new Date(),
+            createdBy: admin.email,
+            updatedAt: new Date(),
+            updatedBy: admin.email
+        };
+
+        const created = await wixData.insert(CONFIG.collections.prompts, newPrompt, { suppressAuth: true });
+
+        // Create initial version
+        await createVersion(created.promptId, created, admin.email, 'Initial creation');
+
+        // Log action
+        await logAction('createPrompt', 'prompt', created._id, {
+            promptId: created.promptId,
+            name: created.name
+        }, admin);
+
+        return created;
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error creating prompt:', error);
+        throw new Error(error.message || 'Failed to create prompt');
+    }
+}
+
+/**
+ * Update an existing prompt (Super Admin only)
+ * @param {string} promptId - Prompt ID
+ * @param {Object} updates - Fields to update
+ * @param {string} changeNote - Note describing the change
+ * @returns {Promise<Object>} - Updated prompt
+ */
+export async function updatePrompt(promptId, updates, changeNote = '') {
+    await requireSuperAdmin();
+
+    try {
+        const admin = await getCurrentAdmin();
+
+        // Get existing prompt
+        const existing = await wixData.query(CONFIG.collections.prompts)
+            .eq('promptId', promptId)
+            .find({ suppressAuth: true });
+
+        if (existing.items.length === 0) {
+            throw new Error('Prompt not found');
+        }
+
+        const prompt = existing.items[0];
+
+        // Apply updates
+        const updatedPrompt = {
+            ...prompt,
+            name: updates.name || prompt.name,
+            category: updates.category || prompt.category,
+            description: updates.description !== undefined ? updates.description : prompt.description,
+            systemPrompt: updates.systemPrompt || prompt.systemPrompt,
+            userPromptTemplate: updates.userPromptTemplate !== undefined ? updates.userPromptTemplate : prompt.userPromptTemplate,
+            variables: updates.variables || prompt.variables,
+            provider: updates.provider || prompt.provider,
+            model: updates.model || prompt.model,
+            isActive: updates.isActive !== undefined ? updates.isActive : prompt.isActive,
+            version: prompt.version + 1,
+            updatedAt: new Date(),
+            updatedBy: admin.email
+        };
+
+        const updated = await wixData.update(CONFIG.collections.prompts, updatedPrompt, { suppressAuth: true });
+
+        // Create version snapshot
+        await createVersion(promptId, updated, admin.email, changeNote);
+
+        // Log action
+        await logAction('updatePrompt', 'prompt', updated._id, {
+            promptId: updated.promptId,
+            name: updated.name,
+            version: updated.version,
+            changeNote
+        }, admin);
+
+        return updated;
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error updating prompt:', error);
+        throw new Error(error.message || 'Failed to update prompt');
+    }
+}
+
+/**
+ * Delete a prompt (Super Admin only)
+ * @param {string} promptId - Prompt ID
+ * @returns {Promise<Object>} - Deletion result
+ */
+export async function deletePrompt(promptId) {
+    await requireSuperAdmin();
+
+    try {
+        const admin = await getCurrentAdmin();
+
+        const existing = await wixData.query(CONFIG.collections.prompts)
+            .eq('promptId', promptId)
+            .find({ suppressAuth: true });
+
+        if (existing.items.length === 0) {
+            throw new Error('Prompt not found');
+        }
+
+        const prompt = existing.items[0];
+
+        // Soft delete - mark as inactive instead of removing
+        prompt.isActive = false;
+        prompt.deletedAt = new Date();
+        prompt.deletedBy = admin.email;
+
+        await wixData.update(CONFIG.collections.prompts, prompt, { suppressAuth: true });
+
+        // Log action
+        await logAction('deletePrompt', 'prompt', prompt._id, {
+            promptId: prompt.promptId,
+            name: prompt.name
+        }, admin);
+
+        return { success: true, message: 'Prompt deactivated' };
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error deleting prompt:', error);
+        throw new Error('Failed to delete prompt');
+    }
+}
+
+/**
+ * Restore a deleted prompt (Super Admin only)
+ * @param {string} promptId - Prompt ID
+ * @returns {Promise<Object>} - Restored prompt
+ */
+export async function restorePrompt(promptId) {
+    await requireSuperAdmin();
+
+    try {
+        const admin = await getCurrentAdmin();
+
+        const existing = await wixData.query(CONFIG.collections.prompts)
+            .eq('promptId', promptId)
+            .find({ suppressAuth: true });
+
+        if (existing.items.length === 0) {
+            throw new Error('Prompt not found');
+        }
+
+        const prompt = existing.items[0];
+        prompt.isActive = true;
+        delete prompt.deletedAt;
+        delete prompt.deletedBy;
+        prompt.updatedAt = new Date();
+        prompt.updatedBy = admin.email;
+
+        const restored = await wixData.update(CONFIG.collections.prompts, prompt, { suppressAuth: true });
+
+        await logAction('restorePrompt', 'prompt', prompt._id, {
+            promptId: prompt.promptId,
+            name: prompt.name
+        }, admin);
+
+        return restored;
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error restoring prompt:', error);
+        throw new Error('Failed to restore prompt');
+    }
+}
+
+// ============================================
+// VERSION MANAGEMENT
+// ============================================
+
+async function createVersion(promptId, promptData, author, changeNote) {
+    const version = {
+        promptId,
+        version: promptData.version,
+        systemPrompt: promptData.systemPrompt,
+        userPromptTemplate: promptData.userPromptTemplate,
+        variables: promptData.variables,
+        provider: promptData.provider,
+        model: promptData.model,
+        changeNote: changeNote || '',
+        createdAt: new Date(),
+        createdBy: author
+    };
+
+    await wixData.insert(CONFIG.collections.versions, version, { suppressAuth: true });
+}
+
+/**
+ * Rollback to a specific version (Super Admin only)
+ * @param {string} promptId - Prompt ID
+ * @param {number} targetVersion - Version to rollback to
+ * @returns {Promise<Object>} - Rolled back prompt
+ */
+export async function rollbackPrompt(promptId, targetVersion) {
+    await requireSuperAdmin();
+
+    try {
+        const admin = await getCurrentAdmin();
+
+        // Get the target version
+        const versions = await wixData.query(CONFIG.collections.versions)
+            .eq('promptId', promptId)
+            .eq('version', targetVersion)
+            .find({ suppressAuth: true });
+
+        if (versions.items.length === 0) {
+            throw new Error('Version not found');
+        }
+
+        const targetVersionData = versions.items[0];
+
+        // Get current prompt
+        const existing = await wixData.query(CONFIG.collections.prompts)
+            .eq('promptId', promptId)
+            .find({ suppressAuth: true });
+
+        if (existing.items.length === 0) {
+            throw new Error('Prompt not found');
+        }
+
+        const prompt = existing.items[0];
+
+        // Apply rollback
+        const rolledBack = {
+            ...prompt,
+            systemPrompt: targetVersionData.systemPrompt,
+            userPromptTemplate: targetVersionData.userPromptTemplate,
+            variables: targetVersionData.variables,
+            provider: targetVersionData.provider,
+            model: targetVersionData.model,
+            version: prompt.version + 1,
+            updatedAt: new Date(),
+            updatedBy: admin.email
+        };
+
+        const updated = await wixData.update(CONFIG.collections.prompts, rolledBack, { suppressAuth: true });
+
+        // Create version snapshot for rollback
+        await createVersion(promptId, updated, admin.email, `Rolled back to version ${targetVersion}`);
+
+        await logAction('rollbackPrompt', 'prompt', prompt._id, {
+            promptId: prompt.promptId,
+            fromVersion: prompt.version,
+            toVersion: targetVersion
+        }, admin);
+
+        return updated;
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error rolling back prompt:', error);
+        throw new Error('Failed to rollback prompt');
+    }
+}
+
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
+/**
+ * Get prompt for use in AI services (internal)
+ * Called by AI services to fetch active prompts
+ * @param {string} promptId - Prompt ID
+ * @returns {Promise<Object|null>} - Active prompt or null
+ */
+export async function getActivePrompt(promptId) {
+    try {
+        const result = await wixData.query(CONFIG.collections.prompts)
+            .eq('promptId', promptId)
+            .eq('isActive', true)
+            .find({ suppressAuth: true });
+
+        return result.items.length > 0 ? result.items[0] : null;
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error fetching active prompt:', error);
+        return null;
+    }
+}
+
+/**
+ * Render a prompt template with variables
+ * @param {string} template - Template string with {{variable}} placeholders
+ * @param {Object} variables - Key-value pairs for substitution
+ * @returns {string} - Rendered prompt
+ */
+export function renderPrompt(template, variables = {}) {
+    let rendered = template;
+
+    for (const [key, value] of Object.entries(variables)) {
+        const placeholder = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
+        rendered = rendered.replace(placeholder, value || '');
+    }
+
+    return rendered;
+}
+
+/**
+ * Get categories list
+ * @returns {Promise<Array>} - Categories
+ */
+export async function getCategories() {
+    await requireAdmin();
+    return CONFIG.categories;
+}
+
+/**
+ * Seed default prompts (run once)
+ * @returns {Promise<Object>} - Seed result
+ */
+export async function seedDefaultPrompts() {
+    await requireSuperAdmin();
+
+    try {
+        const admin = await getCurrentAdmin();
+        let created = 0;
+        let skipped = 0;
+
+        for (const promptData of CONFIG.defaultPrompts) {
+            const existing = await wixData.query(CONFIG.collections.prompts)
+                .eq('promptId', promptData.promptId)
+                .find({ suppressAuth: true });
+
+            if (existing.items.length === 0) {
+                const newPrompt = {
+                    ...promptData,
+                    version: 1,
+                    createdAt: new Date(),
+                    createdBy: admin.email,
+                    updatedAt: new Date(),
+                    updatedBy: admin.email
+                };
+
+                await wixData.insert(CONFIG.collections.prompts, newPrompt, { suppressAuth: true });
+                created++;
+            } else {
+                skipped++;
+            }
+        }
+
+        return {
+            success: true,
+            created,
+            skipped,
+            total: CONFIG.defaultPrompts.length
+        };
+
+    } catch (error) {
+        console.error('[PromptLibrary] Error seeding prompts:', error);
+        throw new Error('Failed to seed default prompts');
+    }
+}
+
+// ============================================
+// AUDIT LOGGING
+// ============================================
+
+async function logAction(action, targetType, targetId, details, admin) {
+    try {
+        await wixData.insert(CONFIG.collections.auditLog, {
+            action,
+            targetType,
+            targetId,
+            details,
+            adminId: admin.id,
+            adminEmail: admin.email,
+            timestamp: new Date()
+        }, { suppressAuth: true });
+    } catch (error) {
+        console.error('[PromptLibrary] Failed to log action:', error);
+    }
+}

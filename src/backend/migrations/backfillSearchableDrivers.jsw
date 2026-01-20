@@ -1,0 +1,166 @@
+// ============================================================================
+// MIGRATION: Backfill is_searchable and visibility_level for existing drivers
+// ============================================================================
+//
+// PURPOSE: Fix driver profiles that were created before the is_searchable field
+//          was added to applicationService.jsw. Without these fields, drivers
+//          who submitted applications via AI_MATCHING.html are invisible to
+//          the recruiter driver search (driverMatching.jsw).
+//
+// USAGE: Call runBackfillMigration() once from the Wix dashboard or via HTTP function
+//
+// SAFETY: This migration only ADDS fields to profiles that have docs_submitted=true
+//         but are missing is_searchable. It does not modify existing values.
+// ============================================================================
+
+import wixData from 'wix-data';
+
+const CONFIG = {
+  collection: 'DriverProfiles',
+  batchSize: 50  // Process in batches to avoid timeouts
+};
+
+/**
+ * Run the backfill migration to fix existing driver profiles
+ * @returns {Object} Migration results with counts
+ */
+export async function runBackfillMigration() {
+  console.log('🔄 Starting driver searchability backfill migration...');
+
+  const results = {
+    scanned: 0,
+    updated: 0,
+    skipped: 0,
+    errors: [],
+    startTime: new Date().toISOString()
+  };
+
+  try {
+    // Find all profiles that have submitted docs but are NOT searchable
+    // Query for docs_submitted = true AND (is_searchable is missing or false)
+    let skip = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      // Get batch of profiles with docs_submitted = true
+      const batch = await wixData.query(CONFIG.collection)
+        .eq('docs_submitted', true)
+        .skip(skip)
+        .limit(CONFIG.batchSize)
+        .find({ suppressAuth: true });
+
+      console.log(`📦 Processing batch: ${batch.items.length} profiles (offset: ${skip})`);
+      results.scanned += batch.items.length;
+
+      for (const profile of batch.items) {
+        try {
+          // Only update if is_searchable is not already true
+          if (profile.is_searchable === true && profile.visibility_level === 'full') {
+            results.skipped++;
+            continue;
+          }
+
+          // Update the profile with searchability fields
+          const updatedProfile = {
+            ...profile,
+            is_searchable: true,
+            visibility_level: 'full',
+            updated_date: new Date(),
+            migration_note: 'Backfilled by backfillSearchableDrivers migration'
+          };
+
+          await wixData.update(CONFIG.collection, updatedProfile, { suppressAuth: true });
+          results.updated++;
+
+          console.log(`✅ Updated profile: ${profile._id} (${profile.display_name || profile.driver_name || 'Unknown'})`);
+
+        } catch (updateError) {
+          console.error(`❌ Error updating profile ${profile._id}:`, updateError);
+          results.errors.push({
+            profileId: profile._id,
+            error: updateError.message
+          });
+        }
+      }
+
+      // Check if there are more results
+      hasMore = batch.items.length === CONFIG.batchSize;
+      skip += CONFIG.batchSize;
+    }
+
+    results.endTime = new Date().toISOString();
+    results.success = true;
+
+    console.log('========================================');
+    console.log('🎉 MIGRATION COMPLETE');
+    console.log(`   Scanned: ${results.scanned} profiles`);
+    console.log(`   Updated: ${results.updated} profiles`);
+    console.log(`   Skipped: ${results.skipped} profiles (already searchable)`);
+    console.log(`   Errors:  ${results.errors.length}`);
+    console.log('========================================');
+
+    return results;
+
+  } catch (error) {
+    console.error('❌ Migration failed:', error);
+    results.success = false;
+    results.error = error.message;
+    results.endTime = new Date().toISOString();
+    return results;
+  }
+}
+
+/**
+ * Preview migration - shows what would be updated without making changes
+ * @returns {Object} Preview of profiles that would be affected
+ */
+export async function previewMigration() {
+  console.log('👁️ Previewing migration (dry run)...');
+
+  const preview = {
+    wouldUpdate: [],
+    alreadySearchable: [],
+    totalWithDocs: 0
+  };
+
+  try {
+    // Find all profiles with docs_submitted = true
+    const result = await wixData.query(CONFIG.collection)
+      .eq('docs_submitted', true)
+      .limit(1000)
+      .find({ suppressAuth: true });
+
+    preview.totalWithDocs = result.items.length;
+
+    for (const profile of result.items) {
+      const profileSummary = {
+        id: profile._id,
+        name: profile.display_name || profile.driver_name || 'Unknown',
+        email: profile.email || 'N/A',
+        is_searchable: profile.is_searchable,
+        visibility_level: profile.visibility_level,
+        docs_submitted: profile.docs_submitted,
+        application_date: profile.application_date
+      };
+
+      if (profile.is_searchable === true && profile.visibility_level === 'full') {
+        preview.alreadySearchable.push(profileSummary);
+      } else {
+        preview.wouldUpdate.push(profileSummary);
+      }
+    }
+
+    console.log('========================================');
+    console.log('👁️ MIGRATION PREVIEW');
+    console.log(`   Total with docs submitted: ${preview.totalWithDocs}`);
+    console.log(`   Would update: ${preview.wouldUpdate.length}`);
+    console.log(`   Already searchable: ${preview.alreadySearchable.length}`);
+    console.log('========================================');
+
+    return preview;
+
+  } catch (error) {
+    console.error('❌ Preview failed:', error);
+    return { error: error.message };
+  }
+}
