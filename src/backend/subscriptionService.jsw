@@ -14,7 +14,15 @@
  */
 
 import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
 import { log } from 'backend/observabilityService';
+import {
+  createCheckoutSession,
+  createPortalSession,
+  getSubscriptionDetails,
+  createPlacementDepositCheckout,
+  getPublishableKey
+} from 'backend/stripeService';
 
 // Collection names
 const SUBSCRIPTIONS_COLLECTION = 'CarrierSubscriptions';
@@ -504,8 +512,162 @@ export async function resetQuotaIfNeeded(subscription) {
         message: `resetQuotaIfNeeded failed`,
         details: { error: error.message }
       });
-    } catch (e) { }
+    } catch (e) { /* ignore log failure */ }
 
     return { wasReset: false, subscription };
+  }
+}
+
+// ============================================================================
+// 8. Stripe Bridge Functions (Frontend Adapters)
+// ============================================================================
+
+/**
+ * Helper to get current user's carrier DOT from profile
+ */
+async function getCurrentCarrier() {
+  const user = wixUsersBackend.currentUser;
+  if (!user.loggedIn) {
+    throw new Error('User not logged in');
+  }
+
+  const email = await user.getEmail();
+
+  // Query Carriers collection by _owner
+  try {
+    const carrierResult = await wixData.query('Carriers')
+      .eq('_owner', user.id)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (carrierResult.items.length > 0) {
+      const c = carrierResult.items[0];
+      return {
+        dotNumber: String(c.dot_number),
+        email: email
+      };
+    }
+  } catch (e) {
+    console.warn('Failed to find carrier by owner', e);
+  }
+
+  throw new Error('No carrier profile found for this user');
+}
+
+/**
+ * Get all plan information for the pricing page
+ */
+export async function getAllPlanInfo() {
+  // Return the plan configuration matching the spec
+  return {
+    pro: {
+      id: 'pro',
+      name: 'Pro',
+      price: 24900, // cents
+      currency: 'usd',
+      interval: 'month',
+      quota: 25
+    },
+    enterprise: {
+      id: 'enterprise',
+      name: 'Enterprise',
+      price: 74900, // cents
+      currency: 'usd',
+      interval: 'month',
+      quota: -1 // unlimited
+    }
+  };
+}
+
+/**
+ * Get Stripe publishable key
+ */
+export async function getStripePublishableKey() {
+  return await getPublishableKey();
+}
+
+/**
+ * Get full subscription status for current user's carrier
+ */
+export async function getFullSubscriptionStatus(carrierDot) {
+  // If dot passed, use it (admin/testing), otherwise resolve current user
+  let dot = carrierDot;
+  if (!dot) {
+    try {
+      const carrier = await getCurrentCarrier();
+      dot = carrier.dotNumber;
+    } catch (e) {
+      console.error('getFullSubscriptionStatus: No carrier context');
+      return { success: false, error: 'No carrier profile found' };
+    }
+  }
+
+  return await getSubscriptionDetails(dot);
+}
+
+/**
+ * Start a subscription checkout session
+ */
+export async function startCheckout(priceId, billingPeriod = 'monthly') {
+  try {
+    const carrier = await getCurrentCarrier();
+
+    // Use dedicated success/cancel pages with HTML components
+    const baseUrl = 'https://www.lastmiledr.app';
+    const successUrl = `${baseUrl}/subscription-success?session_id={CHECKOUT_SESSION_ID}&plan=${priceId}`;
+    const cancelUrl = `${baseUrl}/subscription-canceled?plan=${priceId}`;
+
+    return await createCheckoutSession(
+      priceId,
+      carrier.dotNumber,
+      carrier.email,
+      successUrl,
+      cancelUrl,
+      billingPeriod
+    );
+  } catch (error) {
+    console.error('startCheckout error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Start a placement deposit checkout (one-time)
+ */
+export async function startPlacementCheckout(driverCount, formData) {
+  try {
+    const carrier = await getCurrentCarrier();
+
+    // Use dedicated success/cancel pages
+    const baseUrl = 'https://www.lastmiledr.app';
+    const successUrl = `${baseUrl}/placement-success?session_id={CHECKOUT_SESSION_ID}&drivers=${driverCount}`;
+    const cancelUrl = `${baseUrl}/subscription-canceled?service=placement`;
+
+    return await createPlacementDepositCheckout(
+      carrier.dotNumber,
+      carrier.email,
+      driverCount,
+      successUrl,
+      cancelUrl,
+      formData
+    );
+  } catch (error) {
+    console.error('startPlacementCheckout error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Open the self-service billing portal
+ */
+export async function openBillingPortal() {
+  try {
+    const carrier = await getCurrentCarrier();
+    const returnUrl = 'https://www.lastmiledr.app/carrier-dashboard';
+
+    return await createPortalSession(carrier.dotNumber, returnUrl);
+  } catch (error) {
+    console.error('openBillingPortal error:', error);
+    return { success: false, error: error.message };
   }
 }
