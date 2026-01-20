@@ -808,6 +808,7 @@ async function handleSubmitApplication(data) {
       // Driver identity (NEW)
       firstName: data.firstName,
       lastName: data.lastName,
+      dob: data.dob,  // Date of Birth - CRITICAL FIX
 
       // Contact info
       phone: data.phone,
