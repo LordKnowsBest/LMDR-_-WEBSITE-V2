@@ -832,6 +832,20 @@ async function handleSubmitApplication(data) {
       equipmentExperience: data.equipmentExperience,  // NEW - array
       mvrStatus: data.mvrStatus,                      // NEW
 
+      // Safety & Compliance (NEW)
+      accidentsLast3Years: data.accidentsLast3Years,
+      violationsLast3Years: data.violationsLast3Years,
+      cdlRestrictions: data.cdlRestrictions,
+
+      // Employment History (NEW)
+      companiesLast3Years: data.companiesLast3Years,
+      employer1Name: data.employer1Name,
+      employer1Duration: data.employer1Duration,
+      employer2Name: data.employer2Name,
+      employer2Duration: data.employer2Duration,
+      employer3Name: data.employer3Name,
+      employer3Duration: data.employer3Duration,
+
       // Preferences (NEW)
       preferredRoutes: data.preferredRoutes,          // NEW - array
       homeTimePreference: data.homeTimePreference,    // NEW
