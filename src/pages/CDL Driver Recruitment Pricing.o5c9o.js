@@ -838,25 +838,14 @@ function initSubscriptionHandlers() {
     // Handle checkout initiation
     if (msg.type === 'startCheckout') {
       try {
-        const { plan, email, carrierDot, billingPeriod } = msg.data;
+        const { plan, billingPeriod } = msg.data;
 
-        if (!carrierDot) {
-          htmlComponent.postMessage({
-            type: 'checkoutError',
-            data: { error: 'Please complete your carrier profile first' }
-          });
-          return;
-        }
+        console.log(`Starting checkout for ${plan} plan (${billingPeriod || 'monthly'})`);
 
-        console.log(`Starting checkout for ${plan} plan (${billingPeriod || 'monthly'}), carrier: ${carrierDot}`);
-
-        // Start Stripe checkout session with billing period
+        // Start Stripe checkout session
+        // subscriptionService.startCheckout(priceId, billingPeriod) uses getCurrentCarrier() internally
         const result = await startCheckout(
-          carrierDot,
-          plan,
-          email,
-          `${wixLocation.baseUrl}/subscription-success?session_id={CHECKOUT_SESSION_ID}`,
-          `${wixLocation.baseUrl}/subscription-canceled`,
+          plan,  // 'pro' or 'enterprise'
           billingPeriod || 'monthly'
         );
 
@@ -925,18 +914,7 @@ function initSubscriptionHandlers() {
     // NOTE: This flow does NOT require login - uses form data directly
     if (msg.type === 'startPlacementCheckout') {
       try {
-        const { email, carrierDot, driverCount, formData } = msg.data;
-
-        // Use email from formData if not provided directly
-        const checkoutEmail = email || formData?.email;
-
-        if (!checkoutEmail) {
-          htmlComponent.postMessage({
-            type: 'checkoutResult',
-            data: { success: false, error: 'Please provide your email address' }
-          });
-          return;
-        }
+        const { driverCount, formData } = msg.data;
 
         if (!driverCount || driverCount < 1) {
           htmlComponent.postMessage({
@@ -946,19 +924,13 @@ function initSubscriptionHandlers() {
           return;
         }
 
-        // carrierDot is optional for placement - use DOT from form or placeholder
-        const checkoutDot = carrierDot || formData?.dotNumber || 'PENDING';
-
-        console.log(`Starting placement checkout for ${driverCount} drivers, email: ${checkoutEmail}, DOT: ${checkoutDot}`);
+        console.log(`Starting placement checkout for ${driverCount} drivers`);
 
         // Start Stripe checkout session for placement deposit
+        // subscriptionService.startPlacementCheckout(driverCount, formData) uses getCurrentCarrier() internally
         const result = await startPlacementCheckout(
-          checkoutDot,
-          checkoutEmail,
           driverCount,
-          formData || {},
-          `${wixLocation.baseUrl}/placement-success?session_id={CHECKOUT_SESSION_ID}`,
-          `${wixLocation.baseUrl}/pricing`
+          formData || {}
         );
 
         if (result.success && result.checkoutUrl) {
