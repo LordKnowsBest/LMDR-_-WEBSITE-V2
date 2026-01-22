@@ -335,6 +335,7 @@ Conductor/
   - LMDR Dark: `#0f172a` | LMDR Blue: `#2563eb` | LMDR Yellow: `#fbbf24`
 - **Typography:** Inter font (300-900 weights)
 - **Icons:** Font Awesome 6.4 (Solid)
+- **Mobile Standard:** `docs/MOBILE_OPTIMIZATION_GUIDE.md` (iPhone 12/13 target)
 
 #### `workflow.md` - Development Workflow
 - **TDD Approach:** Red-Green-Refactor cycle

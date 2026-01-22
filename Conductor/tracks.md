@@ -65,6 +65,13 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Goal: Unify Tailwind configs, icons, buttons, and theme logic across the platform.*
 *Status: In Progress (Phase 3 Complete, Phase 4: Component Refactoring)*
 
+## [ ] Track: Systematic HTML Mobile Optimization
+*Link: [./conductor/tracks/mobile_optimization_20260122/](./conductor/tracks/mobile_optimization_20260122/)*
+*Priority: High*
+*Goal: Systematic review and optimization of all HTML files for mobile responsiveness (iPhone 12/13 target).*
+*Status: In Progress*
+*Standard: docs/MOBILE_OPTIMIZATION_GUIDE.md*
+
 ---
 
 # Infrastructure Tracks (Q1 2026)

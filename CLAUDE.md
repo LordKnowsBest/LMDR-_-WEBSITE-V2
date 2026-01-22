@@ -219,6 +219,8 @@ Permissions are defined in `src/backend/permissions.json`. Current config allows
 
 **All HTML files are organized in `src/public/` subfolders by role:**
 
+**📄 Standard:** See `docs/MOBILE_OPTIMIZATION_GUIDE.md` for mandatory mobile responsiveness rules (iPhone 12/13 target).
+
 ```
 src/public/
 ├── admin/      # 10 files - Admin portal (ADMIN_*.html)
