@@ -36,87 +36,87 @@ Phase 5: Incident Reporting
 
 ### 1.1 Data Model & Backend Setup
 
-- [ ] Task: Create `ComplianceEvents` collection in Wix CMS
-  - [ ] Add all fields per spec (event_type, due_date, status, reminders, etc.)
-  - [ ] Configure indexes on carrier_dot, driver_id, due_date, status
-  - [ ] Set collection permissions (carrier owner/admin only)
+- [x] Task: Create `ComplianceEvents` collection in Wix CMS
+  - [x] Add all fields per spec (event_type, due_date, status, reminders, etc.)
+  - [x] Configure indexes on carrier_dot, driver_id, due_date, status
+  - [x] Set collection permissions (carrier owner/admin only)
 
-- [ ] Task: Create `ComplianceAlerts` collection in Wix CMS
-  - [ ] Add fields for alert_type, severity, status, related entities
-  - [ ] Configure indexes on carrier_dot, status, severity
+- [x] Task: Create `ComplianceAlerts` collection in Wix CMS
+  - [x] Add fields for alert_type, severity, status, related entities
+  - [x] Configure indexes on carrier_dot, status, severity
 
-- [ ] Task: Create `src/backend/complianceCalendarService.jsw`
-  - [ ] Implement `getComplianceEvents(carrierDot, filters)`
-  - [ ] Implement `createComplianceEvent(eventData)`
-  - [ ] Implement `updateComplianceEvent(eventId, updates)`
-  - [ ] Implement `deleteComplianceEvent(eventId)`
-  - [ ] Implement `completeComplianceEvent(eventId, documentId)`
-  - [ ] Implement auto-renewal logic for recurring events
+- [x] Task: Create `src/backend/complianceCalendarService.jsw`
+  - [x] Implement `getComplianceEvents(carrierDot, filters)`
+  - [x] Implement `createComplianceEvent(eventData)`
+  - [x] Implement `updateComplianceEvent(eventId, updates)`
+  - [x] Implement `deleteComplianceEvent(eventId)`
+  - [x] Implement `completeComplianceEvent(eventId, documentId)`
+  - [x] Implement auto-renewal logic for recurring events
 
 ### 1.2 Calendar Views & Dashboard
 
-- [ ] Task: Implement `getCalendarView(carrierDot, startDate, endDate)`
-  - [ ] Return events grouped by status (overdue, due_soon, upcoming)
-  - [ ] Include summary counts for dashboard
+- [x] Task: Implement `getCalendarView(carrierDot, startDate, endDate)`
+  - [x] Return events grouped by status (overdue, due_soon, upcoming)
+  - [x] Include summary counts for dashboard
 
-- [ ] Task: Implement `getComplianceDashboard(carrierDot)`
-  - [ ] Calculate compliance score (completed / total non-overdue)
-  - [ ] Return overdueCount, dueSoonCount, upcomingCount
-  - [ ] Include top 5 most urgent items
+- [x] Task: Implement `getComplianceDashboard(carrierDot)`
+  - [x] Calculate compliance score (completed / total non-overdue)
+  - [x] Return overdueCount, dueSoonCount, upcomingCount
+  - [x] Include top 5 most urgent items
 
-- [ ] Task: Implement status update job
-  - [ ] Update event statuses based on due_date vs current date
-  - [ ] Mark events as `overdue`, `due_soon`, `upcoming`
+- [x] Task: Implement status update job
+  - [x] Update event statuses based on due_date vs current date
+  - [x] Mark events as `overdue`, `due_soon`, `upcoming`
 
 ### 1.3 Reminder System
 
-- [ ] Task: Implement `processComplianceReminders()`
-  - [ ] Query all events needing reminders (30, 14, 7, 0 days)
-  - [ ] Send appropriate notifications
-  - [ ] Update reminder_sent flags
+- [x] Task: Implement `processComplianceReminders()`
+  - [x] Query all events needing reminders (30, 14, 7, 0 days)
+  - [x] Send appropriate notifications
+  - [x] Update reminder_sent flags
 
-- [ ] Task: Add compliance reminders to `jobs.config`
-  - [ ] Schedule daily at 6 AM: `processComplianceReminders`
+- [x] Task: Add compliance reminders to `jobs.config`
+  - [x] Schedule daily at 6 AM: `processComplianceReminders`
 
-- [ ] Task: Create email templates in `emailService.jsw`
-  - [ ] `compliance_reminder_30_day` template
-  - [ ] `compliance_reminder_14_day` template
-  - [ ] `compliance_reminder_7_day` template
-  - [ ] `compliance_overdue` template
+- [x] Task: Create email templates in `emailService.jsw`
+  - [x] `compliance_reminder_30_day` template
+  - [x] `compliance_reminder_14_day` template
+  - [x] `compliance_reminder_7_day` template
+  - [x] `compliance_overdue` template
 
 ### 1.4 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_COMPLIANCE_CALENDAR.html`
-  - [ ] Compliance score card with visual progress bar
-  - [ ] Quick stats (overdue, due this week, up to date)
-  - [ ] Upcoming items list grouped by urgency
-  - [ ] "Mark Complete" action with document upload
+- [x] Task: Create `src/public/carrier/CARRIER_COMPLIANCE_CALENDAR.html`
+  - [x] Compliance score card with visual progress bar
+  - [x] Quick stats (overdue, due this week, up to date)
+  - [x] Upcoming items list grouped by urgency
+  - [x] "Mark Complete" action with document upload
 
-- [ ] Task: Implement calendar month view
-  - [ ] Visual calendar with events on due dates
-  - [ ] Color coding by status (red=overdue, yellow=soon, green=upcoming)
-  - [ ] Click to view/edit event details
+- [x] Task: Implement calendar month view
+  - [x] Visual calendar with events on due dates
+  - [x] Color coding by status (red=overdue, yellow=soon, green=upcoming)
+  - [x] Click to view/edit event details
 
-- [ ] Task: Create "Add Event" modal
-  - [ ] Event type selection dropdown
-  - [ ] Driver selection (if driver-specific)
-  - [ ] Due date picker
-  - [ ] Recurrence settings
-  - [ ] Notes field
+- [x] Task: Create "Add Event" modal
+  - [x] Event type selection dropdown
+  - [x] Driver selection (if driver-specific)
+  - [x] Due date picker
+  - [x] Recurrence settings
+  - [x] Notes field
 
-- [ ] Task: Implement PostMessage bridge
-  - [ ] `getComplianceCalendar` message type
-  - [ ] `createComplianceEvent` message type
-  - [ ] `updateComplianceEvent` message type
-  - [ ] `completeComplianceEvent` message type
+- [x] Task: Implement PostMessage bridge
+  - [x] `getComplianceCalendar` message type
+  - [x] `createComplianceEvent` message type
+  - [x] `updateComplianceEvent` message type
+  - [x] `completeComplianceEvent` message type
 
 ### 1.5 Testing - Phase 1
 
-- [ ] Task: Create `src/public/__tests__/complianceCalendarService.test.js`
-  - [ ] Test CRUD operations
-  - [ ] Test recurring event logic
-  - [ ] Test status transitions
-  - [ ] Test reminder processing
+- [x] Task: Create `src/public/__tests__/complianceCalendarService.test.js`
+  - [x] Test CRUD operations
+  - [x] Test recurring event logic
+  - [x] Test status transitions
+  - [x] Test reminder processing
 
 - [ ] Task: Manual integration testing
   - [ ] Create test events for various types

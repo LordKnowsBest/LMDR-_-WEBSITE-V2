@@ -191,7 +191,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planned*
 *Goal: Fleet operations visibility - Driver Roster, Equipment Assignment, Driver Scorecard, Real-Time Location, Capacity Planning.*
 
-### [ ] Track: Carrier Compliance
+### [~] Track: Carrier Compliance
 *Link: [./tracks/carrier_compliance_20260120/](./tracks/carrier_compliance_20260120/)*
 *Depends on: carrier_conversion_20260103*
 *Priority: Critical*

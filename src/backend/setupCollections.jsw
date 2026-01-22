@@ -4,6 +4,12 @@
  * Run this from a page or the Wix editor console to create missing collections.
  *
  * Usage: Import and call setupCarrierSubscriptions() once.
+ *
+ * Feature Adoption Log Collections (4):
+ * - FeatureAdoptionLogs: Primary event log (19 fields)
+ * - FeatureRegistry: Feature catalog (13 fields)
+ * - FeatureFunnels: Multi-step flow definitions (7 fields)
+ * - FeatureMetricsDaily: Pre-aggregated daily rollups (13 fields)
  */
 
 import wixData from 'wix-data';
@@ -124,54 +130,946 @@ export async function setupRecruiterCarrier(carrierDot = '123456') {
   }
 }
 
+// ============================================================================
+// FEATURE ADOPTION LOG COLLECTIONS SETUP
+// ============================================================================
+// Schema definitions and setup functions for the Feature Adoption Log system.
+// Reference: Conductor/tracks/feature_adoption_log_20260120/plan.md
+// ============================================================================
+
 /**
- * Creates the FeatureAdoptionLogs collection if it doesn't exist
+ * Collection Names for Feature Adoption Log system
  */
-export async function setupFeatureAdoptionLogs() {
-  console.log('[SETUP] Setting up FeatureAdoptionLogs...');
-  const COLLECTION = 'FeatureAdoptionLogs';
+const FEATURE_ADOPTION_COLLECTIONS = {
+  LOGS: 'FeatureAdoptionLogs',
+  REGISTRY: 'FeatureRegistry',
+  FUNNELS: 'FeatureFunnels',
+  METRICS_DAILY: 'FeatureMetricsDaily'
+};
 
+/**
+ * Valid action types for FeatureAdoptionLogs
+ */
+const VALID_ACTION_TYPES = [
+  'view',       // Feature was displayed to user
+  'click',      // User clicked within feature
+  'complete',   // User finished primary task
+  'hover',      // User hovered over element (desktop)
+  'scroll_to',  // User scrolled to element
+  'time_spent', // Passive time tracking (fired on exit)
+  'error',      // Something went wrong
+  'abandon',    // User left mid-process
+  'share',      // User shared feature/content
+  'repeat',     // User returned to feature (not first in session)
+  'first_use'   // User's first ever use of this feature
+];
+
+/**
+ * Valid feature status values
+ */
+const VALID_FEATURE_STATUSES = ['beta', 'active', 'deprecated', 'sunset'];
+
+/**
+ * Valid expected usage patterns
+ */
+const VALID_USAGE_PATTERNS = ['daily', 'weekly', 'onboarding-only', 'event-driven'];
+
+/**
+ * Schema definition for FeatureAdoptionLogs collection
+ * Primary event log capturing all feature interactions (19 fields)
+ *
+ * Indexes needed:
+ * - featureId + timestamp (compound)
+ * - sessionId
+ * - userId + timestamp (compound)
+ */
+const FEATURE_ADOPTION_LOGS_SCHEMA = {
+  collectionName: 'FeatureAdoptionLogs',
+  displayName: 'Feature Adoption Logs',
+  fields: [
+    // Core identification fields
+    { name: 'featureId', type: 'text', description: 'Unique feature identifier (e.g., "carrier_search")' },
+    { name: 'featureVersion', type: 'text', description: 'Version for A/B testing (e.g., "v2.1", "control", "variant_a")' },
+    { name: 'userId', type: 'text', description: 'Member ID or anonymous session ID' },
+    { name: 'userRole', type: 'text', description: 'User type: driver, carrier, recruiter' },
+    { name: 'action', type: 'text', description: 'Interaction type from VALID_ACTION_TYPES' },
+    { name: 'timestamp', type: 'date', description: 'When event occurred (ISO 8601)' },
+    { name: 'sessionId', type: 'text', description: 'Groups interactions in a session' },
+
+    // Context fields
+    { name: 'deviceType', type: 'text', description: 'Device category: mobile, desktop, tablet' },
+    { name: 'referrer', type: 'text', description: 'Previous page/feature (e.g., "/dashboard")' },
+    { name: 'entryPoint', type: 'text', description: 'UI element that triggered entry (e.g., "nav_menu")' },
+
+    // Engagement metrics
+    { name: 'durationMs', type: 'number', description: 'Time spent on feature in milliseconds' },
+    { name: 'scrollDepth', type: 'number', description: 'How far user scrolled (0-100 percentage)' },
+    { name: 'interactionCount', type: 'number', description: 'Number of clicks/taps within feature' },
+
+    // Outcome fields
+    { name: 'outcome', type: 'text', description: 'Result: success, failure, partial, abandoned' },
+    { name: 'conversionValue', type: 'number', description: 'Business value if applicable (e.g., 249.00)' },
+    { name: 'nextFeature', type: 'text', description: 'Where user went next (e.g., "driver_profile", "exit")' },
+
+    // Error tracking
+    { name: 'errorCode', type: 'text', description: 'Machine-readable error code if action=error' },
+    { name: 'errorMessage', type: 'text', description: 'Human-readable error detail' },
+
+    // Flexible data
+    { name: 'metadata', type: 'object', description: 'Additional data as JSON (e.g., {searchQuery, resultsCount})' }
+  ],
+  permissions: {
+    read: 'Admin',
+    create: 'SiteMember',  // Frontend tracker needs write access
+    update: 'Admin',
+    delete: 'Admin'
+  }
+};
+
+/**
+ * Schema definition for FeatureRegistry collection
+ * Master list of all trackable features (13 fields)
+ *
+ * Indexes needed:
+ * - featureId (unique)
+ * - status
+ */
+const FEATURE_REGISTRY_SCHEMA = {
+  collectionName: 'FeatureRegistry',
+  displayName: 'Feature Registry',
+  fields: [
+    { name: 'featureId', type: 'text', description: 'UNIQUE identifier (e.g., "carrier_search")' },
+    { name: 'displayName', type: 'text', description: 'Human-readable name' },
+    { name: 'description', type: 'text', description: 'What the feature does' },
+    { name: 'category', type: 'text', description: 'Feature category: matching, communication, analytics, onboarding' },
+    { name: 'launchDate', type: 'date', description: 'When feature was released' },
+    { name: 'status', type: 'text', description: 'Lifecycle status: beta, active, deprecated, sunset' },
+    { name: 'expectedUsagePattern', type: 'text', description: 'Expected frequency: daily, weekly, onboarding-only, event-driven' },
+    { name: 'targetRoles', type: 'array', description: 'Array of user roles: ["driver", "recruiter", "carrier"]' },
+    { name: 'owner', type: 'text', description: 'Team/person responsible (e.g., "matching-team")' },
+    { name: 'successMetric', type: 'text', description: 'Success criteria (e.g., "completion_rate > 40%")' },
+    { name: 'retirementThreshold', type: 'number', description: 'Days without use before flagging (default: 30)' },
+    { name: 'relatedFeatures', type: 'array', description: 'Array of featureIds often used together' },
+    { name: 'documentationUrl', type: 'text', description: 'Link to feature documentation' }
+  ],
+  permissions: {
+    read: 'Anyone',  // Dashboard needs to read
+    create: 'Admin',
+    update: 'Admin',
+    delete: 'Admin'
+  }
+};
+
+/**
+ * Schema definition for FeatureFunnels collection
+ * Multi-step flow definitions for conversion tracking (7 fields)
+ *
+ * Indexes needed:
+ * - funnelId (unique)
+ */
+const FEATURE_FUNNELS_SCHEMA = {
+  collectionName: 'FeatureFunnels',
+  displayName: 'Feature Funnels',
+  fields: [
+    { name: 'funnelId', type: 'text', description: 'UNIQUE funnel identifier (e.g., "driver_application_flow")' },
+    { name: 'displayName', type: 'text', description: 'Human-readable name' },
+    { name: 'description', type: 'text', description: 'What this funnel measures' },
+    {
+      name: 'steps',
+      type: 'array',
+      description: 'Ordered step definitions: [{order, featureId, action, displayName, optional}]'
+    },
+    { name: 'createdAt', type: 'date', description: 'When funnel was defined' },
+    { name: 'updatedAt', type: 'date', description: 'Last modification timestamp' },
+    { name: 'isActive', type: 'boolean', description: 'Whether to track this funnel' }
+  ],
+  permissions: {
+    read: 'Anyone',
+    create: 'Admin',
+    update: 'Admin',
+    delete: 'Admin'
+  }
+};
+
+/**
+ * Schema definition for FeatureMetricsDaily collection
+ * Pre-aggregated daily rollups for fast dashboard queries (13 fields)
+ *
+ * Indexes needed:
+ * - featureId + date (compound, unique)
+ */
+const FEATURE_METRICS_DAILY_SCHEMA = {
+  collectionName: 'FeatureMetricsDaily',
+  displayName: 'Feature Metrics Daily',
+  fields: [
+    { name: 'featureId', type: 'text', description: 'Feature identifier' },
+    { name: 'date', type: 'date', description: 'Aggregation date (midnight UTC)' },
+    { name: 'uniqueUsers', type: 'number', description: 'Distinct users count' },
+    { name: 'totalInteractions', type: 'number', description: 'Total events logged' },
+    { name: 'completionRate', type: 'number', description: 'Percentage of views that completed (0-100)' },
+    { name: 'avgDurationMs', type: 'number', description: 'Average time spent in milliseconds' },
+    { name: 'errorRate', type: 'number', description: 'Percentage of interactions with errors (0-100)' },
+    { name: 'abandonRate', type: 'number', description: 'Percentage of views abandoned (0-100)' },
+    {
+      name: 'byRole',
+      type: 'object',
+      description: 'Breakdown by user role: {driver: {users, interactions, completionRate}, ...}'
+    },
+    {
+      name: 'byDevice',
+      type: 'object',
+      description: 'Breakdown by device: {mobile: {users, interactions}, desktop: {...}, tablet: {...}}'
+    },
+    {
+      name: 'byEntryPoint',
+      type: 'object',
+      description: 'Breakdown by entry point: {nav_menu: count, cta_button: count, ...}'
+    },
+    {
+      name: 'topErrors',
+      type: 'array',
+      description: 'Most common errors: [{code, message, count}, ...]'
+    },
+    { name: 'conversionValueTotal', type: 'number', description: 'Sum of conversion values for the day' }
+  ],
+  permissions: {
+    read: 'Anyone',  // Dashboard needs to read
+    create: 'Admin', // Only aggregation job writes
+    update: 'Admin',
+    delete: 'Admin'
+  }
+};
+
+/**
+ * All Feature Adoption schemas for reference
+ */
+export const FEATURE_ADOPTION_SCHEMAS = {
+  logs: FEATURE_ADOPTION_LOGS_SCHEMA,
+  registry: FEATURE_REGISTRY_SCHEMA,
+  funnels: FEATURE_FUNNELS_SCHEMA,
+  metricsDaily: FEATURE_METRICS_DAILY_SCHEMA
+};
+
+/**
+ * Export valid enums for use in service functions
+ */
+export { VALID_ACTION_TYPES, VALID_FEATURE_STATUSES, VALID_USAGE_PATTERNS, FEATURE_ADOPTION_COLLECTIONS };
+
+/**
+ * Checks if a collection exists by attempting to query it
+ * @param {string} collectionName - Name of the collection to check
+ * @returns {Promise<{exists: boolean, error?: string}>}
+ */
+async function checkCollectionExists(collectionName) {
   try {
-    // Check if we can query it
-    const existing = await wixData.query(COLLECTION).limit(1).find({ suppressAuth: true });
-
-    // If we get here, collection exists
-    console.log('[SETUP] FeatureAdoptionLogs collection exists.');
-
-    // Optional: Insert a seed record if empty to ensure schema is recognized?
-    // Not strictly necessary if we just rely on first write.
-
-    return { success: true, message: 'Collection exists' };
-
+    await wixData.query(collectionName).limit(1).find({ suppressAuth: true });
+    return { exists: true };
   } catch (err) {
     if (err.message.includes('does not exist') || err.code === 'WD_COLLECTION_NOT_FOUND') {
-      return {
-        success: false,
-        error: 'FeatureAdoptionLogs collection missing. Create manually.',
-        instructions: [
-          '1. Create Collection: FeatureAdoptionLogs',
-          '2. Permissions: Read-Admin, Write-Admin (or Site Member if direct write needed)',
-          '3. Fields: featureId (Text), userId (Text), userRole (Text), action (Text), timestamp (Date), metadata (Object)'
-        ]
-      };
+      return { exists: false, error: 'Collection does not exist' };
     }
-    return { success: false, error: err.message };
+    return { exists: false, error: err.message };
   }
 }
 
 /**
- * Run all setup functions
+ * Generates manual creation instructions for a collection
+ * @param {Object} schema - Schema definition object
+ * @returns {string[]} - Array of instruction strings
+ */
+function generateCollectionInstructions(schema) {
+  const instructions = [
+    `1. Go to Wix Editor > CMS > + Create Collection`,
+    `2. Name: ${schema.collectionName} (Display Name: ${schema.displayName})`,
+    `3. Set permissions: Read=${schema.permissions.read}, Create=${schema.permissions.create}, Update=${schema.permissions.update}, Delete=${schema.permissions.delete}`,
+    `4. Add the following fields:`
+  ];
+
+  schema.fields.forEach((field, index) => {
+    const typeMap = {
+      text: 'Text',
+      number: 'Number',
+      date: 'Date and Time',
+      boolean: 'Boolean',
+      array: 'Tags (for simple arrays) or Rich Content/JSON (for complex arrays)',
+      object: 'Rich Content or use JSON in a Text field'
+    };
+    instructions.push(`   ${index + 5}. ${field.name} (${typeMap[field.type] || field.type}) - ${field.description}`);
+  });
+
+  return instructions;
+}
+
+/**
+ * Creates the FeatureAdoptionLogs collection if it doesn't exist
+ * Primary event log capturing all feature interactions (19 fields)
+ */
+export async function setupFeatureAdoptionLogs() {
+  console.log('[SETUP] Setting up FeatureAdoptionLogs...');
+  const schema = FEATURE_ADOPTION_LOGS_SCHEMA;
+
+  const { exists, error } = await checkCollectionExists(schema.collectionName);
+
+  if (exists) {
+    console.log(`[SETUP] ${schema.collectionName} collection exists.`);
+    return { success: true, message: 'Collection exists', collectionName: schema.collectionName };
+  }
+
+  return {
+    success: false,
+    error: `${schema.collectionName} collection missing. Create manually.`,
+    collectionName: schema.collectionName,
+    schema: schema,
+    instructions: generateCollectionInstructions(schema),
+    indexRecommendations: [
+      'Create compound index on: featureId + timestamp',
+      'Create index on: sessionId',
+      'Create compound index on: userId + timestamp'
+    ]
+  };
+}
+
+/**
+ * Creates the FeatureRegistry collection if it doesn't exist
+ * Master list of all trackable features (13 fields)
+ */
+export async function setupFeatureRegistry() {
+  console.log('[SETUP] Setting up FeatureRegistry...');
+  const schema = FEATURE_REGISTRY_SCHEMA;
+
+  const { exists, error } = await checkCollectionExists(schema.collectionName);
+
+  if (exists) {
+    console.log(`[SETUP] ${schema.collectionName} collection exists.`);
+    return { success: true, message: 'Collection exists', collectionName: schema.collectionName };
+  }
+
+  return {
+    success: false,
+    error: `${schema.collectionName} collection missing. Create manually.`,
+    collectionName: schema.collectionName,
+    schema: schema,
+    instructions: generateCollectionInstructions(schema),
+    indexRecommendations: [
+      'Create UNIQUE index on: featureId',
+      'Create index on: status'
+    ]
+  };
+}
+
+/**
+ * Creates the FeatureFunnels collection if it doesn't exist
+ * Multi-step flow definitions for conversion tracking (7 fields)
+ */
+export async function setupFeatureFunnels() {
+  console.log('[SETUP] Setting up FeatureFunnels...');
+  const schema = FEATURE_FUNNELS_SCHEMA;
+
+  const { exists, error } = await checkCollectionExists(schema.collectionName);
+
+  if (exists) {
+    console.log(`[SETUP] ${schema.collectionName} collection exists.`);
+    return { success: true, message: 'Collection exists', collectionName: schema.collectionName };
+  }
+
+  return {
+    success: false,
+    error: `${schema.collectionName} collection missing. Create manually.`,
+    collectionName: schema.collectionName,
+    schema: schema,
+    instructions: generateCollectionInstructions(schema),
+    indexRecommendations: [
+      'Create UNIQUE index on: funnelId'
+    ]
+  };
+}
+
+/**
+ * Creates the FeatureMetricsDaily collection if it doesn't exist
+ * Pre-aggregated daily rollups for fast dashboard queries (13 fields)
+ */
+export async function setupFeatureMetricsDaily() {
+  console.log('[SETUP] Setting up FeatureMetricsDaily...');
+  const schema = FEATURE_METRICS_DAILY_SCHEMA;
+
+  const { exists, error } = await checkCollectionExists(schema.collectionName);
+
+  if (exists) {
+    console.log(`[SETUP] ${schema.collectionName} collection exists.`);
+    return { success: true, message: 'Collection exists', collectionName: schema.collectionName };
+  }
+
+  return {
+    success: false,
+    error: `${schema.collectionName} collection missing. Create manually.`,
+    collectionName: schema.collectionName,
+    schema: schema,
+    instructions: generateCollectionInstructions(schema),
+    indexRecommendations: [
+      'Create UNIQUE compound index on: featureId + date'
+    ]
+  };
+}
+
+/**
+ * Sets up all 4 Feature Adoption Log collections
+ * Run this once to verify/create all required collections
+ *
+ * @returns {Promise<Object>} - Results for each collection setup
+ */
+export async function setupFeatureAdoptionCollections() {
+  console.log('[SETUP] ========================================');
+  console.log('[SETUP] Setting up Feature Adoption Log System');
+  console.log('[SETUP] ========================================');
+
+  const results = {
+    summary: {
+      total: 4,
+      existing: 0,
+      missing: 0
+    },
+    collections: {}
+  };
+
+  // Setup each collection
+  results.collections.FeatureAdoptionLogs = await setupFeatureAdoptionLogs();
+  results.collections.FeatureRegistry = await setupFeatureRegistry();
+  results.collections.FeatureFunnels = await setupFeatureFunnels();
+  results.collections.FeatureMetricsDaily = await setupFeatureMetricsDaily();
+
+  // Calculate summary
+  for (const [name, result] of Object.entries(results.collections)) {
+    if (result.success) {
+      results.summary.existing++;
+    } else {
+      results.summary.missing++;
+    }
+  }
+
+  // Add overall status
+  results.summary.allReady = results.summary.missing === 0;
+
+  console.log('[SETUP] ========================================');
+  console.log(`[SETUP] Results: ${results.summary.existing} existing, ${results.summary.missing} missing`);
+  console.log('[SETUP] All Ready:', results.summary.allReady);
+  console.log('[SETUP] ========================================');
+
+  return results;
+}
+
+/**
+ * Seeds the FeatureRegistry with initial platform features
+ * Call this after collections are created to populate baseline features
+ *
+ * @returns {Promise<Object>} - Results of seeding operation
+ */
+export async function seedFeatureRegistry() {
+  console.log('[SETUP] Seeding FeatureRegistry with initial features...');
+
+  const initialFeatures = [
+    {
+      featureId: 'carrier_search',
+      displayName: 'Carrier Search & Matching',
+      description: 'AI-powered search to find carriers matching driver preferences',
+      category: 'matching',
+      launchDate: new Date('2025-06-15'),
+      status: 'active',
+      expectedUsagePattern: 'daily',
+      targetRoles: ['driver'],
+      owner: 'matching-team',
+      successMetric: 'completion_rate > 40%',
+      retirementThreshold: 30,
+      relatedFeatures: ['carrier_detail', 'driver_application'],
+      documentationUrl: ''
+    },
+    {
+      featureId: 'driver_application',
+      displayName: 'Driver Application Form',
+      description: 'Multi-step form for drivers to apply to carriers',
+      category: 'matching',
+      launchDate: new Date('2025-06-15'),
+      status: 'active',
+      expectedUsagePattern: 'event-driven',
+      targetRoles: ['driver'],
+      owner: 'matching-team',
+      successMetric: 'completion_rate > 30%',
+      retirementThreshold: 30,
+      relatedFeatures: ['carrier_search', 'carrier_detail'],
+      documentationUrl: ''
+    },
+    {
+      featureId: 'recruiter_pipeline',
+      displayName: 'Recruiter Candidate Pipeline',
+      description: 'Kanban-style pipeline for managing driver candidates',
+      category: 'communication',
+      launchDate: new Date('2025-08-01'),
+      status: 'active',
+      expectedUsagePattern: 'daily',
+      targetRoles: ['recruiter'],
+      owner: 'recruiter-team',
+      successMetric: 'daily_active_users > 50',
+      retirementThreshold: 14,
+      relatedFeatures: ['driver_search', 'driver_outreach'],
+      documentationUrl: ''
+    },
+    {
+      featureId: 'driver_search',
+      displayName: 'Driver Search (Recruiter)',
+      description: 'Search and filter drivers for recruiting outreach',
+      category: 'matching',
+      launchDate: new Date('2025-09-01'),
+      status: 'active',
+      expectedUsagePattern: 'daily',
+      targetRoles: ['recruiter', 'carrier'],
+      owner: 'recruiter-team',
+      successMetric: 'daily_active_users > 30',
+      retirementThreshold: 14,
+      relatedFeatures: ['recruiter_pipeline', 'driver_outreach'],
+      documentationUrl: ''
+    },
+    {
+      featureId: 'ai_matching',
+      displayName: 'AI Matching Dashboard',
+      description: 'AI-powered carrier recommendations for drivers',
+      category: 'matching',
+      launchDate: new Date('2025-10-01'),
+      status: 'active',
+      expectedUsagePattern: 'weekly',
+      targetRoles: ['driver'],
+      owner: 'ai-team',
+      successMetric: 'engagement_rate > 60%',
+      retirementThreshold: 30,
+      relatedFeatures: ['carrier_search', 'carrier_detail'],
+      documentationUrl: ''
+    },
+    {
+      featureId: 'carrier_onboarding',
+      displayName: 'Carrier Onboarding Flow',
+      description: 'Multi-step onboarding for new carriers',
+      category: 'onboarding',
+      launchDate: new Date('2025-07-01'),
+      status: 'active',
+      expectedUsagePattern: 'onboarding-only',
+      targetRoles: ['carrier'],
+      owner: 'onboarding-team',
+      successMetric: 'completion_rate > 70%',
+      retirementThreshold: 60,
+      relatedFeatures: ['carrier_preferences'],
+      documentationUrl: ''
+    }
+  ];
+
+  const results = {
+    inserted: [],
+    skipped: [],
+    errors: []
+  };
+
+  for (const feature of initialFeatures) {
+    try {
+      // Check if feature already exists
+      const existing = await wixData.query(FEATURE_ADOPTION_COLLECTIONS.REGISTRY)
+        .eq('featureId', feature.featureId)
+        .limit(1)
+        .find({ suppressAuth: true });
+
+      if (existing.items.length > 0) {
+        results.skipped.push(feature.featureId);
+        console.log(`[SETUP] Skipped (exists): ${feature.featureId}`);
+        continue;
+      }
+
+      // Insert new feature
+      const inserted = await wixData.insert(FEATURE_ADOPTION_COLLECTIONS.REGISTRY, feature, { suppressAuth: true });
+      results.inserted.push(feature.featureId);
+      console.log(`[SETUP] Inserted: ${feature.featureId}`);
+
+    } catch (err) {
+      results.errors.push({ featureId: feature.featureId, error: err.message });
+      console.error(`[SETUP] Error inserting ${feature.featureId}:`, err.message);
+    }
+  }
+
+  console.log(`[SETUP] Seeding complete: ${results.inserted.length} inserted, ${results.skipped.length} skipped, ${results.errors.length} errors`);
+
+  return results;
+}
+
+/**
+ * Seeds the FeatureFunnels collection with initial funnel definitions
+ * Call this after collections are created to set up baseline funnels
+ *
+ * @returns {Promise<Object>} - Results of seeding operation
+ */
+export async function seedFeatureFunnels() {
+  console.log('[SETUP] Seeding FeatureFunnels with initial funnels...');
+
+  const initialFunnels = [
+    {
+      funnelId: 'driver_application_flow',
+      displayName: 'Driver Application Funnel',
+      description: 'Tracks drivers from carrier search to application submission',
+      steps: [
+        { order: 1, featureId: 'carrier_search', action: 'view', displayName: 'Search Carriers', optional: false },
+        { order: 2, featureId: 'carrier_detail', action: 'view', displayName: 'View Carrier Details', optional: false },
+        { order: 3, featureId: 'driver_application', action: 'complete', displayName: 'Submit Application', optional: false }
+      ],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      isActive: true
+    },
+    {
+      funnelId: 'recruiter_outreach_flow',
+      displayName: 'Recruiter Outreach Funnel',
+      description: 'Tracks recruiters from driver search to first contact',
+      steps: [
+        { order: 1, featureId: 'driver_search', action: 'view', displayName: 'Search Drivers', optional: false },
+        { order: 2, featureId: 'driver_profile', action: 'view', displayName: 'View Driver Profile', optional: false },
+        { order: 3, featureId: 'driver_outreach', action: 'complete', displayName: 'Send Outreach Message', optional: false }
+      ],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      isActive: true
+    },
+    {
+      funnelId: 'carrier_onboarding_flow',
+      displayName: 'Carrier Onboarding Funnel',
+      description: 'Tracks carriers through complete onboarding process',
+      steps: [
+        { order: 1, featureId: 'carrier_signup', action: 'complete', displayName: 'Create Account', optional: false },
+        { order: 2, featureId: 'carrier_onboarding', action: 'view', displayName: 'Start Onboarding', optional: false },
+        { order: 3, featureId: 'carrier_preferences', action: 'complete', displayName: 'Set Hiring Preferences', optional: false },
+        { order: 4, featureId: 'subscription_checkout', action: 'complete', displayName: 'Subscribe to Plan', optional: true }
+      ],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      isActive: true
+    }
+  ];
+
+  const results = {
+    inserted: [],
+    skipped: [],
+    errors: []
+  };
+
+  for (const funnel of initialFunnels) {
+    try {
+      // Check if funnel already exists
+      const existing = await wixData.query(FEATURE_ADOPTION_COLLECTIONS.FUNNELS)
+        .eq('funnelId', funnel.funnelId)
+        .limit(1)
+        .find({ suppressAuth: true });
+
+      if (existing.items.length > 0) {
+        results.skipped.push(funnel.funnelId);
+        console.log(`[SETUP] Skipped (exists): ${funnel.funnelId}`);
+        continue;
+      }
+
+      // Insert new funnel
+      const inserted = await wixData.insert(FEATURE_ADOPTION_COLLECTIONS.FUNNELS, funnel, { suppressAuth: true });
+      results.inserted.push(funnel.funnelId);
+      console.log(`[SETUP] Inserted: ${funnel.funnelId}`);
+
+    } catch (err) {
+      results.errors.push({ funnelId: funnel.funnelId, error: err.message });
+      console.error(`[SETUP] Error inserting ${funnel.funnelId}:`, err.message);
+    }
+  }
+
+  console.log(`[SETUP] Seeding complete: ${results.inserted.length} inserted, ${results.skipped.length} skipped, ${results.errors.length} errors`);
+
+  return results;
+}
+
+/**
+ * Complete setup for Feature Adoption Log system
+ * 1. Verifies/creates all 4 collections
+ * 2. Seeds FeatureRegistry with initial features
+ * 3. Seeds FeatureFunnels with initial funnels
+ *
+ * @returns {Promise<Object>} - Complete setup results
+ */
+export async function setupFeatureAdoptionSystem() {
+  console.log('[SETUP] ============================================');
+  console.log('[SETUP] FEATURE ADOPTION LOG SYSTEM - FULL SETUP');
+  console.log('[SETUP] ============================================');
+
+  const results = {
+    collections: null,
+    registrySeed: null,
+    funnelsSeed: null,
+    overallSuccess: false
+  };
+
+  // Step 1: Setup collections
+  results.collections = await setupFeatureAdoptionCollections();
+
+  // Only proceed with seeding if all collections exist
+  if (results.collections.summary.allReady) {
+    // Step 2: Seed FeatureRegistry
+    results.registrySeed = await seedFeatureRegistry();
+
+    // Step 3: Seed FeatureFunnels
+    results.funnelsSeed = await seedFeatureFunnels();
+
+    results.overallSuccess = true;
+  } else {
+    console.log('[SETUP] Cannot seed - some collections are missing. Create them first.');
+    results.registrySeed = { skipped: true, reason: 'Collections not ready' };
+    results.funnelsSeed = { skipped: true, reason: 'Collections not ready' };
+  }
+
+  console.log('[SETUP] ============================================');
+  console.log('[SETUP] SETUP COMPLETE');
+  console.log('[SETUP] Overall Success:', results.overallSuccess);
+  console.log('[SETUP] ============================================');
+
+  return results;
+}
+
+// ============================================================================
+// CARRIER COMPLIANCE SETUP
+// Reference: Conductor/tracks/carrier_compliance_20260120/spec.md
+// ============================================================================
+
+const COMPLIANCE_COLLECTIONS = {
+  EVENTS: 'ComplianceEvents',
+  ALERTS: 'ComplianceAlerts',
+  DOCUMENTS: 'CarrierDocuments',
+  DQ_FILES: 'QualificationFiles',
+  CSA_HISTORY: 'CSAScoreHistory',
+  INCIDENTS: 'IncidentReports'
+};
+
+const COMPLIANCE_EVENTS_SCHEMA = {
+  collectionName: 'ComplianceEvents',
+  displayName: 'Compliance Events',
+  fields: [
+    { name: 'carrier_dot', type: 'text', description: 'Carrier DOT number' },
+    { name: 'driver_id', type: 'text', description: 'Reference to DriverProfiles' },
+    { name: 'event_type', type: 'text', description: 'Type of event (e.g., drug_test_random)' },
+    { name: 'event_category', type: 'text', description: 'Category: medical, testing, training, etc.' },
+    { name: 'title', type: 'text', description: 'Display title' },
+    { name: 'description', type: 'text', description: 'Additional notes' },
+    { name: 'due_date', type: 'date', description: 'Due date' },
+    { name: 'completed_date', type: 'date', description: 'Completion date' },
+    { name: 'status', type: 'text', description: 'pending, upcoming, due_soon, overdue, completed' },
+    { name: 'document_id', type: 'text', description: 'Reference to CarrierDocuments' },
+    { name: 'reminder_30_sent', type: 'boolean', description: 'Reminder sent flag' },
+    { name: 'reminder_14_sent', type: 'boolean', description: 'Reminder sent flag' },
+    { name: 'reminder_7_sent', type: 'boolean', description: 'Reminder sent flag' },
+    { name: 'reminder_due_sent', type: 'boolean', description: 'Reminder sent flag' },
+    { name: 'recurrence', type: 'object', description: 'Recurrence config JSON' },
+    { name: 'auto_renew', type: 'boolean', description: 'Auto-create next event' },
+    { name: 'assigned_to', type: 'text', description: 'User ID responsible' },
+    { name: 'priority', type: 'text', description: 'critical, high, normal, low' }
+  ],
+  permissions: {
+    read: 'SiteMember', // Carrier admins need access
+    create: 'SiteMember',
+    update: 'SiteMember',
+    delete: 'Admin'
+  }
+};
+
+const COMPLIANCE_ALERTS_SCHEMA = {
+  collectionName: 'ComplianceAlerts',
+  displayName: 'Compliance Alerts',
+  fields: [
+    { name: 'carrier_dot', type: 'text', description: 'Carrier DOT number' },
+    { name: 'alert_type', type: 'text', description: 'expiring_document, overdue_event, csa_change' },
+    { name: 'severity', type: 'text', description: 'info, warning, critical' },
+    { name: 'title', type: 'text', description: 'Alert title' },
+    { name: 'message', type: 'text', description: 'Alert message' },
+    { name: 'related_entity_type', type: 'text', description: 'driver, document, event, csa_score' },
+    { name: 'related_entity_id', type: 'text', description: 'ID of related entity' },
+    { name: 'status', type: 'text', description: 'active, acknowledged, resolved, dismissed' },
+    { name: 'acknowledged_by', type: 'text', description: 'User ID' },
+    { name: 'acknowledged_date', type: 'date', description: 'When acknowledged' },
+    { name: 'resolved_date', type: 'date', description: 'When resolved' },
+    { name: 'auto_resolve_on', type: 'date', description: 'Auto-resolve date' }
+  ],
+  permissions: {
+    read: 'SiteMember',
+    create: 'Admin', // System creates alerts usually
+    update: 'SiteMember',
+    delete: 'Admin'
+  }
+};
+
+const CARRIER_DOCUMENTS_SCHEMA = {
+  collectionName: 'CarrierDocuments',
+  displayName: 'Carrier Documents',
+  fields: [
+    { name: 'carrier_dot', type: 'text', description: 'Carrier DOT number' },
+    { name: 'driver_id', type: 'text', description: 'Reference to DriverProfiles' },
+    { name: 'document_type', type: 'text', description: 'Type of document' },
+    { name: 'document_category', type: 'text', description: 'Category' },
+    { name: 'title', type: 'text', description: 'Document title' },
+    { name: 'file_url', type: 'text', description: 'File URL' }, // URL type in Wix is Text usually
+    { name: 'file_name', type: 'text', description: 'Original file name' },
+    { name: 'file_size', type: 'number', description: 'Size in bytes' },
+    { name: 'mime_type', type: 'text', description: 'MIME type' },
+    { name: 'issue_date', type: 'date', description: 'Issue date' },
+    { name: 'expiration_date', type: 'date', description: 'Expiration date' },
+    { name: 'is_expired', type: 'boolean', description: 'Computed expired flag' },
+    { name: 'days_until_expiry', type: 'number', description: 'Computed days remaining' },
+    { name: 'version', type: 'number', description: 'Version number' },
+    { name: 'previous_version_id', type: 'text', description: 'Reference to previous version' },
+    { name: 'status', type: 'text', description: 'active, expired, superseded, archived' },
+    { name: 'verification_status', type: 'text', description: 'pending, verified, rejected' },
+    { name: 'verified_by', type: 'text', description: 'User ID' },
+    { name: 'verified_date', type: 'date', description: 'Verification timestamp' },
+    { name: 'notes', type: 'text', description: 'Admin notes' },
+    { name: 'tags', type: 'array', description: 'Tags array' }
+  ],
+  permissions: {
+    read: 'SiteMember',
+    create: 'SiteMember',
+    update: 'SiteMember',
+    delete: 'Admin'
+  }
+};
+
+const QUALIFICATION_FILES_SCHEMA = {
+  collectionName: 'QualificationFiles',
+  displayName: 'Qualification Files',
+  fields: [
+    { name: 'carrier_dot', type: 'text', description: 'Carrier DOT number' },
+    { name: 'driver_id', type: 'text', description: 'Reference to DriverProfiles' },
+    { name: 'driver_name', type: 'text', description: 'Denormalized name' },
+    { name: 'completeness_score', type: 'number', description: '0-100 percentage' },
+    { name: 'status', type: 'text', description: 'incomplete, complete, audit_ready' },
+    { name: 'last_audit_date', type: 'date', description: 'Last audit date' },
+    { name: 'checklist', type: 'object', description: 'Checklist JSON' },
+    { name: 'missing_items', type: 'array', description: 'Array of missing item keys' },
+    { name: 'expiring_soon', type: 'array', description: 'Array of expiring item keys' },
+    { name: 'alerts', type: 'array', description: 'Array of active alerts' }
+  ],
+  permissions: {
+    read: 'SiteMember',
+    create: 'Admin', // System creates usually
+    update: 'SiteMember',
+    delete: 'Admin'
+  }
+};
+
+const CSA_SCORE_HISTORY_SCHEMA = {
+  collectionName: 'CSAScoreHistory',
+  displayName: 'CSA Score History',
+  fields: [
+    { name: 'carrier_dot', type: 'text', description: 'Carrier DOT number' },
+    { name: 'snapshot_date', type: 'date', description: 'Snapshot date' },
+    { name: 'overall_percentile', type: 'number', description: 'Overall risk' },
+    { name: 'basics', type: 'object', description: 'BASIC scores JSON' },
+    { name: 'alerts_active', type: 'array', description: 'Active alerts' },
+    { name: 'inspections_30_day', type: 'number', description: 'Count' },
+    { name: 'violations_30_day', type: 'number', description: 'Count' },
+    { name: 'crashes_30_day', type: 'number', description: 'Count' },
+    { name: 'trend_vs_prior', type: 'object', description: 'Trend JSON' },
+    { name: 'source', type: 'text', description: 'scheduled, manual, incident' }
+  ],
+  permissions: {
+    read: 'SiteMember',
+    create: 'Admin',
+    update: 'Admin',
+    delete: 'Admin'
+  }
+};
+
+const INCIDENT_REPORTS_SCHEMA = {
+  collectionName: 'IncidentReports',
+  displayName: 'Incident Reports',
+  fields: [
+    { name: 'carrier_dot', type: 'text', description: 'Carrier DOT number' },
+    { name: 'incident_number', type: 'text', description: 'Unique Reference' },
+    { name: 'incident_type', type: 'text', description: 'accident, injury, etc.' },
+    { name: 'incident_date', type: 'date', description: 'Occurrence date' },
+    { name: 'reported_date', type: 'date', description: 'Reported date' },
+    { name: 'driver_id', type: 'text', description: 'Reference to DriverProfiles' },
+    { name: 'driver_name', type: 'text', description: 'Denormalized name' },
+    { name: 'vehicle_id', type: 'text', description: 'Vehicle unit number' },
+    { name: 'location', type: 'object', description: 'Location JSON' },
+    { name: 'description', type: 'text', description: 'Description' },
+    { name: 'severity', type: 'text', description: 'minor, moderate, major, critical' },
+    { name: 'dot_reportable', type: 'boolean', description: 'DOT reportable flag' },
+    { name: 'dot_report_status', type: 'text', description: 'Status' },
+    { name: 'dot_report_date', type: 'date', description: 'Submission date' },
+    { name: 'injuries', type: 'object', description: 'Injuries JSON' },
+    { name: 'property_damage', type: 'object', description: 'Property damage JSON' },
+    { name: 'tow_required', type: 'boolean', description: 'Tow required flag' },
+    { name: 'hazmat_release', type: 'boolean', description: 'Hazmat release flag' },
+    { name: 'police_report_number', type: 'text', description: 'Police report #' },
+    { name: 'insurance_claim_number', type: 'text', description: 'Insurance claim #' },
+    { name: 'investigation_status', type: 'text', description: 'Status' },
+    { name: 'investigation_findings', type: 'text', description: 'Findings' },
+    { name: 'root_cause', type: 'text', description: 'Root cause' },
+    { name: 'corrective_actions', type: 'array', description: 'Actions array' },
+    { name: 'photos', type: 'array', description: 'Array of doc IDs' },
+    { name: 'documents', type: 'array', description: 'Array of doc IDs' },
+    { name: 'witness_statements', type: 'array', description: 'Witness array' },
+    { name: 'assigned_investigator', type: 'text', description: 'User ID' }
+  ],
+  permissions: {
+    read: 'SiteMember',
+    create: 'SiteMember',
+    update: 'SiteMember',
+    delete: 'Admin'
+  }
+};
+
+/**
+ * Setup function for Carrier Compliance collections
+ */
+export async function setupComplianceCollections() {
+  console.log('[SETUP] Setting up Carrier Compliance Collections...');
+  
+  const schemas = [
+    COMPLIANCE_EVENTS_SCHEMA,
+    COMPLIANCE_ALERTS_SCHEMA,
+    CARRIER_DOCUMENTS_SCHEMA,
+    QUALIFICATION_FILES_SCHEMA,
+    CSA_SCORE_HISTORY_SCHEMA,
+    INCIDENT_REPORTS_SCHEMA
+  ];
+
+  const results = {
+    existing: [],
+    missing: []
+  };
+
+  for (const schema of schemas) {
+    const { exists } = await checkCollectionExists(schema.collectionName);
+    if (exists) {
+      results.existing.push(schema.collectionName);
+    } else {
+      results.missing.push({
+        name: schema.collectionName,
+        instructions: generateCollectionInstructions(schema)
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Run all setup functions (legacy + Feature Adoption + Compliance)
  */
 export async function runFullSetup() {
   const results = {
     carrierSubscriptions: null,
     recruiterCarrier: null,
-    featureAdoptionLogs: null
+    featureAdoptionSystem: null,
+    complianceSystem: null
   };
 
   results.carrierSubscriptions = await setupCarrierSubscriptions();
   results.recruiterCarrier = await setupRecruiterCarrier('123456');
-  results.featureAdoptionLogs = await setupFeatureAdoptionLogs();
+  results.featureAdoptionSystem = await setupFeatureAdoptionSystem();
+  results.complianceSystem = await setupComplianceCollections();
 
   console.log('[SETUP] Full setup complete:', results);
   return results;
