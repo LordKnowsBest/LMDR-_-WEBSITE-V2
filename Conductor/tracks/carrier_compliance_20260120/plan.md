@@ -302,7 +302,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 4: CSA Score Monitor
+## Phase 4: CSA Score Monitor [checkpoint: eff32e9]
 
 > **Goal**: Track company BASIC scores, alert on changes, visualize trends
 >
