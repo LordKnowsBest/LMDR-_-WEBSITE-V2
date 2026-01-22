@@ -136,76 +136,76 @@ Phase 5: Incident Reporting
 
 ### 2.1 Data Model & Backend Setup
 
-- [ ] Task: Create `CarrierDocuments` collection in Wix CMS
-  - [ ] Add all fields per spec (document_type, expiration_date, version, etc.)
-  - [ ] Configure indexes on carrier_dot, driver_id, document_type, expiration_date
-  - [ ] Set collection permissions
+- [x] Task: Create `CarrierDocuments` collection in Wix CMS
+  - [x] Add all fields per spec (document_type, expiration_date, version, etc.)
+  - [x] Configure indexes on carrier_dot, driver_id, document_type, expiration_date
+  - [x] Set collection permissions
 
-- [ ] Task: Create `src/backend/documentVaultService.jsw`
-  - [ ] Implement `uploadDocument(carrierDot, documentData)`
-  - [ ] Implement `getDocuments(carrierDot, filters)`
-  - [ ] Implement `getDocument(documentId)`
-  - [ ] Implement `updateDocument(documentId, updates)`
-  - [ ] Implement `archiveDocument(documentId)`
+- [x] Task: Create `src/backend/documentVaultService.jsw`
+  - [x] Implement `uploadDocument(carrierDot, documentData)`
+  - [x] Implement `getDocuments(carrierDot, filters)`
+  - [x] Implement `getDocument(documentId)`
+  - [x] Implement `updateDocument(documentId, updates)`
+  - [x] Implement `archiveDocument(documentId)`
 
 ### 2.2 Version History
 
-- [ ] Task: Implement version tracking
-  - [ ] `uploadNewVersion(documentId, newVersionData)` - create new version, link to previous
-  - [ ] `getDocumentVersionHistory(documentId)` - return all versions
-  - [ ] Auto-archive previous version on new upload
+- [x] Task: Implement version tracking
+  - [x] `uploadNewVersion(documentId, newVersionData)` - create new version, link to previous
+  - [x] `getDocumentVersionHistory(documentId)` - return all versions
+  - [x] Auto-archive previous version on new upload
 
 ### 2.3 Expiration Tracking
 
-- [ ] Task: Implement `getExpiringDocuments(carrierDot, daysAhead)`
-- [ ] Task: Implement `getExpiredDocuments(carrierDot)`
-- [ ] Task: Create scheduled job to update `is_expired` and `days_until_expiry` fields
-- [ ] Task: Generate alerts for documents expiring within 30 days
+- [x] Task: Implement `getExpiringDocuments(carrierDot, daysAhead)`
+- [x] Task: Implement `getExpiredDocuments(carrierDot)`
+- [x] Task: Create scheduled job to update `is_expired` and `days_until_expiry` fields
+- [x] Task: Generate alerts for documents expiring within 30 days
 
 ### 2.4 Document Verification
 
-- [ ] Task: Implement `verifyDocument(documentId, verifierId, status, notes)`
-- [ ] Task: Create verification workflow UI for admins
-- [ ] Task: Track verification status in document list
+- [x] Task: Implement `verifyDocument(documentId, verifierId, status, notes)`
+- [x] Task: Create verification workflow UI for admins
+- [x] Task: Track verification status in document list
 
 ### 2.5 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_DOCUMENT_VAULT.html`
-  - [ ] Folder/category organization view
-  - [ ] Document list with status indicators
-  - [ ] Expiring documents alert banner
-  - [ ] Filter by category, driver, status
+- [x] Task: Create `src/public/carrier/CARRIER_DOCUMENT_VAULT.html`
+  - [x] Folder/category organization view
+  - [x] Document list with status indicators
+  - [x] Expiring documents alert banner
+  - [x] Filter by category, driver, status
 
-- [ ] Task: Implement document upload component
-  - [ ] Drag-and-drop file upload
-  - [ ] Document type selection
-  - [ ] Driver assignment
-  - [ ] Issue/expiration date entry
+- [x] Task: Implement document upload component
+  - [x] Drag-and-drop file upload
+  - [x] Document type selection
+  - [x] Driver assignment
+  - [x] Issue/expiration date entry
 
-- [ ] Task: Implement document detail view
-  - [ ] File preview (PDF, images)
-  - [ ] Metadata display
-  - [ ] Version history
-  - [ ] Edit/archive actions
+- [x] Task: Implement document detail view
+  - [x] File preview (PDF, images)
+  - [x] Metadata display
+  - [x] Version history
+  - [x] Edit/archive actions
 
-- [ ] Task: Implement bulk upload feature
-  - [ ] Multiple file selection
-  - [ ] Batch metadata entry
-  - [ ] Progress indicator
+- [x] Task: Implement bulk upload feature
+  - [x] Multiple file selection
+  - [x] Batch metadata entry
+  - [x] Progress indicator
 
 ### 2.6 Integration with Compliance Calendar
 
-- [ ] Task: Update `completeComplianceEvent` to accept and link document
-- [ ] Task: Auto-create compliance event from document with expiration date
-- [ ] Task: Show linked documents in compliance event detail
+- [x] Task: Update `completeComplianceEvent` to accept and link document
+- [x] Task: Auto-create compliance event from document with expiration date
+- [x] Task: Show linked documents in compliance event detail
 
 ### 2.7 Testing - Phase 2
 
-- [ ] Task: Create `src/public/__tests__/documentVaultService.test.js`
-  - [ ] Test upload/download
-  - [ ] Test version history
-  - [ ] Test expiration tracking
-  - [ ] Test verification workflow
+- [x] Task: Create `src/public/__tests__/documentVaultService.test.js`
+  - [x] Test upload/download
+  - [x] Test version history
+  - [x] Test expiration tracking
+  - [x] Test verification workflow
 
 - [ ] Task: Manual integration testing
   - [ ] Upload various document types
