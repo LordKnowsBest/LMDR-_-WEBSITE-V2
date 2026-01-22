@@ -4,7 +4,7 @@
 // ============================================================================
 
 import { searchParking, getParkingDetails, reportParkingAvailability } from 'backend/parkingService';
-import { searchFuelPrices, linkFuelCard, calculateFuelSavings } from 'backend/fuelService';
+import { searchFuelPrices, linkFuelCard, getDriverFuelCards, calculateFuelSavings } from 'backend/fuelService';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
@@ -18,6 +18,7 @@ const MESSAGE_REGISTRY = {
         'reportParking',
         'searchFuel',
         'linkFuelCard',
+        'getDriverFuelCards',
         'calculateSavings',
         'tabSwitch',
         'ping'
@@ -27,7 +28,8 @@ const MESSAGE_REGISTRY = {
         'parkingDetails',
         'reportResult',
         'fuelResults',
-        'linkCardResult',
+        'fuelCardsLoaded',
+        'fuelCardLinked',
         'savingsResult',
         'error',
         'pong'
@@ -72,6 +74,10 @@ async function handleHtmlMessage(msg) {
                 await handleCalculateFuelSavings(msg.data);
                 break;
 
+            case 'getDriverFuelCards':
+                await handleGetDriverFuelCards();
+                break;
+
             case 'tabSwitch':
                 console.log(`Tab switched to: ${msg.tab}`);
                 break;
@@ -95,17 +101,24 @@ async function handleSearchFuelPrices(data) {
     const lat = data.lat || 35.1495;
     const lng = data.lng || -90.0490;
     const radius = data.radius || 50;
-    const options = data.options || {};
+    const fuelCardType = data.fuelCardType || 'none';
 
     // Track analytics
     logFeatureInteraction('fuel_optimizer', wixUsers.currentUser.id || 'anonymous', 'search', {
-        metadata: { query: data.query, radius, options }
+        metadata: { query: data.query, radius, fuelCardType }
     });
 
-    const result = await searchFuelPrices(lat, lng, radius, options);
-    
+    const result = await searchFuelPrices(lat, lng, radius, { fuelType: 'diesel', cardType: fuelCardType });
+
     if (result.success) {
-        sendToHtml('fuelResults', { items: result.items });
+        // Map results to include savings based on card type
+        const items = result.items.map(station => ({
+            ...station,
+            savings: fuelCardType !== 'none' ? (station.retail_price - station.diesel_price) : 0,
+            accepts_card: fuelCardType !== 'none' && station.accepted_cards?.includes(fuelCardType),
+            card_type: fuelCardType !== 'none' ? fuelCardType.toUpperCase() : null
+        }));
+        sendToHtml('fuelResults', items);
     } else {
         sendToHtml('error', { message: result.error });
     }
@@ -117,12 +130,32 @@ async function handleLinkFuelCard(data) {
         return;
     }
 
-    const result = await linkFuelCard(wixUsers.currentUser.id, data.cardInfo);
-    sendToHtml('linkCardResult', result);
+    const cardInfo = {
+        card_type: data.cardType,
+        card_last4: data.cardLast4,
+        nickname: data.nickname
+    };
+
+    const result = await linkFuelCard(wixUsers.currentUser.id, cardInfo);
+    sendToHtml('fuelCardLinked', result);
+}
+
+async function handleGetDriverFuelCards() {
+    if (!wixUsers.currentUser.loggedIn) {
+        sendToHtml('fuelCardsLoaded', []);
+        return;
+    }
+
+    const result = await getDriverFuelCards(wixUsers.currentUser.id);
+    if (result.success) {
+        sendToHtml('fuelCardsLoaded', result.cards);
+    } else {
+        sendToHtml('fuelCardsLoaded', []);
+    }
 }
 
 async function handleCalculateFuelSavings(data) {
-    const result = await calculateFuelSavings(wixUsers.currentUser.id, data.tripDetails);
+    const result = await calculateFuelSavings(wixUsers.currentUser.id || 'anonymous', data.tripDetails);
     sendToHtml('savingsResult', result);
 }
 

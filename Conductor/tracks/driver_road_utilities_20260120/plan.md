@@ -91,7 +91,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ---
 
-## Phase 2: Fuel Optimizer [checkpoint: fcffb62]
+## Phase 2: Fuel Optimizer [checkpoint: f9a42cd]
 
 **Goal:** Help drivers find cheapest diesel and calculate savings.
 

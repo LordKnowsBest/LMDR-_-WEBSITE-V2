@@ -18,6 +18,26 @@ const API_CONFIG = {
         baseUrl: 'https://api.truckparkingclub.com/v1',
         timeout: 5000,
         rateLimitPerMin: 100
+    },
+    // TPIMS - Truck Parking Information Management System (FHWA)
+    // Real sensor data from 300+ locations across major freight corridors
+    TPIMS: {
+        // OHGO (Ohio) - Well-documented public API
+        OHGO: {
+            baseUrl: 'https://publicapi.ohgo.com/api/v1',
+            timeout: 8000,
+            rateLimitPerMin: 60,
+            secretKey: 'OHGO_API_KEY'
+        },
+        // Wisconsin 511
+        WI_511: {
+            baseUrl: 'https://511wi.gov/api',
+            timeout: 8000,
+            rateLimitPerMin: 10, // Strict: 10 calls per 60 seconds
+            secretKey: 'WI_511_API_KEY'
+        },
+        // Additional MAASTO states can be added here
+        // IN, IA, KS, KY, MI, MN follow similar patterns
     }
 };
 
@@ -27,6 +47,16 @@ const circuitBreaker = {
         failures: 0,
         lastFailure: 0,
         status: 'CLOSED' // CLOSED, OPEN, HALF_OPEN
+    },
+    ohgo: {
+        failures: 0,
+        lastFailure: 0,
+        status: 'CLOSED'
+    },
+    wi511: {
+        failures: 0,
+        lastFailure: 0,
+        status: 'CLOSED'
     }
 };
 
@@ -74,6 +104,194 @@ async function queryTruckParkingClubAPI(lat, lng, radius) {
         console.error('[ParkingService] TruckParkingClub API failed:', error.message);
         throw error;
     }
+}
+
+// ============================================
+// TPIMS API FUNCTIONS (Real Sensor Data)
+// ============================================
+
+/**
+ * Query OHGO (Ohio) TPIMS API for real-time truck parking data
+ * Provides sensor-based availability from 16+ rest areas on I-70, I-75
+ */
+async function queryOHGOAPI(lat, lng, radius) {
+    // Check circuit breaker
+    if (circuitBreaker.ohgo.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.ohgo.lastFailure > 60000) {
+            circuitBreaker.ohgo.status = 'HALF_OPEN';
+        } else {
+            console.log('[TPIMS] OHGO circuit breaker is OPEN, skipping');
+            return [];
+        }
+    }
+
+    try {
+        const apiKey = await getSecret(API_CONFIG.TPIMS.OHGO.secretKey).catch(() => null);
+        if (!apiKey) {
+            console.log('[TPIMS] No OHGO API key configured, skipping');
+            return [];
+        }
+
+        // Use radius parameter: lat,lng,miles
+        const url = `${API_CONFIG.TPIMS.OHGO.baseUrl}/truck-parking?radius=${lat},${lng},${radius}&page-all=true`;
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'Authorization': `APIKEY ${apiKey}`,
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error(`OHGO API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        // Reset circuit breaker on success
+        circuitBreaker.ohgo.failures = 0;
+        circuitBreaker.ohgo.status = 'CLOSED';
+
+        console.log(`[TPIMS] OHGO returned ${data.results?.length || 0} truck parking locations`);
+        return normalizeOHGOData(data.results || []);
+    } catch (error) {
+        circuitBreaker.ohgo.failures++;
+        circuitBreaker.ohgo.lastFailure = Date.now();
+        if (circuitBreaker.ohgo.failures >= 3) {
+            circuitBreaker.ohgo.status = 'OPEN';
+        }
+        console.error('[TPIMS] OHGO API failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Normalize OHGO truck parking data to standard format
+ */
+function normalizeOHGOData(results) {
+    if (!Array.isArray(results)) return [];
+
+    return results.map(item => ({
+        external_id: `ohgo_${item.Id}`,
+        source: 'ohgo_tpims',
+        source_label: 'ODOT Sensors',
+        name: item.Description || item.Location || 'Ohio Rest Area',
+        location: {
+            lat: parseFloat(item.Latitude),
+            lng: parseFloat(item.Longitude)
+        },
+        address: {
+            full: item.Address || '',
+            city: '',
+            state: 'OH'
+        },
+        total_spaces: parseInt(item.Capacity) || 0,
+        available_spaces: item.ReportedAvailable !== null ? parseInt(item.ReportedAvailable) : null,
+        is_open: item.Open !== false,
+        amenities: ['restroom'], // Ohio rest areas have restrooms
+        avg_rating: 0,
+        last_availability_update: item.LastReported ? new Date(item.LastReported) : new Date(),
+        data_confidence: 'sensor', // Real sensor data!
+        highway: item.Location || ''
+    }));
+}
+
+/**
+ * Query Wisconsin 511 TPIMS API
+ */
+async function queryWI511API(lat, lng, radius) {
+    if (circuitBreaker.wi511.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.wi511.lastFailure > 60000) {
+            circuitBreaker.wi511.status = 'HALF_OPEN';
+        } else {
+            return [];
+        }
+    }
+
+    try {
+        const apiKey = await getSecret(API_CONFIG.TPIMS.WI_511.secretKey).catch(() => null);
+        if (!apiKey) return [];
+
+        const url = `${API_CONFIG.TPIMS.WI_511.baseUrl}/GetTruckParking?key=${apiKey}&format=json`;
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`WI 511 API error: ${response.status}`);
+
+        const data = await response.json();
+
+        circuitBreaker.wi511.failures = 0;
+        circuitBreaker.wi511.status = 'CLOSED';
+
+        console.log(`[TPIMS] WI 511 returned ${data.length || 0} truck parking locations`);
+        return normalizeWI511Data(data || []);
+    } catch (error) {
+        circuitBreaker.wi511.failures++;
+        circuitBreaker.wi511.lastFailure = Date.now();
+        if (circuitBreaker.wi511.failures >= 3) {
+            circuitBreaker.wi511.status = 'OPEN';
+        }
+        console.error('[TPIMS] WI 511 API failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Normalize Wisconsin 511 truck parking data
+ */
+function normalizeWI511Data(results) {
+    if (!Array.isArray(results)) return [];
+
+    return results.map(item => ({
+        external_id: `wi511_${item.id || item.Id}`,
+        source: 'wi_tpims',
+        source_label: 'WisDOT Sensors',
+        name: item.name || item.Name || 'Wisconsin Rest Area',
+        location: {
+            lat: parseFloat(item.latitude || item.Latitude),
+            lng: parseFloat(item.longitude || item.Longitude)
+        },
+        address: {
+            full: item.address || '',
+            city: '',
+            state: 'WI'
+        },
+        total_spaces: parseInt(item.capacity || item.Capacity) || 0,
+        available_spaces: item.availableSpaces !== undefined ? parseInt(item.availableSpaces) : null,
+        is_open: true,
+        amenities: ['restroom'],
+        avg_rating: 0,
+        last_availability_update: item.lastUpdated ? new Date(item.lastUpdated) : new Date(),
+        data_confidence: 'sensor',
+        highway: item.route || ''
+    }));
+}
+
+/**
+ * Aggregate TPIMS data from all available state sources
+ * This is the main entry point for real sensor data
+ */
+async function queryAllTPIMSSources(lat, lng, radius) {
+    // Determine which state APIs to query based on location
+    // For now, query all available sources and filter by distance
+    const tpimsQueries = [
+        queryOHGOAPI(lat, lng, radius),
+        queryWI511API(lat, lng, radius)
+        // Add more states as API keys are configured:
+        // queryIN511API(lat, lng, radius),
+        // queryMN511API(lat, lng, radius),
+        // queryMI511API(lat, lng, radius),
+    ];
+
+    const results = await Promise.all(tpimsQueries);
+    const allItems = results.flat();
+
+    console.log(`[TPIMS] Total locations from all sources: ${allItems.length}`);
+    return allItems;
 }
 
 /**
@@ -127,11 +345,18 @@ async function queryParkMyTruckAPI(lat, lng, radius) {
 
 /**
  * Query state DOT APIs for rest area status
+ * Now integrated with TPIMS for real sensor data
  */
 async function queryStateDOTAPIs(lat, lng, radius) {
-    // This would typically involve checking which state we are in 
-    // and calling the relevant DOT API. For now, we'll return an empty array.
-    return [];
+    // Query all TPIMS sources (OHGO, WI 511, etc.)
+    // These provide real-time sensor data from federally-funded systems
+    try {
+        const tpimsData = await queryAllTPIMSSources(lat, lng, radius);
+        return tpimsData;
+    } catch (error) {
+        console.error('[ParkingService] TPIMS query failed:', error.message);
+        return [];
+    }
 }
 
 /**
@@ -205,25 +430,58 @@ export async function searchParking(lat, lng, radius = 25, filters = {}) {
 
 /**
  * Deduplicate and merge results from multiple sources
+ * Prioritizes sensor data over estimates
  */
 function flattenAndMerge(sourceResults) {
     const merged = new Map();
-    
+
+    // Data confidence ranking (higher = better)
+    const confidenceRank = {
+        'sensor': 3,      // Real TPIMS sensor data
+        'reported': 2,    // Community reports
+        'estimated': 1,   // Algorithm estimates
+        'unknown': 0      // No data
+    };
+
     sourceResults.flat().forEach(item => {
-        // Use coordinates + name as a heuristic for deduplication if external_id is source-specific
+        // Use coordinates as key for deduplication
         const key = `${item.location.lat.toFixed(3)}:${item.location.lng.toFixed(3)}`;
+
         if (!merged.has(key)) {
             merged.set(key, item);
         } else {
-            // If we already have it, maybe update available_spaces if the new source is "better"
             const existing = merged.get(key);
-            if (item.available_spaces !== null && existing.available_spaces === null) {
+            const existingConfidence = confidenceRank[existing.data_confidence] || 0;
+            const newConfidence = confidenceRank[item.data_confidence] || 0;
+
+            // Prefer higher confidence data
+            if (newConfidence > existingConfidence) {
                 merged.set(key, { ...existing, ...item });
+            } else if (newConfidence === existingConfidence) {
+                // Same confidence: prefer the one with availability data
+                if (item.available_spaces !== null && existing.available_spaces === null) {
+                    merged.set(key, { ...existing, ...item });
+                }
             }
         }
     });
 
     return Array.from(merged.values());
+}
+
+/**
+ * Get data source label for UI display
+ */
+function getSourceLabel(source) {
+    const labels = {
+        'ohgo_tpims': 'ODOT Sensors',
+        'wi_tpims': 'WisDOT Sensors',
+        'truckparkingclub': 'TruckParkingClub',
+        'parkmytruck': 'ParkMyTruck',
+        'community': 'Driver Reports',
+        'database': 'LMDR Database'
+    };
+    return labels[source] || 'Unknown';
 }
 
 /**
