@@ -225,75 +225,75 @@ Phase 5: Incident Reporting
 
 ### 3.1 Data Model & Backend Setup
 
-- [ ] Task: Create `QualificationFiles` collection in Wix CMS
-  - [ ] Add fields per spec (checklist, completeness_score, missing_items, etc.)
-  - [ ] Configure indexes on carrier_dot, driver_id, status, completeness_score
+- [x] Task: Create `QualificationFiles` collection in Wix CMS
+  - [x] Add fields per spec (checklist, completeness_score, missing_items, etc.)
+  - [x] Configure indexes on carrier_dot, driver_id, status, completeness_score
 
-- [ ] Task: Create `src/backend/dqFileService.jsw`
-  - [ ] Implement `getDQFile(carrierDot, driverId)`
-  - [ ] Implement `getCarrierDQFiles(carrierDot, filters)`
-  - [ ] Implement `updateDQChecklistItem(dqFileId, itemKey, itemData)`
-  - [ ] Implement `linkDocumentToDQItem(dqFileId, itemKey, documentId)`
+- [x] Task: Create `src/backend/dqFileService.jsw`
+  - [x] Implement `getDQFile(carrierDot, driverId)`
+  - [x] Implement `getCarrierDQFiles(carrierDot, filters)`
+  - [x] Implement `updateDQChecklistItem(dqFileId, itemKey, itemData)`
+  - [x] Implement `linkDocumentToDQItem(dqFileId, itemKey, documentId)`
 
 ### 3.2 Completeness Calculation
 
-- [ ] Task: Implement `calculateCompleteness(dqFile)`
-  - [ ] Count required items with valid documents
-  - [ ] Deduct for expired documents
-  - [ ] Return percentage 0-100
+- [x] Task: Implement `calculateCompleteness(dqFile)`
+  - [x] Count required items with valid documents
+  - [x] Deduct for expired documents
+  - [x] Return percentage 0-100
 
-- [ ] Task: Implement automatic DQ file creation on driver hire
-  - [ ] Create QualificationFile record when driver added to carrier
-  - [ ] Initialize checklist with all required items
+- [x] Task: Implement automatic DQ file creation on driver hire
+  - [x] Create QualificationFile record when driver added to carrier
+  - [x] Initialize checklist with all required items
 
 ### 3.3 Audit Reports
 
-- [ ] Task: Implement `generateAuditReport(dqFileId)`
-  - [ ] Format checklist as printable report
-  - [ ] Include document references
-  - [ ] List missing and expiring items
-  - [ ] Add FMCSA compliance notes
+- [x] Task: Implement `generateAuditReport(dqFileId)`
+  - [x] Format checklist as printable report
+  - [x] Include document references
+  - [x] List missing and expiring items
+  - [x] Add FMCSA compliance notes
 
-- [ ] Task: Implement `getDQFileSummary(carrierDot)`
-  - [ ] Total drivers, complete files, incomplete files
-  - [ ] Average completeness score
-  - [ ] Drivers with critical missing items
+- [x] Task: Implement `getDQFileSummary(carrierDot)`
+  - [x] Total drivers, complete files, incomplete files
+  - [x] Average completeness score
+  - [x] Drivers with critical missing items
 
 ### 3.4 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_DQ_TRACKER.html`
-  - [ ] Summary cards (total, complete, incomplete, avg score)
-  - [ ] Driver list with completeness bars
-  - [ ] Filter by status, completeness threshold
-  - [ ] Sort by name, completeness, expiring items
+- [x] Task: Create `src/public/carrier/CARRIER_DQ_TRACKER.html`
+  - [x] Summary cards (total, complete, incomplete, avg score)
+  - [x] Driver list with completeness bars
+  - [x] Filter by status, completeness threshold
+  - [x] Sort by name, completeness, expiring items
 
-- [ ] Task: Implement DQ file detail view
-  - [ ] Checklist with status indicators
-  - [ ] Link to upload missing documents
-  - [ ] Show expiration dates for time-sensitive items
-  - [ ] "Generate Audit Report" button
+- [x] Task: Implement DQ file detail view
+  - [x] Checklist with status indicators
+  - [x] Link to upload missing documents
+  - [x] Show expiration dates for time-sensitive items
+  - [x] "Generate Audit Report" button
 
-- [ ] Task: Implement missing item alerts
-  - [ ] Highlight critical missing items
-  - [ ] Quick action to upload
-  - [ ] Due date warnings
+- [x] Task: Implement missing item alerts
+  - [x] Highlight critical missing items
+  - [x] Quick action to upload
+  - [x] Due date warnings
 
 ### 3.5 Integration with Document Vault
 
-- [ ] Task: Auto-link uploaded documents to DQ checklist items
-  - [ ] Match document_type to checklist item
-  - [ ] Update completeness score on upload
+- [x] Task: Auto-link uploaded documents to DQ checklist items
+  - [x] Match document_type to checklist item
+  - [x] Update completeness score on upload
 
-- [ ] Task: Update DQ file when document expires
-  - [ ] Change item status from `valid` to `expired`
-  - [ ] Recalculate completeness score
+- [x] Task: Update DQ file when document expires
+  - [x] Change item status from `valid` to `expired`
+  - [x] Recalculate completeness score
 
 ### 3.6 Testing - Phase 3
 
-- [ ] Task: Create `src/public/__tests__/dqFileService.test.js`
-  - [ ] Test completeness calculation
-  - [ ] Test document linking
-  - [ ] Test audit report generation
+- [x] Task: Create `src/public/__tests__/dqFileService.test.js`
+  - [x] Test completeness calculation
+  - [x] Test document linking
+  - [x] Test audit report generation
 
 - [ ] Task: Manual integration testing
   - [ ] Create drivers and verify DQ files created

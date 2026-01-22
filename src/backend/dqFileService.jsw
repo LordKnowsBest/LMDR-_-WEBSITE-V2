@@ -1,0 +1,204 @@
+import wixData from 'wix-data';
+import { getDocuments } from './documentVaultService';
+
+const COLLECTION = 'QualificationFiles';
+
+// FMCSA Checklist Template
+const CHECKLIST_TEMPLATE = {
+  employment_application: { required: true, document_id: null, status: 'missing', label: 'Employment Application' },
+  inquiry_previous_employers: { required: true, document_id: null, status: 'missing', label: 'Previous Employer Inquiry' },
+  driving_record_review: { required: true, document_id: null, status: 'missing', label: 'Initial Driving Record Review' },
+  road_test_certificate: { required: true, document_id: null, status: 'missing', label: 'Road Test Certificate' },
+  cdl_copy: { required: true, document_id: null, status: 'missing', label: 'CDL Copy' },
+  medical_certificate: { required: true, document_id: null, status: 'missing', label: 'Medical Examiner\'s Certificate' },
+  annual_driving_record_review: { required: true, document_id: null, status: 'missing', label: 'Annual Driving Record Review' },
+  annual_mvr: { required: true, document_id: null, status: 'missing', label: 'Annual MVR' },
+  pre_employment_drug_test: { required: true, document_id: null, status: 'missing', label: 'Pre-Employment Drug Test' },
+  random_testing_records: { required: true, document_id: null, status: 'missing', label: 'Random Testing Records' },
+  clearinghouse_query: { required: true, document_id: null, status: 'missing', label: 'Clearinghouse Query' }
+};
+
+// ============================================================ 
+// DQ FILE MANAGEMENT
+// ============================================================ 
+
+/**
+ * Get or create DQ file tracker for a driver
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {string} driverId - Driver ID
+ * @returns {Promise<Object>} - DQ file tracker with checklist
+ */
+export async function getDQFile(carrierDot, driverId) {
+  const query = await wixData.query(COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .eq('driver_id', driverId)
+    .limit(1)
+    .find({ suppressAuth: true });
+
+  if (query.items.length > 0) {
+    return query.items[0];
+  }
+
+  // Create new if not exists
+  // Fetch driver name first (mocked or query DriverProfiles)
+  let driverName = 'Unknown Driver';
+  try {
+      const driver = await wixData.get('DriverProfiles', driverId, { suppressAuth: true });
+      if(driver) driverName = `${driver.firstName} ${driver.lastName}`;
+  } catch(e) { console.warn('Driver fetch failed', e); }
+
+  const newFile = {
+    carrier_dot: carrierDot,
+    driver_id: driverId,
+    driver_name: driverName,
+    completeness_score: 0,
+    status: 'incomplete',
+    checklist: JSON.parse(JSON.stringify(CHECKLIST_TEMPLATE)), // Deep copy
+    missing_items: Object.keys(CHECKLIST_TEMPLATE),
+    expiring_soon: [],
+    alerts: [],
+    _createdDate: new Date(),
+    _updatedDate: new Date()
+  };
+
+  return wixData.insert(COLLECTION, newFile, { suppressAuth: true });
+}
+
+/**
+ * Get all DQ files for a carrier
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} filters - { status, minCompleteness }
+ * @returns {Promise<Array>} - List of DQ files
+ */
+export async function getCarrierDQFiles(carrierDot, filters = {}) {
+  let query = wixData.query(COLLECTION).eq('carrier_dot', carrierDot);
+
+  if (filters.status) query = query.eq('status', filters.status);
+  if (filters.minCompleteness) query = query.ge('completeness_score', filters.minCompleteness);
+
+  const result = await query.find({ suppressAuth: true });
+  return result.items;
+}
+
+/**
+ * Update DQ file checklist item
+ * @param {string} dqFileId - DQ file ID
+ * @param {string} itemKey - Checklist item key
+ * @param {Object} itemData - { document_id, status, notes }
+ * @returns {Promise<Object>} - Updated DQ file
+ */
+export async function updateDQChecklistItem(dqFileId, itemKey, itemData) {
+  const dqFile = await wixData.get(COLLECTION, dqFileId, { suppressAuth: true });
+  if (!dqFile) throw new Error('DQ File not found');
+
+  if (!dqFile.checklist[itemKey]) throw new Error(`Invalid checklist item: ${itemKey}`);
+
+  // Update item
+  dqFile.checklist[itemKey] = {
+    ...dqFile.checklist[itemKey],
+    ...itemData
+  };
+
+  // Recalculate completeness
+  recalculateCompleteness(dqFile);
+
+  return wixData.update(COLLECTION, dqFile, { suppressAuth: true });
+}
+
+/**
+ * Link a document to a DQ file checklist item
+ * @param {string} dqFileId - DQ file ID
+ * @param {string} itemKey - Checklist item key
+ * @param {string} documentId - Document ID
+ * @returns {Promise<Object>} - Updated DQ file
+ */
+export async function linkDocumentToDQItem(dqFileId, itemKey, documentId) {
+  return updateDQChecklistItem(dqFileId, itemKey, {
+    document_id: documentId,
+    status: 'valid' // Assume valid upon linking, expiration checks handle updates
+  });
+}
+
+// ============================================================ 
+// CALCULATIONS
+// ============================================================ 
+
+/**
+ * Internal helper to recalculate completeness
+ * @param {Object} dqFile - Modified in place
+ */
+function recalculateCompleteness(dqFile) {
+  const items = Object.values(dqFile.checklist);
+  const required = items.filter(i => i.required);
+  const completed = required.filter(i => i.status === 'valid' && i.document_id);
+  
+  dqFile.completeness_score = Math.round((completed.length / required.length) * 100);
+  
+  // Update status
+  if (dqFile.completeness_score === 100) dqFile.status = 'audit_ready'; // or complete
+  else dqFile.status = 'incomplete';
+
+  // Update missing items list
+  dqFile.missing_items = Object.keys(dqFile.checklist).filter(key => {
+      const item = dqFile.checklist[key];
+      return item.required && (item.status === 'missing' || !item.document_id);
+  });
+}
+
+/**
+ * Calculate completeness score for a DQ file (Public wrapper)
+ * @param {Object} dqFile 
+ * @returns {number} 
+ */
+export function calculateCompleteness(dqFile) {
+    const items = Object.values(dqFile.checklist);
+    const required = items.filter(i => i.required);
+    const completed = required.filter(i => i.status === 'valid' && i.document_id);
+    return Math.round((completed.length / required.length) * 100);
+}
+
+// ============================================================ 
+// REPORTING
+// ============================================================ 
+
+/**
+ * Get audit-ready report for a DQ file
+ * @param {string} dqFileId - DQ file ID
+ * @returns {Promise<Object>} - Formatted audit report
+ */
+export async function generateAuditReport(dqFileId) {
+  const dqFile = await wixData.get(COLLECTION, dqFileId, { suppressAuth: true });
+  if (!dqFile) throw new Error('DQ File not found');
+
+  return {
+    driverName: dqFile.driver_name,
+    generatedAt: new Date(),
+    completeness: dqFile.completeness_score,
+    status: dqFile.status,
+    checklist: dqFile.checklist,
+    missingItems: dqFile.missing_items
+  };
+}
+
+/**
+ * Get DQ file summary for carrier dashboard
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Promise<Object>} - { totalDrivers, completeFiles, incompleteFiles, avgCompleteness }
+ */
+export async function getDQFileSummary(carrierDot) {
+  const allFiles = await getCarrierDQFiles(carrierDot); 
+  
+  const total = allFiles.length;
+  const complete = allFiles.filter(f => f.completeness_score === 100).length;
+  const incomplete = total - complete;
+  const avg = total > 0 
+    ? Math.round(allFiles.reduce((sum, f) => sum + f.completeness_score, 0) / total) 
+    : 0;
+
+  return {
+    totalDrivers: total,
+    completeFiles: complete,
+    incompleteFiles: incomplete,
+    avgCompleteness: avg
+  };
+}
