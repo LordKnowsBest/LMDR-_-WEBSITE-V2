@@ -65,6 +65,22 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+# Infrastructure Tracks (Q1 2026)
+
+> Critical infrastructure improvements for scalability and long-term platform health.
+
+## [ ] Track: Airtable Migration - Scalable Data Architecture
+*Link: [./tracks/airtable_migration_20260121/](./tracks/airtable_migration_20260121/)*
+*Depends on: persistence_20251220*
+*Priority: High*
+*Status: Planned*
+*Goal: Migrate 35 Wix Collections to Airtable for improved scalability, visual data management, and better API tooling while maintaining Wix frontend and authentication.*
+*Business Impact: Infrastructure Improvement - Enables scalable data architecture before production volume.*
+*Technical Scope: 35 collections to migrate, 5 to keep in Wix (auth-related), 38 backend services affected.*
+*Phases: 6 (Infrastructure Setup → Content Migration → Core Data → Transactions → Communication/Billing → Validation)*
+
+---
+
 # Utility Expansion Tracks (Q1 2026)
 
 > Expand utility of existing features to maximize platform value before building new capabilities.
