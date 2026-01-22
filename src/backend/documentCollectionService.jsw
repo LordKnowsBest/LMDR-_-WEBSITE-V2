@@ -1,0 +1,977 @@
+// ============================================================================
+// DOCUMENT COLLECTION SERVICE
+// ============================================================================
+// Handles document collection workflow for driver onboarding.
+// Features:
+// - Secure upload token generation with 48-hour expiry
+// - File type validation (PDF, JPG, PNG only, max 10MB)
+// - Document status state machine (REQUESTED -> UPLOADED -> VERIFIED/REJECTED)
+// - Reminder tracking (day 2, 5, 7 sequence)
+// - Expiration detection for CDL, Medical Card
+// ============================================================================
+
+import wixData from 'wix-data';
+import { v4 as uuidv4 } from 'uuid';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+    collections: {
+        documentRequests: 'DocumentRequests',
+        onboardingWorkflows: 'OnboardingWorkflows',
+        driverProfiles: 'DriverProfiles'
+    },
+
+    // Document types enum
+    documentTypes: {
+        CDL_FRONT: 'cdl_front',
+        CDL_BACK: 'cdl_back',
+        MVR: 'mvr',
+        PSP: 'psp',
+        MEDICAL_CARD: 'medical_card',
+        DRUG_TEST_CONSENT: 'drug_test_consent',
+        EMPLOYMENT_APP: 'employment_app',
+        W4: 'w4',
+        I9: 'i9',
+        DIRECT_DEPOSIT: 'direct_deposit',
+        SOCIAL_SECURITY: 'social_security',
+        EMPLOYMENT_HISTORY: 'employment_history',
+        PROOF_OF_ADDRESS: 'proof_of_address',
+        CUSTOM: 'custom'
+    },
+
+    // Document status enum
+    status: {
+        REQUESTED: 'requested',
+        UPLOADED: 'uploaded',
+        VERIFIED: 'verified',
+        REJECTED: 'rejected'
+    },
+
+    // File validation
+    allowedMimeTypes: ['application/pdf', 'image/jpeg', 'image/png'],
+    maxFileSizeBytes: 10 * 1024 * 1024, // 10MB
+
+    // Token settings
+    tokenExpiryHours: 48,
+
+    // Reminder sequence (days after initial request)
+    reminderSequence: [2, 5, 7],
+
+    // Expiration warning threshold (days)
+    expirationWarningDays: 30,
+
+    // Documents that have expiration dates
+    expiringDocTypes: ['cdl_front', 'cdl_back', 'medical_card'],
+
+    // Required documents (block completion if missing)
+    requiredDocTypes: ['cdl_front', 'cdl_back', 'mvr', 'medical_card']
+};
+
+// ============================================================================
+// DOCUMENT TYPE METADATA
+// ============================================================================
+
+const DOCUMENT_METADATA = {
+    cdl_front: {
+        displayName: 'CDL Front',
+        description: 'Please upload a clear photo of the front of your CDL',
+        isRequired: true,
+        hasExpiration: true
+    },
+    cdl_back: {
+        displayName: 'CDL Back',
+        description: 'Please upload a clear photo of the back of your CDL',
+        isRequired: true,
+        hasExpiration: true
+    },
+    mvr: {
+        displayName: 'Motor Vehicle Record (MVR)',
+        description: 'Request your Motor Vehicle Record from your state DMV',
+        isRequired: true,
+        hasExpiration: false
+    },
+    psp: {
+        displayName: 'Pre-Employment Screening Program (PSP)',
+        description: 'Request your PSP report from psp.fmcsa.dot.gov (~$10 fee)',
+        isRequired: false,
+        hasExpiration: false
+    },
+    medical_card: {
+        displayName: 'DOT Medical Card',
+        description: 'Upload your current DOT Medical Card',
+        isRequired: true,
+        hasExpiration: true
+    },
+    drug_test_consent: {
+        displayName: 'Drug Test Consent Form',
+        description: 'Sign and upload the drug test consent form',
+        isRequired: false,
+        hasExpiration: false
+    },
+    employment_app: {
+        displayName: 'Employment Application',
+        description: 'Complete and upload the employment application',
+        isRequired: false,
+        hasExpiration: false
+    },
+    w4: {
+        displayName: 'W-4 Tax Form',
+        description: 'Complete and upload your W-4 tax form',
+        isRequired: false,
+        hasExpiration: false
+    },
+    i9: {
+        displayName: 'I-9 Employment Eligibility',
+        description: 'Complete and upload your I-9 Employment Eligibility form',
+        isRequired: false,
+        hasExpiration: false
+    },
+    direct_deposit: {
+        displayName: 'Direct Deposit Authorization',
+        description: 'Upload direct deposit authorization with a voided check',
+        isRequired: false,
+        hasExpiration: false
+    },
+    social_security: {
+        displayName: 'Social Security Card',
+        description: 'Upload a copy of your Social Security Card',
+        isRequired: false,
+        hasExpiration: false
+    },
+    employment_history: {
+        displayName: 'Employment History (10 years)',
+        description: 'Provide your employment history for the last 10 years',
+        isRequired: false,
+        hasExpiration: false
+    },
+    proof_of_address: {
+        displayName: 'Proof of Address',
+        description: 'Upload a utility bill or bank statement showing your current address',
+        isRequired: false,
+        hasExpiration: false
+    },
+    custom: {
+        displayName: 'Custom Document',
+        description: 'Please upload the requested document',
+        isRequired: false,
+        hasExpiration: false
+    }
+};
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Generate a secure upload token with UUID and expiry
+ * @param {number} expiryHours - Hours until token expires (default: 48)
+ * @returns {Object} Token data with token string and expiry timestamp
+ */
+function generateUploadToken(expiryHours = CONFIG.tokenExpiryHours) {
+    const token = `tok_${Date.now()}_${uuidv4().replace(/-/g, '')}`;
+    const expiry = new Date();
+    expiry.setHours(expiry.getHours() + expiryHours);
+
+    return {
+        token,
+        expiry: expiry.toISOString()
+    };
+}
+
+/**
+ * Validate if an upload token is still valid
+ * @param {string} tokenExpiry - ISO string of token expiry
+ * @returns {boolean} True if token is valid
+ */
+function isTokenValid(tokenExpiry) {
+    if (!tokenExpiry) return false;
+    const expiryDate = new Date(tokenExpiry);
+    return expiryDate > new Date();
+}
+
+/**
+ * Validate file MIME type
+ * @param {string} mimeType - File MIME type
+ * @returns {boolean} True if file type is allowed
+ */
+function isValidFileType(mimeType) {
+    return CONFIG.allowedMimeTypes.includes(mimeType);
+}
+
+/**
+ * Validate file size
+ * @param {number} sizeBytes - File size in bytes
+ * @returns {boolean} True if file size is within limit
+ */
+function isValidFileSize(sizeBytes) {
+    return sizeBytes > 0 && sizeBytes <= CONFIG.maxFileSizeBytes;
+}
+
+/**
+ * Get document metadata by type
+ * @param {string} docType - Document type
+ * @returns {Object} Document metadata
+ */
+function getDocumentMetadata(docType) {
+    return DOCUMENT_METADATA[docType] || DOCUMENT_METADATA.custom;
+}
+
+/**
+ * Generate a SHA256-like hash (simplified for Wix)
+ * @param {string} data - Data to hash
+ * @returns {string} Hash string
+ */
+function generateFileHash(data) {
+    // In production, use crypto library for real SHA256
+    return `sha256_${Date.now()}_${Math.random().toString(36).substr(2, 16)}`;
+}
+
+// ============================================================================
+// REQUEST DOCUMENTS
+// ============================================================================
+
+/**
+ * Request documents from a driver for an onboarding workflow
+ * Creates DocumentRequest records and generates secure upload link
+ *
+ * @param {string} workflowId - Onboarding workflow ID
+ * @param {Array<string>} documentTypes - Array of document types to request
+ * @returns {Object} Result with requestIds and upload portal URL
+ */
+export async function requestDocuments(workflowId, documentTypes) {
+    // Validate inputs
+    if (!workflowId || typeof workflowId !== 'string') {
+        return { success: false, error: 'workflowId is required' };
+    }
+
+    if (!Array.isArray(documentTypes) || documentTypes.length === 0) {
+        return { success: false, error: 'documentTypes array is required and must not be empty' };
+    }
+
+    // Validate all document types
+    const validTypes = Object.values(CONFIG.documentTypes);
+    for (const docType of documentTypes) {
+        if (!validTypes.includes(docType)) {
+            return { success: false, error: `Invalid document type: ${docType}` };
+        }
+    }
+
+    try {
+        // Verify workflow exists
+        const workflowResult = await wixData.query(CONFIG.collections.onboardingWorkflows)
+            .eq('_id', workflowId)
+            .limit(1)
+            .find({ suppressAuth: true });
+
+        if (workflowResult.items.length === 0) {
+            return { success: false, error: 'Workflow not found' };
+        }
+
+        const workflow = workflowResult.items[0];
+        const now = new Date();
+        const requestIds = [];
+
+        // Generate upload token for this batch
+        const { token, expiry } = generateUploadToken();
+
+        // Create document request records
+        for (const docType of documentTypes) {
+            const metadata = getDocumentMetadata(docType);
+
+            const docRequest = {
+                workflow_id: workflowId,
+                driver_id: workflow.driver_id,
+                document_type: docType,
+                display_name: metadata.displayName,
+                description: metadata.description,
+                is_required: CONFIG.requiredDocTypes.includes(docType),
+                status: CONFIG.status.REQUESTED,
+                rejection_reason: null,
+                file_url: null,
+                file_hash: null,
+                submitted_date: null,
+                verified_date: null,
+                verified_by: null,
+                ocr_data: null,
+                expiration_date: null,
+                reminder_sent_count: 0,
+                last_reminder_date: null,
+                upload_token: token,
+                upload_token_expiry: expiry,
+                _createdDate: now,
+                _updatedDate: now
+            };
+
+            const inserted = await wixData.insert(CONFIG.collections.documentRequests, docRequest, { suppressAuth: true });
+            requestIds.push(inserted._id);
+        }
+
+        // Update workflow status
+        await wixData.update(CONFIG.collections.onboardingWorkflows, {
+            ...workflow,
+            documents_status: 'pending',
+            status: 'documents_requested',
+            _updatedDate: now
+        }, { suppressAuth: true });
+
+        // Generate upload portal URL
+        const uploadPortalUrl = `https://lastmilecdl.com/document-upload?token=${token}`;
+
+        console.log(`[DocumentCollection] Created ${requestIds.length} document requests for workflow ${workflowId}`);
+
+        return {
+            success: true,
+            requestIds,
+            uploadPortalUrl,
+            token,
+            tokenExpiry: expiry
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error requesting documents:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// GET DOCUMENT STATUS
+// ============================================================================
+
+/**
+ * Get all document requests and their status for a workflow
+ *
+ * @param {string} workflowId - Onboarding workflow ID
+ * @returns {Object} Result with documents array and summary
+ */
+export async function getDocumentStatus(workflowId) {
+    if (!workflowId) {
+        return { success: false, error: 'workflowId is required' };
+    }
+
+    try {
+        const result = await wixData.query(CONFIG.collections.documentRequests)
+            .eq('workflow_id', workflowId)
+            .find({ suppressAuth: true });
+
+        const documents = result.items || [];
+
+        // Calculate summary
+        const total = documents.length;
+        const requested = documents.filter(d => d.status === CONFIG.status.REQUESTED).length;
+        const uploaded = documents.filter(d => d.status === CONFIG.status.UPLOADED).length;
+        const verified = documents.filter(d => d.status === CONFIG.status.VERIFIED).length;
+        const rejected = documents.filter(d => d.status === CONFIG.status.REJECTED).length;
+
+        // Complete means all required docs are verified and no rejections
+        const requiredDocs = documents.filter(d => d.is_required);
+        const requiredVerified = requiredDocs.filter(d => d.status === CONFIG.status.VERIFIED).length;
+        const isComplete = requiredDocs.length > 0 && requiredVerified === requiredDocs.length;
+        const hasRejections = rejected > 0;
+
+        return {
+            success: true,
+            documents,
+            summary: {
+                total,
+                requested,
+                uploaded,
+                verified,
+                rejected,
+                isComplete,
+                hasRejections,
+                requiredCount: requiredDocs.length,
+                requiredVerified
+            }
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error getting document status:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// UPLOAD DOCUMENT
+// ============================================================================
+
+/**
+ * Upload a document with secure token validation
+ * Called from the driver upload portal
+ *
+ * @param {string} token - Upload token from request email
+ * @param {string} documentType - Type of document being uploaded
+ * @param {Object} fileData - File data with mimeType, size, url/content
+ * @returns {Object} Result with documentId and verification status
+ */
+export async function uploadDocument(token, documentType, fileData) {
+    // Validate token
+    if (!token || typeof token !== 'string') {
+        return { success: false, error: 'Upload token is required' };
+    }
+
+    // Validate document type
+    if (!documentType || !Object.values(CONFIG.documentTypes).includes(documentType)) {
+        return { success: false, error: 'Invalid document type' };
+    }
+
+    // Validate file data
+    if (!fileData) {
+        return { success: false, error: 'File data is required' };
+    }
+
+    if (!fileData.mimeType || !isValidFileType(fileData.mimeType)) {
+        return {
+            success: false,
+            error: `Invalid file type. Allowed: ${CONFIG.allowedMimeTypes.join(', ')}`
+        };
+    }
+
+    if (!fileData.size || !isValidFileSize(fileData.size)) {
+        return {
+            success: false,
+            error: `File size must be between 0 and ${CONFIG.maxFileSizeBytes / (1024 * 1024)}MB`
+        };
+    }
+
+    try {
+        // Find document request by token and type
+        const result = await wixData.query(CONFIG.collections.documentRequests)
+            .eq('upload_token', token)
+            .eq('document_type', documentType)
+            .limit(1)
+            .find({ suppressAuth: true });
+
+        if (result.items.length === 0) {
+            return { success: false, error: 'Invalid token or document type' };
+        }
+
+        const docRequest = result.items[0];
+
+        // Check token expiry
+        if (!isTokenValid(docRequest.upload_token_expiry)) {
+            return { success: false, error: 'Upload token has expired' };
+        }
+
+        // Check if already verified (can't re-upload verified docs)
+        if (docRequest.status === CONFIG.status.VERIFIED) {
+            return { success: false, error: 'Document has already been verified' };
+        }
+
+        // Generate file hash for integrity
+        const fileHash = generateFileHash(fileData.url || fileData.content);
+
+        // Update document request
+        const now = new Date();
+        const updatedDoc = {
+            ...docRequest,
+            status: CONFIG.status.UPLOADED,
+            file_url: fileData.url || `https://media.wix.com/v1/${fileHash}`,
+            file_hash: fileHash,
+            submitted_date: now,
+            _updatedDate: now
+        };
+
+        await wixData.update(CONFIG.collections.documentRequests, updatedDoc, { suppressAuth: true });
+
+        console.log(`[DocumentCollection] Document uploaded: ${documentType} for workflow ${docRequest.workflow_id}`);
+
+        return {
+            success: true,
+            documentId: docRequest._id,
+            status: CONFIG.status.UPLOADED,
+            verificationStatus: 'pending_review'
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error uploading document:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// VERIFY DOCUMENT
+// ============================================================================
+
+/**
+ * Verify or reject a document (recruiter action)
+ *
+ * @param {string} documentId - Document request ID
+ * @param {string} verifierId - Recruiter/verifier ID
+ * @param {string} status - 'verified' or 'rejected'
+ * @param {string} notes - Required for rejection, optional for verification
+ * @returns {Object} Result with verification details
+ */
+export async function verifyDocument(documentId, verifierId, status, notes = null) {
+    // Validate inputs
+    if (!documentId) {
+        return { success: false, error: 'documentId is required' };
+    }
+
+    if (!verifierId) {
+        return { success: false, error: 'verifierId is required' };
+    }
+
+    if (!status || ![CONFIG.status.VERIFIED, CONFIG.status.REJECTED].includes(status)) {
+        return { success: false, error: 'status must be either "verified" or "rejected"' };
+    }
+
+    // Rejection requires notes/reason
+    if (status === CONFIG.status.REJECTED && !notes) {
+        return { success: false, error: 'Rejection reason is required' };
+    }
+
+    try {
+        // Get document request
+        const docRequest = await wixData.get(CONFIG.collections.documentRequests, documentId, { suppressAuth: true });
+
+        if (!docRequest) {
+            return { success: false, error: 'Document not found' };
+        }
+
+        // Can only verify uploaded documents
+        if (docRequest.status !== CONFIG.status.UPLOADED) {
+            return { success: false, error: `Cannot verify document with status: ${docRequest.status}` };
+        }
+
+        // Update document
+        const now = new Date();
+        const updatedDoc = {
+            ...docRequest,
+            status,
+            verified_date: now,
+            verified_by: verifierId,
+            rejection_reason: status === CONFIG.status.REJECTED ? notes : null,
+            _updatedDate: now
+        };
+
+        await wixData.update(CONFIG.collections.documentRequests, updatedDoc, { suppressAuth: true });
+
+        // Check if all required documents are now verified
+        await updateWorkflowDocumentStatus(docRequest.workflow_id);
+
+        console.log(`[DocumentCollection] Document ${status}: ${documentId} by ${verifierId}`);
+
+        return {
+            success: true,
+            documentId,
+            status,
+            verifiedBy: verifierId,
+            verifiedAt: now.toISOString()
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error verifying document:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// SEND DOCUMENT REMINDER
+// ============================================================================
+
+/**
+ * Send a reminder for a pending document
+ * Follows day 2, 5, 7 reminder sequence
+ *
+ * @param {string} documentId - Document request ID
+ * @returns {Object} Result with reminder details
+ */
+export async function sendDocumentReminder(documentId) {
+    if (!documentId) {
+        return { success: false, error: 'documentId is required' };
+    }
+
+    try {
+        // Get document request
+        const docRequest = await wixData.get(CONFIG.collections.documentRequests, documentId, { suppressAuth: true });
+
+        if (!docRequest) {
+            return { success: false, error: 'Document not found' };
+        }
+
+        // Can only remind for requested or rejected documents
+        if (![CONFIG.status.REQUESTED, CONFIG.status.REJECTED].includes(docRequest.status)) {
+            return { success: false, error: `Cannot send reminder for document with status: ${docRequest.status}` };
+        }
+
+        // Check reminder sequence
+        const currentReminderIndex = docRequest.reminder_sent_count || 0;
+
+        if (currentReminderIndex >= CONFIG.reminderSequence.length) {
+            return {
+                success: false,
+                error: 'Maximum reminders sent',
+                remindersSent: currentReminderIndex
+            };
+        }
+
+        // Update reminder count
+        const now = new Date();
+        const updatedDoc = {
+            ...docRequest,
+            reminder_sent_count: currentReminderIndex + 1,
+            last_reminder_date: now,
+            _updatedDate: now
+        };
+
+        await wixData.update(CONFIG.collections.documentRequests, updatedDoc, { suppressAuth: true });
+
+        // TODO: Trigger email/SMS notification here
+        // In production, call emailService or SMS service
+
+        console.log(`[DocumentCollection] Reminder #${currentReminderIndex + 1} sent for document ${documentId}`);
+
+        return {
+            success: true,
+            documentId,
+            reminderNumber: currentReminderIndex + 1,
+            maxReminders: CONFIG.reminderSequence.length,
+            nextReminderDay: CONFIG.reminderSequence[currentReminderIndex] || null,
+            sentAt: now.toISOString()
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error sending reminder:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// CHECK DOCUMENT EXPIRATION
+// ============================================================================
+
+/**
+ * Check if a document is expired or expiring soon
+ * Applies to CDL and Medical Card
+ *
+ * @param {string} documentId - Document request ID
+ * @returns {Object} Result with expiration status
+ */
+export async function checkDocumentExpiration(documentId) {
+    if (!documentId) {
+        return { success: false, error: 'documentId is required' };
+    }
+
+    try {
+        // Get document request
+        const docRequest = await wixData.get(CONFIG.collections.documentRequests, documentId, { suppressAuth: true });
+
+        if (!docRequest) {
+            return { success: false, error: 'Document not found' };
+        }
+
+        // Check if this document type has expiration
+        if (!CONFIG.expiringDocTypes.includes(docRequest.document_type)) {
+            return {
+                success: true,
+                documentId,
+                hasExpiration: false,
+                isExpired: false,
+                isExpiringSoon: false,
+                expirationDate: null
+            };
+        }
+
+        // Check if expiration date is set
+        if (!docRequest.expiration_date) {
+            return {
+                success: true,
+                documentId,
+                documentType: docRequest.document_type,
+                hasExpiration: true,
+                isExpired: false,
+                isExpiringSoon: false,
+                expirationDate: null,
+                message: 'Expiration date not set'
+            };
+        }
+
+        const now = new Date();
+        const expirationDate = new Date(docRequest.expiration_date);
+        const daysUntilExpiry = Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24));
+
+        const isExpired = daysUntilExpiry < 0;
+        const isExpiringSoon = !isExpired && daysUntilExpiry <= CONFIG.expirationWarningDays;
+
+        let status = 'valid';
+        if (isExpired) status = 'expired';
+        else if (isExpiringSoon) status = 'expiring_soon';
+
+        return {
+            success: true,
+            documentId,
+            documentType: docRequest.document_type,
+            hasExpiration: true,
+            isExpired,
+            isExpiringSoon,
+            expirationDate: expirationDate.toISOString(),
+            daysUntilExpiry: isExpired ? 0 : daysUntilExpiry,
+            status
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error checking expiration:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// GET OCR EXTRACTED DATA
+// ============================================================================
+
+/**
+ * Get OCR-extracted data from a document
+ *
+ * @param {string} documentId - Document request ID
+ * @returns {Object} Result with OCR data
+ */
+export async function getDocumentOcrData(documentId) {
+    if (!documentId) {
+        return { success: false, error: 'documentId is required' };
+    }
+
+    try {
+        const docRequest = await wixData.get(CONFIG.collections.documentRequests, documentId, { suppressAuth: true });
+
+        if (!docRequest) {
+            return { success: false, error: 'Document not found' };
+        }
+
+        return {
+            success: true,
+            documentId,
+            documentType: docRequest.document_type,
+            ocrData: docRequest.ocr_data || null,
+            hasOcrData: !!docRequest.ocr_data
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error getting OCR data:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// CHECK DRIVER DOCUMENT EXPIRATIONS
+// ============================================================================
+
+/**
+ * Check all expiring documents for a driver
+ * Used for compliance monitoring
+ *
+ * @param {string} driverId - Driver profile ID
+ * @returns {Object} Result with array of expiring/expired documents
+ */
+export async function checkDriverDocumentExpirations(driverId) {
+    if (!driverId) {
+        return { success: false, error: 'driverId is required' };
+    }
+
+    try {
+        // Get all documents for this driver with expiration-capable types
+        const result = await wixData.query(CONFIG.collections.documentRequests)
+            .eq('driver_id', driverId)
+            .hasSome('document_type', CONFIG.expiringDocTypes)
+            .eq('status', CONFIG.status.VERIFIED)
+            .find({ suppressAuth: true });
+
+        const documents = result.items || [];
+        const now = new Date();
+        const expiringDocs = [];
+        const expiredDocs = [];
+
+        for (const doc of documents) {
+            if (!doc.expiration_date) continue;
+
+            const expirationDate = new Date(doc.expiration_date);
+            const daysUntilExpiry = Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24));
+
+            if (daysUntilExpiry < 0) {
+                expiredDocs.push({
+                    documentId: doc._id,
+                    documentType: doc.document_type,
+                    displayName: doc.display_name,
+                    expirationDate: expirationDate.toISOString(),
+                    daysExpired: Math.abs(daysUntilExpiry)
+                });
+            } else if (daysUntilExpiry <= CONFIG.expirationWarningDays) {
+                expiringDocs.push({
+                    documentId: doc._id,
+                    documentType: doc.document_type,
+                    displayName: doc.display_name,
+                    expirationDate: expirationDate.toISOString(),
+                    daysUntilExpiry
+                });
+            }
+        }
+
+        return {
+            success: true,
+            driverId,
+            expiredDocuments: expiredDocs,
+            expiringDocuments: expiringDocs,
+            hasExpiredDocs: expiredDocs.length > 0,
+            hasExpiringDocs: expiringDocs.length > 0
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error checking driver expirations:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// HELPER: UPDATE WORKFLOW DOCUMENT STATUS
+// ============================================================================
+
+/**
+ * Update workflow status based on document completion
+ * @private
+ */
+async function updateWorkflowDocumentStatus(workflowId) {
+    try {
+        const statusResult = await getDocumentStatus(workflowId);
+        if (!statusResult.success) return;
+
+        const workflow = await wixData.get(CONFIG.collections.onboardingWorkflows, workflowId, { suppressAuth: true });
+        if (!workflow) return;
+
+        let documentsStatus = 'pending';
+        if (statusResult.summary.hasRejections) {
+            documentsStatus = 'rejected';
+        } else if (statusResult.summary.isComplete) {
+            documentsStatus = 'complete';
+        } else if (statusResult.summary.uploaded > 0 || statusResult.summary.verified > 0) {
+            documentsStatus = 'partial';
+        }
+
+        // Update workflow if status changed
+        if (workflow.documents_status !== documentsStatus) {
+            await wixData.update(CONFIG.collections.onboardingWorkflows, {
+                ...workflow,
+                documents_status: documentsStatus,
+                status: documentsStatus === 'complete' ? 'documents_complete' : workflow.status,
+                _updatedDate: new Date()
+            }, { suppressAuth: true });
+
+            console.log(`[DocumentCollection] Workflow ${workflowId} documents_status updated to: ${documentsStatus}`);
+        }
+    } catch (error) {
+        console.error('[DocumentCollection] Error updating workflow status:', error);
+    }
+}
+
+// ============================================================================
+// REGENERATE UPLOAD TOKEN
+// ============================================================================
+
+/**
+ * Regenerate upload token for expired links
+ *
+ * @param {string} workflowId - Workflow ID to regenerate tokens for
+ * @returns {Object} Result with new token and portal URL
+ */
+export async function regenerateUploadToken(workflowId) {
+    if (!workflowId) {
+        return { success: false, error: 'workflowId is required' };
+    }
+
+    try {
+        // Get all pending document requests for this workflow
+        const result = await wixData.query(CONFIG.collections.documentRequests)
+            .eq('workflow_id', workflowId)
+            .hasSome('status', [CONFIG.status.REQUESTED, CONFIG.status.REJECTED])
+            .find({ suppressAuth: true });
+
+        if (result.items.length === 0) {
+            return { success: false, error: 'No pending documents found for this workflow' };
+        }
+
+        // Generate new token
+        const { token, expiry } = generateUploadToken();
+        const now = new Date();
+
+        // Update all pending documents with new token
+        for (const doc of result.items) {
+            await wixData.update(CONFIG.collections.documentRequests, {
+                ...doc,
+                upload_token: token,
+                upload_token_expiry: expiry,
+                _updatedDate: now
+            }, { suppressAuth: true });
+        }
+
+        const uploadPortalUrl = `https://lastmilecdl.com/document-upload?token=${token}`;
+
+        console.log(`[DocumentCollection] Regenerated token for ${result.items.length} documents in workflow ${workflowId}`);
+
+        return {
+            success: true,
+            token,
+            tokenExpiry: expiry,
+            uploadPortalUrl,
+            documentsUpdated: result.items.length
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error regenerating token:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// SCHEDULED JOB: SEND AUTO REMINDERS
+// ============================================================================
+
+/**
+ * Send automatic reminders for pending documents
+ * Called by scheduled job (jobs.config)
+ *
+ * @returns {Object} Result with reminder counts
+ */
+export async function sendAutoReminders() {
+    try {
+        const now = new Date();
+        let remindersSent = 0;
+        let errors = 0;
+
+        // Get all requested documents
+        const result = await wixData.query(CONFIG.collections.documentRequests)
+            .eq('status', CONFIG.status.REQUESTED)
+            .lt('reminder_sent_count', CONFIG.reminderSequence.length)
+            .find({ suppressAuth: true });
+
+        for (const doc of result.items) {
+            const createdDate = new Date(doc._createdDate);
+            const daysSinceCreation = Math.floor((now - createdDate) / (1000 * 60 * 60 * 24));
+            const currentReminderIndex = doc.reminder_sent_count || 0;
+            const nextReminderDay = CONFIG.reminderSequence[currentReminderIndex];
+
+            // Check if it's time for next reminder
+            if (nextReminderDay && daysSinceCreation >= nextReminderDay) {
+                const reminderResult = await sendDocumentReminder(doc._id);
+                if (reminderResult.success) {
+                    remindersSent++;
+                } else {
+                    errors++;
+                }
+            }
+        }
+
+        console.log(`[DocumentCollection] Auto-reminders: ${remindersSent} sent, ${errors} errors`);
+
+        return {
+            success: true,
+            remindersSent,
+            errors,
+            timestamp: now.toISOString()
+        };
+
+    } catch (error) {
+        console.error('[DocumentCollection] Error in sendAutoReminders:', error);
+        return { success: false, error: error.message };
+    }
+}

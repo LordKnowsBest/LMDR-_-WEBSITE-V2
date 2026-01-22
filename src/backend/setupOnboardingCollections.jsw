@@ -1,0 +1,1489 @@
+/**
+ * Setup Onboarding Collections - Collection schemas and setup for Recruiter Onboarding Automation
+ *
+ * This module defines the schemas for onboarding-related Wix collections and provides
+ * helper functions to create test records and validate collection existence.
+ *
+ * Collections covered:
+ * - DocumentRequests - Individual document requests within onboarding workflows
+ * - OnboardingWorkflows - Master record for each driver's onboarding journey
+ * - BackgroundChecks - Background check orders and results
+ * - DrugTests - Drug test scheduling and results
+ * - OrientationSlots - Orientation session availability and bookings
+ * - OfferLetters - Offer letter templates and generated letters
+ *
+ * Usage:
+ *   import { setupDocumentRequests, DOCUMENT_TYPES, DOCUMENT_STATUS } from 'backend/setupOnboardingCollections';
+ */
+
+import wixData from 'wix-data';
+
+// =============================================================================
+// COLLECTION NAMES
+// =============================================================================
+
+export const COLLECTIONS = {
+  DOCUMENT_REQUESTS: 'DocumentRequests',
+  ONBOARDING_WORKFLOWS: 'OnboardingWorkflows',
+  BACKGROUND_CHECKS: 'BackgroundChecks',
+  DRUG_TESTS: 'DrugTests',
+  ORIENTATION_SLOTS: 'OrientationSlots',
+  OFFER_LETTERS: 'OfferLetters',
+  DRIVER_PROFILES: 'DriverProfiles',
+  CARRIERS: 'Carriers'
+};
+
+// =============================================================================
+// DOCUMENT TYPES - Enumeration of all supported document types
+// =============================================================================
+
+/**
+ * All supported document types for onboarding workflows
+ * @readonly
+ * @enum {string}
+ */
+export const DOCUMENT_TYPES = {
+  // CDL & Licensing
+  CDL_FRONT: 'cdl_front',
+  CDL_BACK: 'cdl_back',
+
+  // Safety & Compliance Records
+  MVR: 'mvr',              // Motor Vehicle Record
+  PSP: 'psp',              // Pre-Employment Screening Program
+  MEDICAL_CARD: 'medical_card',  // DOT Medical Card
+
+  // Employment Authorization
+  DRUG_TEST_CONSENT: 'drug_test_consent',
+  EMPLOYMENT_APP: 'employment_app',
+  EMPLOYMENT_HISTORY: 'employment_history',  // 10-year history
+
+  // Tax & Identity
+  W4: 'w4',                // W-4 Tax Form
+  I9: 'i9',                // I-9 Employment Eligibility
+  SOCIAL_SECURITY: 'social_security',
+
+  // Financial
+  DIRECT_DEPOSIT: 'direct_deposit',
+
+  // Other
+  PROOF_OF_ADDRESS: 'proof_of_address',
+  CUSTOM: 'custom'         // For carrier-specific documents
+};
+
+/**
+ * Human-readable display names for document types
+ * @readonly
+ * @type {Object.<string, string>}
+ */
+export const DOCUMENT_TYPE_LABELS = {
+  [DOCUMENT_TYPES.CDL_FRONT]: 'CDL - Front',
+  [DOCUMENT_TYPES.CDL_BACK]: 'CDL - Back',
+  [DOCUMENT_TYPES.MVR]: 'Motor Vehicle Record (MVR)',
+  [DOCUMENT_TYPES.PSP]: 'Pre-Employment Screening Program (PSP)',
+  [DOCUMENT_TYPES.MEDICAL_CARD]: 'DOT Medical Card',
+  [DOCUMENT_TYPES.DRUG_TEST_CONSENT]: 'Drug Test Consent Form',
+  [DOCUMENT_TYPES.EMPLOYMENT_APP]: 'Employment Application',
+  [DOCUMENT_TYPES.EMPLOYMENT_HISTORY]: 'Employment History (10 Years)',
+  [DOCUMENT_TYPES.W4]: 'W-4 Tax Form',
+  [DOCUMENT_TYPES.I9]: 'I-9 Employment Eligibility',
+  [DOCUMENT_TYPES.SOCIAL_SECURITY]: 'Social Security Card',
+  [DOCUMENT_TYPES.DIRECT_DEPOSIT]: 'Direct Deposit Authorization',
+  [DOCUMENT_TYPES.PROOF_OF_ADDRESS]: 'Proof of Address',
+  [DOCUMENT_TYPES.CUSTOM]: 'Custom Document'
+};
+
+/**
+ * Documents that support OCR auto-verification
+ * @readonly
+ * @type {string[]}
+ */
+export const OCR_SUPPORTED_DOCUMENTS = [
+  DOCUMENT_TYPES.CDL_FRONT,
+  DOCUMENT_TYPES.CDL_BACK,
+  DOCUMENT_TYPES.MEDICAL_CARD,
+  DOCUMENT_TYPES.SOCIAL_SECURITY
+];
+
+/**
+ * Documents that have expiration dates
+ * @readonly
+ * @type {string[]}
+ */
+export const EXPIRING_DOCUMENTS = [
+  DOCUMENT_TYPES.CDL_FRONT,   // CDL expiration
+  DOCUMENT_TYPES.CDL_BACK,    // Same as front
+  DOCUMENT_TYPES.MEDICAL_CARD, // DOT physical valid 1-2 years
+  DOCUMENT_TYPES.MVR          // Typically valid 30-90 days from request
+];
+
+// =============================================================================
+// DOCUMENT STATUS - Document request lifecycle states
+// =============================================================================
+
+/**
+ * Document request status values
+ * @readonly
+ * @enum {string}
+ */
+export const DOCUMENT_STATUS = {
+  REQUESTED: 'requested',   // Initial state - awaiting driver upload
+  SUBMITTED: 'submitted',   // Driver has uploaded, awaiting verification
+  VERIFIED: 'verified',     // Recruiter has verified the document
+  REJECTED: 'rejected',     // Document was rejected (see rejection_reason)
+  EXPIRED: 'expired'        // Document has expired (based on expiration_date)
+};
+
+/**
+ * Allowed status transitions for document workflow
+ * @readonly
+ * @type {Object.<string, string[]>}
+ */
+export const DOCUMENT_STATUS_TRANSITIONS = {
+  [DOCUMENT_STATUS.REQUESTED]: [DOCUMENT_STATUS.SUBMITTED],
+  [DOCUMENT_STATUS.SUBMITTED]: [DOCUMENT_STATUS.VERIFIED, DOCUMENT_STATUS.REJECTED],
+  [DOCUMENT_STATUS.VERIFIED]: [DOCUMENT_STATUS.EXPIRED],  // Can transition if expiration_date passes
+  [DOCUMENT_STATUS.REJECTED]: [DOCUMENT_STATUS.SUBMITTED], // Driver can re-submit
+  [DOCUMENT_STATUS.EXPIRED]: []  // Terminal state, requires new document request
+};
+
+// =============================================================================
+// WORKFLOW STATUS - Onboarding workflow lifecycle states
+// =============================================================================
+
+/**
+ * Onboarding workflow status values
+ * @readonly
+ * @enum {string}
+ */
+export const WORKFLOW_STATUS = {
+  // Offer phase
+  OFFER_SENT: 'offer_sent',
+  OFFER_ACCEPTED: 'offer_accepted',
+
+  // Document collection phase
+  DOCUMENTS_REQUESTED: 'documents_requested',
+  DOCUMENTS_COMPLETE: 'documents_complete',
+
+  // Background check phase
+  BACKGROUND_ORDERED: 'background_ordered',
+  BACKGROUND_PASSED: 'background_passed',
+  BACKGROUND_FAILED: 'background_failed',
+
+  // Drug test phase
+  DRUG_TEST_SCHEDULED: 'drug_test_scheduled',
+  DRUG_TEST_PASSED: 'drug_test_passed',
+  DRUG_TEST_FAILED: 'drug_test_failed',
+
+  // Orientation phase
+  ORIENTATION_SCHEDULED: 'orientation_scheduled',
+  ORIENTATION_COMPLETED: 'orientation_completed',
+
+  // Final states
+  COMPLIANCE_VERIFIED: 'compliance_verified',
+  READY_TO_START: 'ready_to_start',
+  CANCELLED: 'cancelled',
+  ON_HOLD: 'on_hold'
+};
+
+/**
+ * Sub-status values for documents
+ * @readonly
+ * @enum {string}
+ */
+export const DOCUMENTS_SUB_STATUS = {
+  PENDING: 'pending',
+  PARTIAL: 'partial',
+  COMPLETE: 'complete'
+};
+
+/**
+ * Sub-status values for background checks
+ * @readonly
+ * @enum {string}
+ */
+export const BACKGROUND_SUB_STATUS = {
+  NOT_STARTED: 'not_started',
+  ORDERED: 'ordered',
+  PASSED: 'passed',
+  FAILED: 'failed',
+  REVIEW: 'review'  // Needs manual review
+};
+
+/**
+ * Sub-status values for drug tests
+ * @readonly
+ * @enum {string}
+ */
+export const DRUG_TEST_SUB_STATUS = {
+  NOT_STARTED: 'not_started',
+  SCHEDULED: 'scheduled',
+  PASSED: 'passed',
+  FAILED: 'failed'
+};
+
+/**
+ * Sub-status values for orientation
+ * @readonly
+ * @enum {string}
+ */
+export const ORIENTATION_SUB_STATUS = {
+  NOT_SCHEDULED: 'not_scheduled',
+  SCHEDULED: 'scheduled',
+  COMPLETED: 'completed'
+};
+
+// =============================================================================
+// COLLECTION SCHEMAS (JSDoc Documentation)
+// =============================================================================
+
+/**
+ * @typedef {Object} DocumentRequestSchema
+ * @property {string} _id - Primary key (auto-generated)
+ * @property {string} workflow_id - Reference to OnboardingWorkflows._id
+ * @property {string} driver_id - Reference to DriverProfiles._id
+ * @property {string} document_type - Type of document (enum: DOCUMENT_TYPES)
+ * @property {string} display_name - Human-readable name for driver
+ * @property {string} description - Instructions for driver (how to obtain, etc.)
+ * @property {boolean} is_required - If true, blocks onboarding completion if missing
+ * @property {string} status - Current status (enum: DOCUMENT_STATUS)
+ * @property {string} [rejection_reason] - Why document was rejected (if status=rejected)
+ * @property {string} [file_url] - URL to uploaded file in Wix Media Manager
+ * @property {string} [file_hash] - SHA256 hash for file integrity verification
+ * @property {Date} [submitted_date] - When driver uploaded the document
+ * @property {Date} [verified_date] - When recruiter verified the document
+ * @property {string} [verified_by] - Recruiter member ID who verified
+ * @property {Object} [ocr_data] - Extracted data from OCR processing (if applicable)
+ * @property {Date} [expiration_date] - Document expiration date (for CDL, Medical Card, etc.)
+ * @property {number} reminder_sent_count - Number of reminder notifications sent
+ * @property {Date} [last_reminder_date] - Timestamp of most recent reminder
+ * @property {Date} _createdDate - Record creation timestamp
+ * @property {Date} _updatedDate - Last update timestamp
+ */
+
+/**
+ * DocumentRequests Collection Field Definitions
+ * Use these when creating the collection manually in Wix CMS
+ */
+export const DOCUMENT_REQUESTS_FIELDS = [
+  { name: '_id', type: 'TEXT', description: 'Primary key (auto-generated)' },
+  { name: 'workflow_id', type: 'REFERENCE', reference: 'OnboardingWorkflows', description: 'FK to OnboardingWorkflows' },
+  { name: 'driver_id', type: 'REFERENCE', reference: 'DriverProfiles', description: 'FK to DriverProfiles' },
+  { name: 'document_type', type: 'TEXT', description: 'Document type enum value' },
+  { name: 'display_name', type: 'TEXT', description: 'Human-readable name' },
+  { name: 'description', type: 'TEXT', description: 'Instructions for driver' },
+  { name: 'is_required', type: 'BOOLEAN', description: 'Blocks completion if missing' },
+  { name: 'status', type: 'TEXT', description: 'Document status enum' },
+  { name: 'rejection_reason', type: 'TEXT', description: 'Why rejected (optional)' },
+  { name: 'file_url', type: 'TEXT', description: 'Uploaded file URL' },
+  { name: 'file_hash', type: 'TEXT', description: 'SHA256 hash for integrity' },
+  { name: 'submitted_date', type: 'DATETIME', description: 'When driver uploaded' },
+  { name: 'verified_date', type: 'DATETIME', description: 'When verified' },
+  { name: 'verified_by', type: 'TEXT', description: 'Verifier member ID' },
+  { name: 'ocr_data', type: 'OBJECT', description: 'OCR extracted data' },
+  { name: 'expiration_date', type: 'DATETIME', description: 'Document expiration' },
+  { name: 'reminder_sent_count', type: 'NUMBER', description: 'Reminder count' },
+  { name: 'last_reminder_date', type: 'DATETIME', description: 'Last reminder sent' }
+];
+
+/**
+ * Recommended indexes for DocumentRequests collection
+ */
+export const DOCUMENT_REQUESTS_INDEXES = [
+  { fields: ['workflow_id'], description: 'Query all documents for a workflow' },
+  { fields: ['driver_id'], description: 'Query all documents for a driver' },
+  { fields: ['status'], description: 'Filter by document status' },
+  { fields: ['document_type', 'driver_id'], description: 'Find specific document type for driver' },
+  { fields: ['expiration_date'], description: 'Find expiring documents' },
+  { fields: ['is_required', 'status'], description: 'Find pending required documents' }
+];
+
+// =============================================================================
+// CARRIER ONBOARDING CONFIG EXTENSION
+// =============================================================================
+
+/**
+ * @typedef {Object} CarrierOnboardingConfig
+ * @property {string[]} required_documents - Document types required for all hires
+ * @property {string[]} optional_documents - Additional optional documents
+ * @property {string} background_check_package - 'standard' or 'comprehensive'
+ * @property {string} drug_test_panel - 'dot', '5_panel', '10_panel'
+ * @property {boolean} orientation_required - Whether orientation is mandatory
+ * @property {boolean} offer_approval_required - Whether offers need manager approval
+ * @property {number[]} document_reminder_days - Days after request to send reminders
+ * @property {number} offer_expiration_days - Days until offer expires
+ */
+
+/**
+ * Default onboarding configuration for new carriers
+ * @type {CarrierOnboardingConfig}
+ */
+export const DEFAULT_ONBOARDING_CONFIG = {
+  required_documents: [
+    DOCUMENT_TYPES.CDL_FRONT,
+    DOCUMENT_TYPES.CDL_BACK,
+    DOCUMENT_TYPES.MVR,
+    DOCUMENT_TYPES.MEDICAL_CARD,
+    DOCUMENT_TYPES.DRUG_TEST_CONSENT
+  ],
+  optional_documents: [
+    DOCUMENT_TYPES.PSP,
+    DOCUMENT_TYPES.EMPLOYMENT_HISTORY
+  ],
+  background_check_package: 'standard',
+  drug_test_panel: 'dot',
+  orientation_required: true,
+  offer_approval_required: false,
+  document_reminder_days: [2, 5, 7],
+  offer_expiration_days: 14
+};
+
+/**
+ * Fields to add to Carriers collection for onboarding support
+ */
+export const CARRIERS_ONBOARDING_FIELDS = [
+  { name: 'onboarding_config', type: 'OBJECT', description: 'Onboarding settings (CarrierOnboardingConfig)' },
+  { name: 'background_check_provider', type: 'TEXT', description: 'Default: hireright, checkr, tenstreet' },
+  { name: 'drug_test_provider', type: 'TEXT', description: 'Default: quest, labcorp' },
+  { name: 'esign_provider', type: 'TEXT', description: 'docusign or hellosign' },
+  { name: 'offer_letter_template_ids', type: 'ARRAY', description: 'Array of OfferLetters._id for templates' }
+];
+
+/**
+ * Fields to add to DriverProfiles collection for onboarding support
+ */
+export const DRIVER_PROFILES_ONBOARDING_FIELDS = [
+  { name: 'onboarding_status', type: 'TEXT', description: 'not_started, in_progress, complete' },
+  { name: 'active_workflow_id', type: 'REFERENCE', reference: 'OnboardingWorkflows', description: 'Current active onboarding' },
+  { name: 'background_check_consent', type: 'BOOLEAN', description: 'Has consented to background check' },
+  { name: 'drug_test_consent', type: 'BOOLEAN', description: 'Has consented to drug testing' },
+  { name: 'documents_upload_token', type: 'TEXT', description: 'Secure token for upload portal' },
+  { name: 'preferred_orientation_location', type: 'TEXT', description: 'Preferred orientation location' }
+];
+
+// =============================================================================
+// DOCUMENT VERIFICATION WORKFLOW
+// =============================================================================
+
+/**
+ * Document verification workflow stages
+ *
+ * 1. REQUEST - Recruiter initiates document request
+ *    - Creates DocumentRequest with status=REQUESTED
+ *    - Sends email/SMS to driver with secure upload link
+ *    - Sets reminder schedule based on carrier config
+ *
+ * 2. UPLOAD - Driver uploads document
+ *    - Driver uploads via secure portal using documents_upload_token
+ *    - Status changes to SUBMITTED
+ *    - File stored in Wix Media Manager, hash computed
+ *    - If OCR-supported, triggers OCR extraction
+ *
+ * 3. AUTO-VERIFY (if applicable) - OCR verification
+ *    - For CDL, Medical Card, SSN: OCR extracts data
+ *    - Validates against driver profile (name, DOB, etc.)
+ *    - If match confidence > 90%, auto-verifies
+ *    - Otherwise, flags for manual review
+ *
+ * 4. MANUAL VERIFY - Recruiter reviews
+ *    - Recruiter reviews document and OCR data
+ *    - Can VERIFY or REJECT with reason
+ *    - Updates verified_date and verified_by
+ *
+ * 5. EXPIRATION TRACKING
+ *    - For expiring documents, expiration_date is set
+ *    - Daily job checks for upcoming expirations
+ *    - Alerts sent 30, 14, 7 days before expiration
+ *    - Status changes to EXPIRED when date passes
+ */
+export const DOCUMENT_VERIFICATION_WORKFLOW = {
+  stages: ['REQUEST', 'UPLOAD', 'AUTO_VERIFY', 'MANUAL_VERIFY', 'EXPIRATION_TRACKING'],
+  autoVerifyConfidenceThreshold: 0.90,
+  expirationAlertDays: [30, 14, 7],
+  maxReminderCount: 5,
+  reminderIntervalDays: 2
+};
+
+// =============================================================================
+// SETUP FUNCTIONS
+// =============================================================================
+
+/**
+ * Creates a test DocumentRequest record for development
+ * @param {string} workflowId - ID of the onboarding workflow
+ * @param {string} driverId - ID of the driver
+ * @returns {Promise<Object>} Result with success status and record
+ */
+export async function setupDocumentRequests(workflowId = 'test-workflow-001', driverId = 'test-driver-001') {
+  console.log('[SETUP] Setting up DocumentRequests...');
+
+  try {
+    // Check if test record exists
+    const existingResult = await wixData.query(COLLECTIONS.DOCUMENT_REQUESTS)
+      .eq('workflow_id', workflowId)
+      .eq('document_type', DOCUMENT_TYPES.CDL_FRONT)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (existingResult.items.length > 0) {
+      console.log('[SETUP] Test DocumentRequest already exists:', existingResult.items[0]);
+      return { success: true, message: 'Collection already has test record', record: existingResult.items[0] };
+    }
+
+    // Create test document requests (CDL front and back)
+    const testDocuments = [
+      {
+        workflow_id: workflowId,
+        driver_id: driverId,
+        document_type: DOCUMENT_TYPES.CDL_FRONT,
+        display_name: DOCUMENT_TYPE_LABELS[DOCUMENT_TYPES.CDL_FRONT],
+        description: 'Please upload a clear photo of the front of your CDL.',
+        is_required: true,
+        status: DOCUMENT_STATUS.REQUESTED,
+        reminder_sent_count: 0
+      },
+      {
+        workflow_id: workflowId,
+        driver_id: driverId,
+        document_type: DOCUMENT_TYPES.CDL_BACK,
+        display_name: DOCUMENT_TYPE_LABELS[DOCUMENT_TYPES.CDL_BACK],
+        description: 'Please upload a clear photo of the back of your CDL.',
+        is_required: true,
+        status: DOCUMENT_STATUS.REQUESTED,
+        reminder_sent_count: 0
+      },
+      {
+        workflow_id: workflowId,
+        driver_id: driverId,
+        document_type: DOCUMENT_TYPES.MVR,
+        display_name: DOCUMENT_TYPE_LABELS[DOCUMENT_TYPES.MVR],
+        description: 'Request your MVR from your state DMV. Must be dated within the last 30 days.',
+        is_required: true,
+        status: DOCUMENT_STATUS.REQUESTED,
+        reminder_sent_count: 0
+      },
+      {
+        workflow_id: workflowId,
+        driver_id: driverId,
+        document_type: DOCUMENT_TYPES.MEDICAL_CARD,
+        display_name: DOCUMENT_TYPE_LABELS[DOCUMENT_TYPES.MEDICAL_CARD],
+        description: 'Upload your current DOT Medical Examiner\'s Certificate.',
+        is_required: true,
+        status: DOCUMENT_STATUS.REQUESTED,
+        reminder_sent_count: 0
+      }
+    ];
+
+    const insertedRecords = [];
+    for (const doc of testDocuments) {
+      const inserted = await wixData.insert(COLLECTIONS.DOCUMENT_REQUESTS, doc, { suppressAuth: true });
+      insertedRecords.push(inserted);
+      console.log('[SETUP] Created test DocumentRequest:', inserted.document_type);
+    }
+
+    return { success: true, message: 'Created test document requests', records: insertedRecords };
+
+  } catch (err) {
+    console.error('[SETUP] Error:', err.message);
+
+    if (err.message.includes('does not exist')) {
+      return {
+        success: false,
+        error: 'DocumentRequests collection does not exist. Please create it manually.',
+        instructions: [
+          '1. Go to Wix Editor > CMS > + Create Collection',
+          '2. Name: DocumentRequests',
+          '3. Permissions: Read-Site Member, Write-Site Member',
+          '4. Add fields (see DOCUMENT_REQUESTS_FIELDS in this file):',
+          ...DOCUMENT_REQUESTS_FIELDS.map(f => `   - ${f.name} (${f.type}): ${f.description}`)
+        ]
+      };
+    }
+
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Validates that all required onboarding collections exist
+ * @returns {Promise<Object>} Result with collection status
+ */
+export async function validateOnboardingCollections() {
+  console.log('[SETUP] Validating onboarding collections...');
+
+  const results = {
+    DocumentRequests: { exists: false, recordCount: 0 },
+    OnboardingWorkflows: { exists: false, recordCount: 0 },
+    BackgroundChecks: { exists: false, recordCount: 0 },
+    DrugTests: { exists: false, recordCount: 0 },
+    OrientationSlots: { exists: false, recordCount: 0 },
+    OfferLetters: { exists: false, recordCount: 0 }
+  };
+
+  for (const collectionName of Object.keys(results)) {
+    try {
+      const queryResult = await wixData.query(collectionName)
+        .limit(1)
+        .find({ suppressAuth: true });
+
+      results[collectionName].exists = true;
+      results[collectionName].recordCount = queryResult.totalCount || 0;
+    } catch (err) {
+      if (err.message.includes('does not exist')) {
+        results[collectionName].exists = false;
+      } else {
+        results[collectionName].error = err.message;
+      }
+    }
+  }
+
+  const allExist = Object.values(results).every(r => r.exists);
+  console.log('[SETUP] Collection validation complete:', results);
+
+  return {
+    success: allExist,
+    collections: results,
+    message: allExist ? 'All collections exist' : 'Some collections are missing'
+  };
+}
+
+/**
+ * Creates default onboarding config for a carrier
+ * @param {string} carrierId - Carrier _id to update
+ * @returns {Promise<Object>} Result with success status
+ */
+export async function initializeCarrierOnboardingConfig(carrierId) {
+  console.log('[SETUP] Initializing carrier onboarding config for:', carrierId);
+
+  try {
+    const carrier = await wixData.get(COLLECTIONS.CARRIERS, carrierId, { suppressAuth: true });
+
+    if (!carrier) {
+      return { success: false, error: 'Carrier not found' };
+    }
+
+    // Only set if not already configured
+    if (carrier.onboarding_config) {
+      console.log('[SETUP] Carrier already has onboarding config');
+      return { success: true, message: 'Config already exists', config: carrier.onboarding_config };
+    }
+
+    carrier.onboarding_config = DEFAULT_ONBOARDING_CONFIG;
+    carrier.background_check_provider = 'hireright';  // Default provider
+    carrier.drug_test_provider = 'quest';              // Default provider
+    carrier.esign_provider = 'docusign';               // Default provider
+
+    const updated = await wixData.update(COLLECTIONS.CARRIERS, carrier, { suppressAuth: true });
+    console.log('[SETUP] Carrier onboarding config initialized');
+
+    return { success: true, message: 'Config initialized', config: updated.onboarding_config };
+
+  } catch (err) {
+    console.error('[SETUP] Error:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Get instructions for creating all onboarding collections manually
+ * @returns {Object} Collection creation instructions
+ */
+export function getCollectionCreationInstructions() {
+  return {
+    DocumentRequests: {
+      permissions: 'Read-Site Member, Write-Site Member',
+      fields: DOCUMENT_REQUESTS_FIELDS,
+      indexes: DOCUMENT_REQUESTS_INDEXES
+    },
+    Carriers_extensions: {
+      description: 'Add these fields to existing Carriers collection',
+      fields: CARRIERS_ONBOARDING_FIELDS
+    },
+    DriverProfiles_extensions: {
+      description: 'Add these fields to existing DriverProfiles collection',
+      fields: DRIVER_PROFILES_ONBOARDING_FIELDS
+    }
+  };
+}
+
+// =============================================================================
+// ONBOARDING WORKFLOWS COLLECTION SCHEMA
+// =============================================================================
+
+/**
+ * @typedef {Object} OnboardingWorkflowSchema
+ * Master record tracking the complete onboarding journey for each driver.
+ *
+ * @property {string} _id - Primary key (auto-generated)
+ * @property {string} _owner - Recruiter member ID (Wix system field)
+ * @property {string} driver_id - Reference FK to DriverProfiles._id
+ * @property {string} carrier_id - Reference FK to Carriers._id
+ * @property {string} recruiter_id - Recruiter who initiated the workflow
+ * @property {string} status - Workflow state (see WORKFLOW_STATUS enum)
+ * @property {string} offer_letter_id - Reference FK to OfferLetters._id
+ * @property {Date} start_date - Intended start date for the driver
+ * @property {Date} actual_start_date - Actual start date (filled when ready_to_start)
+ * @property {string} documents_status - 'pending' | 'partial' | 'complete'
+ * @property {string} background_status - 'not_started' | 'ordered' | 'passed' | 'failed' | 'review'
+ * @property {string} drug_test_status - 'not_started' | 'scheduled' | 'passed' | 'failed'
+ * @property {string} orientation_status - 'not_scheduled' | 'scheduled' | 'completed'
+ * @property {boolean} compliance_verified - All requirements met flag
+ * @property {string[]} compliance_issues - List of blocking issues
+ * @property {Object} metadata - Provider-specific data (flexible JSON)
+ * @property {Date} _createdDate - Workflow created timestamp
+ * @property {Date} _updatedDate - Last updated timestamp
+ */
+
+/**
+ * OnboardingWorkflows Collection Field Definitions
+ * Use these when creating the collection manually in Wix CMS
+ */
+export const ONBOARDING_WORKFLOWS_FIELDS = [
+  { name: '_id', type: 'TEXT', description: 'Primary key (auto-generated)' },
+  { name: 'driver_id', type: 'REFERENCE', reference: 'DriverProfiles', required: true, description: 'FK to DriverProfiles' },
+  { name: 'carrier_id', type: 'REFERENCE', reference: 'Carriers', required: true, description: 'FK to Carriers' },
+  { name: 'recruiter_id', type: 'TEXT', required: true, description: 'Recruiter member ID who initiated' },
+  { name: 'status', type: 'TEXT', required: true, default: 'offer_sent', description: 'Workflow state (WORKFLOW_STATUS enum)' },
+  { name: 'offer_letter_id', type: 'REFERENCE', reference: 'OfferLetters', description: 'FK to OfferLetters' },
+  { name: 'start_date', type: 'DATETIME', description: 'Intended start date' },
+  { name: 'actual_start_date', type: 'DATETIME', description: 'Actual start date (when ready)' },
+  { name: 'documents_status', type: 'TEXT', default: 'pending', description: 'pending | partial | complete' },
+  { name: 'background_status', type: 'TEXT', default: 'not_started', description: 'not_started | ordered | passed | failed | review' },
+  { name: 'drug_test_status', type: 'TEXT', default: 'not_started', description: 'not_started | scheduled | passed | failed' },
+  { name: 'orientation_status', type: 'TEXT', default: 'not_scheduled', description: 'not_scheduled | scheduled | completed' },
+  { name: 'compliance_verified', type: 'BOOLEAN', default: false, description: 'All requirements met' },
+  { name: 'compliance_issues', type: 'ARRAY', description: 'Array of blocking issue strings' },
+  { name: 'metadata', type: 'OBJECT', description: 'Provider-specific data (JSON)' }
+];
+
+/**
+ * Recommended indexes for OnboardingWorkflows collection
+ */
+export const ONBOARDING_WORKFLOWS_INDEXES = [
+  { fields: ['driver_id'], description: 'Query workflows by driver' },
+  { fields: ['carrier_id'], description: 'Query workflows by carrier' },
+  { fields: ['recruiter_id'], description: 'Query workflows by recruiter' },
+  { fields: ['status'], description: 'Filter by workflow status' },
+  { fields: ['_createdDate'], description: 'Sort by creation date' },
+  { fields: ['start_date'], description: 'Query by start date' }
+];
+
+// =============================================================================
+// BACKGROUND CHECKS COLLECTION SCHEMA
+// =============================================================================
+
+/**
+ * Background check provider enum
+ * @readonly
+ * @enum {string}
+ */
+export const BACKGROUND_CHECK_PROVIDERS = {
+  HIRERIGHT: 'hireright',
+  CHECKR: 'checkr',
+  TENSTREET: 'tenstreet'
+};
+
+/**
+ * Background check status enum
+ * @readonly
+ * @enum {string}
+ */
+export const BACKGROUND_CHECK_STATUS = {
+  ORDERED: 'ordered',
+  PROCESSING: 'processing',
+  COMPLETE: 'complete',
+  ERROR: 'error'
+};
+
+/**
+ * Background check result enum
+ * @readonly
+ * @enum {string}
+ */
+export const BACKGROUND_CHECK_RESULT = {
+  CLEAR: 'clear',
+  CONSIDER: 'consider',
+  FAIL: 'fail',
+  PENDING: 'pending'
+};
+
+/**
+ * @typedef {Object} BackgroundCheckSchema
+ * Track background check orders and results.
+ *
+ * @property {string} _id - Primary key (auto-generated)
+ * @property {string} workflow_id - Reference FK to OnboardingWorkflows._id
+ * @property {string} driver_id - Reference FK to DriverProfiles._id
+ * @property {string} provider - 'hireright' | 'checkr' | 'tenstreet'
+ * @property {string} provider_order_id - External order ID from provider
+ * @property {string} package_type - Check package ordered (e.g., 'standard', 'comprehensive')
+ * @property {string} status - 'ordered' | 'processing' | 'complete' | 'error'
+ * @property {string} result - 'clear' | 'consider' | 'fail' | 'pending'
+ * @property {Object} result_details - Detailed results breakdown (JSON)
+ * @property {string} criminal_result - Criminal check result
+ * @property {string} employment_result - Employment verification result
+ * @property {string} mvr_result - MVR check result
+ * @property {string} education_result - Education verification result
+ * @property {string} report_url - Link to full report from provider
+ * @property {Date} ordered_date - When order was placed
+ * @property {Date} completed_date - When results received
+ * @property {Date} estimated_completion - ETA from provider
+ * @property {number} cost - Cost of the check in cents
+ * @property {Object[]} webhook_events - All webhook events received (audit trail)
+ * @property {Date} _createdDate - Record created timestamp
+ * @property {Date} _updatedDate - Last updated timestamp
+ */
+
+/**
+ * BackgroundChecks Collection Field Definitions
+ */
+export const BACKGROUND_CHECKS_FIELDS = [
+  { name: '_id', type: 'TEXT', description: 'Primary key (auto-generated)' },
+  { name: 'workflow_id', type: 'REFERENCE', reference: 'OnboardingWorkflows', required: true, description: 'FK to OnboardingWorkflows' },
+  { name: 'driver_id', type: 'REFERENCE', reference: 'DriverProfiles', required: true, description: 'FK to DriverProfiles' },
+  { name: 'provider', type: 'TEXT', required: true, description: 'hireright | checkr | tenstreet' },
+  { name: 'provider_order_id', type: 'TEXT', description: 'External order ID from provider' },
+  { name: 'package_type', type: 'TEXT', description: 'Check package (standard, comprehensive)' },
+  { name: 'status', type: 'TEXT', default: 'ordered', description: 'ordered | processing | complete | error' },
+  { name: 'result', type: 'TEXT', default: 'pending', description: 'clear | consider | fail | pending' },
+  { name: 'result_details', type: 'OBJECT', description: 'Detailed results breakdown (JSON)' },
+  { name: 'criminal_result', type: 'TEXT', description: 'Criminal check result' },
+  { name: 'employment_result', type: 'TEXT', description: 'Employment verification result' },
+  { name: 'mvr_result', type: 'TEXT', description: 'MVR check result' },
+  { name: 'education_result', type: 'TEXT', description: 'Education verification result' },
+  { name: 'report_url', type: 'TEXT', description: 'Link to full report' },
+  { name: 'ordered_date', type: 'DATETIME', description: 'When order was placed' },
+  { name: 'completed_date', type: 'DATETIME', description: 'When results received' },
+  { name: 'estimated_completion', type: 'DATETIME', description: 'ETA from provider' },
+  { name: 'cost', type: 'NUMBER', description: 'Cost in cents' },
+  { name: 'webhook_events', type: 'OBJECT', description: 'Array of webhook events (JSON)' }
+];
+
+/**
+ * Recommended indexes for BackgroundChecks collection
+ */
+export const BACKGROUND_CHECKS_INDEXES = [
+  { fields: ['workflow_id'], description: 'Query by workflow' },
+  { fields: ['driver_id'], description: 'Query by driver' },
+  { fields: ['provider_order_id'], description: 'Lookup for webhook processing' },
+  { fields: ['status'], description: 'Filter by status' }
+];
+
+// =============================================================================
+// DRUG TESTS COLLECTION SCHEMA
+// =============================================================================
+
+/**
+ * Drug test provider enum
+ * @readonly
+ * @enum {string}
+ */
+export const DRUG_TEST_PROVIDERS = {
+  QUEST: 'quest',
+  LABCORP: 'labcorp'
+};
+
+/**
+ * Drug test type enum
+ * @readonly
+ * @enum {string}
+ */
+export const DRUG_TEST_TYPES = {
+  PRE_EMPLOYMENT: 'pre_employment',
+  RANDOM: 'random',
+  POST_ACCIDENT: 'post_accident'
+};
+
+/**
+ * Drug test panel type enum
+ * @readonly
+ * @enum {string}
+ */
+export const DRUG_TEST_PANELS = {
+  FIVE_PANEL: '5_panel',
+  TEN_PANEL: '10_panel',
+  DOT: 'dot'
+};
+
+/**
+ * Drug test status enum
+ * @readonly
+ * @enum {string}
+ */
+export const DRUG_TEST_STATUS = {
+  ORDERED: 'ordered',
+  SCHEDULED: 'scheduled',
+  COMPLETED: 'completed',
+  NO_SHOW: 'no_show',
+  ERROR: 'error'
+};
+
+/**
+ * Drug test result enum
+ * @readonly
+ * @enum {string}
+ */
+export const DRUG_TEST_RESULT = {
+  NEGATIVE: 'negative',
+  POSITIVE: 'positive',
+  DILUTE: 'dilute',
+  PENDING: 'pending'
+};
+
+/**
+ * @typedef {Object} DrugTestSchema
+ * Track drug test scheduling and results.
+ *
+ * @property {string} _id - Primary key (auto-generated)
+ * @property {string} workflow_id - Reference FK to OnboardingWorkflows._id
+ * @property {string} driver_id - Reference FK to DriverProfiles._id
+ * @property {string} provider - 'quest' | 'labcorp'
+ * @property {string} provider_order_id - External order ID from lab
+ * @property {string} test_type - 'pre_employment' | 'random' | 'post_accident'
+ * @property {string} panel_type - '5_panel' | '10_panel' | 'dot'
+ * @property {string} status - 'ordered' | 'scheduled' | 'completed' | 'no_show' | 'error'
+ * @property {string} result - 'negative' | 'positive' | 'dilute' | 'pending'
+ * @property {string} mro_status - Medical Review Officer status
+ * @property {Object} collection_site - { name, address, phone } of collection location
+ * @property {Date} appointment_date - Scheduled appointment datetime
+ * @property {boolean} appointment_confirmed - Driver confirmed attendance
+ * @property {Date} completed_date - When test was completed
+ * @property {Date} result_date - When results were received
+ * @property {string} donor_pass_id - Pass ID for collection site
+ * @property {string} chain_of_custody_id - COC form number
+ * @property {number} cost - Cost of the test in cents
+ * @property {Date} _createdDate - Record created timestamp
+ * @property {Date} _updatedDate - Last updated timestamp
+ */
+
+/**
+ * DrugTests Collection Field Definitions
+ */
+export const DRUG_TESTS_FIELDS = [
+  { name: '_id', type: 'TEXT', description: 'Primary key (auto-generated)' },
+  { name: 'workflow_id', type: 'REFERENCE', reference: 'OnboardingWorkflows', required: true, description: 'FK to OnboardingWorkflows' },
+  { name: 'driver_id', type: 'REFERENCE', reference: 'DriverProfiles', required: true, description: 'FK to DriverProfiles' },
+  { name: 'provider', type: 'TEXT', required: true, description: 'quest | labcorp' },
+  { name: 'provider_order_id', type: 'TEXT', description: 'External order ID from lab' },
+  { name: 'test_type', type: 'TEXT', default: 'pre_employment', description: 'pre_employment | random | post_accident' },
+  { name: 'panel_type', type: 'TEXT', default: 'dot', description: '5_panel | 10_panel | dot' },
+  { name: 'status', type: 'TEXT', default: 'ordered', description: 'ordered | scheduled | completed | no_show | error' },
+  { name: 'result', type: 'TEXT', default: 'pending', description: 'negative | positive | dilute | pending' },
+  { name: 'mro_status', type: 'TEXT', description: 'Medical Review Officer status' },
+  { name: 'collection_site', type: 'OBJECT', description: '{ name, address, phone } JSON' },
+  { name: 'appointment_date', type: 'DATETIME', description: 'Scheduled appointment datetime' },
+  { name: 'appointment_confirmed', type: 'BOOLEAN', default: false, description: 'Driver confirmed attendance' },
+  { name: 'completed_date', type: 'DATETIME', description: 'When test was completed' },
+  { name: 'result_date', type: 'DATETIME', description: 'When results were received' },
+  { name: 'donor_pass_id', type: 'TEXT', description: 'Pass ID for collection site' },
+  { name: 'chain_of_custody_id', type: 'TEXT', description: 'COC form number' },
+  { name: 'cost', type: 'NUMBER', description: 'Cost in cents' }
+];
+
+/**
+ * Recommended indexes for DrugTests collection
+ */
+export const DRUG_TESTS_INDEXES = [
+  { fields: ['workflow_id'], description: 'Query by workflow' },
+  { fields: ['driver_id'], description: 'Query by driver' },
+  { fields: ['provider_order_id'], description: 'Lookup for webhook processing' },
+  { fields: ['appointment_date'], description: 'Query by appointment date' },
+  { fields: ['status'], description: 'Filter by status' }
+];
+
+// =============================================================================
+// ORIENTATION SLOTS COLLECTION SCHEMA
+// =============================================================================
+
+/**
+ * @typedef {Object} OrientationSlotSchema
+ * Available orientation sessions and bookings.
+ *
+ * @property {string} _id - Primary key (auto-generated)
+ * @property {string} carrier_id - Reference FK to Carriers._id
+ * @property {Object} location - { address, city, state, zip } of orientation
+ * @property {string} location_name - Human-readable name (e.g., "Dallas Terminal")
+ * @property {Date} session_date - Orientation date
+ * @property {string} start_time - Start time in 24h format (e.g., "08:00")
+ * @property {string} end_time - End time in 24h format (e.g., "17:00")
+ * @property {number} duration_days - For multi-day orientations
+ * @property {number} capacity - Maximum attendees
+ * @property {number} booked_count - Current bookings count
+ * @property {number} available_count - Computed: capacity - booked_count
+ * @property {boolean} is_active - Accepting bookings flag
+ * @property {string} instructor - Orientation leader name
+ * @property {string} notes - What to bring, parking info, etc.
+ * @property {Object[]} bookings - Array of { driver_id, workflow_id, booked_date }
+ * @property {Date} _createdDate - Slot created timestamp
+ * @property {Date} _updatedDate - Last updated timestamp
+ */
+
+/**
+ * OrientationSlots Collection Field Definitions
+ */
+export const ORIENTATION_SLOTS_FIELDS = [
+  { name: '_id', type: 'TEXT', description: 'Primary key (auto-generated)' },
+  { name: 'carrier_id', type: 'REFERENCE', reference: 'Carriers', required: true, description: 'FK to Carriers' },
+  { name: 'location', type: 'OBJECT', required: true, description: '{ address, city, state, zip } JSON' },
+  { name: 'location_name', type: 'TEXT', required: true, description: 'Human-readable name' },
+  { name: 'session_date', type: 'DATETIME', required: true, description: 'Orientation date' },
+  { name: 'start_time', type: 'TEXT', required: true, description: 'Start time (24h format, e.g., "08:00")' },
+  { name: 'end_time', type: 'TEXT', required: true, description: 'End time (24h format, e.g., "17:00")' },
+  { name: 'duration_days', type: 'NUMBER', default: 1, description: 'For multi-day orientations' },
+  { name: 'capacity', type: 'NUMBER', required: true, description: 'Maximum attendees' },
+  { name: 'booked_count', type: 'NUMBER', default: 0, description: 'Current bookings count' },
+  { name: 'available_count', type: 'NUMBER', description: 'Computed: capacity - booked_count' },
+  { name: 'is_active', type: 'BOOLEAN', default: true, description: 'Accepting bookings' },
+  { name: 'instructor', type: 'TEXT', description: 'Orientation leader name' },
+  { name: 'notes', type: 'TEXT', description: 'What to bring, parking info, etc.' },
+  { name: 'bookings', type: 'OBJECT', description: 'Array of { driver_id, workflow_id, booked_date } JSON' }
+];
+
+/**
+ * Recommended indexes for OrientationSlots collection
+ */
+export const ORIENTATION_SLOTS_INDEXES = [
+  { fields: ['carrier_id'], description: 'Query by carrier' },
+  { fields: ['session_date'], description: 'Query by date' },
+  { fields: ['is_active'], description: 'Filter active slots' },
+  { fields: ['carrier_id', 'session_date'], description: 'Query carrier sessions by date' }
+];
+
+// =============================================================================
+// OFFER LETTERS COLLECTION SCHEMA
+// =============================================================================
+
+/**
+ * Offer letter type enum
+ * @readonly
+ * @enum {string}
+ */
+export const OFFER_LETTER_TYPES = {
+  COMPANY_DRIVER: 'company_driver',
+  OWNER_OPERATOR: 'owner_operator',
+  LEASE_PURCHASE: 'lease_purchase'
+};
+
+/**
+ * Offer letter status enum
+ * @readonly
+ * @enum {string}
+ */
+export const OFFER_LETTER_STATUS = {
+  DRAFT: 'draft',
+  PENDING_APPROVAL: 'pending_approval',
+  APPROVED: 'approved',
+  SENT: 'sent',
+  SIGNED: 'signed',
+  DECLINED: 'declined'
+};
+
+/**
+ * E-signature provider enum
+ * @readonly
+ * @enum {string}
+ */
+export const ESIGN_PROVIDERS = {
+  DOCUSIGN: 'docusign',
+  HELLOSIGN: 'hellosign'
+};
+
+/**
+ * @typedef {Object} OfferLetterSchema
+ * Offer letter templates and generated letters.
+ *
+ * @property {string} _id - Primary key (auto-generated)
+ * @property {string} workflow_id - Reference FK to OnboardingWorkflows._id (null for templates)
+ * @property {string} driver_id - Reference FK to DriverProfiles._id (null for templates)
+ * @property {string} carrier_id - Reference FK to Carriers._id
+ * @property {boolean} is_template - True if this is a reusable template
+ * @property {string} template_name - Template identifier/name
+ * @property {number} template_version - Version number for templates
+ * @property {string} letter_type - 'company_driver' | 'owner_operator' | 'lease_purchase'
+ * @property {string} content_html - Full letter content in HTML
+ * @property {string} content_pdf_url - Generated PDF URL
+ * @property {Object} variables - Variables used in generation (JSON)
+ * @property {string} pay_rate - Offered pay rate (e.g., "$0.55 CPM")
+ * @property {Date} start_date - Proposed start date
+ * @property {string} position_title - Job title offered
+ * @property {string} route_type - 'otr' | 'regional' | 'local'
+ * @property {string} benefits_summary - Benefits overview text
+ * @property {number} sign_on_bonus - Sign-on bonus amount in cents
+ * @property {string} status - 'draft' | 'pending_approval' | 'approved' | 'sent' | 'signed' | 'declined'
+ * @property {boolean} approval_required - Needs manager approval flag
+ * @property {string} approved_by - Manager ID who approved
+ * @property {Date} approved_date - Approval timestamp
+ * @property {Date} sent_date - When sent to driver
+ * @property {string} esign_provider - 'docusign' | 'hellosign'
+ * @property {string} esign_envelope_id - External envelope ID from e-sign provider
+ * @property {string} esign_status - E-signature status from provider
+ * @property {Date} signed_date - When driver signed
+ * @property {string} signed_document_url - Final signed PDF URL
+ * @property {Date} expiration_date - Offer expiration date
+ * @property {Date} _createdDate - Record created timestamp
+ * @property {Date} _updatedDate - Last updated timestamp
+ */
+
+/**
+ * OfferLetters Collection Field Definitions
+ */
+export const OFFER_LETTERS_FIELDS = [
+  { name: '_id', type: 'TEXT', description: 'Primary key (auto-generated)' },
+  { name: 'workflow_id', type: 'REFERENCE', reference: 'OnboardingWorkflows', description: 'FK to OnboardingWorkflows (null for templates)' },
+  { name: 'driver_id', type: 'REFERENCE', reference: 'DriverProfiles', description: 'FK to DriverProfiles (null for templates)' },
+  { name: 'carrier_id', type: 'REFERENCE', reference: 'Carriers', required: true, description: 'FK to Carriers' },
+  { name: 'is_template', type: 'BOOLEAN', default: false, description: 'True if reusable template' },
+  { name: 'template_name', type: 'TEXT', description: 'Template identifier/name' },
+  { name: 'template_version', type: 'NUMBER', default: 1, description: 'Version number' },
+  { name: 'letter_type', type: 'TEXT', required: true, description: 'company_driver | owner_operator | lease_purchase' },
+  { name: 'content_html', type: 'TEXT', description: 'Full letter content in HTML' },
+  { name: 'content_pdf_url', type: 'TEXT', description: 'Generated PDF URL' },
+  { name: 'variables', type: 'OBJECT', description: 'Variables used in generation (JSON)' },
+  { name: 'pay_rate', type: 'TEXT', description: 'Offered pay rate (e.g., "$0.55 CPM")' },
+  { name: 'start_date', type: 'DATETIME', description: 'Proposed start date' },
+  { name: 'position_title', type: 'TEXT', description: 'Job title offered' },
+  { name: 'route_type', type: 'TEXT', description: 'otr | regional | local' },
+  { name: 'benefits_summary', type: 'TEXT', description: 'Benefits overview text' },
+  { name: 'sign_on_bonus', type: 'NUMBER', description: 'Sign-on bonus in cents' },
+  { name: 'status', type: 'TEXT', default: 'draft', description: 'draft | pending_approval | approved | sent | signed | declined' },
+  { name: 'approval_required', type: 'BOOLEAN', default: false, description: 'Needs manager approval' },
+  { name: 'approved_by', type: 'TEXT', description: 'Manager ID who approved' },
+  { name: 'approved_date', type: 'DATETIME', description: 'Approval timestamp' },
+  { name: 'sent_date', type: 'DATETIME', description: 'When sent to driver' },
+  { name: 'esign_provider', type: 'TEXT', description: 'docusign | hellosign' },
+  { name: 'esign_envelope_id', type: 'TEXT', description: 'External envelope ID' },
+  { name: 'esign_status', type: 'TEXT', description: 'E-signature status from provider' },
+  { name: 'signed_date', type: 'DATETIME', description: 'When driver signed' },
+  { name: 'signed_document_url', type: 'TEXT', description: 'Final signed PDF URL' },
+  { name: 'expiration_date', type: 'DATETIME', description: 'Offer expiration date' }
+];
+
+/**
+ * Recommended indexes for OfferLetters collection
+ */
+export const OFFER_LETTERS_INDEXES = [
+  { fields: ['workflow_id'], description: 'Query by workflow' },
+  { fields: ['carrier_id'], description: 'Query by carrier' },
+  { fields: ['is_template'], description: 'Filter templates' },
+  { fields: ['status'], description: 'Filter by status' },
+  { fields: ['esign_envelope_id'], description: 'Lookup for webhook processing' },
+  { fields: ['carrier_id', 'is_template'], description: 'Query carrier templates' }
+];
+
+// =============================================================================
+// ADDITIONAL SETUP FUNCTIONS
+// =============================================================================
+
+/**
+ * Creates a test OnboardingWorkflow record
+ * @param {Object} options - Test record options
+ * @param {string} options.driverId - Driver profile ID
+ * @param {string} options.carrierId - Carrier ID
+ * @param {string} options.recruiterId - Recruiter member ID
+ * @returns {Promise<Object>} Created workflow record
+ */
+export async function setupOnboardingWorkflow(options = {}) {
+  console.log('[SETUP] Creating test OnboardingWorkflow...');
+
+  try {
+    const workflowId = options.workflowId || 'test-workflow-001';
+
+    // Check if test record exists
+    const existingResult = await wixData.query(COLLECTIONS.ONBOARDING_WORKFLOWS)
+      .eq('_id', workflowId)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (existingResult.items.length > 0) {
+      console.log('[SETUP] Test OnboardingWorkflow already exists:', existingResult.items[0]._id);
+      return { success: true, message: 'Workflow already exists', record: existingResult.items[0] };
+    }
+
+    const testWorkflow = {
+      driver_id: options.driverId || 'test-driver-001',
+      carrier_id: options.carrierId || 'test-carrier-001',
+      recruiter_id: options.recruiterId || 'test-recruiter-001',
+      status: WORKFLOW_STATUS.OFFER_SENT,
+      start_date: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 2 weeks from now
+      documents_status: DOCUMENTS_SUB_STATUS.PENDING,
+      background_status: BACKGROUND_SUB_STATUS.NOT_STARTED,
+      drug_test_status: DRUG_TEST_SUB_STATUS.NOT_STARTED,
+      orientation_status: ORIENTATION_SUB_STATUS.NOT_SCHEDULED,
+      compliance_verified: false,
+      compliance_issues: [],
+      metadata: { test: true, created_by: 'setupOnboardingCollections' }
+    };
+
+    const inserted = await wixData.insert(COLLECTIONS.ONBOARDING_WORKFLOWS, testWorkflow, { suppressAuth: true });
+    console.log('[SETUP] Created test workflow:', inserted._id);
+    return { success: true, record: inserted };
+
+  } catch (err) {
+    console.error('[SETUP] Error creating test workflow:', err.message);
+
+    if (err.message.includes('does not exist')) {
+      return {
+        success: false,
+        error: 'OnboardingWorkflows collection does not exist. Please create it manually.',
+        instructions: [
+          '1. Go to Wix Editor > CMS > + Create Collection',
+          '2. Name: OnboardingWorkflows',
+          '3. Permissions: Read-Admin, Write-Admin',
+          '4. Add fields (see ONBOARDING_WORKFLOWS_FIELDS):',
+          ...ONBOARDING_WORKFLOWS_FIELDS.map(f => `   - ${f.name} (${f.type}): ${f.description}`)
+        ]
+      };
+    }
+
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Creates a test BackgroundCheck record
+ * @param {Object} options - Test record options
+ * @returns {Promise<Object>} Created record
+ */
+export async function setupBackgroundCheck(options = {}) {
+  console.log('[SETUP] Creating test BackgroundCheck...');
+
+  try {
+    const testRecord = {
+      workflow_id: options.workflowId || 'test-workflow-001',
+      driver_id: options.driverId || 'test-driver-001',
+      provider: BACKGROUND_CHECK_PROVIDERS.HIRERIGHT,
+      provider_order_id: 'TEST-HR-' + Date.now(),
+      package_type: 'standard',
+      status: BACKGROUND_CHECK_STATUS.ORDERED,
+      result: BACKGROUND_CHECK_RESULT.PENDING,
+      ordered_date: new Date(),
+      estimated_completion: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000), // 5 days
+      cost: 7500, // $75.00
+      webhook_events: []
+    };
+
+    const inserted = await wixData.insert(COLLECTIONS.BACKGROUND_CHECKS, testRecord, { suppressAuth: true });
+    console.log('[SETUP] Created test BackgroundCheck:', inserted._id);
+    return { success: true, record: inserted };
+
+  } catch (err) {
+    console.error('[SETUP] Error creating test BackgroundCheck:', err.message);
+
+    if (err.message.includes('does not exist')) {
+      return {
+        success: false,
+        error: 'BackgroundChecks collection does not exist. Please create it manually.',
+        instructions: [
+          '1. Create Collection: BackgroundChecks',
+          '2. Permissions: Read-Admin, Write-Admin',
+          '3. Add fields (see BACKGROUND_CHECKS_FIELDS)'
+        ]
+      };
+    }
+
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Creates a test DrugTest record
+ * @param {Object} options - Test record options
+ * @returns {Promise<Object>} Created record
+ */
+export async function setupDrugTest(options = {}) {
+  console.log('[SETUP] Creating test DrugTest...');
+
+  try {
+    const appointmentDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000); // 3 days from now
+    appointmentDate.setHours(9, 0, 0, 0); // 9:00 AM
+
+    const testRecord = {
+      workflow_id: options.workflowId || 'test-workflow-001',
+      driver_id: options.driverId || 'test-driver-001',
+      provider: DRUG_TEST_PROVIDERS.QUEST,
+      provider_order_id: 'TEST-Q-' + Date.now(),
+      test_type: DRUG_TEST_TYPES.PRE_EMPLOYMENT,
+      panel_type: DRUG_TEST_PANELS.DOT,
+      status: DRUG_TEST_STATUS.SCHEDULED,
+      result: DRUG_TEST_RESULT.PENDING,
+      collection_site: {
+        name: 'Quest Diagnostics - Dallas Main',
+        address: '123 Main St, Dallas, TX 75201',
+        phone: '214-555-0100'
+      },
+      appointment_date: appointmentDate,
+      appointment_confirmed: false,
+      donor_pass_id: 'DP-' + Date.now(),
+      cost: 4500 // $45.00
+    };
+
+    const inserted = await wixData.insert(COLLECTIONS.DRUG_TESTS, testRecord, { suppressAuth: true });
+    console.log('[SETUP] Created test DrugTest:', inserted._id);
+    return { success: true, record: inserted };
+
+  } catch (err) {
+    console.error('[SETUP] Error creating test DrugTest:', err.message);
+
+    if (err.message.includes('does not exist')) {
+      return {
+        success: false,
+        error: 'DrugTests collection does not exist. Please create it manually.',
+        instructions: [
+          '1. Create Collection: DrugTests',
+          '2. Permissions: Read-Admin, Write-Admin',
+          '3. Add fields (see DRUG_TESTS_FIELDS)'
+        ]
+      };
+    }
+
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Creates a test OrientationSlot record
+ * @param {Object} options - Test record options
+ * @returns {Promise<Object>} Created record
+ */
+export async function setupOrientationSlot(options = {}) {
+  console.log('[SETUP] Creating test OrientationSlot...');
+
+  try {
+    // Find next Monday
+    const nextMonday = new Date();
+    nextMonday.setDate(nextMonday.getDate() + ((8 - nextMonday.getDay()) % 7 || 7));
+    nextMonday.setHours(8, 0, 0, 0);
+
+    const testRecord = {
+      carrier_id: options.carrierId || 'test-carrier-001',
+      location: {
+        address: '1234 Industrial Blvd',
+        city: 'Dallas',
+        state: 'TX',
+        zip: '75201'
+      },
+      location_name: 'Dallas Terminal',
+      session_date: nextMonday,
+      start_time: '08:00',
+      end_time: '17:00',
+      duration_days: 1,
+      capacity: 15,
+      booked_count: 0,
+      available_count: 15,
+      is_active: true,
+      instructor: 'John Smith',
+      notes: 'Please bring your CDL, DOT Medical Card, and Social Security Card. Lunch will be provided.',
+      bookings: []
+    };
+
+    const inserted = await wixData.insert(COLLECTIONS.ORIENTATION_SLOTS, testRecord, { suppressAuth: true });
+    console.log('[SETUP] Created test OrientationSlot:', inserted._id);
+    return { success: true, record: inserted };
+
+  } catch (err) {
+    console.error('[SETUP] Error creating test OrientationSlot:', err.message);
+
+    if (err.message.includes('does not exist')) {
+      return {
+        success: false,
+        error: 'OrientationSlots collection does not exist. Please create it manually.',
+        instructions: [
+          '1. Create Collection: OrientationSlots',
+          '2. Permissions: Read-Site Member, Write-Admin',
+          '3. Add fields (see ORIENTATION_SLOTS_FIELDS)'
+        ]
+      };
+    }
+
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Creates a test OfferLetter template
+ * @param {Object} options - Test record options
+ * @returns {Promise<Object>} Created record
+ */
+export async function setupOfferLetterTemplate(options = {}) {
+  console.log('[SETUP] Creating test OfferLetter template...');
+
+  try {
+    const testTemplate = {
+      carrier_id: options.carrierId || 'test-carrier-001',
+      is_template: true,
+      template_name: 'Company Driver - OTR Standard',
+      template_version: 1,
+      letter_type: OFFER_LETTER_TYPES.COMPANY_DRIVER,
+      content_html: `
+        <h1>Employment Offer</h1>
+        <p>Dear {{driver_name}},</p>
+        <p>We are pleased to offer you the position of {{position_title}} with {{carrier_name}}.</p>
+        <p><strong>Compensation:</strong> {{pay_rate}}</p>
+        <p><strong>Start Date:</strong> {{start_date}}</p>
+        <p><strong>Route Type:</strong> {{route_type}}</p>
+        <p><strong>Sign-On Bonus:</strong> {{sign_on_bonus}}</p>
+        <p>{{benefits_summary}}</p>
+        <p>Please sign below to accept this offer.</p>
+      `,
+      variables: {
+        driver_name: '',
+        carrier_name: '',
+        position_title: 'OTR Driver',
+        pay_rate: '$0.55 CPM',
+        start_date: '',
+        route_type: 'OTR',
+        sign_on_bonus: '$2,500',
+        benefits_summary: 'Health, Dental, Vision, 401k, Paid Vacation'
+      },
+      status: OFFER_LETTER_STATUS.APPROVED,
+      approval_required: false
+    };
+
+    const inserted = await wixData.insert(COLLECTIONS.OFFER_LETTERS, testTemplate, { suppressAuth: true });
+    console.log('[SETUP] Created test OfferLetter template:', inserted._id);
+    return { success: true, record: inserted };
+
+  } catch (err) {
+    console.error('[SETUP] Error creating test OfferLetter template:', err.message);
+
+    if (err.message.includes('does not exist')) {
+      return {
+        success: false,
+        error: 'OfferLetters collection does not exist. Please create it manually.',
+        instructions: [
+          '1. Create Collection: OfferLetters',
+          '2. Permissions: Read-Admin, Write-Admin',
+          '3. Add fields (see OFFER_LETTERS_FIELDS)'
+        ]
+      };
+    }
+
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Get complete collection creation instructions for all onboarding collections
+ * @returns {Object} All collection creation instructions
+ */
+export function getAllCollectionCreationInstructions() {
+  return {
+    OnboardingWorkflows: {
+      permissions: 'Read-Admin, Write-Admin',
+      fields: ONBOARDING_WORKFLOWS_FIELDS,
+      indexes: ONBOARDING_WORKFLOWS_INDEXES
+    },
+    DocumentRequests: {
+      permissions: 'Read-Site Member, Write-Site Member',
+      fields: DOCUMENT_REQUESTS_FIELDS,
+      indexes: DOCUMENT_REQUESTS_INDEXES
+    },
+    BackgroundChecks: {
+      permissions: 'Read-Admin, Write-Admin',
+      fields: BACKGROUND_CHECKS_FIELDS,
+      indexes: BACKGROUND_CHECKS_INDEXES
+    },
+    DrugTests: {
+      permissions: 'Read-Admin, Write-Admin',
+      fields: DRUG_TESTS_FIELDS,
+      indexes: DRUG_TESTS_INDEXES
+    },
+    OrientationSlots: {
+      permissions: 'Read-Site Member, Write-Admin',
+      fields: ORIENTATION_SLOTS_FIELDS,
+      indexes: ORIENTATION_SLOTS_INDEXES
+    },
+    OfferLetters: {
+      permissions: 'Read-Admin, Write-Admin',
+      fields: OFFER_LETTERS_FIELDS,
+      indexes: OFFER_LETTERS_INDEXES
+    },
+    DriverProfiles_extensions: {
+      description: 'Add these fields to existing DriverProfiles collection',
+      fields: DRIVER_PROFILES_ONBOARDING_FIELDS
+    },
+    Carriers_extensions: {
+      description: 'Add these fields to existing Carriers collection',
+      fields: CARRIERS_ONBOARDING_FIELDS
+    }
+  };
+}
+
+/**
+ * Print all collection creation instructions to console
+ */
+export function printAllCollectionInstructions() {
+  console.log('='.repeat(80));
+  console.log('ONBOARDING COLLECTIONS SETUP INSTRUCTIONS');
+  console.log('='.repeat(80));
+
+  const instructions = getAllCollectionCreationInstructions();
+
+  for (const [collectionName, config] of Object.entries(instructions)) {
+    console.log(`\n${'='.repeat(40)}`);
+    console.log(`COLLECTION: ${collectionName}`);
+    if (config.permissions) {
+      console.log(`Permissions: ${config.permissions}`);
+    }
+    if (config.description) {
+      console.log(`Description: ${config.description}`);
+    }
+    console.log('$'.repeat(40));
+    console.log('Fields:');
+    for (const field of config.fields) {
+      const required = field.required ? ' [REQUIRED]' : '';
+      const defaultVal = field.default !== undefined ? ` (default: ${field.default})` : '';
+      const ref = field.reference ? ` -> ${field.reference}` : '';
+      console.log(`  - ${field.name}: ${field.type}${ref}${required}${defaultVal}`);
+      console.log(`    ${field.description}`);
+    }
+    if (config.indexes) {
+      console.log('\nRecommended Indexes:');
+      for (const idx of config.indexes) {
+        console.log(`  - [${idx.fields.join(', ')}]: ${idx.description}`);
+      }
+    }
+  }
+}
+
+/**
+ * Run all onboarding setup functions
+ * @returns {Promise<Object>} Combined results
+ */
+export async function runOnboardingSetup() {
+  console.log('[SETUP] Running full onboarding setup...');
+
+  const results = {
+    validation: null,
+    onboardingWorkflow: null,
+    documentRequests: null,
+    backgroundCheck: null,
+    drugTest: null,
+    orientationSlot: null,
+    offerLetterTemplate: null
+  };
+
+  // Step 1: Validate all collections exist
+  results.validation = await validateOnboardingCollections();
+
+  if (!results.validation.success) {
+    console.log('[SETUP] Some collections are missing. Printing creation instructions...');
+    printAllCollectionInstructions();
+    return results;
+  }
+
+  // Step 2: Create test records
+  results.onboardingWorkflow = await setupOnboardingWorkflow();
+
+  if (results.onboardingWorkflow.success) {
+    const workflowId = results.onboardingWorkflow.record._id;
+    results.documentRequests = await setupDocumentRequests(workflowId);
+    results.backgroundCheck = await setupBackgroundCheck({ workflowId });
+    results.drugTest = await setupDrugTest({ workflowId });
+  }
+
+  results.orientationSlot = await setupOrientationSlot();
+  results.offerLetterTemplate = await setupOfferLetterTemplate();
+
+  console.log('[SETUP] Onboarding setup complete:', results);
+  return results;
+}

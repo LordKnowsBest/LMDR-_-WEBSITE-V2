@@ -1,0 +1,1447 @@
+// ============================================================================
+// ONBOARDING WORKFLOW SERVICE - Orchestrates driver onboarding automation
+// Handles workflow lifecycle: creation, status management, and compliance tracking
+// ============================================================================
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { currentMember } from 'wix-members-backend';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  workflowsCollection: 'OnboardingWorkflows',
+  documentRequestsCollection: 'DocumentRequests',
+  backgroundChecksCollection: 'BackgroundChecks',
+  drugTestsCollection: 'DrugTests',
+  orientationSlotsCollection: 'OrientationSlots',
+  driverProfilesCollection: 'DriverProfiles',
+  carriersCollection: 'Carriers',
+  recruiterCarriersCollection: 'recruiterCarriers',
+  auditLogCollection: 'AdminAuditLog',
+
+  // Workflow status values (state machine states)
+  STATUS: {
+    // Initial states
+    PENDING: 'pending',
+    OFFER_SENT: 'offer_sent',
+    OFFER_ACCEPTED: 'offer_accepted',
+
+    // In-progress states
+    IN_PROGRESS: 'in_progress',
+    DOCUMENTS_PENDING: 'documents_pending',
+    DOCUMENTS_REQUESTED: 'documents_requested',
+    DOCUMENTS_COMPLETE: 'documents_complete',
+
+    // Background check states
+    BACKGROUND_CHECK: 'background_check',
+    BACKGROUND_ORDERED: 'background_ordered',
+    BACKGROUND_PASSED: 'background_passed',
+    BACKGROUND_FAILED: 'background_failed',
+
+    // Drug test states
+    DRUG_TEST: 'drug_test',
+    DRUG_TEST_SCHEDULED: 'drug_test_scheduled',
+    DRUG_TEST_PASSED: 'drug_test_passed',
+    DRUG_TEST_FAILED: 'drug_test_failed',
+
+    // Final states
+    ORIENTATION: 'orientation',
+    ORIENTATION_SCHEDULED: 'orientation_scheduled',
+    ORIENTATION_COMPLETED: 'orientation_completed',
+    COMPLIANCE_VERIFIED: 'compliance_verified',
+    READY: 'ready_to_start',
+    COMPLETED: 'completed',
+
+    // Terminal states
+    CANCELLED: 'cancelled',
+    ON_HOLD: 'on_hold'
+  },
+
+  // Sub-status values for components
+  DOCUMENTS_STATUS: {
+    PENDING: 'pending',
+    PARTIAL: 'partial',
+    COMPLETE: 'complete'
+  },
+
+  BACKGROUND_STATUS: {
+    NOT_STARTED: 'not_started',
+    ORDERED: 'ordered',
+    PROCESSING: 'processing',
+    PASSED: 'passed',
+    FAILED: 'failed',
+    REVIEW: 'review'
+  },
+
+  DRUG_TEST_STATUS: {
+    NOT_STARTED: 'not_started',
+    SCHEDULED: 'scheduled',
+    COMPLETED: 'completed',
+    PASSED: 'passed',
+    FAILED: 'failed',
+    NO_SHOW: 'no_show'
+  },
+
+  ORIENTATION_STATUS: {
+    NOT_SCHEDULED: 'not_scheduled',
+    SCHEDULED: 'scheduled',
+    COMPLETED: 'completed'
+  },
+
+  // Valid state transitions
+  VALID_TRANSITIONS: {
+    'pending': ['offer_sent', 'in_progress', 'cancelled', 'on_hold'],
+    'offer_sent': ['offer_accepted', 'cancelled', 'on_hold'],
+    'offer_accepted': ['in_progress', 'documents_requested', 'cancelled', 'on_hold'],
+    'in_progress': ['documents_pending', 'documents_requested', 'background_ordered', 'drug_test_scheduled', 'cancelled', 'on_hold'],
+    'documents_pending': ['documents_requested', 'documents_complete', 'cancelled', 'on_hold'],
+    'documents_requested': ['documents_complete', 'cancelled', 'on_hold'],
+    'documents_complete': ['background_ordered', 'background_check', 'compliance_verified', 'cancelled', 'on_hold'],
+    'background_check': ['background_ordered', 'background_passed', 'background_failed', 'cancelled', 'on_hold'],
+    'background_ordered': ['background_passed', 'background_failed', 'cancelled', 'on_hold'],
+    'background_passed': ['drug_test_scheduled', 'drug_test', 'compliance_verified', 'cancelled', 'on_hold'],
+    'background_failed': ['cancelled', 'on_hold', 'background_ordered'], // Allow retry
+    'drug_test': ['drug_test_scheduled', 'drug_test_passed', 'drug_test_failed', 'cancelled', 'on_hold'],
+    'drug_test_scheduled': ['drug_test_passed', 'drug_test_failed', 'cancelled', 'on_hold'],
+    'drug_test_passed': ['orientation', 'orientation_scheduled', 'compliance_verified', 'cancelled', 'on_hold'],
+    'drug_test_failed': ['cancelled', 'on_hold', 'drug_test_scheduled'], // Allow retry
+    'orientation': ['orientation_scheduled', 'orientation_completed', 'cancelled', 'on_hold'],
+    'orientation_scheduled': ['orientation_completed', 'cancelled', 'on_hold'],
+    'orientation_completed': ['compliance_verified', 'ready_to_start', 'cancelled', 'on_hold'],
+    'compliance_verified': ['ready_to_start', 'cancelled', 'on_hold'],
+    'ready_to_start': ['completed', 'cancelled', 'on_hold'],
+    'completed': [], // Terminal state - no transitions
+    'cancelled': ['pending'], // Allow restart
+    'on_hold': ['pending', 'in_progress', 'documents_pending', 'background_check', 'drug_test', 'orientation', 'cancelled'] // Resume to various states
+  },
+
+  // Error codes
+  ERROR_CODES: {
+    UNAUTHORIZED: 'ERR_UNAUTHORIZED',
+    NOT_FOUND: 'ERR_NOT_FOUND',
+    INVALID_TRANSITION: 'ERR_INVALID_TRANSITION',
+    VALIDATION_FAILED: 'ERR_VALIDATION_FAILED',
+    DATABASE_ERROR: 'ERR_DATABASE_ERROR',
+    DUPLICATE_WORKFLOW: 'ERR_DUPLICATE_WORKFLOW'
+  }
+};
+
+// ============================================================================
+// ERROR HANDLING
+// ============================================================================
+
+class OnboardingError extends Error {
+  constructor(code, message, details = {}) {
+    super(message);
+    this.name = 'OnboardingError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function createErrorResponse(code, message, details = {}) {
+  return {
+    success: false,
+    error: {
+      code,
+      message,
+      details
+    }
+  };
+}
+
+// ============================================================================
+// AUTHORIZATION
+// ============================================================================
+
+/**
+ * Get current user ID
+ */
+async function getCurrentUserId() {
+  try {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) {
+      return null;
+    }
+    return currentUser.id;
+  } catch (error) {
+    console.error('getCurrentUserId error:', error);
+    return null;
+  }
+}
+
+/**
+ * Check if current user is a recruiter with access to a carrier
+ */
+async function verifyRecruiterAccess(carrierId) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { authorized: false, error: 'Not authenticated' };
+    }
+
+    // Get carrier DOT from carrier ID
+    const carrier = await wixData.get(CONFIG.carriersCollection, carrierId, { suppressAuth: true });
+    if (!carrier) {
+      return { authorized: false, error: 'Carrier not found' };
+    }
+
+    const carrierDot = String(carrier.dot_number).trim();
+
+    // Check RecruiterCarriers for access
+    const result = await wixData.query(CONFIG.recruiterCarriersCollection)
+      .eq('recruiter_id', userId)
+      .eq('carrier_dot', carrierDot)
+      .eq('is_active', true)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (result.items.length === 0) {
+      return { authorized: false, error: 'No access to this carrier' };
+    }
+
+    return { authorized: true, recruiterId: userId, carrierDot, carrierAccess: result.items[0] };
+  } catch (error) {
+    console.error('verifyRecruiterAccess error:', error);
+    return { authorized: false, error: error.message };
+  }
+}
+
+/**
+ * Check if current user is a carrier admin
+ */
+async function verifyCarrierAdminAccess(carrierId) {
+  try {
+    const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+    if (!member) {
+      return { authorized: false, error: 'Not authenticated' };
+    }
+
+    // Check if member has carrier_admin role for this carrier
+    const memberRole = member.contactDetails?.customFields?.role || '';
+    const memberCarrierId = member.contactDetails?.customFields?.carrier_id || '';
+
+    if (memberRole === 'carrier_admin' && memberCarrierId === carrierId) {
+      return { authorized: true, adminId: member._id };
+    }
+
+    return { authorized: false, error: 'Not a carrier admin for this carrier' };
+  } catch (error) {
+    console.error('verifyCarrierAdminAccess error:', error);
+    return { authorized: false, error: error.message };
+  }
+}
+
+/**
+ * Verify user has access to a workflow (either as recruiter or carrier admin)
+ */
+async function verifyWorkflowAccess(workflowId) {
+  try {
+    // Get the workflow
+    const workflow = await wixData.get(CONFIG.workflowsCollection, workflowId, { suppressAuth: true });
+    if (!workflow) {
+      return { authorized: false, error: 'Workflow not found', workflow: null };
+    }
+
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { authorized: false, error: 'Not authenticated', workflow };
+    }
+
+    // Check if user is the assigned recruiter
+    if (workflow.recruiter_id === userId) {
+      return { authorized: true, role: 'recruiter', userId, workflow };
+    }
+
+    // Check if user has recruiter access to the carrier
+    const recruiterAccess = await verifyRecruiterAccess(workflow.carrier_id);
+    if (recruiterAccess.authorized) {
+      return { authorized: true, role: 'recruiter', userId, workflow };
+    }
+
+    // Check if user is carrier admin
+    const carrierAdminAccess = await verifyCarrierAdminAccess(workflow.carrier_id);
+    if (carrierAdminAccess.authorized) {
+      return { authorized: true, role: 'carrier_admin', userId, workflow };
+    }
+
+    return { authorized: false, error: 'No access to this workflow', workflow };
+  } catch (error) {
+    console.error('verifyWorkflowAccess error:', error);
+    return { authorized: false, error: error.message, workflow: null };
+  }
+}
+
+// ============================================================================
+// AUDIT LOGGING
+// ============================================================================
+
+/**
+ * Log an audit event for workflow changes
+ */
+async function logAuditEvent(action, targetType, targetId, details, actorId = null) {
+  try {
+    const userId = actorId || await getCurrentUserId();
+    let actorEmail = 'system';
+
+    if (userId) {
+      try {
+        const currentUser = wixUsersBackend.currentUser;
+        actorEmail = await currentUser.getEmail();
+      } catch (e) {
+        // Ignore email fetch errors
+      }
+    }
+
+    const auditEntry = {
+      action,
+      targetType,
+      targetId,
+      details,
+      adminId: userId || 'system',
+      adminEmail: actorEmail,
+      timestamp: new Date()
+    };
+
+    await wixData.insert(CONFIG.auditLogCollection, auditEntry, { suppressAuth: true });
+    console.log(`Audit: ${action} on ${targetType}:${targetId}`);
+  } catch (error) {
+    // Don't fail the main operation if audit logging fails
+    console.error('Audit logging failed:', error);
+  }
+}
+
+// ============================================================================
+// STATE MACHINE
+// ============================================================================
+
+/**
+ * Validate if a status transition is allowed
+ */
+function isValidTransition(currentStatus, newStatus) {
+  const validNextStates = CONFIG.VALID_TRANSITIONS[currentStatus];
+  if (!validNextStates) {
+    return false;
+  }
+  return validNextStates.includes(newStatus);
+}
+
+/**
+ * Get the list of valid next states for a given status
+ */
+function getValidNextStates(currentStatus) {
+  return CONFIG.VALID_TRANSITIONS[currentStatus] || [];
+}
+
+// ============================================================================
+// CREATE ONBOARDING WORKFLOW
+// ============================================================================
+
+/**
+ * Create a new onboarding workflow for a driver
+ *
+ * @param {string} driverId - Driver profile ID
+ * @param {string} carrierId - Carrier ID
+ * @param {string} recruiterId - Recruiter user ID (optional, defaults to current user)
+ * @param {Object} config - Workflow configuration
+ * @param {Date} config.startDate - Intended start date
+ * @param {string} config.offerLetterId - Offer letter ID (optional)
+ * @param {boolean} config.skipBackgroundCheck - Skip background check (default: false)
+ * @param {boolean} config.skipDrugTest - Skip drug test (default: false)
+ * @param {boolean} config.skipOrientation - Skip orientation (default: false)
+ * @returns {Promise<Object>} - Created workflow with next steps
+ */
+export async function createOnboardingWorkflow(driverId, carrierId, recruiterId = null, config = {}) {
+  try {
+    // Validate required parameters
+    if (!driverId) {
+      return createErrorResponse(CONFIG.ERROR_CODES.VALIDATION_FAILED, 'Driver ID is required');
+    }
+    if (!carrierId) {
+      return createErrorResponse(CONFIG.ERROR_CODES.VALIDATION_FAILED, 'Carrier ID is required');
+    }
+
+    // Verify recruiter access to carrier
+    const accessCheck = await verifyRecruiterAccess(carrierId);
+    if (!accessCheck.authorized) {
+      return createErrorResponse(CONFIG.ERROR_CODES.UNAUTHORIZED, accessCheck.error);
+    }
+
+    const effectiveRecruiterId = recruiterId || accessCheck.recruiterId;
+
+    // Verify driver exists
+    const driver = await wixData.get(CONFIG.driverProfilesCollection, driverId, { suppressAuth: true });
+    if (!driver) {
+      return createErrorResponse(CONFIG.ERROR_CODES.NOT_FOUND, 'Driver profile not found');
+    }
+
+    // Get carrier info
+    const carrier = await wixData.get(CONFIG.carriersCollection, carrierId, { suppressAuth: true });
+    if (!carrier) {
+      return createErrorResponse(CONFIG.ERROR_CODES.NOT_FOUND, 'Carrier not found');
+    }
+
+    // Check for existing active workflow for this driver-carrier combination
+    const existingWorkflow = await wixData.query(CONFIG.workflowsCollection)
+      .eq('driver_id', driverId)
+      .eq('carrier_id', carrierId)
+      .ne('status', CONFIG.STATUS.COMPLETED)
+      .ne('status', CONFIG.STATUS.CANCELLED)
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if (existingWorkflow.items.length > 0) {
+      return createErrorResponse(
+        CONFIG.ERROR_CODES.DUPLICATE_WORKFLOW,
+        'An active onboarding workflow already exists for this driver and carrier',
+        { existingWorkflowId: existingWorkflow.items[0]._id }
+      );
+    }
+
+    const now = new Date();
+
+    // Create the workflow record
+    const workflowData = {
+      driver_id: driverId,
+      carrier_id: carrierId,
+      recruiter_id: effectiveRecruiterId,
+      status: CONFIG.STATUS.PENDING,
+      start_date: config.startDate ? new Date(config.startDate) : null,
+      actual_start_date: null,
+      offer_letter_id: config.offerLetterId || null,
+
+      // Sub-statuses
+      documents_status: CONFIG.DOCUMENTS_STATUS.PENDING,
+      background_status: config.skipBackgroundCheck ? CONFIG.BACKGROUND_STATUS.PASSED : CONFIG.BACKGROUND_STATUS.NOT_STARTED,
+      drug_test_status: config.skipDrugTest ? CONFIG.DRUG_TEST_STATUS.PASSED : CONFIG.DRUG_TEST_STATUS.NOT_STARTED,
+      orientation_status: config.skipOrientation ? CONFIG.ORIENTATION_STATUS.COMPLETED : CONFIG.ORIENTATION_STATUS.NOT_SCHEDULED,
+
+      // Compliance tracking
+      compliance_verified: false,
+      compliance_issues: [],
+
+      // Configuration flags
+      skip_background_check: config.skipBackgroundCheck || false,
+      skip_drug_test: config.skipDrugTest || false,
+      skip_orientation: config.skipOrientation || false,
+
+      // Metadata
+      metadata: {
+        created_by: effectiveRecruiterId,
+        carrier_dot: accessCheck.carrierDot,
+        driver_name: driver.display_name || driver.driver_name || 'Unknown',
+        carrier_name: carrier.legal_name || carrier.title || 'Unknown'
+      },
+
+      // Status history
+      status_history: JSON.stringify([{
+        status: CONFIG.STATUS.PENDING,
+        timestamp: now.toISOString(),
+        actor: effectiveRecruiterId,
+        note: 'Workflow created'
+      }]),
+
+      // Timestamps
+      _createdDate: now,
+      _updatedDate: now
+    };
+
+    const insertedWorkflow = await wixData.insert(CONFIG.workflowsCollection, workflowData, { suppressAuth: true });
+
+    // Update driver profile with active workflow reference
+    await wixData.update(CONFIG.driverProfilesCollection, {
+      ...driver,
+      active_workflow_id: insertedWorkflow._id,
+      onboarding_status: 'in_progress',
+      updated_date: now
+    }, { suppressAuth: true });
+
+    // Log audit event
+    await logAuditEvent(
+      'createOnboardingWorkflow',
+      'workflow',
+      insertedWorkflow._id,
+      {
+        driverId,
+        carrierId,
+        driverName: workflowData.metadata.driver_name,
+        carrierName: workflowData.metadata.carrier_name
+      },
+      effectiveRecruiterId
+    );
+
+    // Calculate next steps
+    const nextSteps = calculateNextSteps(insertedWorkflow);
+
+    console.log(`Created onboarding workflow ${insertedWorkflow._id} for driver ${driverId}`);
+
+    return {
+      success: true,
+      workflow: insertedWorkflow,
+      workflowId: insertedWorkflow._id,
+      nextSteps
+    };
+
+  } catch (error) {
+    console.error('createOnboardingWorkflow error:', error);
+    return createErrorResponse(CONFIG.ERROR_CODES.DATABASE_ERROR, error.message);
+  }
+}
+
+// ============================================================================
+// GET WORKFLOW STATUS
+// ============================================================================
+
+/**
+ * Get full workflow status with all sub-statuses
+ *
+ * @param {string} workflowId - Workflow ID
+ * @returns {Promise<Object>} - Full workflow with sub-statuses and progress
+ */
+export async function getWorkflowStatus(workflowId) {
+  try {
+    if (!workflowId) {
+      return createErrorResponse(CONFIG.ERROR_CODES.VALIDATION_FAILED, 'Workflow ID is required');
+    }
+
+    // Verify access
+    const accessCheck = await verifyWorkflowAccess(workflowId);
+    if (!accessCheck.authorized) {
+      return createErrorResponse(CONFIG.ERROR_CODES.UNAUTHORIZED, accessCheck.error);
+    }
+
+    const workflow = accessCheck.workflow;
+
+    // Get related data
+    const [documents, backgroundChecks, drugTests] = await Promise.all([
+      getWorkflowDocuments(workflowId),
+      getWorkflowBackgroundChecks(workflowId),
+      getWorkflowDrugTests(workflowId)
+    ]);
+
+    // Get orientation booking if scheduled
+    let orientationBooking = null;
+    if (workflow.orientation_slot_id) {
+      try {
+        orientationBooking = await wixData.get(CONFIG.orientationSlotsCollection, workflow.orientation_slot_id, { suppressAuth: true });
+      } catch (e) {
+        // Orientation slot may not exist
+      }
+    }
+
+    // Parse status history
+    let statusHistory = [];
+    try {
+      statusHistory = workflow.status_history ? JSON.parse(workflow.status_history) : [];
+    } catch (e) {
+      statusHistory = [];
+    }
+
+    // Calculate progress percentage
+    const progress = calculateWorkflowProgress(workflow);
+
+    // Calculate days in process
+    const daysInProcess = Math.floor((new Date() - new Date(workflow._createdDate)) / (1000 * 60 * 60 * 24));
+
+    // Get valid next states
+    const validNextStates = getValidNextStates(workflow.status);
+
+    return {
+      success: true,
+      workflow: {
+        ...workflow,
+        status_history: statusHistory
+      },
+      documents,
+      backgroundChecks,
+      drugTests,
+      orientationBooking,
+      progress,
+      daysInProcess,
+      validNextStates,
+      accessRole: accessCheck.role
+    };
+
+  } catch (error) {
+    console.error('getWorkflowStatus error:', error);
+    return createErrorResponse(CONFIG.ERROR_CODES.DATABASE_ERROR, error.message);
+  }
+}
+
+// ============================================================================
+// GET ACTIVE WORKFLOWS
+// ============================================================================
+
+/**
+ * Query workflows by filters
+ *
+ * @param {Object} filters - Query filters
+ * @param {string} filters.recruiterId - Filter by recruiter
+ * @param {string} filters.carrierId - Filter by carrier
+ * @param {string} filters.status - Filter by status
+ * @param {string} filters.driverId - Filter by driver
+ * @param {Object} filters.dateRange - Filter by date range { from, to }
+ * @param {number} filters.page - Page number (default: 1)
+ * @param {number} filters.pageSize - Page size (default: 50)
+ * @returns {Promise<Object>} - List of workflows with pagination
+ */
+export async function getActiveWorkflows(filters = {}) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return createErrorResponse(CONFIG.ERROR_CODES.UNAUTHORIZED, 'Not authenticated');
+    }
+
+    const {
+      recruiterId,
+      carrierId,
+      status,
+      driverId,
+      dateRange,
+      page = 1,
+      pageSize = 50,
+      includeCompleted = false
+    } = filters;
+
+    // Build query
+    let query = wixData.query(CONFIG.workflowsCollection);
+
+    // If recruiterId filter is provided, use it; otherwise, get workflows for all carriers the user has access to
+    if (recruiterId) {
+      query = query.eq('recruiter_id', recruiterId);
+    } else {
+      // Get all carriers this user has access to
+      const carrierAccessResult = await wixData.query(CONFIG.recruiterCarriersCollection)
+        .eq('recruiter_id', userId)
+        .eq('is_active', true)
+        .find({ suppressAuth: true });
+
+      if (carrierAccessResult.items.length === 0) {
+        return {
+          success: true,
+          workflows: [],
+          totalCount: 0,
+          page,
+          pageSize,
+          totalPages: 0
+        };
+      }
+
+      const carrierIds = carrierAccessResult.items.map(a => a.carrier_dot);
+
+      // Query by carrier DOT stored in metadata
+      // Note: This requires the carrier_dot to be stored in metadata or as a separate indexed field
+      query = query.eq('recruiter_id', userId);
+    }
+
+    // Apply carrier filter
+    if (carrierId) {
+      query = query.eq('carrier_id', carrierId);
+    }
+
+    // Apply status filter
+    if (status && status !== 'all') {
+      query = query.eq('status', status);
+    } else if (!includeCompleted) {
+      // Exclude completed and cancelled by default
+      query = query.ne('status', CONFIG.STATUS.COMPLETED)
+        .ne('status', CONFIG.STATUS.CANCELLED);
+    }
+
+    // Apply driver filter
+    if (driverId) {
+      query = query.eq('driver_id', driverId);
+    }
+
+    // Apply date range filter
+    if (dateRange) {
+      if (dateRange.from) {
+        query = query.ge('_createdDate', new Date(dateRange.from));
+      }
+      if (dateRange.to) {
+        const endDate = new Date(dateRange.to);
+        endDate.setHours(23, 59, 59, 999);
+        query = query.le('_createdDate', endDate);
+      }
+    }
+
+    // Sort by most recent
+    query = query.descending('_updatedDate');
+
+    // Apply pagination
+    const skip = (page - 1) * pageSize;
+    query = query.skip(skip).limit(pageSize);
+
+    const result = await query.find({ suppressAuth: true });
+
+    // Get total count for pagination
+    let countQuery = wixData.query(CONFIG.workflowsCollection);
+    if (recruiterId) {
+      countQuery = countQuery.eq('recruiter_id', recruiterId);
+    } else {
+      countQuery = countQuery.eq('recruiter_id', userId);
+    }
+    if (carrierId) {
+      countQuery = countQuery.eq('carrier_id', carrierId);
+    }
+    if (status && status !== 'all') {
+      countQuery = countQuery.eq('status', status);
+    } else if (!includeCompleted) {
+      countQuery = countQuery.ne('status', CONFIG.STATUS.COMPLETED)
+        .ne('status', CONFIG.STATUS.CANCELLED);
+    }
+    const totalCount = await countQuery.count({ suppressAuth: true });
+
+    // Enrich workflows with summary data
+    const enrichedWorkflows = result.items.map(workflow => {
+      const progress = calculateWorkflowProgress(workflow);
+      const daysInProcess = Math.floor((new Date() - new Date(workflow._createdDate)) / (1000 * 60 * 60 * 24));
+
+      return {
+        ...workflow,
+        progress,
+        daysInProcess,
+        driverName: workflow.metadata?.driver_name || 'Unknown',
+        carrierName: workflow.metadata?.carrier_name || 'Unknown'
+      };
+    });
+
+    return {
+      success: true,
+      workflows: enrichedWorkflows,
+      totalCount,
+      page,
+      pageSize,
+      totalPages: Math.ceil(totalCount / pageSize)
+    };
+
+  } catch (error) {
+    console.error('getActiveWorkflows error:', error);
+    return createErrorResponse(CONFIG.ERROR_CODES.DATABASE_ERROR, error.message);
+  }
+}
+
+// ============================================================================
+// UPDATE WORKFLOW STATUS
+// ============================================================================
+
+/**
+ * Update workflow status with state machine validation
+ *
+ * @param {string} workflowId - Workflow ID
+ * @param {string} newStatus - New status
+ * @param {Object} metadata - Additional metadata for the transition
+ * @param {string} metadata.note - Note about the status change
+ * @param {Object} metadata.subStatuses - Sub-status updates
+ * @returns {Promise<Object>} - Updated workflow
+ */
+export async function updateWorkflowStatus(workflowId, newStatus, metadata = {}) {
+  try {
+    if (!workflowId) {
+      return createErrorResponse(CONFIG.ERROR_CODES.VALIDATION_FAILED, 'Workflow ID is required');
+    }
+    if (!newStatus) {
+      return createErrorResponse(CONFIG.ERROR_CODES.VALIDATION_FAILED, 'New status is required');
+    }
+
+    // Verify access
+    const accessCheck = await verifyWorkflowAccess(workflowId);
+    if (!accessCheck.authorized) {
+      return createErrorResponse(CONFIG.ERROR_CODES.UNAUTHORIZED, accessCheck.error);
+    }
+
+    const workflow = accessCheck.workflow;
+    const currentStatus = workflow.status;
+
+    // Validate transition
+    if (!isValidTransition(currentStatus, newStatus)) {
+      return createErrorResponse(
+        CONFIG.ERROR_CODES.INVALID_TRANSITION,
+        `Invalid status transition from '${currentStatus}' to '${newStatus}'`,
+        {
+          currentStatus,
+          newStatus,
+          validNextStates: getValidNextStates(currentStatus)
+        }
+      );
+    }
+
+    const now = new Date();
+    const userId = accessCheck.userId;
+
+    // Parse existing status history
+    let statusHistory = [];
+    try {
+      statusHistory = workflow.status_history ? JSON.parse(workflow.status_history) : [];
+    } catch (e) {
+      statusHistory = [];
+    }
+
+    // Add new status entry
+    statusHistory.push({
+      status: newStatus,
+      previousStatus: currentStatus,
+      timestamp: now.toISOString(),
+      actor: userId,
+      note: metadata.note || `Status changed from ${currentStatus} to ${newStatus}`
+    });
+
+    // Prepare update data
+    const updateData = {
+      ...workflow,
+      status: newStatus,
+      status_history: JSON.stringify(statusHistory),
+      _updatedDate: now
+    };
+
+    // Apply sub-status updates if provided
+    if (metadata.subStatuses) {
+      if (metadata.subStatuses.documents_status) {
+        updateData.documents_status = metadata.subStatuses.documents_status;
+      }
+      if (metadata.subStatuses.background_status) {
+        updateData.background_status = metadata.subStatuses.background_status;
+      }
+      if (metadata.subStatuses.drug_test_status) {
+        updateData.drug_test_status = metadata.subStatuses.drug_test_status;
+      }
+      if (metadata.subStatuses.orientation_status) {
+        updateData.orientation_status = metadata.subStatuses.orientation_status;
+      }
+    }
+
+    // Handle specific status transitions
+    if (newStatus === CONFIG.STATUS.COMPLETED) {
+      updateData.actual_start_date = now;
+
+      // Update driver profile
+      const driver = await wixData.get(CONFIG.driverProfilesCollection, workflow.driver_id, { suppressAuth: true });
+      if (driver) {
+        await wixData.update(CONFIG.driverProfilesCollection, {
+          ...driver,
+          onboarding_status: 'complete',
+          active_workflow_id: null,
+          updated_date: now
+        }, { suppressAuth: true });
+      }
+    }
+
+    if (newStatus === CONFIG.STATUS.CANCELLED) {
+      updateData.compliance_verified = false;
+
+      // Update driver profile
+      const driver = await wixData.get(CONFIG.driverProfilesCollection, workflow.driver_id, { suppressAuth: true });
+      if (driver) {
+        await wixData.update(CONFIG.driverProfilesCollection, {
+          ...driver,
+          onboarding_status: 'not_started',
+          active_workflow_id: null,
+          updated_date: now
+        }, { suppressAuth: true });
+      }
+    }
+
+    if (newStatus === CONFIG.STATUS.COMPLIANCE_VERIFIED) {
+      updateData.compliance_verified = true;
+      updateData.compliance_issues = [];
+    }
+
+    // Store additional metadata
+    if (metadata.additionalData) {
+      updateData.metadata = {
+        ...updateData.metadata,
+        ...metadata.additionalData
+      };
+    }
+
+    // Update the workflow
+    const updatedWorkflow = await wixData.update(CONFIG.workflowsCollection, updateData, { suppressAuth: true });
+
+    // Log audit event
+    await logAuditEvent(
+      'updateWorkflowStatus',
+      'workflow',
+      workflowId,
+      {
+        previousStatus: currentStatus,
+        newStatus,
+        note: metadata.note
+      },
+      userId
+    );
+
+    // Calculate next steps
+    const nextSteps = calculateNextSteps(updatedWorkflow);
+
+    console.log(`Workflow ${workflowId} status updated: ${currentStatus} -> ${newStatus}`);
+
+    return {
+      success: true,
+      workflow: updatedWorkflow,
+      previousStatus: currentStatus,
+      newStatus,
+      nextSteps
+    };
+
+  } catch (error) {
+    console.error('updateWorkflowStatus error:', error);
+    return createErrorResponse(CONFIG.ERROR_CODES.DATABASE_ERROR, error.message);
+  }
+}
+
+// ============================================================================
+// CANCEL WORKFLOW
+// ============================================================================
+
+/**
+ * Cancel a workflow and cleanup related records
+ *
+ * @param {string} workflowId - Workflow ID
+ * @param {string} reason - Reason for cancellation
+ * @returns {Promise<Object>} - Cancellation result
+ */
+export async function cancelWorkflow(workflowId, reason = '') {
+  try {
+    if (!workflowId) {
+      return createErrorResponse(CONFIG.ERROR_CODES.VALIDATION_FAILED, 'Workflow ID is required');
+    }
+
+    // Verify access
+    const accessCheck = await verifyWorkflowAccess(workflowId);
+    if (!accessCheck.authorized) {
+      return createErrorResponse(CONFIG.ERROR_CODES.UNAUTHORIZED, accessCheck.error);
+    }
+
+    const workflow = accessCheck.workflow;
+
+    // Check if already cancelled or completed
+    if (workflow.status === CONFIG.STATUS.CANCELLED) {
+      return createErrorResponse(
+        CONFIG.ERROR_CODES.INVALID_TRANSITION,
+        'Workflow is already cancelled'
+      );
+    }
+    if (workflow.status === CONFIG.STATUS.COMPLETED) {
+      return createErrorResponse(
+        CONFIG.ERROR_CODES.INVALID_TRANSITION,
+        'Cannot cancel a completed workflow'
+      );
+    }
+
+    const now = new Date();
+    const userId = accessCheck.userId;
+
+    // Parse existing status history
+    let statusHistory = [];
+    try {
+      statusHistory = workflow.status_history ? JSON.parse(workflow.status_history) : [];
+    } catch (e) {
+      statusHistory = [];
+    }
+
+    // Add cancellation entry
+    statusHistory.push({
+      status: CONFIG.STATUS.CANCELLED,
+      previousStatus: workflow.status,
+      timestamp: now.toISOString(),
+      actor: userId,
+      note: reason || 'Workflow cancelled'
+    });
+
+    // Update the workflow
+    const updateData = {
+      ...workflow,
+      status: CONFIG.STATUS.CANCELLED,
+      status_history: JSON.stringify(statusHistory),
+      cancellation_reason: reason,
+      cancelled_date: now,
+      cancelled_by: userId,
+      _updatedDate: now
+    };
+
+    const updatedWorkflow = await wixData.update(CONFIG.workflowsCollection, updateData, { suppressAuth: true });
+
+    // Update driver profile
+    const driver = await wixData.get(CONFIG.driverProfilesCollection, workflow.driver_id, { suppressAuth: true });
+    if (driver && driver.active_workflow_id === workflowId) {
+      await wixData.update(CONFIG.driverProfilesCollection, {
+        ...driver,
+        onboarding_status: 'not_started',
+        active_workflow_id: null,
+        updated_date: now
+      }, { suppressAuth: true });
+    }
+
+    // Cancel pending document requests
+    const pendingDocs = await wixData.query(CONFIG.documentRequestsCollection)
+      .eq('workflow_id', workflowId)
+      .eq('status', 'requested')
+      .find({ suppressAuth: true });
+
+    for (const doc of pendingDocs.items) {
+      await wixData.update(CONFIG.documentRequestsCollection, {
+        ...doc,
+        status: 'cancelled',
+        cancelled_date: now
+      }, { suppressAuth: true });
+    }
+
+    // Note: Background check and drug test cancellations may require API calls to providers
+    // These would be handled by their respective services
+
+    // Log audit event
+    await logAuditEvent(
+      'cancelWorkflow',
+      'workflow',
+      workflowId,
+      {
+        previousStatus: workflow.status,
+        reason,
+        driverName: workflow.metadata?.driver_name,
+        carrierName: workflow.metadata?.carrier_name
+      },
+      userId
+    );
+
+    console.log(`Workflow ${workflowId} cancelled: ${reason}`);
+
+    return {
+      success: true,
+      workflow: updatedWorkflow,
+      reason
+    };
+
+  } catch (error) {
+    console.error('cancelWorkflow error:', error);
+    return createErrorResponse(CONFIG.ERROR_CODES.DATABASE_ERROR, error.message);
+  }
+}
+
+// ============================================================================
+// GET COMPLIANCE CHECKLIST
+// ============================================================================
+
+/**
+ * Get aggregated compliance checklist for a workflow
+ *
+ * @param {string} workflowId - Workflow ID
+ * @returns {Promise<Object>} - Compliance checklist with status
+ */
+export async function getComplianceChecklist(workflowId) {
+  try {
+    if (!workflowId) {
+      return createErrorResponse(CONFIG.ERROR_CODES.VALIDATION_FAILED, 'Workflow ID is required');
+    }
+
+    // Verify access
+    const accessCheck = await verifyWorkflowAccess(workflowId);
+    if (!accessCheck.authorized) {
+      return createErrorResponse(CONFIG.ERROR_CODES.UNAUTHORIZED, accessCheck.error);
+    }
+
+    const workflow = accessCheck.workflow;
+
+    // Get carrier configuration
+    let carrierConfig = {
+      required_documents: ['cdl_front', 'cdl_back', 'mvr', 'medical_card', 'drug_test_consent'],
+      optional_documents: ['psp', 'employment_history'],
+      background_check_required: true,
+      drug_test_required: true,
+      orientation_required: true
+    };
+
+    try {
+      const carrier = await wixData.get(CONFIG.carriersCollection, workflow.carrier_id, { suppressAuth: true });
+      if (carrier && carrier.onboarding_config) {
+        carrierConfig = { ...carrierConfig, ...carrier.onboarding_config };
+      }
+    } catch (e) {
+      // Use defaults
+    }
+
+    // Get document requests
+    const documents = await getWorkflowDocuments(workflowId);
+
+    // Build document checklist
+    const documentChecklist = carrierConfig.required_documents.map(docType => {
+      const doc = documents.find(d => d.document_type === docType);
+      return {
+        type: docType,
+        displayName: getDocumentDisplayName(docType),
+        required: true,
+        status: doc ? doc.status : 'not_requested',
+        submitted: doc && doc.status !== 'requested',
+        verified: doc && doc.status === 'verified',
+        submittedDate: doc?.submitted_date,
+        verifiedDate: doc?.verified_date
+      };
+    });
+
+    // Add optional documents
+    carrierConfig.optional_documents.forEach(docType => {
+      const doc = documents.find(d => d.document_type === docType);
+      documentChecklist.push({
+        type: docType,
+        displayName: getDocumentDisplayName(docType),
+        required: false,
+        status: doc ? doc.status : 'not_requested',
+        submitted: doc && doc.status !== 'requested',
+        verified: doc && doc.status === 'verified',
+        submittedDate: doc?.submitted_date,
+        verifiedDate: doc?.verified_date
+      });
+    });
+
+    // Calculate document completion
+    const requiredDocs = documentChecklist.filter(d => d.required);
+    const completedRequiredDocs = requiredDocs.filter(d => d.verified);
+    const documentProgress = requiredDocs.length > 0
+      ? Math.round((completedRequiredDocs.length / requiredDocs.length) * 100)
+      : 100;
+
+    // Build compliance checklist
+    const checklist = {
+      documents: {
+        items: documentChecklist,
+        completedCount: completedRequiredDocs.length,
+        totalRequired: requiredDocs.length,
+        progress: documentProgress,
+        status: documentProgress === 100 ? 'complete' : 'incomplete'
+      },
+      backgroundCheck: {
+        required: carrierConfig.background_check_required && !workflow.skip_background_check,
+        status: workflow.background_status,
+        passed: workflow.background_status === CONFIG.BACKGROUND_STATUS.PASSED,
+        skipped: workflow.skip_background_check
+      },
+      drugTest: {
+        required: carrierConfig.drug_test_required && !workflow.skip_drug_test,
+        status: workflow.drug_test_status,
+        passed: workflow.drug_test_status === CONFIG.DRUG_TEST_STATUS.PASSED,
+        skipped: workflow.skip_drug_test
+      },
+      orientation: {
+        required: carrierConfig.orientation_required && !workflow.skip_orientation,
+        status: workflow.orientation_status,
+        completed: workflow.orientation_status === CONFIG.ORIENTATION_STATUS.COMPLETED,
+        skipped: workflow.skip_orientation
+      }
+    };
+
+    // Calculate overall compliance status
+    const issues = [];
+    let isCompliant = true;
+
+    if (checklist.documents.status !== 'complete') {
+      isCompliant = false;
+      const missingDocs = requiredDocs.filter(d => !d.verified).map(d => d.displayName);
+      issues.push(`Missing documents: ${missingDocs.join(', ')}`);
+    }
+
+    if (checklist.backgroundCheck.required && !checklist.backgroundCheck.passed) {
+      isCompliant = false;
+      if (workflow.background_status === CONFIG.BACKGROUND_STATUS.FAILED) {
+        issues.push('Background check failed');
+      } else {
+        issues.push('Background check not completed');
+      }
+    }
+
+    if (checklist.drugTest.required && !checklist.drugTest.passed) {
+      isCompliant = false;
+      if (workflow.drug_test_status === CONFIG.DRUG_TEST_STATUS.FAILED) {
+        issues.push('Drug test failed');
+      } else {
+        issues.push('Drug test not completed');
+      }
+    }
+
+    if (checklist.orientation.required && !checklist.orientation.completed) {
+      isCompliant = false;
+      issues.push('Orientation not completed');
+    }
+
+    // Calculate overall progress
+    let stepsCompleted = 0;
+    let totalSteps = 1; // Documents always count
+
+    if (checklist.documents.status === 'complete') stepsCompleted++;
+
+    if (checklist.backgroundCheck.required) {
+      totalSteps++;
+      if (checklist.backgroundCheck.passed) stepsCompleted++;
+    }
+
+    if (checklist.drugTest.required) {
+      totalSteps++;
+      if (checklist.drugTest.passed) stepsCompleted++;
+    }
+
+    if (checklist.orientation.required) {
+      totalSteps++;
+      if (checklist.orientation.completed) stepsCompleted++;
+    }
+
+    const overallProgress = Math.round((stepsCompleted / totalSteps) * 100);
+
+    return {
+      success: true,
+      workflowId,
+      checklist,
+      isCompliant,
+      issues,
+      overallProgress,
+      stepsCompleted,
+      totalSteps,
+      readyToStart: isCompliant && workflow.status !== CONFIG.STATUS.CANCELLED
+    };
+
+  } catch (error) {
+    console.error('getComplianceChecklist error:', error);
+    return createErrorResponse(CONFIG.ERROR_CODES.DATABASE_ERROR, error.message);
+  }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Get documents for a workflow
+ */
+async function getWorkflowDocuments(workflowId) {
+  try {
+    const result = await wixData.query(CONFIG.documentRequestsCollection)
+      .eq('workflow_id', workflowId)
+      .find({ suppressAuth: true });
+    return result.items;
+  } catch (error) {
+    console.error('getWorkflowDocuments error:', error);
+    return [];
+  }
+}
+
+/**
+ * Get background checks for a workflow
+ */
+async function getWorkflowBackgroundChecks(workflowId) {
+  try {
+    const result = await wixData.query(CONFIG.backgroundChecksCollection)
+      .eq('workflow_id', workflowId)
+      .descending('ordered_date')
+      .find({ suppressAuth: true });
+    return result.items;
+  } catch (error) {
+    console.error('getWorkflowBackgroundChecks error:', error);
+    return [];
+  }
+}
+
+/**
+ * Get drug tests for a workflow
+ */
+async function getWorkflowDrugTests(workflowId) {
+  try {
+    const result = await wixData.query(CONFIG.drugTestsCollection)
+      .eq('workflow_id', workflowId)
+      .descending('_createdDate')
+      .find({ suppressAuth: true });
+    return result.items;
+  } catch (error) {
+    console.error('getWorkflowDrugTests error:', error);
+    return [];
+  }
+}
+
+/**
+ * Calculate workflow progress percentage
+ */
+function calculateWorkflowProgress(workflow) {
+  const statusWeights = {
+    [CONFIG.STATUS.PENDING]: 0,
+    [CONFIG.STATUS.OFFER_SENT]: 5,
+    [CONFIG.STATUS.OFFER_ACCEPTED]: 10,
+    [CONFIG.STATUS.IN_PROGRESS]: 15,
+    [CONFIG.STATUS.DOCUMENTS_PENDING]: 20,
+    [CONFIG.STATUS.DOCUMENTS_REQUESTED]: 25,
+    [CONFIG.STATUS.DOCUMENTS_COMPLETE]: 40,
+    [CONFIG.STATUS.BACKGROUND_CHECK]: 45,
+    [CONFIG.STATUS.BACKGROUND_ORDERED]: 50,
+    [CONFIG.STATUS.BACKGROUND_PASSED]: 60,
+    [CONFIG.STATUS.DRUG_TEST]: 65,
+    [CONFIG.STATUS.DRUG_TEST_SCHEDULED]: 70,
+    [CONFIG.STATUS.DRUG_TEST_PASSED]: 80,
+    [CONFIG.STATUS.ORIENTATION]: 82,
+    [CONFIG.STATUS.ORIENTATION_SCHEDULED]: 85,
+    [CONFIG.STATUS.ORIENTATION_COMPLETED]: 90,
+    [CONFIG.STATUS.COMPLIANCE_VERIFIED]: 95,
+    [CONFIG.STATUS.READY]: 98,
+    [CONFIG.STATUS.COMPLETED]: 100,
+    [CONFIG.STATUS.CANCELLED]: 0,
+    [CONFIG.STATUS.ON_HOLD]: null // Preserve current progress
+  };
+
+  return statusWeights[workflow.status] ?? 0;
+}
+
+/**
+ * Calculate next steps for a workflow
+ */
+function calculateNextSteps(workflow) {
+  const steps = [];
+
+  switch (workflow.status) {
+    case CONFIG.STATUS.PENDING:
+      steps.push({
+        action: 'send_offer',
+        label: 'Send offer letter to driver',
+        priority: 'high'
+      });
+      break;
+
+    case CONFIG.STATUS.OFFER_SENT:
+      steps.push({
+        action: 'await_acceptance',
+        label: 'Waiting for driver to accept offer',
+        priority: 'medium'
+      });
+      break;
+
+    case CONFIG.STATUS.OFFER_ACCEPTED:
+    case CONFIG.STATUS.IN_PROGRESS:
+      if (workflow.documents_status !== CONFIG.DOCUMENTS_STATUS.COMPLETE) {
+        steps.push({
+          action: 'request_documents',
+          label: 'Request required documents from driver',
+          priority: 'high'
+        });
+      }
+      if (!workflow.skip_background_check && workflow.background_status === CONFIG.BACKGROUND_STATUS.NOT_STARTED) {
+        steps.push({
+          action: 'order_background_check',
+          label: 'Order background check',
+          priority: 'high'
+        });
+      }
+      if (!workflow.skip_drug_test && workflow.drug_test_status === CONFIG.DRUG_TEST_STATUS.NOT_STARTED) {
+        steps.push({
+          action: 'schedule_drug_test',
+          label: 'Schedule drug test',
+          priority: 'high'
+        });
+      }
+      break;
+
+    case CONFIG.STATUS.DOCUMENTS_PENDING:
+    case CONFIG.STATUS.DOCUMENTS_REQUESTED:
+      steps.push({
+        action: 'await_documents',
+        label: 'Waiting for driver to submit documents',
+        priority: 'medium'
+      });
+      steps.push({
+        action: 'send_reminder',
+        label: 'Send document reminder',
+        priority: 'low'
+      });
+      break;
+
+    case CONFIG.STATUS.DOCUMENTS_COMPLETE:
+      if (!workflow.skip_background_check && workflow.background_status === CONFIG.BACKGROUND_STATUS.NOT_STARTED) {
+        steps.push({
+          action: 'order_background_check',
+          label: 'Order background check',
+          priority: 'high'
+        });
+      }
+      break;
+
+    case CONFIG.STATUS.BACKGROUND_ORDERED:
+      steps.push({
+        action: 'await_background_check',
+        label: 'Waiting for background check results',
+        priority: 'medium'
+      });
+      break;
+
+    case CONFIG.STATUS.BACKGROUND_PASSED:
+    case CONFIG.STATUS.DRUG_TEST_PASSED:
+      if (!workflow.skip_orientation && workflow.orientation_status === CONFIG.ORIENTATION_STATUS.NOT_SCHEDULED) {
+        steps.push({
+          action: 'schedule_orientation',
+          label: 'Schedule orientation',
+          priority: 'high'
+        });
+      }
+      break;
+
+    case CONFIG.STATUS.ORIENTATION_SCHEDULED:
+      steps.push({
+        action: 'await_orientation',
+        label: 'Waiting for driver to complete orientation',
+        priority: 'medium'
+      });
+      break;
+
+    case CONFIG.STATUS.ORIENTATION_COMPLETED:
+    case CONFIG.STATUS.COMPLIANCE_VERIFIED:
+      steps.push({
+        action: 'mark_ready',
+        label: 'Mark driver as ready to start',
+        priority: 'high'
+      });
+      break;
+
+    case CONFIG.STATUS.READY:
+      steps.push({
+        action: 'complete_onboarding',
+        label: 'Complete onboarding when driver starts',
+        priority: 'high'
+      });
+      break;
+
+    case CONFIG.STATUS.ON_HOLD:
+      steps.push({
+        action: 'resume_workflow',
+        label: 'Resume onboarding workflow',
+        priority: 'medium'
+      });
+      break;
+  }
+
+  return steps;
+}
+
+/**
+ * Get display name for document type
+ */
+function getDocumentDisplayName(docType) {
+  const displayNames = {
+    'cdl_front': 'CDL Front',
+    'cdl_back': 'CDL Back',
+    'mvr': 'Motor Vehicle Record (MVR)',
+    'psp': 'Pre-Employment Screening Program (PSP)',
+    'medical_card': 'DOT Medical Card',
+    'drug_test_consent': 'Drug Test Consent Form',
+    'employment_app': 'Employment Application',
+    'w4': 'W-4 Tax Form',
+    'i9': 'I-9 Employment Eligibility',
+    'direct_deposit': 'Direct Deposit Authorization',
+    'social_security': 'Social Security Card',
+    'employment_history': 'Employment History (10 years)',
+    'proof_of_address': 'Proof of Address',
+    'custom': 'Custom Document'
+  };
+
+  return displayNames[docType] || docType;
+}
+
+// ============================================================================
+// EXPORT CONFIGURATION (for use by other services)
+// ============================================================================
+
+export const WORKFLOW_STATUS = CONFIG.STATUS;
+export const WORKFLOW_ERROR_CODES = CONFIG.ERROR_CODES;
