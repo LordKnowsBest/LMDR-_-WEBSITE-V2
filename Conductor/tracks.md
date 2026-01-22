@@ -128,7 +128,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## Driver New Features
 
-### [ ] Track: Driver Road Utilities
+### [~] Track: Driver Road Utilities
 *Link: [./tracks/driver_road_utilities_20260120/](./tracks/driver_road_utilities_20260120/)*
 *Depends on: driver_cockpit_20251221*
 *Priority: Critical*

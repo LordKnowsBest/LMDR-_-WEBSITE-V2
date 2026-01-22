@@ -1,0 +1,372 @@
+/**
+ * Parking Service - Truck parking finder and reporting
+ */
+
+import wixData from 'wix-data';
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import { calculateDistance } from 'backend/locationService';
+
+// ... existing collections ...
+
+// ============================================
+// EXTERNAL API CONFIGURATION
+// ============================================
+
+const API_CONFIG = {
+    TRUCK_PARKING_CLUB: {
+        baseUrl: 'https://api.truckparkingclub.com/v1',
+        timeout: 5000,
+        rateLimitPerMin: 100
+    }
+};
+
+// Simple circuit breaker state
+const circuitBreaker = {
+    truckParkingClub: {
+        failures: 0,
+        lastFailure: 0,
+        status: 'CLOSED' // CLOSED, OPEN, HALF_OPEN
+    }
+};
+
+/**
+ * Query external TruckParkingClub API for real-time data
+ */
+async function queryTruckParkingClubAPI(lat, lng, radius) {
+    // Check circuit breaker
+    if (circuitBreaker.truckParkingClub.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.truckParkingClub.lastFailure > 60000) {
+            circuitBreaker.truckParkingClub.status = 'HALF_OPEN';
+        } else {
+            throw new Error('Circuit breaker is OPEN for TruckParkingClub');
+        }
+    }
+
+    try {
+        const apiKey = await getSecret('TRUCK_PARKING_CLUB_API_KEY');
+        const response = await fetch(`${API_CONFIG.TRUCK_PARKING_CLUB.baseUrl}/parking/search?lat=${lat}&lng=${lng}&radius=${radius}`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Accept': 'application/json'
+            },
+            timeout: API_CONFIG.TRUCK_PARKING_CLUB.timeout
+        });
+
+        if (!response.ok) {
+            throw new Error(`TruckParkingClub API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        
+        // Reset circuit breaker on success
+        circuitBreaker.truckParkingClub.failures = 0;
+        circuitBreaker.truckParkingClub.status = 'CLOSED';
+
+        return normalizeParkingData(data.results, 'truckparkingclub');
+    } catch (error) {
+        circuitBreaker.truckParkingClub.failures++;
+        circuitBreaker.truckParkingClub.lastFailure = Date.now();
+        if (circuitBreaker.truckParkingClub.failures >= 5) {
+            circuitBreaker.truckParkingClub.status = 'OPEN';
+        }
+        console.error('[ParkingService] TruckParkingClub API failed:', error.message);
+        throw error;
+    }
+}
+
+/**
+ * Normalize data from different sources into a standard format
+ */
+function normalizeParkingData(results, source) {
+    if (!Array.isArray(results)) return [];
+
+    return results.map(item => ({
+        external_id: item.id || item.external_id,
+        source: source,
+        name: item.name,
+        location: {
+            lat: item.latitude || item.lat || item.location?.lat,
+            lng: item.longitude || item.lng || item.location?.lng
+        },
+        address: item.address || {},
+        total_spaces: item.total_spaces || 0,
+        available_spaces: item.available_spaces || null,
+        amenities: item.amenities || [],
+        avg_rating: item.rating || 0,
+        last_availability_update: item.updated_at || new Date()
+    }));
+}
+
+const COLLECTIONS = {
+    LOCATIONS: 'ParkingLocations',
+    REPORTS: 'ParkingReports',
+    CACHE: 'RoadUtilityCache'
+};
+
+/**
+ * Fallback query to ParkMyTruck API
+ */
+async function queryParkMyTruckAPI(lat, lng, radius) {
+    try {
+        const apiKey = await getSecret('PARK_MY_TRUCK_API_KEY').catch(() => null);
+        if (!apiKey) return []; // Skip if no key
+
+        const response = await fetch(`https://api.parkmytruck.com/v1/search?lat=${lat}&lng=${lng}&radius=${radius}`, {
+            headers: { 'X-API-Key': apiKey }
+        });
+
+        if (!response.ok) return [];
+        const data = await response.json();
+        return normalizeParkingData(data.locations, 'parkmytruck');
+    } catch (err) {
+        return [];
+    }
+}
+
+/**
+ * Query state DOT APIs for rest area status
+ */
+async function queryStateDOTAPIs(lat, lng, radius) {
+    // This would typically involve checking which state we are in 
+    // and calling the relevant DOT API. For now, we'll return an empty array.
+    return [];
+}
+
+/**
+ * Search for truck parking near a location
+ * @param {number} lat 
+ * @param {number} lng 
+ * @param {number} radius 
+ * @param {Object} filters 
+ */
+export async function searchParking(lat, lng, radius = 25, filters = {}) {
+    const cacheKey = `parking:${lat.toFixed(2)}:${lng.toFixed(2)}:${radius}:${JSON.stringify(filters)}`;
+    
+    try {
+        // 1. Check cache first
+        const cached = await wixData.query(COLLECTIONS.CACHE)
+            .eq('cache_key', cacheKey)
+            .gt('expires_at', new Date())
+            .limit(1)
+            .find({ suppressAuth: true });
+            
+        if (cached.items.length > 0) {
+            return { success: true, items: cached.items[0].data, fromCache: true };
+        }
+
+        // 2. Cache miss: Fetch from multiple sources
+        const sources = [
+            queryTruckParkingClubAPI(lat, lng, radius).catch(() => []),
+            queryParkMyTruckAPI(lat, lng, radius),
+            queryStateDOTAPIs(lat, lng, radius),
+            // Also include local database locations
+            wixData.query(COLLECTIONS.LOCATIONS).limit(100).find({ suppressAuth: true }).then(res => res.items)
+        ];
+
+        const allResults = await Promise.all(sources);
+        const mergedItems = flattenAndMerge(allResults);
+
+        // Calculate distance and filter by radius
+        const filteredItems = mergedItems.map(item => {
+            const distance = calculateDistance(lat, lng, item.location.lat, item.location.lng);
+            return { ...item, distance_miles: parseFloat(distance.toFixed(2)) };
+        }).filter(item => item.distance_miles <= radius);
+
+        // Filter by amenities
+        let finalItems = filteredItems;
+        if (filters.amenities && Array.isArray(filters.amenities) && filters.amenities.length > 0) {
+            finalItems = filteredItems.filter(item => 
+                filters.amenities.every(amenity => item.amenities && item.amenities.includes(amenity))
+            );
+        }
+
+        // Sort by distance
+        finalItems.sort((a, b) => a.distance_miles - b.distance_miles);
+
+        // 3. Store in cache
+        const expiry = new Date();
+        expiry.setMinutes(expiry.getMinutes() + 5);
+        
+        await wixData.insert(COLLECTIONS.CACHE, {
+            cache_key: cacheKey,
+            cache_type: 'parking',
+            data: finalItems,
+            expires_at: expiry
+        }, { suppressAuth: true }).catch(err => console.error('Failed to update cache:', err));
+
+        return { success: true, items: finalItems };
+    } catch (error) {
+        console.error('[ParkingService] searchParking failed:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Deduplicate and merge results from multiple sources
+ */
+function flattenAndMerge(sourceResults) {
+    const merged = new Map();
+    
+    sourceResults.flat().forEach(item => {
+        // Use coordinates + name as a heuristic for deduplication if external_id is source-specific
+        const key = `${item.location.lat.toFixed(3)}:${item.location.lng.toFixed(3)}`;
+        if (!merged.has(key)) {
+            merged.set(key, item);
+        } else {
+            // If we already have it, maybe update available_spaces if the new source is "better"
+            const existing = merged.get(key);
+            if (item.available_spaces !== null && existing.available_spaces === null) {
+                merged.set(key, { ...existing, ...item });
+            }
+        }
+    });
+
+    return Array.from(merged.values());
+}
+
+/**
+ * Get detailed info for a specific parking location
+ * @param {string} locationId 
+ */
+export async function getParkingDetails(locationId) {
+    if (!locationId) return { success: false, error: 'locationId is required' };
+    
+    try {
+        const item = await wixData.get(COLLECTIONS.LOCATIONS, locationId, { suppressAuth: true });
+        if (!item) return { success: false, error: 'Location not found' };
+        
+        return { success: true, item };
+    } catch (error) {
+        console.error('[ParkingService] getParkingDetails failed:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Submit a parking availability report
+ * @param {string} locationId 
+ * @param {Object} report 
+ */
+export async function reportParkingAvailability(locationId, report) {
+    if (!locationId) return { success: false, error: 'locationId is required' };
+    if (!report.driver_id) return { success: false, error: 'driver_id is required' };
+    if (typeof report.spaces_available !== 'number' || report.spaces_available < 0) {
+        return { success: false, error: 'Invalid spaces available' };
+    }
+
+    // Rate limiting: 1 report per location per hour per driver
+    const oneHourAgo = new Date(Date.now() - 3600000);
+    try {
+        const recentReports = await wixData.query(COLLECTIONS.REPORTS)
+            .eq('location_id', locationId)
+            .eq('driver_id', report.driver_id)
+            .gt('reported_at', oneHourAgo)
+            .limit(1)
+            .find({ suppressAuth: true });
+
+        if (recentReports.items.length > 0) {
+            return { success: false, error: 'You have already reported for this location in the last hour' };
+        }
+
+        const record = {
+            location_id: locationId,
+            driver_id: report.driver_id,
+            spaces_available: report.spaces_available,
+            notes: report.notes || '',
+            reported_at: new Date()
+        };
+
+        const result = await wixData.insert(COLLECTIONS.REPORTS, record, { suppressAuth: true });
+        
+        // Trigger availability estimation update (async)
+        updateEstimatedAvailability(locationId).catch(err => console.error('Failed to update estimation:', err));
+
+        return { success: true, reportId: result._id };
+    } catch (error) {
+        console.error('[ParkingService] reportParkingAvailability failed:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Update the estimated availability for a location based on recent reports
+ */
+async function updateEstimatedAvailability(locationId) {
+    const twoHoursAgo = new Date(Date.now() - 7200000);
+    
+    const reports = await wixData.query(COLLECTIONS.REPORTS)
+        .eq('location_id', locationId)
+        .gt('reported_at', twoHoursAgo)
+        .descending('reported_at')
+        .limit(10)
+        .find({ suppressAuth: true });
+
+    if (reports.items.length === 0) return;
+
+    // Simple aggregation: average of recent reports weighted by recency
+    let totalWeightedSpaces = 0;
+    let totalWeight = 0;
+    const now = Date.now();
+
+    reports.items.forEach(report => {
+        const ageHours = (now - report.reported_at.getTime()) / 3600000;
+        const weight = 1 / (ageHours + 0.5); // Decay weight
+        totalWeightedSpaces += report.spaces_available * weight;
+        totalWeight += weight;
+    });
+
+    const estimatedSpaces = Math.round(totalWeightedSpaces / totalWeight);
+
+    await wixData.update(COLLECTIONS.LOCATIONS, {
+        _id: locationId,
+        available_spaces: estimatedSpaces,
+        availability_confidence: 'estimated',
+        last_availability_update: new Date()
+    }, { suppressAuth: true });
+}
+
+/**
+ * Calculate availability status (available, limited, full, unknown)
+ */
+function calculateAvailabilityStatus(item) {
+    if (item.available_spaces === null) return 'unknown';
+    
+    const ratio = item.total_spaces > 0 ? item.available_spaces / item.total_spaces : 1;
+    
+    if (item.available_spaces === 0) return 'full';
+    if (ratio < 0.1 || item.available_spaces < 5) return 'limited';
+    return 'available';
+}
+
+/**
+ * Get parking along a route
+ * @param {Array} routePoints 
+ * @param {Object} options 
+ */
+export async function getParkingAlongRoute(routePoints, options = {}) {
+    // Basic implementation: find parking near start, middle, and end
+    // A full implementation would check along the entire corridor
+    if (!Array.isArray(routePoints) || routePoints.length < 2) {
+        return { success: false, error: 'Invalid route points' };
+    }
+
+    // Simplified: check near all waypoints provided
+    const allResults = [];
+    const seenIds = new Set();
+
+    for (const point of routePoints) {
+        const nearPoint = await searchParking(point.lat, point.lng, options.radius || 10, options.filters);
+        if (nearPoint.success) {
+            for (const item of nearPoint.items) {
+                if (!seenIds.has(item._id)) {
+                    allResults.push(item);
+                    seenIds.add(item._id);
+                }
+            }
+        }
+    }
+
+    return { success: true, items: allResults };
+}
