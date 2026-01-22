@@ -312,80 +312,80 @@ Phase 5: Incident Reporting
 
 ### 4.1 Data Model & Backend Setup
 
-- [ ] Task: Create `CSAScoreHistory` collection in Wix CMS
-  - [ ] Add fields per spec (snapshot_date, basics, trend_vs_prior, etc.)
-  - [ ] Configure indexes on carrier_dot, snapshot_date
+- [x] Task: Create `CSAScoreHistory` collection in Wix CMS
+  - [x] Add fields per spec (snapshot_date, basics, trend_vs_prior, etc.)
+  - [x] Configure indexes on carrier_dot, snapshot_date
 
-- [ ] Task: Create `src/backend/csaMonitorService.jsw`
-  - [ ] Import and extend `fmcsaService.jsw`
-  - [ ] Implement `getCSAScoresWithTrends(carrierDot)`
-  - [ ] Implement `getCSAScoreHistory(carrierDot, months)`
-  - [ ] Implement `snapshotCSAScores(carrierDot, source)`
+- [x] Task: Create `src/backend/csaMonitorService.jsw`
+  - [x] Import and extend `fmcsaService.jsw`
+  - [x] Implement `getCSAScoresWithTrends(carrierDot)`
+  - [x] Implement `getCSAScoreHistory(carrierDot, months)`
+  - [x] Implement `snapshotCSAScores(carrierDot, source)`
 
 ### 4.2 Trend Analysis
 
-- [ ] Task: Implement trend calculation
-  - [ ] Compare current scores to previous snapshot
-  - [ ] Calculate change percentage per BASIC
-  - [ ] Identify improving/worsening categories
+- [x] Task: Implement trend calculation
+  - [x] Compare current scores to previous snapshot
+  - [x] Calculate change percentage per BASIC
+  - [x] Identify improving/worsening categories
 
-- [ ] Task: Implement `getCSARecommendations(carrierDot)`
-  - [ ] Analyze score patterns
-  - [ ] Generate actionable recommendations
-  - [ ] Prioritize by impact
+- [x] Task: Implement `getCSARecommendations(carrierDot)`
+  - [x] Analyze score patterns
+  - [x] Generate actionable recommendations
+  - [x] Prioritize by impact
 
 ### 4.3 Automated Score Updates
 
-- [ ] Task: Implement `processCSAScoreUpdates()`
-  - [ ] Query all active carriers
-  - [ ] Fetch latest scores from FMCSA
-  - [ ] Create snapshot records
-  - [ ] Generate alerts for significant changes
+- [x] Task: Implement `processCSAScoreUpdates()`
+  - [x] Query all active carriers
+  - [x] Fetch latest scores from FMCSA
+  - [x] Create snapshot records
+  - [x] Generate alerts for significant changes
 
-- [ ] Task: Add CSA update job to `jobs.config`
-  - [ ] Schedule weekly: `processCSAScoreUpdates`
+- [x] Task: Add CSA update job to `jobs.config`
+  - [x] Schedule weekly: `processCSAScoreUpdates`
 
-- [ ] Task: Implement CSA alert generation
-  - [ ] Alert when score increases >5% in 30 days
-  - [ ] Alert when approaching intervention threshold
-  - [ ] Alert on new BASIC alerts
+- [x] Task: Implement CSA alert generation
+  - [x] Alert when score increases >5% in 30 days
+  - [x] Alert when approaching intervention threshold
+  - [x] Alert on new BASIC alerts
 
 ### 4.4 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_CSA_MONITOR.html`
-  - [ ] BASIC scores overview with progress bars
-  - [ ] Trend indicators (up/down arrows, percentages)
-  - [ ] Threshold warnings
-  - [ ] Last updated timestamp
+- [x] Task: Create `src/public/carrier/CARRIER_CSA_MONITOR.html`
+  - [x] BASIC scores overview with progress bars
+  - [x] Trend indicators (up/down arrows, percentages)
+  - [x] Threshold warnings
+  - [x] Last updated timestamp
 
-- [ ] Task: Implement trend chart
-  - [ ] 12-month historical view
-  - [ ] Line chart per BASIC category
-  - [ ] Threshold line overlay
-  - [ ] Hover tooltips
+- [x] Task: Implement trend chart
+  - [x] 12-month historical view
+  - [x] Line chart per BASIC category
+  - [x] Threshold line overlay
+  - [x] Hover tooltips
 
-- [ ] Task: Implement recommendations panel
-  - [ ] AI-generated improvement suggestions
-  - [ ] Priority indicators
-  - [ ] Links to relevant training resources
+- [x] Task: Implement recommendations panel
+  - [x] AI-generated improvement suggestions
+  - [x] Priority indicators
+  - [x] Links to relevant training resources
 
 ### 4.5 Integration with fmcsaService.jsw
 
-- [ ] Task: Add `getDetailedCSAData(dotNumber)` to fmcsaService.jsw
-  - [ ] Fetch enhanced BASIC data
-  - [ ] Include inspection/violation breakdown
-  - [ ] Cache results appropriately
+- [x] Task: Add `getDetailedCSAData(dotNumber)` to fmcsaService.jsw
+  - [x] Fetch enhanced BASIC data
+  - [x] Include inspection/violation breakdown
+  - [x] Cache results appropriately
 
-- [ ] Task: Ensure circuit breaker compatibility
-  - [ ] CSA monitor respects rate limits
-  - [ ] Graceful degradation on API issues
+- [x] Task: Ensure circuit breaker compatibility
+  - [x] CSA monitor respects rate limits
+  - [x] Graceful degradation on API issues
 
 ### 4.6 Testing - Phase 4
 
-- [ ] Task: Create `src/public/__tests__/csaMonitorService.test.js`
-  - [ ] Test snapshot creation
-  - [ ] Test trend calculation
-  - [ ] Test alert generation
+- [x] Task: Create `src/public/__tests__/csaMonitorService.test.js`
+  - [x] Test snapshot creation
+  - [x] Test trend calculation
+  - [x] Test alert generation
 
 - [ ] Task: Manual integration testing
   - [ ] Verify FMCSA data fetch

@@ -1,0 +1,216 @@
+import wixData from 'wix-data';
+import { getDetailedCSAData } from './fmcsaService';
+
+const COLLECTION = 'CSAScoreHistory';
+const ALERTS_COLLECTION = 'ComplianceAlerts';
+
+// ============================================================
+// CSA SCORE MONITORING
+// ============================================================
+
+/**
+ * Get current CSA scores with trend analysis
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Promise<Object>} - Current scores with trends
+ */
+export async function getCSAScoresWithTrends(carrierDot) {
+  // Get latest snapshot
+  const latestSnapshot = await wixData.query(COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .descending('snapshot_date')
+    .limit(1)
+    .find({ suppressAuth: true });
+
+  if (latestSnapshot.items.length === 0) {
+    // No history, fetch fresh
+    return snapshotCSAScores(carrierDot, 'manual');
+  }
+
+  return latestSnapshot.items[0];
+}
+
+/**
+ * Get CSA score history for charting
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {number} months - Number of months of history
+ * @returns {Promise<Array>} - Historical snapshots
+ */
+export async function getCSAScoreHistory(carrierDot, months = 12) {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - months);
+
+  const result = await wixData.query(COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .ge('snapshot_date', cutoff)
+    .ascending('snapshot_date')
+    .find({ suppressAuth: true });
+
+  return result.items;
+}
+
+/**
+ * Take a snapshot of current CSA scores
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {string} source - 'scheduled', 'manual', 'incident_triggered'
+ * @returns {Promise<Object>} - New snapshot record
+ */
+export async function snapshotCSAScores(carrierDot, source = 'manual') {
+  // 1. Fetch live data
+  const liveData = await getDetailedCSAData(carrierDot);
+  
+  if (liveData.error) {
+    throw new Error(liveData.userMessage || 'Failed to fetch FMCSA data');
+  }
+
+  // 2. Get previous snapshot for comparison
+  const prevResult = await wixData.query(COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .descending('snapshot_date')
+    .limit(1)
+    .find({ suppressAuth: true });
+    
+  const prev = prevResult.items[0];
+
+  // 3. Calculate trends
+  const trend = {};
+  const basics = liveData.basics || {};
+  let overallChange = 0; // Simplified metric
+
+  Object.keys(basics).forEach(key => {
+    const current = basics[key].percentile;
+    const previous = prev && prev.basics && prev.basics[key] ? prev.basics[key].percentile : current;
+    trend[key] = current - previous;
+    overallChange += trend[key];
+  });
+
+  // 4. Create snapshot
+  const snapshot = {
+    carrier_dot: carrierDot,
+    snapshot_date: new Date(),
+    overall_percentile: 0, // Placeholder, FMCSA doesn't give a single score publicly
+    basics: basics,
+    alerts_active: liveData.has_basic_alerts ? Object.keys(basics).filter(k => basics[k].alert) : [],
+    inspections_30_day: 0, // Not provided directly by API usually, need calculated
+    violations_30_day: 0,
+    crashes_30_day: 0,
+    trend_vs_prior: trend,
+    source: source,
+    _createdDate: new Date()
+  };
+
+  const result = await wixData.insert(COLLECTION, snapshot, { suppressAuth: true });
+  
+  // 5. Generate Alerts if scheduled
+  if (source === 'scheduled') {
+      await checkAndAlert(carrierDot, snapshot, prev);
+  }
+
+  return result;
+}
+
+/**
+ * Check for significant changes and generate alerts
+ */
+async function checkAndAlert(carrierDot, current, prev) {
+    if (!prev) return;
+    
+    // Check for alerts
+    const newAlerts = [];
+    
+    // 1. New BASIC alerts
+    const currentAlerts = current.alerts_active || [];
+    const prevAlerts = prev.alerts_active || [];
+    
+    const brandNewAlerts = currentAlerts.filter(a => !prevAlerts.includes(a));
+    brandNewAlerts.forEach(basic => {
+        newAlerts.push({
+            type: 'csa_change',
+            severity: 'critical',
+            message: `New FMCSA Alert in ${basic.replace('_', ' ')}`
+        });
+    });
+    
+    // 2. Significant score increase (>10%)
+    Object.keys(current.basics).forEach(key => {
+        const change = current.trend_vs_prior[key];
+        if (change > 10) {
+            newAlerts.push({
+                type: 'csa_change',
+                severity: 'warning',
+                message: `${key.replace('_', ' ')} score increased by ${change}%`
+            });
+        }
+    });
+    
+    // Save alerts
+    for (const a of newAlerts) {
+        await wixData.insert(ALERTS_COLLECTION, {
+            carrier_dot: carrierDot,
+            alert_type: a.type,
+            severity: a.severity,
+            title: 'CSA Score Alert',
+            message: a.message,
+            status: 'active',
+            related_entity_type: 'csa_score',
+            related_entity_id: current._id,
+            _createdDate: new Date()
+        }, { suppressAuth: true });
+    }
+}
+
+/**
+ * Process all carriers for CSA score updates
+ * Called by jobs.config scheduler weekly
+ * @returns {Promise<Object>} - { processed, alertsGenerated }
+ */
+export async function processCSAScoreUpdates() {
+  // Get all active carriers (from subscriptions or profiles)
+  // For now, querying CarrierSubscriptions is safest
+  const subs = await wixData.query('CarrierSubscriptions')
+    .eq('is_active', true)
+    .find({ suppressAuth: true });
+    
+  let processed = 0;
+  
+  for (const sub of subs.items) {
+      if (sub.carrier_dot) {
+          try {
+              await snapshotCSAScores(sub.carrier_dot, 'scheduled');
+              processed++;
+          } catch (e) {
+              console.error(`Failed to update CSA for ${sub.carrier_dot}`, e);
+          }
+      }
+  }
+  
+  return { processed };
+}
+
+/**
+ * Generate CSA improvement recommendations
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Promise<Array>} - AI-generated recommendations based on scores
+ */
+export async function getCSARecommendations(carrierDot) {
+    const scores = await getCSAScoresWithTrends(carrierDot);
+    const basics = scores.basics || {};
+    const recs = [];
+    
+    if (basics.unsafe_driving && basics.unsafe_driving.percentile > 50) {
+        recs.push({
+            category: 'Unsafe Driving',
+            action: 'Implement defensive driving course',
+            priority: 'high'
+        });
+    }
+    
+    if (basics.vehicle_maintenance && basics.vehicle_maintenance.percentile > 50) {
+        recs.push({
+            category: 'Vehicle Maintenance',
+            action: 'Review pre-trip inspection logs',
+            priority: 'medium'
+        });
+    }
+    
+    return recs;
+}

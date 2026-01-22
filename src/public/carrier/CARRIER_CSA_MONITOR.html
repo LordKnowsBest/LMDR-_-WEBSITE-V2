@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+CARRIER CSA MONITOR
+================================================================================
+-->
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSA Monitor | LMDR</title>
+    
+    <!-- Fonts & Icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Tailwind -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="../../lmdr-config.js"></script>
+    <script src="../../theme-utils.js"></script>
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-50 text-slate-900 h-screen flex flex-col overflow-hidden">
+
+    <!-- HEADER -->
+    <header class="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center shadow-sm z-10">
+        <div>
+            <h1 class="text-xl font-bold text-slate-800">CSA Score Monitor</h1>
+            <p class="text-sm text-slate-500">FMCSA Safety Measurement System</p>
+        </div>
+        <div class="flex gap-3 text-sm text-slate-500">
+             <span>Last Updated: <strong class="text-slate-800" id="lastUpdated">--</strong></span>
+        </div>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <main class="flex-1 overflow-y-auto p-6">
+        
+        <!-- TOP ROW: BASIC SCORES -->
+        <h2 class="text-xs font-bold text-slate-400 uppercase mb-4">BASIC Scores Overview</h2>
+        <div id="basicGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 mb-8">
+            <!-- Injected via JS -->
+            <div class="animate-pulse bg-white p-4 rounded-xl h-32"></div>
+            <div class="animate-pulse bg-white p-4 rounded-xl h-32"></div>
+            <div class="animate-pulse bg-white p-4 rounded-xl h-32"></div>
+            <div class="animate-pulse bg-white p-4 rounded-xl h-32"></div>
+        </div>
+
+        <!-- MIDDLE ROW: TRENDS & RECS -->
+        <div class="grid lg:grid-cols-3 gap-6">
+            
+            <!-- TREND CHART -->
+            <div class="lg:col-span-2 bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+                <div class="flex justify-between items-center mb-6">
+                    <h3 class="font-bold text-lg text-slate-800">12-Month Trend</h3>
+                    <select id="trendMetric" class="text-sm border-gray-300 rounded-lg">
+                        <option value="all">All BASICs</option>
+                        <option value="unsafe_driving">Unsafe Driving</option>
+                        <option value="hours_of_service">HOS Compliance</option>
+                        <option value="vehicle_maintenance">Vehicle Maint.</option>
+                    </select>
+                </div>
+                <div class="h-64">
+                    <canvas id="trendChart"></canvas>
+                </div>
+            </div>
+
+            <!-- RECOMMENDATIONS -->
+            <div class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+                <h3 class="font-bold text-lg text-slate-800 mb-4">Recommendations</h3>
+                <div id="recsList" class="space-y-4">
+                    <div class="text-center text-slate-400 py-4">No active recommendations.</div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- SCRIPT -->
+    <script>
+        (function() {
+            let chartInstance = null;
+            let currentData = null;
+
+            // --- API BRIDGE ---
+            function sendToVelo(action, payload = {}) {
+                window.parent.postMessage({ type: action, action, data: payload }, '*');
+            }
+
+            window.addEventListener('message', (event) => {
+                const msg = event.data;
+                if (!msg || !msg.type) return;
+
+                if (msg.type === 'setCSAData') {
+                    currentData = msg.data;
+                    render();
+                }
+            });
+
+            // --- RENDER ---
+            function render() {
+                if(!currentData) return;
+                
+                const basics = currentData.basics || {};
+                const history = currentData.history || [];
+                const recs = currentData.recommendations || [];
+                
+                document.getElementById('lastUpdated').textContent = new Date().toLocaleDateString();
+
+                // 1. BASIC Grid
+                const grid = document.getElementById('basicGrid');
+                grid.innerHTML = '';
+                
+                // Define standard BASICs
+                const categories = [
+                    { key: 'unsafe_driving', label: 'Unsafe Driving', threshold: 65 },
+                    { key: 'hours_of_service', label: 'HOS Compliance', threshold: 65 },
+                    { key: 'driver_fitness', label: 'Driver Fitness', threshold: 80 },
+                    { key: 'drugs_alcohol', label: 'Drugs/Alcohol', threshold: 80 },
+                    { key: 'vehicle_maintenance', label: 'Vehicle Maint.', threshold: 80 },
+                    { key: 'crash_indicator', label: 'Crash Indicator', threshold: 65 }
+                ];
+
+                categories.forEach(cat => {
+                    const score = basics[cat.key]?.percentile || 0;
+                    const alert = basics[cat.key]?.alert || false;
+                    const trend = basics[cat.key]?.change || 0;
+
+                    const div = document.createElement('div');
+                    div.className = 'bg-white p-5 rounded-xl border border-gray-200 shadow-sm';
+                    
+                    let statusColor = 'bg-green-500';
+                    let statusIcon = 'fa-check-circle text-green-500';
+                    let statusText = 'Good';
+                    
+                    if (score > cat.threshold * 0.8) { statusColor = 'bg-yellow-500'; statusIcon = 'fa-exclamation-circle text-yellow-500'; statusText = 'Warning'; }
+                    if (alert || score > cat.threshold) { statusColor = 'bg-red-500'; statusIcon = 'fa-triangle-exclamation text-red-500'; statusText = 'Alert'; }
+
+                    div.innerHTML = `
+                        <div class="flex justify-between items-start mb-3">
+                            <h4 class="font-bold text-slate-700 text-sm">${cat.label}</h4>
+                            <i class="fa-solid ${statusIcon}"></i>
+                        </div>
+                        <div class="flex items-baseline gap-2 mb-2">
+                            <span class="text-3xl font-black text-slate-900">${score}%</span>
+                            <span class="text-xs text-slate-400">/ ${cat.threshold}% limit</span>
+                        </div>
+                        <div class="w-full bg-slate-100 rounded-full h-2 mb-3">
+                            <div class="${statusColor} h-2 rounded-full transition-all duration-1000" style="width: ${score}%"></div>
+                        </div>
+                        <div class="flex justify-between text-xs">
+                            <span class="font-semibold ${score > cat.threshold ? 'text-red-600' : 'text-slate-500'}">${statusText}</span>
+                            <span class="${trend > 0 ? 'text-red-500' : 'text-green-500'}">
+                                ${trend > 0 ? '▲' : '▼'} ${Math.abs(trend)}% vs last mo
+                            </span>
+                        </div>
+                    `;
+                    grid.appendChild(div);
+                });
+
+                // 2. Recommendations
+                const recList = document.getElementById('recsList');
+                recList.innerHTML = '';
+                
+                if (recs.length === 0) {
+                    recList.innerHTML = '<div class="text-center text-slate-400 py-4">No active recommendations.</div>';
+                } else {
+                    recs.forEach(rec => {
+                        const item = document.createElement('div');
+                        item.className = 'p-3 bg-blue-50 rounded-lg border border-blue-100';
+                        item.innerHTML = `
+                            <div class="flex gap-3">
+                                <div class="mt-1"><i class="fa-solid fa-lightbulb text-lmdr-blue"></i></div>
+                                <div>
+                                    <h5 class="font-bold text-sm text-slate-800">${rec.category}</h5>
+                                    <p class="text-xs text-slate-600">${rec.action}</p>
+                                </div>
+                            </div>
+                        `;
+                        recList.appendChild(item);
+                    });
+                }
+
+                // 3. Chart
+                renderChart(history);
+            }
+
+            function renderChart(history) {
+                const ctx = document.getElementById('trendChart').getContext('2d');
+                
+                if (chartInstance) chartInstance.destroy();
+
+                // Mock data if empty
+                if(!history || history.length === 0) {
+                    history = Array.from({length: 6}, (_, i) => ({
+                        snapshot_date: new Date(2025, i, 1),
+                        basics: {
+                            unsafe_driving: { percentile: 40 + Math.random() * 10 },
+                            vehicle_maintenance: { percentile: 30 + Math.random() * 10 },
+                            hours_of_service: { percentile: 20 + Math.random() * 5 }
+                        }
+                    }));
+                }
+
+                const labels = history.map(h => new Date(h.snapshot_date).toLocaleDateString('en-US', { month: 'short' }));
+                
+                const datasets = [
+                    {
+                        label: 'Unsafe Driving',
+                        data: history.map(h => h.basics.unsafe_driving?.percentile || 0),
+                        borderColor: '#ef4444',
+                        tension: 0.4
+                    },
+                    {
+                        label: 'Vehicle Maint.',
+                        data: history.map(h => h.basics.vehicle_maintenance?.percentile || 0),
+                        borderColor: '#3b82f6',
+                        tension: 0.4
+                    },
+                    {
+                        label: 'HOS Compliance',
+                        data: history.map(h => h.basics.hours_of_service?.percentile || 0),
+                        borderColor: '#f59e0b',
+                        tension: 0.4
+                    }
+                ];
+
+                chartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels, datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: { intersect: false, mode: 'index' },
+                        plugins: { legend: { position: 'bottom' } },
+                        scales: { y: { min: 0, max: 100 } }
+                    }
+                });
+            }
+
+            // INIT
+            sendToVelo('getCSAData');
+            window.parent.postMessage({ type: 'csaMonitorReady', action: 'csaMonitorReady' }, '*');
+
+        })();
+    </script>
+</body>
+</html>
