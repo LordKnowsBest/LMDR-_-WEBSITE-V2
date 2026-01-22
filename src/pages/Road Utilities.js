@@ -4,16 +4,127 @@
 // ============================================================================
 
 import { searchParking, getParkingDetails, reportParkingAvailability } from 'backend/parkingService';
-
+import { searchFuelPrices, linkFuelCard, calculateFuelSavings } from 'backend/fuelService';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
-
 import wixUsers from 'wix-users';
-
 import wixLocation from 'wix-location';
 
+// ... existing code ...
 
+const MESSAGE_REGISTRY = {
+    inbound: [
+        'searchParking',
+        'getParkingDetails',
+        'reportParking',
+        'searchFuel',
+        'linkFuelCard',
+        'calculateSavings',
+        'tabSwitch',
+        'ping'
+    ],
+    outbound: [
+        'parkingResults',
+        'parkingDetails',
+        'reportResult',
+        'fuelResults',
+        'linkCardResult',
+        'savingsResult',
+        'error',
+        'pong'
+    ]
+};
 
 // ... existing code ...
+
+async function handleHtmlMessage(msg) {
+    if (!msg || !msg.type) return;
+
+    const action = msg.type;
+    console.log(`📥 [HTML→Velo] ${action}`, msg.data);
+
+    try {
+        switch (action) {
+            case 'ping':
+                sendToHtml('pong', { timestamp: Date.now() });
+                break;
+
+            case 'searchParking':
+                await handleSearchParking(msg.data);
+                break;
+
+            case 'getParkingDetails':
+                await handleGetParkingDetails(msg.data);
+                break;
+
+            case 'reportParking':
+                await handleReportParking(msg.data);
+                break;
+
+            case 'searchFuel':
+                await handleSearchFuelPrices(msg.data);
+                break;
+
+            case 'linkFuelCard':
+                await handleLinkFuelCard(msg.data);
+                break;
+
+            case 'calculateSavings':
+                await handleCalculateFuelSavings(msg.data);
+                break;
+
+            case 'tabSwitch':
+                console.log(`Tab switched to: ${msg.tab}`);
+                break;
+
+            default:
+                console.warn('⚠️ Unhandled action:', action);
+        }
+    } catch (error) {
+        console.error('❌ Error handling message:', error);
+        sendToHtml('error', { message: error.message });
+    }
+}
+
+// ... existing code ...
+
+// ============================================================================
+// FUEL ACTION HANDLERS
+// ============================================================================
+
+async function handleSearchFuelPrices(data) {
+    const lat = data.lat || 35.1495;
+    const lng = data.lng || -90.0490;
+    const radius = data.radius || 50;
+    const options = data.options || {};
+
+    // Track analytics
+    logFeatureInteraction('fuel_optimizer', wixUsers.currentUser.id || 'anonymous', 'search', {
+        metadata: { query: data.query, radius, options }
+    });
+
+    const result = await searchFuelPrices(lat, lng, radius, options);
+    
+    if (result.success) {
+        sendToHtml('fuelResults', { items: result.items });
+    } else {
+        sendToHtml('error', { message: result.error });
+    }
+}
+
+async function handleLinkFuelCard(data) {
+    if (!wixUsers.currentUser.loggedIn) {
+        sendToHtml('error', { message: 'You must be logged in to link a fuel card' });
+        return;
+    }
+
+    const result = await linkFuelCard(wixUsers.currentUser.id, data.cardInfo);
+    sendToHtml('linkCardResult', result);
+}
+
+async function handleCalculateFuelSavings(data) {
+    const result = await calculateFuelSavings(wixUsers.currentUser.id, data.tripDetails);
+    sendToHtml('savingsResult', result);
+}
 
 
 

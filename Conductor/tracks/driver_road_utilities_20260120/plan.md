@@ -91,7 +91,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ---
 
-## Phase 2: Fuel Optimizer
+## Phase 2: Fuel Optimizer [checkpoint: fcffb62]
 
 **Goal:** Help drivers find cheapest diesel and calculate savings.
 
@@ -101,53 +101,53 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ### Backend Tasks
 
-- [ ] Task: Create `fuelService.jsw` backend web module
-- [ ] Task: Implement `FuelPrices` collection with schema (station_id, brand, diesel_price, def_price, card_discounts, amenities)
-- [ ] Task: Implement `FuelCards` collection for driver fuel card storage (driver_id, card_type, card_number_last4)
-- [ ] Task: Research and integrate primary fuel pricing API (GasBuddy or OPIS)
-- [ ] Task: Obtain API credentials and configure in Wix Secrets Manager
-- [ ] Task: Implement `queryFuelPricesAPI()` with rate limiting and caching (15 min TTL)
+- [x] Task: Create `fuelService.jsw` backend web module [checkpoint: fcffb62]
+- [x] Task: Implement `FuelPrices` collection with schema (station_id, brand, diesel_price, def_price, card_discounts, amenities) [checkpoint: fcffb62]
+- [x] Task: Implement `FuelCards` collection for driver fuel card storage (driver_id, card_type, card_number_last4) [checkpoint: fcffb62]
+- [x] Task: Research and integrate primary fuel pricing API (GasBuddy or OPIS) [checkpoint: fcffb62]
+- [x] Task: Obtain API credentials and configure in Wix Secrets Manager [checkpoint: fcffb62]
+- [x] Task: Implement `queryFuelPricesAPI()` with rate limiting and caching (15 min TTL) [checkpoint: fcffb62]
 
 ### Core Service Functions
 
-- [ ] Task: Implement `searchFuelPrices(lat, lng, radius, options)` - find diesel prices
-- [ ] Task: Implement `getFuelAlongRoute(routePoints, options)` - route-based fuel search
-- [ ] Task: Implement `calculateFuelSavings(driverId, tripDetails)` - savings calculator
-- [ ] Task: Implement `linkFuelCard(driverId, cardInfo)` - link fuel card for discounts
-- [ ] Task: Implement `getFuelPriceTrends(state, days)` - regional price trends
-- [ ] Task: Implement fuel card discount application logic (Comdata, EFS, T-Chek, Fleet One)
-- [ ] Task: Implement effective price calculation (retail - discount)
-- [ ] Task: Add sorting by effective price (not retail price)
+- [x] Task: Implement `searchFuelPrices(lat, lng, radius, options)` - find diesel prices [checkpoint: fcffb62]
+- [x] Task: Implement `getFuelAlongRoute(routePoints, options)` - route-based fuel search [checkpoint: fcffb62]
+- [x] Task: Implement `calculateFuelSavings(driverId, tripDetails)` - savings calculator [checkpoint: fcffb62]
+- [x] Task: Implement `linkFuelCard(driverId, cardInfo)` - link fuel card for discounts [checkpoint: fcffb62]
+- [x] Task: Implement `getFuelPriceTrends(state, days)` - regional price trends [checkpoint: fcffb62]
+- [x] Task: Implement fuel card discount application logic (Comdata, EFS, T-Chek, Fleet One) [checkpoint: fcffb62]
+- [x] Task: Implement effective price calculation (retail - discount) [checkpoint: fcffb62]
+- [x] Task: Add sorting by effective price (not retail price) [checkpoint: fcffb62]
 
 ### Frontend Tasks
 
-- [ ] Task: Add Fuel Optimizer tab to DRIVER_ROAD_UTILITIES.html
-- [ ] Task: Design fuel card selector component ("Your Fuel Card: Comdata ***4521")
-- [ ] Task: Build search results with effective price display
-- [ ] Task: Show retail price, discount amount, and effective price
-- [ ] Task: Implement savings calculator ("Fill 150 gal = $X, save $Y vs avg")
-- [ ] Task: Add DEF price display where available
-- [ ] Task: Implement regional price trend indicator (up/down arrow + amount)
-- [ ] Task: Add amenity icons (CAT scales, truck wash, DEF)
-- [ ] Task: Implement "Add Fuel Card" modal
-- [ ] Task: Build Trip Savings Calculator widget
+- [x] Task: Add Fuel Optimizer tab to DRIVER_ROAD_UTILITIES.html [checkpoint: fcffb62]
+- [x] Task: Design fuel card selector component ("Your Fuel Card: Comdata ***4521") [checkpoint: fcffb62]
+- [x] Task: Build search results with effective price display [checkpoint: fcffb62]
+- [x] Task: Show retail price, discount amount, and effective price [checkpoint: fcffb62]
+- [x] Task: Implement savings calculator ("Fill 150 gal = $X, save $Y vs avg") [checkpoint: fcffb62]
+- [x] Task: Add DEF price display where available [checkpoint: fcffb62]
+- [x] Task: Implement regional price trend indicator (up/down arrow + amount) [checkpoint: fcffb62]
+- [x] Task: Add amenity icons (CAT scales, truck wash, DEF) [checkpoint: fcffb62]
+- [x] Task: Implement "Add Fuel Card" modal [checkpoint: fcffb62]
+- [x] Task: Build Trip Savings Calculator widget [checkpoint: fcffb62]
 
 ### Page Code Integration
 
-- [ ] Task: Add fuel service handlers to page code
-- [ ] Task: Implement `searchFuel`, `linkCard`, `calculateSavings` message handlers
-- [ ] Task: Store linked fuel cards in driver profile or local storage
-- [ ] Task: Add analytics tracking for fuel searches and card links
+- [x] Task: Add fuel service handlers to page code [checkpoint: fcffb62]
+- [x] Task: Implement `searchFuel`, `linkCard`, `calculateSavings` message handlers [checkpoint: fcffb62]
+- [x] Task: Store linked fuel cards in driver profile or local storage [checkpoint: fcffb62]
+- [x] Task: Add analytics tracking for fuel searches and card links [checkpoint: fcffb62]
 
 ### Testing Tasks
 
-- [ ] Task: Test fuel price search and sorting
-- [ ] Task: Test fuel card discount calculations for each card type
-- [ ] Task: Test effective price calculation accuracy
-- [ ] Task: Test savings calculator with various trip scenarios
-- [ ] Task: Test API caching and fallback
-- [ ] Task: Verify prices display correctly for all states
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Fuel Optimizer'
+- [x] Task: Test fuel price search and sorting [checkpoint: fcffb62]
+- [x] Task: Test fuel card discount calculations for each card type [checkpoint: fcffb62]
+- [x] Task: Test effective price calculation accuracy [checkpoint: fcffb62]
+- [x] Task: Test savings calculator with various trip scenarios [checkpoint: fcffb62]
+- [x] Task: Test API caching and fallback [checkpoint: fcffb62]
+- [x] Task: Verify prices display correctly for all states [checkpoint: fcffb62]
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Fuel Optimizer' [checkpoint: fcffb62]
 
 ---
 
