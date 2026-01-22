@@ -65,6 +65,13 @@ An AI-driven matching platform for CDL drivers and carriers, leveraging a 3-stag
 *   **Quota Enforcement:** Real-time tracking of driver profile views
 *   **Automatic Renewal:** Monthly billing with quota reset on billing cycle
 
+### 3.7. Carrier Compliance Suite
+*   **Compliance Calendar:** Automated tracking of expirations (Drug tests, Physicals, CDL, MVR).
+*   **Document Vault:** Secure storage for carrier and driver documents with version history.
+*   **DQ File Tracker:** FMCSA Qualification File completeness tracking per driver.
+*   **CSA Monitor:** Real-time tracking of BASIC scores, trend analysis, and alerts.
+*   **Incident Reporting:** DOT-compliant accident/incident documentation and investigation workflow.
+
 ## 4. Implementation Strategy (Phased Rollout)
 *   **Week 1: Core Driver UX:** Implement persistent profile, Job Save/Favorite, Basic Application Tracking.
 *   **Week 2: Engagement:** Launch Native Reviews system and Red Flag Warnings.
