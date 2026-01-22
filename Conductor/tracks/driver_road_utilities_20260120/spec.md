@@ -344,6 +344,136 @@ export async function getParkingAlongRoute(routePoints, options = {}) {
 
 ---
 
+## 3.7 TPIMS Integration (Implemented)
+
+### What is TPIMS?
+
+The **Truck Parking Information Management System (TPIMS)** is a federally-funded initiative under FHWA that provides real-time truck parking availability through sensor networks at rest areas across major freight corridors.
+
+### Why TPIMS?
+
+| Data Source | Data Quality | Coverage | Cost |
+|-------------|--------------|----------|------|
+| TruckParkingClub | Community reported | National | Paid API |
+| TPIMS Sensors | **Real-time sensors** | Regional (growing) | **FREE** |
+
+TPIMS provides **sensor-based** data vs. community-reported estimates, giving drivers actual availability counts.
+
+### Implementation Architecture
+
+```
++------------------------------------------------------------------+
+|                    TPIMS MULTI-SOURCE AGGREGATION                   |
++------------------------------------------------------------------+
+|                                                                    |
+|   queryAllTPIMSSources(lat, lng, radius)                           |
+|         |                                                          |
+|         +---> queryIndianaTPIMS()      --> normalizeIndianaData()  |
+|         +---> queryKentuckyTPIMS()     --> normalizeMAASTO()       |
+|         +---> queryMinnesotaTPIMS()    --> normalizeMAASTO()       |
+|         +---> queryIllinoisTPIMS()     --> normalizeMAASTO()       |
+|         +---> queryOHGOAPI()           --> normalizeOHGOData()     |
+|         +---> queryWI511API()          --> normalizeWI511Data()    |
+|         +---> queryArizonaTPIMS()      --> normalizeArizonaData()  |
+|         +---> queryGeorgiaTPIMS()      --> normalizeGeorgiaData()  |
+|         +---> queryCaliforniaRestAreas()--> normalizeCaliforniaData()|
+|         |                                                          |
+|         v                                                          |
+|   flattenAndMerge() with confidence ranking                        |
+|         |                                                          |
+|         v                                                          |
+|   Unified results with data_confidence field                       |
+|   - 'sensor' (real TPIMS data)                                     |
+|   - 'reported' (community)                                         |
+|   - 'estimated' (algorithm)                                        |
+|   - 'static' (location only)                                       |
+|                                                                    |
++------------------------------------------------------------------+
+```
+
+### State Coverage (9 States Implemented)
+
+#### MAASTO Midwest Coalition (6 States)
+
+| State | API | Format | Public | Highways |
+|-------|-----|--------|--------|----------|
+| Indiana | TrafficWise | GeoJSON | Yes | I-65, I-69, I-70 |
+| Kentucky | TRIMARC | MAASTO JSON | Yes | I-65, I-71, I-75 |
+| Minnesota | MnDOT IRIS | MAASTO JSON | Yes | I-94, I-35 |
+| Illinois | TravelMidwest | MAASTO JSON | Yes | I-80, I-55, I-57 |
+| Ohio | OHGO | REST API | Key Required | I-70, I-75 |
+| Wisconsin | 511WI | REST API | Key Required | I-94, I-90 |
+
+#### Southern/Western States (3 States)
+
+| State | API | Format | Public | Highways |
+|-------|-----|--------|--------|----------|
+| Arizona | AZ511 | REST API | Yes | I-10, I-40, I-17 |
+| Georgia | GA511 | REST API | Optional | I-75, I-85, I-20, I-95 |
+| California | Caltrans ArcGIS | GeoJSON | Yes | Statewide (static) |
+
+### Data Confidence System
+
+```javascript
+// Confidence ranking (higher = better)
+const confidenceRank = {
+    'sensor': 3,      // Real TPIMS sensor data
+    'reported': 2,    // Community reports (< 2 hours old)
+    'estimated': 1,   // Algorithm estimates
+    'static': 0       // Location only, no availability
+};
+```
+
+When merging results from multiple sources, **sensor data always wins**.
+
+### Circuit Breaker Pattern
+
+Each API has independent circuit breaker state to prevent cascade failures:
+
+```javascript
+const circuitBreaker = {
+    indiana: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    kentucky: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    // ... 9 total states
+};
+```
+
+- **CLOSED**: Normal operation
+- **OPEN**: Skip API after 3 consecutive failures (60s cooldown)
+- **HALF_OPEN**: Try one request after cooldown
+
+### UI Badges
+
+The frontend displays data confidence with visual badges:
+
+```html
+<!-- Sensor data (real-time) -->
+<span class="bg-blue-100 text-blue-700">
+  <i class="fa-solid fa-signal"></i> LIVE
+</span>
+
+<!-- Community reported -->
+<span class="bg-green-100 text-green-700">
+  <i class="fa-solid fa-users"></i> REPORTED
+</span>
+
+<!-- Static location data -->
+<span class="bg-gray-100 text-gray-500">
+  <i class="fa-solid fa-map-pin"></i> LOCATION
+</span>
+```
+
+### Future Expansion
+
+States with TPIMS that could be added:
+- Iowa (registration required)
+- Kansas (registration required)
+- Michigan (registration required)
+- Texas (DriveTexas API - needs research)
+- Florida (TPAS - no public docs)
+
+---
+
 ## 4. Feature 2: Fuel Optimizer
 
 ### 4.1 Problem Statement

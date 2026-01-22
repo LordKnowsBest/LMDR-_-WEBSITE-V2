@@ -91,6 +91,72 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ---
 
+## Phase 1.5: TPIMS Integration (Real-Time Sensor Data) [checkpoint: f4477bc]
+
+**Goal:** Integrate FHWA-funded Truck Parking Information Management System (TPIMS) for real-time sensor-based parking availability.
+
+**Dependencies:** Phase 1 (parkingService.jsw foundation)
+
+**Estimated Effort:** 1 week (completed in 2 days)
+
+### Research & Discovery
+
+- [x] Task: Research TPIMS and MAASTO state coalition [checkpoint: 12e61aa]
+- [x] Task: Identify public feeds (no API key required) [checkpoint: 12e61aa]
+- [x] Task: Identify feeds requiring registration [checkpoint: 12e61aa]
+- [x] Task: Research southern state APIs (TX, CA, GA, FL, AZ) [checkpoint: f4477bc]
+
+### MAASTO Midwest Integration (6 States)
+
+- [x] Task: Implement OHGO (Ohio) API integration with circuit breaker [checkpoint: d2a1644]
+- [x] Task: Implement Wisconsin 511 API integration [checkpoint: d2a1644]
+- [x] Task: Implement Indiana TPIMS (GeoJSON format, public feed) [checkpoint: 12e61aa]
+- [x] Task: Implement Kentucky TPIMS (MAASTO standard, public feed) [checkpoint: 12e61aa]
+- [x] Task: Implement Minnesota TPIMS (MAASTO standard, public feed) [checkpoint: 12e61aa]
+- [x] Task: Implement Illinois TPIMS (MAASTO standard, public feed) [checkpoint: 12e61aa]
+
+### Southern/Western States Integration (3 States)
+
+- [x] Task: Implement Arizona 511 TPIMS (I-10 TPAS corridor) [checkpoint: f4477bc]
+- [x] Task: Implement Georgia 511 TPIMS (I-75, I-85, I-20, I-95) [checkpoint: f4477bc]
+- [x] Task: Implement California Caltrans ArcGIS rest areas (static locations) [checkpoint: f4477bc]
+
+### Infrastructure
+
+- [x] Task: Create circuit breaker state for each API source [checkpoint: 12e61aa]
+- [x] Task: Create normalizer functions for each data format [checkpoint: 12e61aa]
+  - `normalizeOHGOData()` - Ohio format
+  - `normalizeWI511Data()` - Wisconsin format
+  - `normalizeIndianaData()` - GeoJSON format
+  - `normalizeMAASTO()` - Standard format (KY, MN, IL)
+  - `normalizeArizonaData()` - AZ511 format
+  - `normalizeGeorgiaData()` - GA511 format
+  - `normalizeCaliforniaData()` - ArcGIS format
+- [x] Task: Create `queryAllTPIMSSources()` aggregator function [checkpoint: f4477bc]
+- [x] Task: Implement smart merging with data confidence ranking [checkpoint: 12e61aa]
+- [x] Task: Update `getSourceLabel()` for UI display [checkpoint: f4477bc]
+
+### Frontend Updates
+
+- [x] Task: Add LIVE/REPORTED badge indicators for data confidence [checkpoint: d2a1644]
+- [x] Task: Show sensor source label (e.g., "INDOT Sensors", "Caltrans") [checkpoint: d2a1644]
+
+### Coverage Summary
+
+| State | API | Data Type | Requires Key |
+|-------|-----|-----------|--------------|
+| Indiana | TrafficWise GeoJSON | Sensor | No |
+| Kentucky | TRIMARC MAASTO | Sensor | No |
+| Minnesota | MnDOT IRIS | Sensor | No |
+| Illinois | TravelMidwest | Sensor | No |
+| Ohio | OHGO REST | Sensor | Yes (OHGO_API_KEY) |
+| Wisconsin | 511WI | Sensor | Yes (WI_511_API_KEY) |
+| Arizona | AZ511 | Sensor | Optional |
+| Georgia | GA511 | Sensor/Static | Optional |
+| California | Caltrans ArcGIS | Static | No |
+
+---
+
 ## Phase 2: Fuel Optimizer [checkpoint: f9a42cd]
 
 **Goal:** Help drivers find cheapest diesel and calculate savings.
