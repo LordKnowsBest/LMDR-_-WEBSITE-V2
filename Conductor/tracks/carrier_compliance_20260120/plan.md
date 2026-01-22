@@ -215,7 +215,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 3: Qualification File Tracker
+## Phase 3: Qualification File Tracker [checkpoint: 361ff12]
 
 > **Goal**: FMCSA DQ file completeness per driver with audit-ready reports
 >
