@@ -26,7 +26,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 1: Compliance Calendar
+## Phase 1: Compliance Calendar [checkpoint: f5c58d8]
 
 > **Goal**: Never miss a drug test, physical, training renewal, or license expiration
 >
