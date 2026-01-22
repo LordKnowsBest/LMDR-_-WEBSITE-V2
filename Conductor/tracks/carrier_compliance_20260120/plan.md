@@ -394,7 +394,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 5: Incident Reporting
+## Phase 5: Incident Reporting [checkpoint: ed18f7a]
 
 > **Goal**: DOT-compliant accident/incident documentation with investigation workflow
 >
