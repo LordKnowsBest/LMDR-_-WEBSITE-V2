@@ -65,6 +65,31 @@ const API_CONFIG = {
             staticUrl: 'https://truckparking.travelmidwest.com/TPIMS_Static.json',
             timeout: 8000,
             public: true
+        },
+        // ========================================
+        // SOUTHERN STATES
+        // ========================================
+        // Arizona 511 - I-10 TPAS corridor (4 rest areas with sensors)
+        ARIZONA: {
+            baseUrl: 'https://www.az511.com',
+            endpoint: '/api/restareas',
+            timeout: 8000,
+            rateLimitPerMin: 10,
+            secretKey: 'AZ_511_API_KEY'
+        },
+        // Georgia 511 - I-75, I-85, I-20, I-95 rest areas
+        GEORGIA: {
+            baseUrl: 'https://511ga.org',
+            endpoint: '/api/restareas',
+            timeout: 8000,
+            rateLimitPerMin: 10,
+            secretKey: 'GA_511_API_KEY'
+        },
+        // California - Caltrans GIS Rest Areas (static locations)
+        CALIFORNIA: {
+            baseUrl: 'https://services.gis.ca.gov/arcgis/rest/services/Transportation/Rest_Areas/MapServer/0/query',
+            timeout: 10000,
+            public: true
         }
     }
 };
@@ -77,7 +102,10 @@ const circuitBreaker = {
     indiana: { failures: 0, lastFailure: 0, status: 'CLOSED' },
     kentucky: { failures: 0, lastFailure: 0, status: 'CLOSED' },
     minnesota: { failures: 0, lastFailure: 0, status: 'CLOSED' },
-    illinois: { failures: 0, lastFailure: 0, status: 'CLOSED' }
+    illinois: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    georgia: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    arizona: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    california: { failures: 0, lastFailure: 0, status: 'CLOSED' }
 };
 
 /**
@@ -469,6 +497,276 @@ async function queryIllinoisTPIMS() {
     }
 }
 
+// ============================================
+// SOUTHERN STATES TPIMS FEEDS
+// ============================================
+
+/**
+ * Query Arizona 511 TPIMS - I-10 TPAS corridor
+ * Coverage: I-10, I-40, I-17 rest areas with truck parking sensors
+ */
+async function queryArizonaTPIMS() {
+    if (circuitBreaker.arizona.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.arizona.lastFailure > 60000) {
+            circuitBreaker.arizona.status = 'HALF_OPEN';
+        } else {
+            return [];
+        }
+    }
+
+    try {
+        // AZ511 uses public REST API for rest areas
+        const url = `${API_CONFIG.TPIMS.ARIZONA.baseUrl}${API_CONFIG.TPIMS.ARIZONA.endpoint}`;
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`Arizona TPIMS error: ${response.status}`);
+
+        const data = await response.json();
+        circuitBreaker.arizona.failures = 0;
+        circuitBreaker.arizona.status = 'CLOSED';
+
+        console.log(`[TPIMS] Arizona returned ${Array.isArray(data) ? data.length : data.restAreas?.length || 0} locations`);
+        return normalizeArizonaData(data.restAreas || data || []);
+    } catch (error) {
+        circuitBreaker.arizona.failures++;
+        circuitBreaker.arizona.lastFailure = Date.now();
+        if (circuitBreaker.arizona.failures >= 3) circuitBreaker.arizona.status = 'OPEN';
+        console.error('[TPIMS] Arizona failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Normalize Arizona 511 rest area data
+ */
+function normalizeArizonaData(data) {
+    if (!Array.isArray(data)) return [];
+
+    return data.map(item => {
+        // AZ511 format: TotalTruckSpaces, AvailableTruckSpaces
+        const total = parseInt(item.TotalTruckSpaces || item.totalTruckSpaces || 0);
+        const available = item.AvailableTruckSpaces !== undefined
+            ? parseInt(item.AvailableTruckSpaces)
+            : (item.availableTruckSpaces !== undefined ? parseInt(item.availableTruckSpaces) : null);
+
+        return {
+            external_id: `az_${item.Id || item.id || item.RestAreaId}`,
+            source: 'arizona_tpims',
+            source_label: 'ADOT Sensors',
+            name: item.Name || item.name || item.Description || 'Arizona Rest Area',
+            location: {
+                lat: parseFloat(item.Latitude || item.latitude || item.Lat || 0),
+                lng: parseFloat(item.Longitude || item.longitude || item.Lng || 0)
+            },
+            address: {
+                city: item.City || item.city || '',
+                state: 'AZ'
+            },
+            total_spaces: total,
+            available_spaces: available,
+            is_open: item.Open !== false && item.Status !== 'Closed',
+            amenities: parseArizonaAmenities(item),
+            data_confidence: available !== null ? 'sensor' : 'static',
+            highway: item.Route || item.route || item.Highway || '',
+            last_availability_update: item.LastUpdated ? new Date(item.LastUpdated) : new Date()
+        };
+    });
+}
+
+function parseArizonaAmenities(item) {
+    const amenities = ['restroom'];
+    if (item.HasFuel || item.hasFuel) amenities.push('fuel');
+    if (item.HasFood || item.hasFood) amenities.push('food');
+    if (item.HasShowers || item.hasShowers) amenities.push('showers');
+    if (item.PetArea || item.petArea) amenities.push('pet_area');
+    return amenities;
+}
+
+/**
+ * Query Georgia 511 TPIMS - I-75, I-85, I-20, I-95
+ * Georgia has 17 welcome centers and rest areas along major interstates
+ */
+async function queryGeorgiaTPIMS() {
+    if (circuitBreaker.georgia.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.georgia.lastFailure > 60000) {
+            circuitBreaker.georgia.status = 'HALF_OPEN';
+        } else {
+            return [];
+        }
+    }
+
+    try {
+        // GA511 REST API endpoint
+        const url = `${API_CONFIG.TPIMS.GEORGIA.baseUrl}${API_CONFIG.TPIMS.GEORGIA.endpoint}`;
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`Georgia TPIMS error: ${response.status}`);
+
+        const data = await response.json();
+        circuitBreaker.georgia.failures = 0;
+        circuitBreaker.georgia.status = 'CLOSED';
+
+        console.log(`[TPIMS] Georgia returned ${Array.isArray(data) ? data.length : data.restAreas?.length || 0} locations`);
+        return normalizeGeorgiaData(data.restAreas || data || []);
+    } catch (error) {
+        circuitBreaker.georgia.failures++;
+        circuitBreaker.georgia.lastFailure = Date.now();
+        if (circuitBreaker.georgia.failures >= 3) circuitBreaker.georgia.status = 'OPEN';
+        console.error('[TPIMS] Georgia failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Normalize Georgia 511 rest area data
+ */
+function normalizeGeorgiaData(data) {
+    if (!Array.isArray(data)) return [];
+
+    return data.map(item => {
+        // GA511 format varies - handle common patterns
+        const total = parseInt(item.TruckSpaces || item.truckSpaces || item.capacity || 0);
+        const available = item.AvailableSpaces !== undefined
+            ? parseInt(item.AvailableSpaces)
+            : (item.availableSpaces !== undefined ? parseInt(item.availableSpaces) : null);
+
+        return {
+            external_id: `ga_${item.Id || item.id || item.RestAreaId}`,
+            source: 'georgia_tpims',
+            source_label: 'GDOT',
+            name: item.Name || item.name || item.Description || 'Georgia Rest Area',
+            location: {
+                lat: parseFloat(item.Latitude || item.latitude || item.Lat || 0),
+                lng: parseFloat(item.Longitude || item.longitude || item.Lng || 0)
+            },
+            address: {
+                city: item.City || item.city || '',
+                state: 'GA'
+            },
+            total_spaces: total,
+            available_spaces: available,
+            is_open: item.Open !== false && item.Status !== 'Closed',
+            amenities: parseGeorgiaAmenities(item),
+            data_confidence: available !== null ? 'sensor' : 'static',
+            highway: item.Route || item.route || item.Interstate || '',
+            last_availability_update: item.LastUpdated ? new Date(item.LastUpdated) : new Date()
+        };
+    });
+}
+
+function parseGeorgiaAmenities(item) {
+    const amenities = ['restroom'];
+    if (item.Vending || item.vending) amenities.push('vending');
+    if (item.PicnicArea || item.picnicArea) amenities.push('picnic');
+    if (item.PetArea || item.petArea) amenities.push('pet_area');
+    if (item.WiFi || item.wifi) amenities.push('wifi');
+    return amenities;
+}
+
+/**
+ * Query California Caltrans Rest Areas - ArcGIS REST service
+ * Coverage: All California rest areas (static locations)
+ * Note: Caltrans doesn't provide real-time availability, but has accurate location data
+ */
+async function queryCaliforniaRestAreas() {
+    if (circuitBreaker.california.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.california.lastFailure > 60000) {
+            circuitBreaker.california.status = 'HALF_OPEN';
+        } else {
+            return [];
+        }
+    }
+
+    try {
+        // ArcGIS REST query - get all features as JSON
+        const params = new URLSearchParams({
+            where: '1=1',
+            outFields: '*',
+            returnGeometry: 'true',
+            f: 'json'
+        });
+
+        const url = `${API_CONFIG.TPIMS.CALIFORNIA.baseUrl}?${params.toString()}`;
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`California REST Areas error: ${response.status}`);
+
+        const data = await response.json();
+        circuitBreaker.california.failures = 0;
+        circuitBreaker.california.status = 'CLOSED';
+
+        console.log(`[TPIMS] California returned ${data.features?.length || 0} rest areas`);
+        return normalizeCaliforniaData(data.features || []);
+    } catch (error) {
+        circuitBreaker.california.failures++;
+        circuitBreaker.california.lastFailure = Date.now();
+        if (circuitBreaker.california.failures >= 3) circuitBreaker.california.status = 'OPEN';
+        console.error('[TPIMS] California failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Normalize California Caltrans ArcGIS data
+ */
+function normalizeCaliforniaData(features) {
+    if (!Array.isArray(features)) return [];
+
+    return features.map(feature => {
+        const props = feature.attributes || {};
+        const geom = feature.geometry || {};
+
+        // Caltrans provides static data - no real-time availability
+        return {
+            external_id: `ca_${props.OBJECTID || props.RestAreaID}`,
+            source: 'california_caltrans',
+            source_label: 'Caltrans',
+            name: props.NAME || props.Name || props.REST_AREA_NAME || 'California Rest Area',
+            location: {
+                lat: geom.y || parseFloat(props.LATITUDE || 0),
+                lng: geom.x || parseFloat(props.LONGITUDE || 0)
+            },
+            address: {
+                city: props.CITY || props.City || '',
+                county: props.COUNTY || props.County || '',
+                state: 'CA'
+            },
+            total_spaces: parseInt(props.TRUCK_SPACES || props.TruckSpaces || 0),
+            available_spaces: null, // Caltrans doesn't provide real-time availability
+            is_open: props.STATUS !== 'Closed' && props.OPEN !== 'No',
+            amenities: parseCaliforniaAmenities(props),
+            data_confidence: 'static', // No sensor data, just location info
+            highway: props.ROUTE || props.Route || props.HIGHWAY || '',
+            last_availability_update: new Date() // Static data
+        };
+    });
+}
+
+function parseCaliforniaAmenities(props) {
+    const amenities = [];
+    if (props.RESTROOMS === 'Yes' || props.Restrooms) amenities.push('restroom');
+    if (props.VENDING === 'Yes' || props.Vending) amenities.push('vending');
+    if (props.PICNIC === 'Yes' || props.PicnicArea) amenities.push('picnic');
+    if (props.PET_AREA === 'Yes' || props.PetArea) amenities.push('pet_area');
+    if (props.WATER === 'Yes' || props.Water) amenities.push('water');
+    if (props.PHONES === 'Yes' || props.Phones) amenities.push('phone');
+    if (props.HANDICAP === 'Yes' || props.Handicap) amenities.push('accessible');
+    if (amenities.length === 0) amenities.push('restroom'); // Default
+    return amenities;
+}
+
 /**
  * Normalize MAASTO standard format (used by KY, MN, IL)
  * Schema: siteId, timeStamp, reportedAvailable, trend, open, trustData, capacity
@@ -530,23 +828,31 @@ function extractHighwayFromSiteId(siteId) {
  */
 async function queryAllTPIMSSources(lat, lng, radius) {
     // Query ALL available TPIMS sources in parallel
-    // Public feeds (no key): IN, KY, MN, IL
-    // API key required: OH, WI
+    // MAASTO Midwest (6 states): IN, KY, MN, IL, OH, WI
+    // Southern/Western (3 states): AZ, GA, CA
     const tpimsQueries = [
-        // Public feeds - always available
+        // === MAASTO MIDWEST ===
+        // Public feeds (no key required)
         queryIndianaTPIMS(),
         queryKentuckyTPIMS(),
         queryMinnesotaTPIMS(),
         queryIllinoisTPIMS(),
         // API key feeds - gracefully fail if no key
         queryOHGOAPI(lat, lng, radius),
-        queryWI511API(lat, lng, radius)
+        queryWI511API(lat, lng, radius),
+        // === SOUTHERN/WESTERN STATES ===
+        // Arizona - I-10 TPAS corridor
+        queryArizonaTPIMS(),
+        // Georgia - I-75, I-85, I-20, I-95
+        queryGeorgiaTPIMS(),
+        // California - Caltrans static rest areas
+        queryCaliforniaRestAreas()
     ];
 
     const results = await Promise.all(tpimsQueries);
     const allItems = results.flat();
 
-    console.log(`[TPIMS] Total locations from all 6 sources: ${allItems.length}`);
+    console.log(`[TPIMS] Total locations from all 9 sources: ${allItems.length}`);
     return allItems;
 }
 
@@ -730,8 +1036,18 @@ function flattenAndMerge(sourceResults) {
  */
 function getSourceLabel(source) {
     const labels = {
+        // MAASTO Midwest
         'ohgo_tpims': 'ODOT Sensors',
         'wi_tpims': 'WisDOT Sensors',
+        'indiana_tpims': 'INDOT Sensors',
+        'kentucky_tpims': 'KYTC Sensors',
+        'minnesota_tpims': 'MnDOT Sensors',
+        'illinois_tpims': 'IDOT Sensors',
+        // Southern/Western
+        'arizona_tpims': 'ADOT Sensors',
+        'georgia_tpims': 'GDOT',
+        'california_caltrans': 'Caltrans',
+        // Other sources
         'truckparkingclub': 'TruckParkingClub',
         'parkmytruck': 'ParkMyTruck',
         'community': 'Driver Reports',
