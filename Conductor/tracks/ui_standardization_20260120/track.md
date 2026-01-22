@@ -20,5 +20,5 @@ Unify the platform's UI/UX by removing inline Tailwind configs, standardizing on
 - [x] Standardize `Recruiting_Landing_Page.html`
 - [x] Standardize Landing Pages (src/public/landing/*.html)
 - [x] Standardize Carrier Pages (src/public/carrier/*.html)
-- [ ] Refactor Table Components
-- [ ] Refactor Card Components
+- [x] Refactor Table Components
+- [x] Refactor Card Components

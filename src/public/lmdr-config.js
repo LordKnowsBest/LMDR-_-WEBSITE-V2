@@ -21,6 +21,29 @@ tailwind.config = {
                     yellow: '#fbbf24',    // Amber-400
                     'yellow-hover': '#f59e0b', // Amber-500
                     canvas: '#f8fafc',    // Slate-50
+                },
+                // Admin / Dashboard System Tokens
+                primary: {
+                    DEFAULT: '#2563eb',
+                    dark: '#1d4ed8',
+                },
+                background: {
+                    dark: '#0f172a',
+                    light: '#f8fafc',
+                },
+                surface: {
+                    dark: '#1e293b',
+                    light: '#ffffff',
+                    darker: '#0f172a',
+                    lighter: '#f1f5f9',
+                },
+                border: {
+                    dark: '#334155',
+                    light: '#e2e8f0',
+                },
+                text: {
+                    muted: '#94a3b8',
+                    dark: '#0f172a',
                 }
             },
             animation: {
