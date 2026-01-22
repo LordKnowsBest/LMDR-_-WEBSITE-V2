@@ -22,42 +22,62 @@ const API_CONFIG = {
     // TPIMS - Truck Parking Information Management System (FHWA)
     // Real sensor data from 300+ locations across major freight corridors
     TPIMS: {
-        // OHGO (Ohio) - Well-documented public API
+        // OHGO (Ohio) - Requires API key
         OHGO: {
             baseUrl: 'https://publicapi.ohgo.com/api/v1',
             timeout: 8000,
             rateLimitPerMin: 60,
             secretKey: 'OHGO_API_KEY'
         },
-        // Wisconsin 511
+        // Wisconsin 511 - Requires API key
         WI_511: {
             baseUrl: 'https://511wi.gov/api',
             timeout: 8000,
-            rateLimitPerMin: 10, // Strict: 10 calls per 60 seconds
+            rateLimitPerMin: 10,
             secretKey: 'WI_511_API_KEY'
         },
-        // Additional MAASTO states can be added here
-        // IN, IA, KS, KY, MI, MN follow similar patterns
+        // ========================================
+        // PUBLIC FEEDS (No API Key Required!)
+        // ========================================
+        // Indiana - GeoJSON format, 19 sites on I-65, I-69, I-70
+        INDIANA: {
+            dynamicUrl: 'https://content.trafficwise.org/json/tpims.json',
+            staticUrl: 'https://content.trafficwise.org/json/rest_area.json',
+            timeout: 8000,
+            public: true
+        },
+        // Kentucky - TRIMARC, 14 sites on I-65, I-71, I-75
+        KENTUCKY: {
+            dynamicUrl: 'http://www.trimarc.org/dat/tpims/TPIMS_Dynamic.json',
+            staticUrl: 'http://www.trimarc.org/dat/tpims/TPIMS_Static.json',
+            timeout: 8000,
+            public: true
+        },
+        // Minnesota - MnDOT IRIS, 7 sites on I-94, I-35
+        MINNESOTA: {
+            dynamicUrl: 'http://iris.dot.state.mn.us/iris/TPIMS_dynamic',
+            timeout: 8000,
+            public: true
+        },
+        // Illinois - TravelMidwest, bonus coverage
+        ILLINOIS: {
+            dynamicUrl: 'https://truckparking.travelmidwest.com/TPIMS_Dynamic.json',
+            staticUrl: 'https://truckparking.travelmidwest.com/TPIMS_Static.json',
+            timeout: 8000,
+            public: true
+        }
     }
 };
 
 // Simple circuit breaker state
 const circuitBreaker = {
-    truckParkingClub: {
-        failures: 0,
-        lastFailure: 0,
-        status: 'CLOSED' // CLOSED, OPEN, HALF_OPEN
-    },
-    ohgo: {
-        failures: 0,
-        lastFailure: 0,
-        status: 'CLOSED'
-    },
-    wi511: {
-        failures: 0,
-        lastFailure: 0,
-        status: 'CLOSED'
-    }
+    truckParkingClub: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    ohgo: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    wi511: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    indiana: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    kentucky: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    minnesota: { failures: 0, lastFailure: 0, status: 'CLOSED' },
+    illinois: { failures: 0, lastFailure: 0, status: 'CLOSED' }
 };
 
 /**
@@ -271,26 +291,262 @@ function normalizeWI511Data(results) {
     }));
 }
 
+// ============================================
+// PUBLIC TPIMS FEEDS (No API Key Required!)
+// ============================================
+
+/**
+ * Query Indiana TPIMS - GeoJSON format
+ * Coverage: I-65, I-69, I-70 (19 sites)
+ */
+async function queryIndianaTPIMS() {
+    if (circuitBreaker.indiana.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.indiana.lastFailure > 60000) {
+            circuitBreaker.indiana.status = 'HALF_OPEN';
+        } else {
+            return [];
+        }
+    }
+
+    try {
+        const response = await fetch(API_CONFIG.TPIMS.INDIANA.dynamicUrl, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`Indiana TPIMS error: ${response.status}`);
+
+        const data = await response.json();
+        circuitBreaker.indiana.failures = 0;
+        circuitBreaker.indiana.status = 'CLOSED';
+
+        console.log(`[TPIMS] Indiana returned ${data.features?.length || 0} locations`);
+        return normalizeIndianaData(data.features || []);
+    } catch (error) {
+        circuitBreaker.indiana.failures++;
+        circuitBreaker.indiana.lastFailure = Date.now();
+        if (circuitBreaker.indiana.failures >= 3) circuitBreaker.indiana.status = 'OPEN';
+        console.error('[TPIMS] Indiana failed:', error.message);
+        return [];
+    }
+}
+
+function normalizeIndianaData(features) {
+    return features.map(f => {
+        const props = f.properties || {};
+        const coords = f.geometry?.coordinates || [0, 0];
+        // Parse availability from message1 (can be number, "LOW", or "X")
+        let available = null;
+        if (props.message1 && !isNaN(parseInt(props.message1))) {
+            available = parseInt(props.message1);
+        } else if (props.message1 === 'LOW') {
+            available = 5; // Estimate low as 5
+        }
+
+        return {
+            external_id: `in_${props.device_nbr || f.id}`,
+            source: 'indiana_tpims',
+            source_label: 'INDOT Sensors',
+            name: props.title || props.description || 'Indiana Rest Area',
+            location: { lat: coords[1], lng: coords[0] },
+            address: { state: 'IN' },
+            total_spaces: parseInt(props.message3) || 0,
+            available_spaces: available,
+            is_open: props.message1 !== 'X',
+            amenities: ['restroom'],
+            data_confidence: 'sensor',
+            highway: props.route || '',
+            last_availability_update: props.ontime ? new Date(props.ontime) : new Date()
+        };
+    });
+}
+
+/**
+ * Query Kentucky TPIMS - MAASTO standard format
+ * Coverage: I-65, I-71, I-75 (14 sites)
+ */
+async function queryKentuckyTPIMS() {
+    if (circuitBreaker.kentucky.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.kentucky.lastFailure > 60000) {
+            circuitBreaker.kentucky.status = 'HALF_OPEN';
+        } else {
+            return [];
+        }
+    }
+
+    try {
+        const response = await fetch(API_CONFIG.TPIMS.KENTUCKY.dynamicUrl, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`Kentucky TPIMS error: ${response.status}`);
+
+        const data = await response.json();
+        circuitBreaker.kentucky.failures = 0;
+        circuitBreaker.kentucky.status = 'CLOSED';
+
+        console.log(`[TPIMS] Kentucky returned ${Array.isArray(data) ? data.length : 0} locations`);
+        return normalizeMAASTO(data, 'KY', 'kentucky_tpims', 'KYTC Sensors');
+    } catch (error) {
+        circuitBreaker.kentucky.failures++;
+        circuitBreaker.kentucky.lastFailure = Date.now();
+        if (circuitBreaker.kentucky.failures >= 3) circuitBreaker.kentucky.status = 'OPEN';
+        console.error('[TPIMS] Kentucky failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Query Minnesota TPIMS - MAASTO standard format
+ * Coverage: I-94, I-35 (7 sites)
+ */
+async function queryMinnesotaTPIMS() {
+    if (circuitBreaker.minnesota.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.minnesota.lastFailure > 60000) {
+            circuitBreaker.minnesota.status = 'HALF_OPEN';
+        } else {
+            return [];
+        }
+    }
+
+    try {
+        const response = await fetch(API_CONFIG.TPIMS.MINNESOTA.dynamicUrl, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`Minnesota TPIMS error: ${response.status}`);
+
+        const data = await response.json();
+        circuitBreaker.minnesota.failures = 0;
+        circuitBreaker.minnesota.status = 'CLOSED';
+
+        console.log(`[TPIMS] Minnesota returned ${Array.isArray(data) ? data.length : 0} locations`);
+        return normalizeMAASTO(data, 'MN', 'minnesota_tpims', 'MnDOT Sensors');
+    } catch (error) {
+        circuitBreaker.minnesota.failures++;
+        circuitBreaker.minnesota.lastFailure = Date.now();
+        if (circuitBreaker.minnesota.failures >= 3) circuitBreaker.minnesota.status = 'OPEN';
+        console.error('[TPIMS] Minnesota failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Query Illinois TPIMS - MAASTO standard format
+ * Coverage: I-80, I-55, I-57 corridor
+ */
+async function queryIllinoisTPIMS() {
+    if (circuitBreaker.illinois.status === 'OPEN') {
+        if (Date.now() - circuitBreaker.illinois.lastFailure > 60000) {
+            circuitBreaker.illinois.status = 'HALF_OPEN';
+        } else {
+            return [];
+        }
+    }
+
+    try {
+        const response = await fetch(API_CONFIG.TPIMS.ILLINOIS.dynamicUrl, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) throw new Error(`Illinois TPIMS error: ${response.status}`);
+
+        const data = await response.json();
+        circuitBreaker.illinois.failures = 0;
+        circuitBreaker.illinois.status = 'CLOSED';
+
+        console.log(`[TPIMS] Illinois returned ${Array.isArray(data) ? data.length : 0} locations`);
+        return normalizeMAASTO(data, 'IL', 'illinois_tpims', 'IDOT Sensors');
+    } catch (error) {
+        circuitBreaker.illinois.failures++;
+        circuitBreaker.illinois.lastFailure = Date.now();
+        if (circuitBreaker.illinois.failures >= 3) circuitBreaker.illinois.status = 'OPEN';
+        console.error('[TPIMS] Illinois failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Normalize MAASTO standard format (used by KY, MN, IL)
+ * Schema: siteId, timeStamp, reportedAvailable, trend, open, trustData, capacity
+ */
+function normalizeMAASTO(data, state, source, sourceLabel) {
+    if (!Array.isArray(data)) return [];
+
+    return data.map(item => {
+        // Parse availability - can be number string, "Low", or "Unknown"
+        let available = null;
+        if (item.reportedAvailable && !isNaN(parseInt(item.reportedAvailable))) {
+            available = parseInt(item.reportedAvailable);
+        } else if (item.reportedAvailable === 'Low') {
+            available = 5;
+        }
+
+        // Extract highway from siteId (e.g., "KY00065IS..." -> I-65)
+        const highway = extractHighwayFromSiteId(item.siteId);
+
+        return {
+            external_id: `${state.toLowerCase()}_${item.siteId}`,
+            source: source,
+            source_label: sourceLabel,
+            name: item.siteName || `${state} Rest Area`,
+            location: {
+                lat: item.latitude || item.location?.latitude || 0,
+                lng: item.longitude || item.location?.longitude || 0
+            },
+            address: {
+                city: item.city || item.location?.city || '',
+                state: state
+            },
+            total_spaces: parseInt(item.capacity) || 0,
+            available_spaces: available,
+            is_open: item.open === true || item.open === 'true',
+            amenities: item.amenities || ['restroom'],
+            data_confidence: item.trustData ? 'sensor' : 'estimated',
+            highway: highway,
+            trend: item.trend || null,
+            last_availability_update: item.timeStamp ? new Date(item.timeStamp) : new Date()
+        };
+    });
+}
+
+function extractHighwayFromSiteId(siteId) {
+    if (!siteId) return '';
+    // Format: KY00065IS... -> extract route number after state code
+    const match = siteId.match(/\d{5}(IS|US|SH)(\d+)/);
+    if (match) {
+        const type = match[1] === 'IS' ? 'I-' : match[1] === 'US' ? 'US-' : 'SR-';
+        return type + parseInt(match[2]);
+    }
+    return '';
+}
+
 /**
  * Aggregate TPIMS data from all available state sources
  * This is the main entry point for real sensor data
  */
 async function queryAllTPIMSSources(lat, lng, radius) {
-    // Determine which state APIs to query based on location
-    // For now, query all available sources and filter by distance
+    // Query ALL available TPIMS sources in parallel
+    // Public feeds (no key): IN, KY, MN, IL
+    // API key required: OH, WI
     const tpimsQueries = [
+        // Public feeds - always available
+        queryIndianaTPIMS(),
+        queryKentuckyTPIMS(),
+        queryMinnesotaTPIMS(),
+        queryIllinoisTPIMS(),
+        // API key feeds - gracefully fail if no key
         queryOHGOAPI(lat, lng, radius),
         queryWI511API(lat, lng, radius)
-        // Add more states as API keys are configured:
-        // queryIN511API(lat, lng, radius),
-        // queryMN511API(lat, lng, radius),
-        // queryMI511API(lat, lng, radius),
     ];
 
     const results = await Promise.all(tpimsQueries);
     const allItems = results.flat();
 
-    console.log(`[TPIMS] Total locations from all sources: ${allItems.length}`);
+    console.log(`[TPIMS] Total locations from all 6 sources: ${allItems.length}`);
     return allItems;
 }
 
