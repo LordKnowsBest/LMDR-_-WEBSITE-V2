@@ -404,107 +404,107 @@ Phase 5: Incident Reporting
 
 ### 5.1 Data Model & Backend Setup
 
-- [ ] Task: Create `IncidentReports` collection in Wix CMS
-  - [ ] Add all fields per spec (incident_type, severity, DOT reportability, etc.)
-  - [ ] Configure indexes on carrier_dot, incident_date, driver_id, severity
+- [x] Task: Create `IncidentReports` collection in Wix CMS
+  - [x] Add all fields per spec (incident_type, severity, DOT reportability, etc.)
+  - [x] Configure indexes on carrier_dot, incident_date, driver_id, severity
 
-- [ ] Task: Create `src/backend/incidentService.jsw`
-  - [ ] Implement `createIncidentReport(incidentData)`
-  - [ ] Implement `getIncidentReport(incidentId)`
-  - [ ] Implement `getIncidentReports(carrierDot, filters)`
-  - [ ] Implement `updateIncidentReport(incidentId, updates)`
+- [x] Task: Create `src/backend/incidentService.jsw`
+  - [x] Implement `createIncidentReport(incidentData)`
+  - [x] Implement `getIncidentReport(incidentId)`
+  - [x] Implement `getIncidentReports(carrierDot, filters)`
+  - [x] Implement `updateIncidentReport(incidentId, updates)`
 
 ### 5.2 DOT Reportability Classification
 
-- [ ] Task: Implement `classifyDOTReportability(incidentData)`
-  - [ ] Check fatality criterion
-  - [ ] Check injury criterion (medical treatment away from scene)
-  - [ ] Check tow-away criterion
-  - [ ] Check hazmat release criterion
-  - [ ] Return reportable status, reason, deadline
+- [x] Task: Implement `classifyDOTReportability(incidentData)`
+  - [x] Check fatality criterion
+  - [x] Check injury criterion (medical treatment away from scene)
+  - [x] Check tow-away criterion
+  - [x] Check hazmat release criterion
+  - [x] Return reportable status, reason, deadline
 
-- [ ] Task: Implement `markDOTReported(incidentId, reportNumber)`
-- [ ] Task: Create DOT reporting deadline alerts
+- [x] Task: Implement `markDOTReported(incidentId, reportNumber)`
+- [x] Task: Create DOT reporting deadline alerts
 
 ### 5.3 Investigation Workflow
 
-- [ ] Task: Implement `startInvestigation(incidentId, investigatorId)`
-  - [ ] Update investigation_status
-  - [ ] Create audit trail entry
+- [x] Task: Implement `startInvestigation(incidentId, investigatorId)`
+  - [x] Update investigation_status
+  - [x] Create audit trail entry
 
-- [ ] Task: Implement `addInvestigationFinding(incidentId, finding)`
-  - [ ] Append to investigation findings
-  - [ ] Track root cause analysis
+- [x] Task: Implement `addInvestigationFinding(incidentId, finding)`
+  - [x] Append to investigation findings
+  - [x] Track root cause analysis
 
-- [ ] Task: Implement `closeInvestigation(incidentId, summary)`
-  - [ ] Finalize investigation
-  - [ ] Mark corrective actions
+- [x] Task: Implement `closeInvestigation(incidentId, summary)`
+  - [x] Finalize investigation
+  - [x] Mark corrective actions
 
-- [ ] Task: Implement `addCorrectiveAction(incidentId, action)`
-  - [ ] Add action item with assignee and due date
-  - [ ] Track completion status
+- [x] Task: Implement `addCorrectiveAction(incidentId, action)`
+  - [x] Add action item with assignee and due date
+  - [x] Track completion status
 
 ### 5.4 Statistics & Reporting
 
-- [ ] Task: Implement `getIncidentStatistics(carrierDot, dateRange)`
-  - [ ] Total incidents by type and severity
-  - [ ] DOT reportable count
-  - [ ] Trending analysis (month-over-month)
-  - [ ] Driver incident frequency
+- [x] Task: Implement `getIncidentStatistics(carrierDot, dateRange)`
+  - [x] Total incidents by type and severity
+  - [x] DOT reportable count
+  - [x] Trending analysis (month-over-month)
+  - [x] Driver incident frequency
 
 ### 5.5 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_INCIDENT_REPORTING.html`
-  - [ ] Incident list with filters
-  - [ ] Quick stats (total, DOT reportable, open investigations)
-  - [ ] Severity indicators
+- [x] Task: Create `src/public/carrier/CARRIER_INCIDENT_REPORTING.html`
+  - [x] Incident list with filters
+  - [x] Quick stats (total, DOT reportable, open investigations)
+  - [x] Severity indicators
 
-- [ ] Task: Create incident report form
-  - [ ] Incident type selection
-  - [ ] Driver and vehicle selection
-  - [ ] Location entry (address, city, state)
-  - [ ] Date/time picker
-  - [ ] Injury/fatality/tow/hazmat checkboxes
-  - [ ] Real-time DOT reportability indicator
-  - [ ] Description text area
-  - [ ] Photo/document upload
+- [x] Task: Create incident report form
+  - [x] Incident type selection
+  - [x] Driver and vehicle selection
+  - [x] Location entry (address, city, state)
+  - [x] Date/time picker
+  - [x] Injury/fatality/tow/hazmat checkboxes
+  - [x] Real-time DOT reportability indicator
+  - [x] Description text area
+  - [x] Photo/document upload
 
-- [ ] Task: Create incident detail view
-  - [ ] Full incident information
-  - [ ] Investigation status and timeline
-  - [ ] Corrective actions list
-  - [ ] Attached documents/photos
+- [x] Task: Create incident detail view
+  - [x] Full incident information
+  - [x] Investigation status and timeline
+  - [x] Corrective actions list
+  - [x] Attached documents/photos
 
-- [ ] Task: Create investigation workflow UI
-  - [ ] Start investigation button
-  - [ ] Add finding modal
-  - [ ] Corrective action form
-  - [ ] Close investigation summary
+- [x] Task: Create investigation workflow UI
+  - [x] Start investigation button
+  - [x] Add finding modal
+  - [x] Corrective action form
+  - [x] Close investigation summary
 
 ### 5.6 Notifications
 
-- [ ] Task: Create incident email templates
-  - [ ] `incident_reported` - new incident notification
-  - [ ] `incident_dot_reportable` - DOT reporting required
-  - [ ] `incident_deadline_approaching` - DOT deadline reminder
-  - [ ] `investigation_assigned` - investigator notification
+- [x] Task: Create incident email templates
+  - [x] `incident_reported` - new incident notification
+  - [x] `incident_dot_reportable` - DOT reporting required
+  - [x] `incident_deadline_approaching` - DOT deadline reminder
+  - [x] `investigation_assigned` - investigator notification
 
 ### 5.7 Integration Points
 
-- [ ] Task: Trigger CSA score refresh after incident
-  - [ ] Call `snapshotCSAScores` with source `incident_triggered`
+- [x] Task: Trigger CSA score refresh after incident
+  - [x] Call `snapshotCSAScores` with source `incident_triggered`
 
-- [ ] Task: Link incident documents to Document Vault
-  - [ ] Store photos and reports in CarrierDocuments
-  - [ ] Reference from incident record
+- [x] Task: Link incident documents to Document Vault
+  - [x] Store photos and reports in CarrierDocuments
+  - [x] Reference from incident record
 
 ### 5.8 Testing - Phase 5
 
-- [ ] Task: Create `src/public/__tests__/incidentService.test.js`
-  - [ ] Test incident creation
-  - [ ] Test DOT reportability logic
-  - [ ] Test investigation workflow
-  - [ ] Test statistics calculation
+- [x] Task: Create `src/public/__tests__/incidentService.test.js`
+  - [x] Test incident creation
+  - [x] Test DOT reportability logic
+  - [x] Test investigation workflow
+  - [x] Test statistics calculation
 
 - [ ] Task: Manual integration testing
   - [ ] Create incidents of various types
