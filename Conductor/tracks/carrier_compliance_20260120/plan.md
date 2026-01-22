@@ -126,7 +126,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 2: Document Vault
+## Phase 2: Document Vault [checkpoint: 1f46b22]
 
 > **Goal**: Centralized, audit-ready document storage with expiration tracking
 >
