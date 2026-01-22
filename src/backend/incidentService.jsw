@@ -1,0 +1,225 @@
+import wixData from 'wix-data';
+import { snapshotCSAScores } from './csaMonitorService';
+
+const COLLECTION = 'IncidentReports';
+
+// ============================================================ 
+// INCIDENT REPORTING
+// ============================================================ 
+
+/**
+ * Create a new incident report
+ * @param {Object} incidentData - Incident details
+ * @returns {Promise<Object>} - Created incident
+ */
+export async function createIncidentReport(incidentData) {
+  // Generate Incident Number
+  const count = await wixData.query(COLLECTION).count({ suppressAuth: true });
+  incidentData.incident_number = `INC-${new Date().getFullYear()}-${String(count + 1).padStart(4, '0')}`;
+  
+  // Auto-classify DOT reportability
+  const classification = classifyDOTReportability(incidentData);
+  incidentData.dot_reportable = classification.reportable;
+  incidentData.dot_report_status = classification.reportable ? 'pending' : 'not_required';
+  if(classification.reportable) {
+      incidentData.dot_deadline = classification.deadline;
+  }
+
+  incidentData.investigation_status = 'pending';
+  incidentData._createdDate = new Date();
+
+  const result = await wixData.insert(COLLECTION, incidentData, { suppressAuth: true });
+  
+  // Trigger CSA refresh if critical
+  if (incidentData.severity === 'critical' || incidentData.dot_reportable) {
+      // Async trigger, don't wait
+      snapshotCSAScores(incidentData.carrier_dot, 'incident_triggered').catch(console.error);
+  }
+
+  return result;
+}
+
+/**
+ * Get incident by ID
+ * @param {string} incidentId - Incident ID
+ * @returns {Promise<Object>} - Full incident record
+ */
+export async function getIncidentReport(incidentId) {
+  return wixData.get(COLLECTION, incidentId, { suppressAuth: true });
+}
+
+/**
+ * Get all incidents for a carrier
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} filters - { type, severity, dateRange, driverId, status }
+ * @returns {Promise<Array>} - List of incidents
+ */
+export async function getIncidentReports(carrierDot, filters = {}) {
+  let query = wixData.query(COLLECTION).eq('carrier_dot', carrierDot);
+
+  if (filters.type) query = query.eq('incident_type', filters.type);
+  if (filters.severity) query = query.eq('severity', filters.severity);
+  if (filters.driverId) query = query.eq('driver_id', filters.driverId);
+  if (filters.status) query = query.eq('investigation_status', filters.status);
+
+  // Sort newest first
+  query = query.descending('incident_date');
+
+  const result = await query.find({ suppressAuth: true });
+  return result.items;
+}
+
+/**
+ * Update an incident report
+ * @param {string} incidentId - Incident ID
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<Object>} - Updated incident
+ */
+export async function updateIncidentReport(incidentId, updates) {
+  const existing = await wixData.get(COLLECTION, incidentId, { suppressAuth: true });
+  if (!existing) throw new Error('Incident not found');
+
+  const toUpdate = { ...existing, ...updates, _updatedDate: new Date() };
+  return wixData.update(COLLECTION, toUpdate, { suppressAuth: true });
+}
+
+/**
+ * Classify if incident is DOT reportable
+ * @param {Object} incidentData - Incident details
+ * @returns {Object} - { reportable: boolean, reason: string, deadline: Date }
+ */
+export function classifyDOTReportability(incidentData) {
+  const injuries = incidentData.injuries || {};
+  
+  if (injuries.fatalities > 0) {
+      return { reportable: true, reason: 'Fatality involved', deadline: getDeadline(30) };
+  }
+  
+  if (injuries.treatment_away_from_scene) { // Need checkbox for this in UI
+      return { reportable: true, reason: 'Injury requiring immediate treatment away from scene', deadline: getDeadline(30) };
+  }
+  
+  if (incidentData.tow_required) {
+      return { reportable: true, reason: 'Disabling damage requiring tow', deadline: getDeadline(30) };
+  }
+  
+  return { reportable: false, reason: 'Does not meet DOT thresholds', deadline: null };
+}
+
+function getDeadline(days) {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d;
+}
+
+/**
+ * Mark incident as reported to DOT
+ * @param {string} incidentId - Incident ID
+ * @param {string} reportNumber - DOT report confirmation number
+ * @returns {Promise<Object>} - Updated incident
+ */
+export async function markDOTReported(incidentId, reportNumber) {
+  return updateIncidentReport(incidentId, {
+      dot_report_status: 'submitted',
+      dot_report_date: new Date(),
+      dot_confirmation_number: reportNumber
+  });
+}
+
+// ============================================================ 
+// INVESTIGATION WORKFLOW
+// ============================================================ 
+
+/**
+ * Start investigation on an incident
+ * @param {string} incidentId - Incident ID
+ * @param {string} investigatorId - Assigned investigator
+ * @returns {Promise<Object>} - Updated incident
+ */
+export async function startInvestigation(incidentId, investigatorId) {
+  return updateIncidentReport(incidentId, {
+      investigation_status: 'in_progress',
+      assigned_investigator: investigatorId,
+      investigation_start_date: new Date()
+  });
+}
+
+/**
+ * Add investigation finding
+ * @param {string} incidentId - Incident ID
+ * @param {Object} finding - { description, rootCause, correctiveActions }
+ * @returns {Promise<Object>} - Updated incident
+ */
+export async function addInvestigationFinding(incidentId, finding) {
+  const incident = await getIncidentReport(incidentId);
+  const findings = incident.investigation_findings ? JSON.parse(JSON.stringify(incident.investigation_findings)) : [];
+  
+  // Note: Schema says findings is Text, but array is better. 
+  // If Text, we append. If we can store JSON/Array (which setupCollections used for some fields), let's assume Array or text append.
+  // SetupCollections.jsw defined 'investigation_findings' as 'text'. I should probably treat it as a text blob or update schema.
+  // For now, I'll append text.
+  
+  const newFindingText = `[${new Date().toLocaleDateString()}] ${finding.description}`;
+  const updatedText = incident.investigation_findings ? `${incident.investigation_findings}\n${newFindingText}` : newFindingText;
+  
+  return updateIncidentReport(incidentId, {
+      investigation_findings: updatedText,
+      root_cause: finding.rootCause || incident.root_cause
+  });
+}
+
+/**
+ * Close investigation
+ * @param {string} incidentId - Incident ID
+ * @param {Object} summary - Final investigation summary
+ * @returns {Promise<Object>} - Updated incident
+ */
+export async function closeInvestigation(incidentId, summary) {
+  return updateIncidentReport(incidentId, {
+      investigation_status: 'closed',
+      investigation_closed_date: new Date(),
+      investigation_summary: summary
+  });
+}
+
+/**
+ * Add corrective action to incident
+ * @param {string} incidentId - Incident ID
+ * @param {Object} action - { description, assignedTo, dueDate }
+ * @returns {Promise<Object>} - Updated incident
+ */
+export async function addCorrectiveAction(incidentId, action) {
+  const incident = await getIncidentReport(incidentId);
+  const actions = incident.corrective_actions || [];
+  
+  actions.push({
+      ...action,
+      status: 'pending',
+      created_at: new Date()
+  });
+  
+  return updateIncidentReport(incidentId, { corrective_actions: actions });
+}
+
+/**
+ * Get incident statistics for reporting
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} dateRange - { start, end }
+ * @returns {Promise<Object>} - Incident statistics
+ */
+export async function getIncidentStatistics(carrierDot, dateRange = {}) {
+  // Simple stats for now
+  const incidents = await getIncidentReports(carrierDot);
+  
+  return {
+      total: incidents.length,
+      reportable: incidents.filter(i => i.dot_reportable).length,
+      open: incidents.filter(i => i.investigation_status !== 'closed').length,
+      bySeverity: {
+          critical: incidents.filter(i => i.severity === 'critical').length,
+          major: incidents.filter(i => i.severity === 'major').length,
+          moderate: incidents.filter(i => i.severity === 'moderate').length,
+          minor: incidents.filter(i => i.severity === 'minor').length
+      }
+  };
+}

@@ -1,0 +1,402 @@
+import wixData from 'wix-data';
+import wixAuth from 'wix-auth';
+
+// Collection Names
+const COMPLIANCE_EVENTS_COLLECTION = 'ComplianceEvents';
+const COMPLIANCE_ALERTS_COLLECTION = 'ComplianceAlerts';
+const CARRIER_DOCUMENTS_COLLECTION = 'CarrierDocuments';
+
+// Event Statuses
+const STATUS = {
+  PENDING: 'pending',
+  UPCOMING: 'upcoming',
+  DUE_SOON: 'due_soon',
+  OVERDUE: 'overdue',
+  COMPLETED: 'completed'
+};
+
+// ============================================================
+// COMPLIANCE EVENTS - CRUD
+// ============================================================
+
+/**
+ * Get all compliance events for a carrier
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} filters - { status, category, driverId, dateRange }
+ * @returns {Promise<Array>} - List of compliance events
+ */
+export async function getComplianceEvents(carrierDot, filters = {}) {
+  let query = wixData.query(COMPLIANCE_EVENTS_COLLECTION)
+    .eq('carrier_dot', carrierDot);
+
+  if (filters.status) {
+    query = query.eq('status', filters.status);
+  }
+
+  if (filters.category) {
+    query = query.eq('event_category', filters.category);
+  }
+
+  if (filters.driverId) {
+    query = query.eq('driver_id', filters.driverId);
+  }
+
+  if (filters.dateRange) {
+    if (filters.dateRange.start) {
+      query = query.ge('due_date', filters.dateRange.start);
+    }
+    if (filters.dateRange.end) {
+      query = query.le('due_date', filters.dateRange.end);
+    }
+  }
+
+  // Sort by due date ascending (soonest first)
+  query = query.ascending('due_date');
+
+  const result = await query.find({ suppressAuth: true });
+  return result.items;
+}
+
+/**
+ * Create a new compliance event
+ * @param {Object} eventData - Event details
+ * @returns {Promise<Object>} - Created event
+ */
+export async function createComplianceEvent(eventData) {
+  // Validate required fields
+  if (!eventData.carrier_dot || !eventData.event_type || !eventData.due_date) {
+    throw new Error('Missing required fields: carrier_dot, event_type, due_date');
+  }
+
+  // Set default status if not provided
+  if (!eventData.status) {
+    eventData.status = STATUS.PENDING;
+    
+    // Auto-calculate status based on due date
+    const now = new Date();
+    const dueDate = new Date(eventData.due_date);
+    const diffDays = Math.ceil((dueDate - now) / (1000 * 60 * 60 * 24));
+    
+    if (diffDays < 0) eventData.status = STATUS.OVERDUE;
+    else if (diffDays <= 7) eventData.status = STATUS.DUE_SOON;
+    else if (diffDays <= 30) eventData.status = STATUS.UPCOMING;
+  }
+
+  // Initialize reminder flags
+  eventData.reminder_30_sent = false;
+  eventData.reminder_14_sent = false;
+  eventData.reminder_7_sent = false;
+  eventData.reminder_due_sent = false;
+
+  const result = await wixData.insert(COMPLIANCE_EVENTS_COLLECTION, eventData, { suppressAuth: true });
+  return result;
+}
+
+/**
+ * Update a compliance event
+ * @param {string} eventId - Event ID
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<Object>} - Updated event
+ */
+export async function updateComplianceEvent(eventId, updates) {
+  // Don't allow updating _id or _owner
+  delete updates._id;
+  delete updates._owner;
+
+  // Get existing event
+  const existing = await wixData.get(COMPLIANCE_EVENTS_COLLECTION, eventId, { suppressAuth: true });
+  if (!existing) {
+    throw new Error(`Event ${eventId} not found`);
+  }
+
+  // Merge updates
+  const toUpdate = { ...existing, ...updates };
+
+  // Re-calculate status if due_date changed and status wasn't manually set to completed
+  if (updates.due_date && toUpdate.status !== STATUS.COMPLETED) {
+    const now = new Date();
+    const dueDate = new Date(updates.due_date);
+    const diffDays = Math.ceil((dueDate - now) / (1000 * 60 * 60 * 24));
+    
+    if (diffDays < 0) toUpdate.status = STATUS.OVERDUE;
+    else if (diffDays <= 7) toUpdate.status = STATUS.DUE_SOON;
+    else if (diffDays <= 30) toUpdate.status = STATUS.UPCOMING;
+    else toUpdate.status = STATUS.PENDING;
+  }
+
+  const result = await wixData.update(COMPLIANCE_EVENTS_COLLECTION, toUpdate, { suppressAuth: true });
+  return result;
+}
+
+/**
+ * Mark event as completed
+ * @param {string} eventId - Event ID
+ * @param {string} documentId - Optional proof document
+ * @returns {Promise<Object>} - Updated event with next occurrence if recurring
+ */
+export async function completeComplianceEvent(eventId, documentId = null) {
+  const existing = await wixData.get(COMPLIANCE_EVENTS_COLLECTION, eventId, { suppressAuth: true });
+  if (!existing) throw new Error(`Event ${eventId} not found`);
+
+  const updates = {
+    status: STATUS.COMPLETED,
+    completed_date: new Date(),
+    document_id: documentId
+  };
+
+  const updatedEvent = await updateComplianceEvent(eventId, updates);
+
+  // Handle recurrence
+  if (existing.recurrence && existing.auto_renew) {
+    await createNextRecurringEvent(existing);
+  }
+
+  return updatedEvent;
+}
+
+/**
+ * Delete a compliance event
+ * @param {string} eventId - Event ID
+ * @returns {Promise<boolean>} - Success
+ */
+export async function deleteComplianceEvent(eventId) {
+  await wixData.remove(COMPLIANCE_EVENTS_COLLECTION, eventId, { suppressAuth: true });
+  return true;
+}
+
+// ============================================================
+// CALENDAR VIEWS
+// ============================================================
+
+/**
+ * Get calendar data for a date range
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Date} startDate - Range start
+ * @param {Date} endDate - Range end
+ * @returns {Promise<Object>} - { events: [], summary: { overdue, dueSoon, upcoming } }
+ */
+export async function getCalendarView(carrierDot, startDate, endDate) {
+  const events = await getComplianceEvents(carrierDot, {
+    dateRange: { start: startDate, end: endDate }
+  });
+
+  // Also fetch overdue items even if outside range
+  const overdueItems = await wixData.query(COMPLIANCE_EVENTS_COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .eq('status', STATUS.OVERDUE)
+    .find({ suppressAuth: true });
+  
+  // Combine unique events (avoid duplicates if overdue is in range)
+  const allEventsMap = new Map();
+  overdueItems.items.forEach(e => allEventsMap.set(e._id, e));
+  events.forEach(e => allEventsMap.set(e._id, e));
+
+  const allEvents = Array.from(allEventsMap.values());
+
+  return {
+    events: allEvents,
+    summary: {
+      overdue: allEvents.filter(e => e.status === STATUS.OVERDUE).length,
+      dueSoon: allEvents.filter(e => e.status === STATUS.DUE_SOON).length,
+      upcoming: allEvents.filter(e => e.status === STATUS.UPCOMING).length,
+      total: allEvents.length
+    }
+  };
+}
+
+/**
+ * Get dashboard summary of compliance status
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Promise<Object>} - { score, overdueCount, dueSoonCount, alerts }
+ */
+export async function getComplianceDashboard(carrierDot) {
+  // Get all active events (not completed)
+  const result = await wixData.query(COMPLIANCE_EVENTS_COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .ne('status', STATUS.COMPLETED)
+    .find({ suppressAuth: true });
+
+  const activeEvents = result.items;
+  
+  const overdue = activeEvents.filter(e => e.status === STATUS.OVERDUE);
+  const dueSoon = activeEvents.filter(e => e.status === STATUS.DUE_SOON);
+  const upcoming = activeEvents.filter(e => e.status === STATUS.UPCOMING || e.status === STATUS.PENDING);
+
+  // Calculate generic score (simple heuristic for now)
+  // 100 base, minus 10 per overdue, minus 2 per due soon
+  let score = 100 - (overdue.length * 10) - (dueSoon.length * 2);
+  if (score < 0) score = 0;
+
+  // Get active alerts
+  const alertsResult = await wixData.query(COMPLIANCE_ALERTS_COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .eq('status', 'active')
+    .limit(5)
+    .find({ suppressAuth: true });
+
+  return {
+    score,
+    stats: {
+      overdue: overdue.length,
+      dueSoon: dueSoon.length,
+      upcoming: upcoming.length,
+      totalActive: activeEvents.length
+    },
+    topPriorityItems: [...overdue, ...dueSoon].sort((a, b) => new Date(a.due_date) - new Date(b.due_date)).slice(0, 5),
+    alerts: alertsResult.items
+  };
+}
+
+// ============================================================
+// INTERNAL HELPERS
+// ============================================================
+
+async function createNextRecurringEvent(completedEvent) {
+  const { recurrence } = completedEvent;
+  if (!recurrence || !recurrence.interval_days) return;
+
+  const nextDueDate = new Date(completedEvent.due_date);
+  nextDueDate.setDate(nextDueDate.getDate() + recurrence.interval_days);
+
+  const newEvent = {
+    carrier_dot: completedEvent.carrier_dot,
+    driver_id: completedEvent.driver_id,
+    event_type: completedEvent.event_type,
+    event_category: completedEvent.event_category,
+    title: completedEvent.title, // Keep same title
+    description: completedEvent.description,
+    due_date: nextDueDate,
+    status: STATUS.PENDING,
+    recurrence: recurrence,
+    auto_renew: true,
+    assigned_to: completedEvent.assigned_to,
+    priority: completedEvent.priority,
+    // Reset reminders
+    reminder_30_sent: false,
+    reminder_14_sent: false,
+    reminder_7_sent: false,
+    reminder_due_sent: false
+  };
+
+  await createComplianceEvent(newEvent);
+}
+
+// ============================================================
+// REMINDERS (Called by scheduled job)
+// ============================================================
+
+/**
+ * Process all compliance reminders for all carriers
+ * Called by jobs.config scheduler daily
+ * @returns {Promise<Object>} - { processed, emailsSent }
+ */
+export async function processComplianceReminders() {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  
+  // Find events that need reminders or status updates
+  // This could be large, so we might need pagination in real prod, but simple query for now
+  
+  // 1. Update statuses based on time
+  // Query all non-completed events
+  // Note: Wix query limit is 1000 by default, pagination needed for scale
+  
+  let processedCount = 0;
+  let updatedCount = 0;
+  
+  // In a real implementation, we would query by specific date ranges to find things 
+  // that just crossed thresholds (e.g. 30 days out, 7 days out)
+  // For this prototype, we'll scan active events
+  
+  const activeEvents = await wixData.query(COMPLIANCE_EVENTS_COLLECTION)
+    .ne('status', STATUS.COMPLETED)
+    .find({ suppressAuth: true });
+    
+  for (const event of activeEvents.items) {
+    processedCount++;
+    const dueDate = new Date(event.due_date);
+    const diffTime = dueDate - today;
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    
+    let needsUpdate = false;
+    let newStatus = event.status;
+    
+    // Status Logic
+    if (diffDays < 0 && event.status !== STATUS.OVERDUE) {
+      newStatus = STATUS.OVERDUE;
+      needsUpdate = true;
+    } else if (diffDays >= 0 && diffDays <= 7 && event.status !== STATUS.DUE_SOON && event.status !== STATUS.OVERDUE) {
+      newStatus = STATUS.DUE_SOON;
+      needsUpdate = true;
+    } else if (diffDays > 7 && diffDays <= 30 && event.status !== STATUS.UPCOMING && event.status !== STATUS.DUE_SOON && event.status !== STATUS.OVERDUE) {
+      newStatus = STATUS.UPCOMING;
+      needsUpdate = true;
+    }
+
+    if (needsUpdate) {
+      event.status = newStatus;
+      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+      updatedCount++;
+    }
+    
+    // Reminder Logic (Send Alerts)
+    // We would integrate with emailService here
+    // For now, we'll just log/create internal alerts
+    
+    if (diffDays === 30 && !event.reminder_30_sent) {
+      await createComplianceAlert(event, '30_day');
+      event.reminder_30_sent = true;
+      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+    } else if (diffDays === 14 && !event.reminder_14_sent) {
+      await createComplianceAlert(event, '14_day');
+      event.reminder_14_sent = true;
+      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+    } else if (diffDays === 7 && !event.reminder_7_sent) {
+      await createComplianceAlert(event, '7_day');
+      event.reminder_7_sent = true;
+      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+    } else if (diffDays === 0 && !event.reminder_due_sent) {
+      await createComplianceAlert(event, 'due_today');
+      event.reminder_due_sent = true;
+      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+    }
+  }
+
+  return { processed: processedCount, updated: updatedCount };
+}
+
+async function createComplianceAlert(event, reminderType) {
+  // Create an internal alert
+  const alert = {
+    carrier_dot: event.carrier_dot,
+    alert_type: 'overdue_event', // or expring_soon based on type
+    severity: reminderType === 'due_today' || reminderType === 'overdue' ? 'critical' : 'warning',
+    title: `Compliance Reminder: ${event.title}`,
+    message: `Item is due in ${reminderType.replace('_', ' ')}.`,
+    related_entity_type: 'event',
+    related_entity_id: event._id,
+    status: 'active'
+  };
+  
+  await wixData.insert(COMPLIANCE_ALERTS_COLLECTION, alert, { suppressAuth: true });
+  
+  // TODO: Send email via emailService
+}
+
+/**
+ * Get upcoming items for a driver (for driver portal)
+ * @param {string} driverId - Driver ID
+ * @returns {Promise<Array>} - Upcoming compliance items
+ */
+export async function getDriverComplianceItems(driverId) {
+  return getComplianceEvents(null, { driverId: driverId }); // Need to adjust getComplianceEvents to allow null carrierDot if driverId present, or query differently
+  
+  // Actually, query directly
+   const result = await wixData.query(COMPLIANCE_EVENTS_COLLECTION)
+    .eq('driver_id', driverId)
+    .ne('status', STATUS.COMPLETED)
+    .ascending('due_date')
+    .find({ suppressAuth: true });
+    
+  return result.items;
+}

@@ -24,6 +24,12 @@
 ## 4. Services & Infrastructure
 *   **AI Enrichment Pipeline:** Custom backend services (`aiEnrichment.jsw`, `socialScanner.jsw`) leveraging external LLMs and scraping tools.
 *   **Compliance Data:** `fmcsaService.jsw` for real-time safety and regulatory data fetching.
+*   **Carrier Compliance:** Dedicated services for managing compliance lifecycle:
+    *   `complianceCalendarService.jsw`: Event tracking and reminders.
+    *   `documentVaultService.jsw`: Document storage and expiration logic.
+    *   `dqFileService.jsw`: Driver Qualification file completeness.
+    *   `csaMonitorService.jsw`: BASIC score trending and alerts.
+    *   `incidentService.jsw`: Incident reporting and DOT classification.
 *   **Job Scheduler:** `jobs.config` for background tasks and automated match updates.
 *   **Payments & Subscriptions:** Stripe integration via `stripeService.jsw` for checkout, billing portal, and webhook handling.
 

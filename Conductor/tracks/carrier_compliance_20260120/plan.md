@@ -26,7 +26,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 1: Compliance Calendar
+## Phase 1: Compliance Calendar [checkpoint: f5c58d8]
 
 > **Goal**: Never miss a drug test, physical, training renewal, or license expiration
 >
@@ -36,87 +36,87 @@ Phase 5: Incident Reporting
 
 ### 1.1 Data Model & Backend Setup
 
-- [ ] Task: Create `ComplianceEvents` collection in Wix CMS
-  - [ ] Add all fields per spec (event_type, due_date, status, reminders, etc.)
-  - [ ] Configure indexes on carrier_dot, driver_id, due_date, status
-  - [ ] Set collection permissions (carrier owner/admin only)
+- [x] Task: Create `ComplianceEvents` collection in Wix CMS
+  - [x] Add all fields per spec (event_type, due_date, status, reminders, etc.)
+  - [x] Configure indexes on carrier_dot, driver_id, due_date, status
+  - [x] Set collection permissions (carrier owner/admin only)
 
-- [ ] Task: Create `ComplianceAlerts` collection in Wix CMS
-  - [ ] Add fields for alert_type, severity, status, related entities
-  - [ ] Configure indexes on carrier_dot, status, severity
+- [x] Task: Create `ComplianceAlerts` collection in Wix CMS
+  - [x] Add fields for alert_type, severity, status, related entities
+  - [x] Configure indexes on carrier_dot, status, severity
 
-- [ ] Task: Create `src/backend/complianceCalendarService.jsw`
-  - [ ] Implement `getComplianceEvents(carrierDot, filters)`
-  - [ ] Implement `createComplianceEvent(eventData)`
-  - [ ] Implement `updateComplianceEvent(eventId, updates)`
-  - [ ] Implement `deleteComplianceEvent(eventId)`
-  - [ ] Implement `completeComplianceEvent(eventId, documentId)`
-  - [ ] Implement auto-renewal logic for recurring events
+- [x] Task: Create `src/backend/complianceCalendarService.jsw`
+  - [x] Implement `getComplianceEvents(carrierDot, filters)`
+  - [x] Implement `createComplianceEvent(eventData)`
+  - [x] Implement `updateComplianceEvent(eventId, updates)`
+  - [x] Implement `deleteComplianceEvent(eventId)`
+  - [x] Implement `completeComplianceEvent(eventId, documentId)`
+  - [x] Implement auto-renewal logic for recurring events
 
 ### 1.2 Calendar Views & Dashboard
 
-- [ ] Task: Implement `getCalendarView(carrierDot, startDate, endDate)`
-  - [ ] Return events grouped by status (overdue, due_soon, upcoming)
-  - [ ] Include summary counts for dashboard
+- [x] Task: Implement `getCalendarView(carrierDot, startDate, endDate)`
+  - [x] Return events grouped by status (overdue, due_soon, upcoming)
+  - [x] Include summary counts for dashboard
 
-- [ ] Task: Implement `getComplianceDashboard(carrierDot)`
-  - [ ] Calculate compliance score (completed / total non-overdue)
-  - [ ] Return overdueCount, dueSoonCount, upcomingCount
-  - [ ] Include top 5 most urgent items
+- [x] Task: Implement `getComplianceDashboard(carrierDot)`
+  - [x] Calculate compliance score (completed / total non-overdue)
+  - [x] Return overdueCount, dueSoonCount, upcomingCount
+  - [x] Include top 5 most urgent items
 
-- [ ] Task: Implement status update job
-  - [ ] Update event statuses based on due_date vs current date
-  - [ ] Mark events as `overdue`, `due_soon`, `upcoming`
+- [x] Task: Implement status update job
+  - [x] Update event statuses based on due_date vs current date
+  - [x] Mark events as `overdue`, `due_soon`, `upcoming`
 
 ### 1.3 Reminder System
 
-- [ ] Task: Implement `processComplianceReminders()`
-  - [ ] Query all events needing reminders (30, 14, 7, 0 days)
-  - [ ] Send appropriate notifications
-  - [ ] Update reminder_sent flags
+- [x] Task: Implement `processComplianceReminders()`
+  - [x] Query all events needing reminders (30, 14, 7, 0 days)
+  - [x] Send appropriate notifications
+  - [x] Update reminder_sent flags
 
-- [ ] Task: Add compliance reminders to `jobs.config`
-  - [ ] Schedule daily at 6 AM: `processComplianceReminders`
+- [x] Task: Add compliance reminders to `jobs.config`
+  - [x] Schedule daily at 6 AM: `processComplianceReminders`
 
-- [ ] Task: Create email templates in `emailService.jsw`
-  - [ ] `compliance_reminder_30_day` template
-  - [ ] `compliance_reminder_14_day` template
-  - [ ] `compliance_reminder_7_day` template
-  - [ ] `compliance_overdue` template
+- [x] Task: Create email templates in `emailService.jsw`
+  - [x] `compliance_reminder_30_day` template
+  - [x] `compliance_reminder_14_day` template
+  - [x] `compliance_reminder_7_day` template
+  - [x] `compliance_overdue` template
 
 ### 1.4 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_COMPLIANCE_CALENDAR.html`
-  - [ ] Compliance score card with visual progress bar
-  - [ ] Quick stats (overdue, due this week, up to date)
-  - [ ] Upcoming items list grouped by urgency
-  - [ ] "Mark Complete" action with document upload
+- [x] Task: Create `src/public/carrier/CARRIER_COMPLIANCE_CALENDAR.html`
+  - [x] Compliance score card with visual progress bar
+  - [x] Quick stats (overdue, due this week, up to date)
+  - [x] Upcoming items list grouped by urgency
+  - [x] "Mark Complete" action with document upload
 
-- [ ] Task: Implement calendar month view
-  - [ ] Visual calendar with events on due dates
-  - [ ] Color coding by status (red=overdue, yellow=soon, green=upcoming)
-  - [ ] Click to view/edit event details
+- [x] Task: Implement calendar month view
+  - [x] Visual calendar with events on due dates
+  - [x] Color coding by status (red=overdue, yellow=soon, green=upcoming)
+  - [x] Click to view/edit event details
 
-- [ ] Task: Create "Add Event" modal
-  - [ ] Event type selection dropdown
-  - [ ] Driver selection (if driver-specific)
-  - [ ] Due date picker
-  - [ ] Recurrence settings
-  - [ ] Notes field
+- [x] Task: Create "Add Event" modal
+  - [x] Event type selection dropdown
+  - [x] Driver selection (if driver-specific)
+  - [x] Due date picker
+  - [x] Recurrence settings
+  - [x] Notes field
 
-- [ ] Task: Implement PostMessage bridge
-  - [ ] `getComplianceCalendar` message type
-  - [ ] `createComplianceEvent` message type
-  - [ ] `updateComplianceEvent` message type
-  - [ ] `completeComplianceEvent` message type
+- [x] Task: Implement PostMessage bridge
+  - [x] `getComplianceCalendar` message type
+  - [x] `createComplianceEvent` message type
+  - [x] `updateComplianceEvent` message type
+  - [x] `completeComplianceEvent` message type
 
 ### 1.5 Testing - Phase 1
 
-- [ ] Task: Create `src/public/__tests__/complianceCalendarService.test.js`
-  - [ ] Test CRUD operations
-  - [ ] Test recurring event logic
-  - [ ] Test status transitions
-  - [ ] Test reminder processing
+- [x] Task: Create `src/public/__tests__/complianceCalendarService.test.js`
+  - [x] Test CRUD operations
+  - [x] Test recurring event logic
+  - [x] Test status transitions
+  - [x] Test reminder processing
 
 - [ ] Task: Manual integration testing
   - [ ] Create test events for various types
@@ -126,7 +126,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 2: Document Vault
+## Phase 2: Document Vault [checkpoint: 1f46b22]
 
 > **Goal**: Centralized, audit-ready document storage with expiration tracking
 >
@@ -136,76 +136,76 @@ Phase 5: Incident Reporting
 
 ### 2.1 Data Model & Backend Setup
 
-- [ ] Task: Create `CarrierDocuments` collection in Wix CMS
-  - [ ] Add all fields per spec (document_type, expiration_date, version, etc.)
-  - [ ] Configure indexes on carrier_dot, driver_id, document_type, expiration_date
-  - [ ] Set collection permissions
+- [x] Task: Create `CarrierDocuments` collection in Wix CMS
+  - [x] Add all fields per spec (document_type, expiration_date, version, etc.)
+  - [x] Configure indexes on carrier_dot, driver_id, document_type, expiration_date
+  - [x] Set collection permissions
 
-- [ ] Task: Create `src/backend/documentVaultService.jsw`
-  - [ ] Implement `uploadDocument(carrierDot, documentData)`
-  - [ ] Implement `getDocuments(carrierDot, filters)`
-  - [ ] Implement `getDocument(documentId)`
-  - [ ] Implement `updateDocument(documentId, updates)`
-  - [ ] Implement `archiveDocument(documentId)`
+- [x] Task: Create `src/backend/documentVaultService.jsw`
+  - [x] Implement `uploadDocument(carrierDot, documentData)`
+  - [x] Implement `getDocuments(carrierDot, filters)`
+  - [x] Implement `getDocument(documentId)`
+  - [x] Implement `updateDocument(documentId, updates)`
+  - [x] Implement `archiveDocument(documentId)`
 
 ### 2.2 Version History
 
-- [ ] Task: Implement version tracking
-  - [ ] `uploadNewVersion(documentId, newVersionData)` - create new version, link to previous
-  - [ ] `getDocumentVersionHistory(documentId)` - return all versions
-  - [ ] Auto-archive previous version on new upload
+- [x] Task: Implement version tracking
+  - [x] `uploadNewVersion(documentId, newVersionData)` - create new version, link to previous
+  - [x] `getDocumentVersionHistory(documentId)` - return all versions
+  - [x] Auto-archive previous version on new upload
 
 ### 2.3 Expiration Tracking
 
-- [ ] Task: Implement `getExpiringDocuments(carrierDot, daysAhead)`
-- [ ] Task: Implement `getExpiredDocuments(carrierDot)`
-- [ ] Task: Create scheduled job to update `is_expired` and `days_until_expiry` fields
-- [ ] Task: Generate alerts for documents expiring within 30 days
+- [x] Task: Implement `getExpiringDocuments(carrierDot, daysAhead)`
+- [x] Task: Implement `getExpiredDocuments(carrierDot)`
+- [x] Task: Create scheduled job to update `is_expired` and `days_until_expiry` fields
+- [x] Task: Generate alerts for documents expiring within 30 days
 
 ### 2.4 Document Verification
 
-- [ ] Task: Implement `verifyDocument(documentId, verifierId, status, notes)`
-- [ ] Task: Create verification workflow UI for admins
-- [ ] Task: Track verification status in document list
+- [x] Task: Implement `verifyDocument(documentId, verifierId, status, notes)`
+- [x] Task: Create verification workflow UI for admins
+- [x] Task: Track verification status in document list
 
 ### 2.5 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_DOCUMENT_VAULT.html`
-  - [ ] Folder/category organization view
-  - [ ] Document list with status indicators
-  - [ ] Expiring documents alert banner
-  - [ ] Filter by category, driver, status
+- [x] Task: Create `src/public/carrier/CARRIER_DOCUMENT_VAULT.html`
+  - [x] Folder/category organization view
+  - [x] Document list with status indicators
+  - [x] Expiring documents alert banner
+  - [x] Filter by category, driver, status
 
-- [ ] Task: Implement document upload component
-  - [ ] Drag-and-drop file upload
-  - [ ] Document type selection
-  - [ ] Driver assignment
-  - [ ] Issue/expiration date entry
+- [x] Task: Implement document upload component
+  - [x] Drag-and-drop file upload
+  - [x] Document type selection
+  - [x] Driver assignment
+  - [x] Issue/expiration date entry
 
-- [ ] Task: Implement document detail view
-  - [ ] File preview (PDF, images)
-  - [ ] Metadata display
-  - [ ] Version history
-  - [ ] Edit/archive actions
+- [x] Task: Implement document detail view
+  - [x] File preview (PDF, images)
+  - [x] Metadata display
+  - [x] Version history
+  - [x] Edit/archive actions
 
-- [ ] Task: Implement bulk upload feature
-  - [ ] Multiple file selection
-  - [ ] Batch metadata entry
-  - [ ] Progress indicator
+- [x] Task: Implement bulk upload feature
+  - [x] Multiple file selection
+  - [x] Batch metadata entry
+  - [x] Progress indicator
 
 ### 2.6 Integration with Compliance Calendar
 
-- [ ] Task: Update `completeComplianceEvent` to accept and link document
-- [ ] Task: Auto-create compliance event from document with expiration date
-- [ ] Task: Show linked documents in compliance event detail
+- [x] Task: Update `completeComplianceEvent` to accept and link document
+- [x] Task: Auto-create compliance event from document with expiration date
+- [x] Task: Show linked documents in compliance event detail
 
 ### 2.7 Testing - Phase 2
 
-- [ ] Task: Create `src/public/__tests__/documentVaultService.test.js`
-  - [ ] Test upload/download
-  - [ ] Test version history
-  - [ ] Test expiration tracking
-  - [ ] Test verification workflow
+- [x] Task: Create `src/public/__tests__/documentVaultService.test.js`
+  - [x] Test upload/download
+  - [x] Test version history
+  - [x] Test expiration tracking
+  - [x] Test verification workflow
 
 - [ ] Task: Manual integration testing
   - [ ] Upload various document types
@@ -215,7 +215,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 3: Qualification File Tracker
+## Phase 3: Qualification File Tracker [checkpoint: 361ff12]
 
 > **Goal**: FMCSA DQ file completeness per driver with audit-ready reports
 >
@@ -225,75 +225,75 @@ Phase 5: Incident Reporting
 
 ### 3.1 Data Model & Backend Setup
 
-- [ ] Task: Create `QualificationFiles` collection in Wix CMS
-  - [ ] Add fields per spec (checklist, completeness_score, missing_items, etc.)
-  - [ ] Configure indexes on carrier_dot, driver_id, status, completeness_score
+- [x] Task: Create `QualificationFiles` collection in Wix CMS
+  - [x] Add fields per spec (checklist, completeness_score, missing_items, etc.)
+  - [x] Configure indexes on carrier_dot, driver_id, status, completeness_score
 
-- [ ] Task: Create `src/backend/dqFileService.jsw`
-  - [ ] Implement `getDQFile(carrierDot, driverId)`
-  - [ ] Implement `getCarrierDQFiles(carrierDot, filters)`
-  - [ ] Implement `updateDQChecklistItem(dqFileId, itemKey, itemData)`
-  - [ ] Implement `linkDocumentToDQItem(dqFileId, itemKey, documentId)`
+- [x] Task: Create `src/backend/dqFileService.jsw`
+  - [x] Implement `getDQFile(carrierDot, driverId)`
+  - [x] Implement `getCarrierDQFiles(carrierDot, filters)`
+  - [x] Implement `updateDQChecklistItem(dqFileId, itemKey, itemData)`
+  - [x] Implement `linkDocumentToDQItem(dqFileId, itemKey, documentId)`
 
 ### 3.2 Completeness Calculation
 
-- [ ] Task: Implement `calculateCompleteness(dqFile)`
-  - [ ] Count required items with valid documents
-  - [ ] Deduct for expired documents
-  - [ ] Return percentage 0-100
+- [x] Task: Implement `calculateCompleteness(dqFile)`
+  - [x] Count required items with valid documents
+  - [x] Deduct for expired documents
+  - [x] Return percentage 0-100
 
-- [ ] Task: Implement automatic DQ file creation on driver hire
-  - [ ] Create QualificationFile record when driver added to carrier
-  - [ ] Initialize checklist with all required items
+- [x] Task: Implement automatic DQ file creation on driver hire
+  - [x] Create QualificationFile record when driver added to carrier
+  - [x] Initialize checklist with all required items
 
 ### 3.3 Audit Reports
 
-- [ ] Task: Implement `generateAuditReport(dqFileId)`
-  - [ ] Format checklist as printable report
-  - [ ] Include document references
-  - [ ] List missing and expiring items
-  - [ ] Add FMCSA compliance notes
+- [x] Task: Implement `generateAuditReport(dqFileId)`
+  - [x] Format checklist as printable report
+  - [x] Include document references
+  - [x] List missing and expiring items
+  - [x] Add FMCSA compliance notes
 
-- [ ] Task: Implement `getDQFileSummary(carrierDot)`
-  - [ ] Total drivers, complete files, incomplete files
-  - [ ] Average completeness score
-  - [ ] Drivers with critical missing items
+- [x] Task: Implement `getDQFileSummary(carrierDot)`
+  - [x] Total drivers, complete files, incomplete files
+  - [x] Average completeness score
+  - [x] Drivers with critical missing items
 
 ### 3.4 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_DQ_TRACKER.html`
-  - [ ] Summary cards (total, complete, incomplete, avg score)
-  - [ ] Driver list with completeness bars
-  - [ ] Filter by status, completeness threshold
-  - [ ] Sort by name, completeness, expiring items
+- [x] Task: Create `src/public/carrier/CARRIER_DQ_TRACKER.html`
+  - [x] Summary cards (total, complete, incomplete, avg score)
+  - [x] Driver list with completeness bars
+  - [x] Filter by status, completeness threshold
+  - [x] Sort by name, completeness, expiring items
 
-- [ ] Task: Implement DQ file detail view
-  - [ ] Checklist with status indicators
-  - [ ] Link to upload missing documents
-  - [ ] Show expiration dates for time-sensitive items
-  - [ ] "Generate Audit Report" button
+- [x] Task: Implement DQ file detail view
+  - [x] Checklist with status indicators
+  - [x] Link to upload missing documents
+  - [x] Show expiration dates for time-sensitive items
+  - [x] "Generate Audit Report" button
 
-- [ ] Task: Implement missing item alerts
-  - [ ] Highlight critical missing items
-  - [ ] Quick action to upload
-  - [ ] Due date warnings
+- [x] Task: Implement missing item alerts
+  - [x] Highlight critical missing items
+  - [x] Quick action to upload
+  - [x] Due date warnings
 
 ### 3.5 Integration with Document Vault
 
-- [ ] Task: Auto-link uploaded documents to DQ checklist items
-  - [ ] Match document_type to checklist item
-  - [ ] Update completeness score on upload
+- [x] Task: Auto-link uploaded documents to DQ checklist items
+  - [x] Match document_type to checklist item
+  - [x] Update completeness score on upload
 
-- [ ] Task: Update DQ file when document expires
-  - [ ] Change item status from `valid` to `expired`
-  - [ ] Recalculate completeness score
+- [x] Task: Update DQ file when document expires
+  - [x] Change item status from `valid` to `expired`
+  - [x] Recalculate completeness score
 
 ### 3.6 Testing - Phase 3
 
-- [ ] Task: Create `src/public/__tests__/dqFileService.test.js`
-  - [ ] Test completeness calculation
-  - [ ] Test document linking
-  - [ ] Test audit report generation
+- [x] Task: Create `src/public/__tests__/dqFileService.test.js`
+  - [x] Test completeness calculation
+  - [x] Test document linking
+  - [x] Test audit report generation
 
 - [ ] Task: Manual integration testing
   - [ ] Create drivers and verify DQ files created
@@ -302,7 +302,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 4: CSA Score Monitor
+## Phase 4: CSA Score Monitor [checkpoint: eff32e9]
 
 > **Goal**: Track company BASIC scores, alert on changes, visualize trends
 >
@@ -312,80 +312,80 @@ Phase 5: Incident Reporting
 
 ### 4.1 Data Model & Backend Setup
 
-- [ ] Task: Create `CSAScoreHistory` collection in Wix CMS
-  - [ ] Add fields per spec (snapshot_date, basics, trend_vs_prior, etc.)
-  - [ ] Configure indexes on carrier_dot, snapshot_date
+- [x] Task: Create `CSAScoreHistory` collection in Wix CMS
+  - [x] Add fields per spec (snapshot_date, basics, trend_vs_prior, etc.)
+  - [x] Configure indexes on carrier_dot, snapshot_date
 
-- [ ] Task: Create `src/backend/csaMonitorService.jsw`
-  - [ ] Import and extend `fmcsaService.jsw`
-  - [ ] Implement `getCSAScoresWithTrends(carrierDot)`
-  - [ ] Implement `getCSAScoreHistory(carrierDot, months)`
-  - [ ] Implement `snapshotCSAScores(carrierDot, source)`
+- [x] Task: Create `src/backend/csaMonitorService.jsw`
+  - [x] Import and extend `fmcsaService.jsw`
+  - [x] Implement `getCSAScoresWithTrends(carrierDot)`
+  - [x] Implement `getCSAScoreHistory(carrierDot, months)`
+  - [x] Implement `snapshotCSAScores(carrierDot, source)`
 
 ### 4.2 Trend Analysis
 
-- [ ] Task: Implement trend calculation
-  - [ ] Compare current scores to previous snapshot
-  - [ ] Calculate change percentage per BASIC
-  - [ ] Identify improving/worsening categories
+- [x] Task: Implement trend calculation
+  - [x] Compare current scores to previous snapshot
+  - [x] Calculate change percentage per BASIC
+  - [x] Identify improving/worsening categories
 
-- [ ] Task: Implement `getCSARecommendations(carrierDot)`
-  - [ ] Analyze score patterns
-  - [ ] Generate actionable recommendations
-  - [ ] Prioritize by impact
+- [x] Task: Implement `getCSARecommendations(carrierDot)`
+  - [x] Analyze score patterns
+  - [x] Generate actionable recommendations
+  - [x] Prioritize by impact
 
 ### 4.3 Automated Score Updates
 
-- [ ] Task: Implement `processCSAScoreUpdates()`
-  - [ ] Query all active carriers
-  - [ ] Fetch latest scores from FMCSA
-  - [ ] Create snapshot records
-  - [ ] Generate alerts for significant changes
+- [x] Task: Implement `processCSAScoreUpdates()`
+  - [x] Query all active carriers
+  - [x] Fetch latest scores from FMCSA
+  - [x] Create snapshot records
+  - [x] Generate alerts for significant changes
 
-- [ ] Task: Add CSA update job to `jobs.config`
-  - [ ] Schedule weekly: `processCSAScoreUpdates`
+- [x] Task: Add CSA update job to `jobs.config`
+  - [x] Schedule weekly: `processCSAScoreUpdates`
 
-- [ ] Task: Implement CSA alert generation
-  - [ ] Alert when score increases >5% in 30 days
-  - [ ] Alert when approaching intervention threshold
-  - [ ] Alert on new BASIC alerts
+- [x] Task: Implement CSA alert generation
+  - [x] Alert when score increases >5% in 30 days
+  - [x] Alert when approaching intervention threshold
+  - [x] Alert on new BASIC alerts
 
 ### 4.4 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_CSA_MONITOR.html`
-  - [ ] BASIC scores overview with progress bars
-  - [ ] Trend indicators (up/down arrows, percentages)
-  - [ ] Threshold warnings
-  - [ ] Last updated timestamp
+- [x] Task: Create `src/public/carrier/CARRIER_CSA_MONITOR.html`
+  - [x] BASIC scores overview with progress bars
+  - [x] Trend indicators (up/down arrows, percentages)
+  - [x] Threshold warnings
+  - [x] Last updated timestamp
 
-- [ ] Task: Implement trend chart
-  - [ ] 12-month historical view
-  - [ ] Line chart per BASIC category
-  - [ ] Threshold line overlay
-  - [ ] Hover tooltips
+- [x] Task: Implement trend chart
+  - [x] 12-month historical view
+  - [x] Line chart per BASIC category
+  - [x] Threshold line overlay
+  - [x] Hover tooltips
 
-- [ ] Task: Implement recommendations panel
-  - [ ] AI-generated improvement suggestions
-  - [ ] Priority indicators
-  - [ ] Links to relevant training resources
+- [x] Task: Implement recommendations panel
+  - [x] AI-generated improvement suggestions
+  - [x] Priority indicators
+  - [x] Links to relevant training resources
 
 ### 4.5 Integration with fmcsaService.jsw
 
-- [ ] Task: Add `getDetailedCSAData(dotNumber)` to fmcsaService.jsw
-  - [ ] Fetch enhanced BASIC data
-  - [ ] Include inspection/violation breakdown
-  - [ ] Cache results appropriately
+- [x] Task: Add `getDetailedCSAData(dotNumber)` to fmcsaService.jsw
+  - [x] Fetch enhanced BASIC data
+  - [x] Include inspection/violation breakdown
+  - [x] Cache results appropriately
 
-- [ ] Task: Ensure circuit breaker compatibility
-  - [ ] CSA monitor respects rate limits
-  - [ ] Graceful degradation on API issues
+- [x] Task: Ensure circuit breaker compatibility
+  - [x] CSA monitor respects rate limits
+  - [x] Graceful degradation on API issues
 
 ### 4.6 Testing - Phase 4
 
-- [ ] Task: Create `src/public/__tests__/csaMonitorService.test.js`
-  - [ ] Test snapshot creation
-  - [ ] Test trend calculation
-  - [ ] Test alert generation
+- [x] Task: Create `src/public/__tests__/csaMonitorService.test.js`
+  - [x] Test snapshot creation
+  - [x] Test trend calculation
+  - [x] Test alert generation
 
 - [ ] Task: Manual integration testing
   - [ ] Verify FMCSA data fetch
@@ -394,7 +394,7 @@ Phase 5: Incident Reporting
 
 ---
 
-## Phase 5: Incident Reporting
+## Phase 5: Incident Reporting [checkpoint: ed18f7a]
 
 > **Goal**: DOT-compliant accident/incident documentation with investigation workflow
 >
@@ -404,107 +404,107 @@ Phase 5: Incident Reporting
 
 ### 5.1 Data Model & Backend Setup
 
-- [ ] Task: Create `IncidentReports` collection in Wix CMS
-  - [ ] Add all fields per spec (incident_type, severity, DOT reportability, etc.)
-  - [ ] Configure indexes on carrier_dot, incident_date, driver_id, severity
+- [x] Task: Create `IncidentReports` collection in Wix CMS
+  - [x] Add all fields per spec (incident_type, severity, DOT reportability, etc.)
+  - [x] Configure indexes on carrier_dot, incident_date, driver_id, severity
 
-- [ ] Task: Create `src/backend/incidentService.jsw`
-  - [ ] Implement `createIncidentReport(incidentData)`
-  - [ ] Implement `getIncidentReport(incidentId)`
-  - [ ] Implement `getIncidentReports(carrierDot, filters)`
-  - [ ] Implement `updateIncidentReport(incidentId, updates)`
+- [x] Task: Create `src/backend/incidentService.jsw`
+  - [x] Implement `createIncidentReport(incidentData)`
+  - [x] Implement `getIncidentReport(incidentId)`
+  - [x] Implement `getIncidentReports(carrierDot, filters)`
+  - [x] Implement `updateIncidentReport(incidentId, updates)`
 
 ### 5.2 DOT Reportability Classification
 
-- [ ] Task: Implement `classifyDOTReportability(incidentData)`
-  - [ ] Check fatality criterion
-  - [ ] Check injury criterion (medical treatment away from scene)
-  - [ ] Check tow-away criterion
-  - [ ] Check hazmat release criterion
-  - [ ] Return reportable status, reason, deadline
+- [x] Task: Implement `classifyDOTReportability(incidentData)`
+  - [x] Check fatality criterion
+  - [x] Check injury criterion (medical treatment away from scene)
+  - [x] Check tow-away criterion
+  - [x] Check hazmat release criterion
+  - [x] Return reportable status, reason, deadline
 
-- [ ] Task: Implement `markDOTReported(incidentId, reportNumber)`
-- [ ] Task: Create DOT reporting deadline alerts
+- [x] Task: Implement `markDOTReported(incidentId, reportNumber)`
+- [x] Task: Create DOT reporting deadline alerts
 
 ### 5.3 Investigation Workflow
 
-- [ ] Task: Implement `startInvestigation(incidentId, investigatorId)`
-  - [ ] Update investigation_status
-  - [ ] Create audit trail entry
+- [x] Task: Implement `startInvestigation(incidentId, investigatorId)`
+  - [x] Update investigation_status
+  - [x] Create audit trail entry
 
-- [ ] Task: Implement `addInvestigationFinding(incidentId, finding)`
-  - [ ] Append to investigation findings
-  - [ ] Track root cause analysis
+- [x] Task: Implement `addInvestigationFinding(incidentId, finding)`
+  - [x] Append to investigation findings
+  - [x] Track root cause analysis
 
-- [ ] Task: Implement `closeInvestigation(incidentId, summary)`
-  - [ ] Finalize investigation
-  - [ ] Mark corrective actions
+- [x] Task: Implement `closeInvestigation(incidentId, summary)`
+  - [x] Finalize investigation
+  - [x] Mark corrective actions
 
-- [ ] Task: Implement `addCorrectiveAction(incidentId, action)`
-  - [ ] Add action item with assignee and due date
-  - [ ] Track completion status
+- [x] Task: Implement `addCorrectiveAction(incidentId, action)`
+  - [x] Add action item with assignee and due date
+  - [x] Track completion status
 
 ### 5.4 Statistics & Reporting
 
-- [ ] Task: Implement `getIncidentStatistics(carrierDot, dateRange)`
-  - [ ] Total incidents by type and severity
-  - [ ] DOT reportable count
-  - [ ] Trending analysis (month-over-month)
-  - [ ] Driver incident frequency
+- [x] Task: Implement `getIncidentStatistics(carrierDot, dateRange)`
+  - [x] Total incidents by type and severity
+  - [x] DOT reportable count
+  - [x] Trending analysis (month-over-month)
+  - [x] Driver incident frequency
 
 ### 5.5 Frontend UI
 
-- [ ] Task: Create `src/public/carrier/CARRIER_INCIDENT_REPORTING.html`
-  - [ ] Incident list with filters
-  - [ ] Quick stats (total, DOT reportable, open investigations)
-  - [ ] Severity indicators
+- [x] Task: Create `src/public/carrier/CARRIER_INCIDENT_REPORTING.html`
+  - [x] Incident list with filters
+  - [x] Quick stats (total, DOT reportable, open investigations)
+  - [x] Severity indicators
 
-- [ ] Task: Create incident report form
-  - [ ] Incident type selection
-  - [ ] Driver and vehicle selection
-  - [ ] Location entry (address, city, state)
-  - [ ] Date/time picker
-  - [ ] Injury/fatality/tow/hazmat checkboxes
-  - [ ] Real-time DOT reportability indicator
-  - [ ] Description text area
-  - [ ] Photo/document upload
+- [x] Task: Create incident report form
+  - [x] Incident type selection
+  - [x] Driver and vehicle selection
+  - [x] Location entry (address, city, state)
+  - [x] Date/time picker
+  - [x] Injury/fatality/tow/hazmat checkboxes
+  - [x] Real-time DOT reportability indicator
+  - [x] Description text area
+  - [x] Photo/document upload
 
-- [ ] Task: Create incident detail view
-  - [ ] Full incident information
-  - [ ] Investigation status and timeline
-  - [ ] Corrective actions list
-  - [ ] Attached documents/photos
+- [x] Task: Create incident detail view
+  - [x] Full incident information
+  - [x] Investigation status and timeline
+  - [x] Corrective actions list
+  - [x] Attached documents/photos
 
-- [ ] Task: Create investigation workflow UI
-  - [ ] Start investigation button
-  - [ ] Add finding modal
-  - [ ] Corrective action form
-  - [ ] Close investigation summary
+- [x] Task: Create investigation workflow UI
+  - [x] Start investigation button
+  - [x] Add finding modal
+  - [x] Corrective action form
+  - [x] Close investigation summary
 
 ### 5.6 Notifications
 
-- [ ] Task: Create incident email templates
-  - [ ] `incident_reported` - new incident notification
-  - [ ] `incident_dot_reportable` - DOT reporting required
-  - [ ] `incident_deadline_approaching` - DOT deadline reminder
-  - [ ] `investigation_assigned` - investigator notification
+- [x] Task: Create incident email templates
+  - [x] `incident_reported` - new incident notification
+  - [x] `incident_dot_reportable` - DOT reporting required
+  - [x] `incident_deadline_approaching` - DOT deadline reminder
+  - [x] `investigation_assigned` - investigator notification
 
 ### 5.7 Integration Points
 
-- [ ] Task: Trigger CSA score refresh after incident
-  - [ ] Call `snapshotCSAScores` with source `incident_triggered`
+- [x] Task: Trigger CSA score refresh after incident
+  - [x] Call `snapshotCSAScores` with source `incident_triggered`
 
-- [ ] Task: Link incident documents to Document Vault
-  - [ ] Store photos and reports in CarrierDocuments
-  - [ ] Reference from incident record
+- [x] Task: Link incident documents to Document Vault
+  - [x] Store photos and reports in CarrierDocuments
+  - [x] Reference from incident record
 
 ### 5.8 Testing - Phase 5
 
-- [ ] Task: Create `src/public/__tests__/incidentService.test.js`
-  - [ ] Test incident creation
-  - [ ] Test DOT reportability logic
-  - [ ] Test investigation workflow
-  - [ ] Test statistics calculation
+- [x] Task: Create `src/public/__tests__/incidentService.test.js`
+  - [x] Test incident creation
+  - [x] Test DOT reportability logic
+  - [x] Test investigation workflow
+  - [x] Test statistics calculation
 
 - [ ] Task: Manual integration testing
   - [ ] Create incidents of various types

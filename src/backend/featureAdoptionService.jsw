@@ -8,6 +8,16 @@
  * - FeatureRegistry: Feature metadata and lifecycle status
  * - FeatureFunnels: Multi-step conversion funnel definitions
  * - FeatureMetricsDaily: Pre-aggregated daily metrics for performance
+ *
+ * Error Codes:
+ * - FAL_001: Feature not found in registry
+ * - FAL_002: Invalid action type
+ * - FAL_003: Missing required field
+ * - FAL_004: Session ID not initialized
+ * - FAL_005: Funnel not found
+ * - FAL_006: Invalid time range
+ * - FAL_007: Aggregation failed
+ * - FAL_008: Status transition invalid
  */
 
 import wixData from 'wix-data';
@@ -24,20 +34,22 @@ const CONFIG = {
         funnels: 'FeatureFunnels',
         metricsDaily: 'FeatureMetricsDaily'
     },
-    // Valid interaction actions
+    // Valid interaction actions (per spec)
     validActions: [
-        'view',           // Feature was viewed/loaded
-        'click',          // User clicked/interacted
-        'complete',       // User completed the feature's main action
-        'hover',          // User hovered (for engagement tracking)
-        'scroll_to',      // User scrolled to feature
-        'time_spent',     // Time tracking (in metadata.duration)
-        'error',          // Feature error occurred
-        'abandon',        // User abandoned mid-flow
-        'share',          // Feature shared
-        'repeat',         // Repeat usage
-        'first_use'       // First time user used feature
+        'view',           // Feature was displayed to user
+        'click',          // User clicked within feature
+        'complete',       // User finished primary task
+        'hover',          // User hovered over element (desktop)
+        'scroll_to',      // User scrolled to element
+        'time_spent',     // Passive time tracking (fired on exit)
+        'error',          // Something went wrong
+        'abandon',        // User left mid-process
+        'share',          // User shared feature/content
+        'repeat',         // User returned to feature
+        'first_use'       // User's first ever use
     ],
+    // Valid feature lifecycle statuses (per spec)
+    validStatuses: ['beta', 'active', 'deprecated', 'sunset'],
     // Lifecycle status thresholds
     thresholds: {
         newFeatureDays: 30,        // Feature is "New" for 30 days
@@ -47,15 +59,17 @@ const CONFIG = {
         atRiskDropPercent: 30,     // 30% drop triggers "At Risk"
         deadDaysNoUse: 30          // 30 days no use = "Dead"
     },
-    // Health score weights
+    // Health score weights (per spec)
     healthWeights: {
-        usage: 40,       // Usage volume weight
-        completion: 30,  // Completion rate weight
-        errorFree: 30    // Error-free rate weight
+        adoptionRate: 30,      // % of target users using
+        completionRate: 25,    // % completing primary action
+        errorRate: 20,         // 100 - actual error rate
+        retentionRate: 15,     // Users returning
+        engagementDepth: 10    // Avg interactions per session
     }
 };
 
-// Feature lifecycle statuses
+// Feature lifecycle statuses (legacy - for backward compatibility)
 export const FeatureCycles = {
     NEW: 'New',          // < 30 days old
     ADOPTED: 'Adopted',  // Steady usage > threshold
@@ -63,6 +77,14 @@ export const FeatureCycles = {
     AT_RISK: 'At Risk',  // Usage dropping significantly
     DEAD: 'Dead',        // No usage in 30 days
     DEPRECATED: 'Deprecated' // Marked for removal
+};
+
+// Feature lifecycle statuses (per spec)
+export const FeatureStatus = {
+    BETA: 'beta',
+    ACTIVE: 'active',
+    DEPRECATED: 'deprecated',
+    SUNSET: 'sunset'
 };
 
 // ============================================
@@ -86,73 +108,170 @@ async function isAdmin() {
 
 /**
  * Log a user interaction with a feature.
- * @param {string} featureId - Unique ID of the feature (e.g., 'driver_search', 'interview_scheduler')
- * @param {string} userId - ID of the user performing the action
- * @param {string} action - Action performed (view, click, complete, error, etc.)
+ * Records any user interaction with a feature to the FeatureAdoptionLogs collection.
+ *
+ * @param {string} featureId - Unique feature identifier from FeatureRegistry
+ * @param {string} userId - Member ID or anonymous session ID
+ * @param {string} action - One of the Action Types enumeration (view, click, complete, etc.)
  * @param {Object} [context] - Additional context data
- * @param {string} [context.userRole] - Role: 'driver', 'carrier', 'recruiter', 'admin'
- * @param {string} [context.sessionId] - Session identifier for grouping
- * @param {string} [context.pageUrl] - Page URL where interaction occurred
- * @param {string} [context.referrer] - Referring feature or page
- * @param {number} [context.duration] - Time spent in milliseconds
- * @param {Object} [context.metadata] - Any additional metadata
- * @returns {Promise<Object>} - Result with success status and logId
+ * @param {string} [context.userRole] - User type: 'driver', 'carrier', 'recruiter'
+ * @param {string} [context.featureVersion] - Version for A/B tests (e.g., 'v2.1', 'control')
+ * @param {string} [context.sessionId] - Session identifier for grouping interactions
+ * @param {string} [context.deviceType] - Device category: 'mobile', 'desktop', 'tablet'
+ * @param {string} [context.referrer] - Previous page/feature
+ * @param {string} [context.entryPoint] - UI element that triggered entry (e.g., 'nav_menu', 'cta_button')
+ * @param {number} [context.durationMs] - Time spent on feature (milliseconds)
+ * @param {number} [context.scrollDepth] - How far user scrolled (0-100)
+ * @param {number} [context.interactionCount] - Clicks/taps within feature
+ * @param {string} [context.outcome] - Result: 'success', 'failure', 'partial', 'abandoned'
+ * @param {number} [context.conversionValue] - Business value if applicable
+ * @param {string} [context.nextFeature] - Where user went next
+ * @param {Object} [context.metadata] - Flexible additional data
+ * @returns {Promise<Object>} - { success: boolean, logId?: string, timestamp?: string, error?: string, errorCode?: string }
  */
 export async function logFeatureInteraction(featureId, userId, action, context = {}) {
     // Validate required fields
-    if (!featureId || !userId || !action) {
-        console.warn('[FeatureAdoption] Missing required fields', { featureId, userId, action });
-        return { success: false, error: 'Missing required fields: featureId, userId, and action are required' };
+    if (!featureId) {
+        console.warn('[FeatureAdoption] Missing featureId');
+        return {
+            success: false,
+            error: 'Missing required field: featureId',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    if (!userId) {
+        console.warn('[FeatureAdoption] Missing userId');
+        return {
+            success: false,
+            error: 'Missing required field: userId',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    if (!action) {
+        console.warn('[FeatureAdoption] Missing action');
+        return {
+            success: false,
+            error: 'Missing required field: action',
+            errorCode: 'FAL_003'
+        };
     }
 
     // Validate action type
     if (!CONFIG.validActions.includes(action)) {
         console.warn('[FeatureAdoption] Invalid action type', { action, valid: CONFIG.validActions });
-        return { success: false, error: `Invalid action: ${action}. Valid actions: ${CONFIG.validActions.join(', ')}` };
+        return {
+            success: false,
+            error: `Invalid action: ${action}. Valid actions: ${CONFIG.validActions.join(', ')}`,
+            errorCode: 'FAL_002'
+        };
     }
 
     const now = new Date();
+    const timestamp = now.toISOString();
+
+    // Build the log record per spec (Section 2.1 FeatureAdoptionLogs)
     const record = {
+        // Core identifiers
         featureId: featureId.toLowerCase().trim(),
+        featureVersion: context.featureVersion || null,
         userId,
-        action,
         userRole: context.userRole || 'unknown',
-        sessionId: context.sessionId || null,
-        pageUrl: context.pageUrl || null,
-        referrer: context.referrer || null,
-        duration: context.duration || null,
-        metadata: context.metadata || {},
+        action,
         timestamp: now,
+
+        // Session & navigation
+        sessionId: context.sessionId || null,
+        deviceType: context.deviceType || null,
+        referrer: context.referrer || null,
+        entryPoint: context.entryPoint || null,
+
+        // Engagement metrics
+        durationMs: context.durationMs || null,
+        scrollDepth: context.scrollDepth || null,
+        interactionCount: context.interactionCount || null,
+
+        // Outcome tracking
+        outcome: context.outcome || null,
+        conversionValue: context.conversionValue || null,
+        nextFeature: context.nextFeature || null,
+
+        // Error fields (populated by logFeatureError)
+        errorCode: context.errorCode || null,
+        errorMessage: context.errorMessage || null,
+
+        // Flexible metadata
+        metadata: context.metadata || {},
+
+        // Legacy fields for backward compatibility
         date: now.toISOString().split('T')[0], // YYYY-MM-DD for aggregation
         hour: now.getHours()
     };
 
     try {
         const result = await wixData.insert(CONFIG.collections.logs, record, { suppressAuth: true });
-        return { success: true, logId: result._id };
+        return {
+            success: true,
+            logId: result._id,
+            timestamp
+        };
     } catch (error) {
         // Handle collection not existing gracefully
         if (error.message?.includes('does not exist')) {
             console.warn('[FeatureAdoption] Collection not set up yet:', CONFIG.collections.logs);
-            return { success: false, error: 'Collection not initialized. Run setupCollections first.' };
+            return {
+                success: false,
+                error: 'Collection not initialized. Run setupCollections first.',
+                errorCode: 'FAL_007'
+            };
         }
         console.error('[FeatureAdoption] Failed to log interaction:', error);
-        return { success: false, error: error.message };
+        return {
+            success: false,
+            error: error.message,
+            errorCode: 'FAL_007'
+        };
     }
 }
 
 /**
- * Log a feature error event
- * @param {string} featureId - Feature that errored
- * @param {string} userId - User who encountered error
- * @param {string} errorCode - Error code/type
- * @param {string} errorMessage - Human-readable error message
- * @param {Object} [context] - Additional error context
- * @returns {Promise<Object>} - Result with success status
+ * Log a feature error event.
+ * Records an error event for a feature with automatic action='error' setting.
+ *
+ * @param {string} featureId - Feature identifier that errored
+ * @param {string} userId - Member ID or anonymous session ID
+ * @param {string} errorCode - Machine-readable error code (e.g., 'SEARCH_TIMEOUT', 'VALIDATION_FAILED')
+ * @param {string} errorMessage - Human-readable error detail
+ * @param {Object} [context] - Same context options as logFeatureInteraction
+ * @returns {Promise<Object>} - { success: boolean, logId?: string, errorLogged: boolean, error?: string, errorCode?: string }
  */
 export async function logFeatureError(featureId, userId, errorCode, errorMessage, context = {}) {
-    return logFeatureInteraction(featureId, userId, 'error', {
+    // Validate required error-specific fields
+    if (!errorCode) {
+        return {
+            success: false,
+            errorLogged: false,
+            error: 'Missing required field: errorCode',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    if (!errorMessage) {
+        return {
+            success: false,
+            errorLogged: false,
+            error: 'Missing required field: errorMessage',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    // Call logFeatureInteraction with error action and error details in context
+    const result = await logFeatureInteraction(featureId, userId, 'error', {
         ...context,
+        errorCode,
+        errorMessage,
+        outcome: 'failure',
         metadata: {
             ...context.metadata,
             errorCode,
@@ -160,183 +279,537 @@ export async function logFeatureError(featureId, userId, errorCode, errorMessage
             stack: context.stack || null
         }
     });
+
+    // Transform response to match spec
+    return {
+        success: result.success,
+        logId: result.logId,
+        errorLogged: result.success,
+        error: result.error,
+        errorCode: result.errorCode
+    };
 }
 
 /**
- * Log a session summary with multiple feature interactions
+ * Log a session summary with all features used.
+ * Records a session summary with all features used in a single session.
+ *
  * @param {string} sessionId - Session identifier
- * @param {string} userId - User ID
- * @param {Array<Object>} features - Array of { featureId, action, duration, metadata }
- * @returns {Promise<Object>} - Result with success status and count
+ * @param {string} userId - Member ID
+ * @param {Array<Object>} features - Array of feature interaction summaries
+ * @param {string} features[].featureId - Feature identifier
+ * @param {Array<string>} features[].actions - Array of actions performed (e.g., ['view', 'click', 'complete'])
+ * @param {number} [features[].durationMs] - Time spent on feature in milliseconds
+ * @param {number} [features[].interactionCount] - Number of interactions within the feature
+ * @returns {Promise<Object>} - { success: boolean, sessionRecorded: boolean, featuresLogged: number, error?: string, errorCode?: string }
  */
 export async function logFeatureSession(sessionId, userId, features) {
-    if (!sessionId || !userId || !Array.isArray(features) || features.length === 0) {
-        return { success: false, error: 'Invalid session data' };
+    // Validate required fields
+    if (!sessionId) {
+        return {
+            success: false,
+            sessionRecorded: false,
+            featuresLogged: 0,
+            error: 'Missing required field: sessionId',
+            errorCode: 'FAL_004'
+        };
     }
 
-    const results = [];
+    if (!userId) {
+        return {
+            success: false,
+            sessionRecorded: false,
+            featuresLogged: 0,
+            error: 'Missing required field: userId',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    if (!Array.isArray(features) || features.length === 0) {
+        return {
+            success: false,
+            sessionRecorded: false,
+            featuresLogged: 0,
+            error: 'features must be a non-empty array',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    let featuresLogged = 0;
+    const errors = [];
+
+    // Process each feature in the session
     for (const feat of features) {
-        const result = await logFeatureInteraction(feat.featureId, userId, feat.action, {
-            sessionId,
-            duration: feat.duration,
-            metadata: feat.metadata
-        });
-        results.push(result);
+        if (!feat.featureId) {
+            errors.push({ featureId: 'unknown', error: 'Missing featureId' });
+            continue;
+        }
+
+        // Get the actions array or default to ['view']
+        const actions = Array.isArray(feat.actions) ? feat.actions : ['view'];
+
+        // Log each action for this feature
+        for (const action of actions) {
+            const result = await logFeatureInteraction(feat.featureId, userId, action, {
+                sessionId,
+                durationMs: feat.durationMs,
+                interactionCount: feat.interactionCount
+            });
+
+            if (result.success) {
+                featuresLogged++;
+            } else {
+                errors.push({
+                    featureId: feat.featureId,
+                    action,
+                    error: result.error
+                });
+            }
+        }
     }
 
-    const successCount = results.filter(r => r.success).length;
+    const allSuccessful = errors.length === 0;
+
     return {
-        success: successCount === features.length,
-        logged: successCount,
-        total: features.length,
-        errors: results.filter(r => !r.success).map(r => r.error)
+        success: allSuccessful,
+        sessionRecorded: featuresLogged > 0,
+        featuresLogged,
+        ...(errors.length > 0 && { errors })
     };
 }
 
 // ============================================
-// ANALYTICS FUNCTIONS
+// ANALYTICS FUNCTIONS (Section 3.2 of Spec)
 // ============================================
 
 /**
- * Get comprehensive statistics for a feature
- * @param {string} featureId - Feature to analyze (or 'all' for all features)
- * @param {Object} options - Query options
- * @param {string} [options.timeRange] - 'day', 'week', 'month', 'quarter', or number of days
- * @param {string} [options.groupBy] - 'day', 'hour', 'action', 'userRole'
- * @param {string} [options.userRole] - Filter by user role
- * @returns {Promise<Object>} - Statistics object
+ * Retrieves aggregated statistics for a single feature.
+ * Supports both spec format (timeRange object) and legacy format (options object).
+ *
+ * Spec signature: getFeatureStats(featureId, timeRange, groupBy)
+ * @param {string} featureId - Feature identifier (required)
+ * @param {Object} timeRange - { start: Date, end: Date } OR legacy options object
+ * @param {string} [groupBy] - 'day', 'week', 'month', 'role', 'device'
+ * @returns {Promise<Object>} - Feature statistics with summary and breakdown per spec Section 3.2
  */
-export async function getFeatureStats(featureId = 'all', options = {}) {
-    const { timeRange = 'month', groupBy = 'day', userRole = null } = options;
-
-    // Calculate date range
-    const now = new Date();
-    let startDate = new Date();
-    let days = 30;
-
-    if (typeof timeRange === 'number') {
-        days = timeRange;
-    } else {
-        switch (timeRange) {
-            case 'day': days = 1; break;
-            case 'week': days = 7; break;
-            case 'month': days = 30; break;
-            case 'quarter': days = 90; break;
-            default: days = 30;
-        }
+export async function getFeatureStats(featureId, timeRange, groupBy = 'day') {
+    // Validate required featureId
+    if (!featureId) {
+        return { error: 'FAL_003: featureId is required', errorCode: 'FAL_003' };
     }
-    startDate.setDate(startDate.getDate() - days);
+
+    // Handle both spec format and legacy format
+    let startDate, endDate;
+
+    if (timeRange && typeof timeRange === 'object' && timeRange.start) {
+        // Spec format: { start: Date, end: Date }
+        startDate = new Date(timeRange.start);
+        endDate = timeRange.end ? new Date(timeRange.end) : new Date();
+    } else if (typeof timeRange === 'object' && (timeRange.timeRange || timeRange.groupBy)) {
+        // Legacy format: { timeRange: 'month', groupBy: 'day' }
+        const legacyRange = timeRange.timeRange || 'month';
+        groupBy = timeRange.groupBy || groupBy;
+        endDate = new Date();
+        startDate = new Date();
+        const days = legacyRange === 'day' ? 1 : legacyRange === 'week' ? 7 : legacyRange === 'quarter' ? 90 : 30;
+        startDate.setDate(startDate.getDate() - days);
+    } else if (typeof timeRange === 'string' || typeof timeRange === 'number') {
+        // Simple string/number: 'month', 'week', or number of days
+        endDate = new Date();
+        startDate = new Date();
+        const days = typeof timeRange === 'number' ? timeRange :
+            timeRange === 'day' ? 1 : timeRange === 'week' ? 7 : timeRange === 'quarter' ? 90 : 30;
+        startDate.setDate(startDate.getDate() - days);
+    } else {
+        // Default: last 30 days
+        endDate = new Date();
+        startDate = new Date();
+        startDate.setDate(startDate.getDate() - 30);
+    }
+
+    // Validate date range
+    if (startDate >= endDate) {
+        return { error: 'FAL_006: Invalid time range - start must be before end', errorCode: 'FAL_006' };
+    }
 
     try {
         // Build query
         let query = wixData.query(CONFIG.collections.logs)
             .ge('timestamp', startDate)
-            .le('timestamp', now);
-
-        if (featureId !== 'all') {
-            query = query.eq('featureId', featureId.toLowerCase().trim());
-        }
-
-        if (userRole) {
-            query = query.eq('userRole', userRole);
-        }
+            .le('timestamp', endDate)
+            .eq('featureId', featureId.toLowerCase().trim());
 
         const results = await query
-            .limit(1000)
+            .limit(5000)
             .find({ suppressAuth: true });
 
-        // If querying 'all', aggregate by feature
-        if (featureId === 'all') {
-            return aggregateAllFeatures(results.items, groupBy);
-        }
+        const items = results.items;
 
-        // Single feature stats
-        return aggregateSingleFeature(featureId, results.items, groupBy);
+        // Calculate summary statistics per spec
+        const uniqueUsers = new Set(items.map(i => i.userId)).size;
+        const totalInteractions = items.length;
+        const views = items.filter(i => i.action === 'view').length;
+        const completions = items.filter(i => i.action === 'complete').length;
+        const errors = items.filter(i => i.action === 'error').length;
+        const abandons = items.filter(i => i.action === 'abandon').length;
+
+        // Calculate durations (use durationMs field per spec)
+        const durationsMs = items.filter(i => i.durationMs || i.duration).map(i => i.durationMs || i.duration);
+        const avgDurationMs = durationsMs.length > 0
+            ? Math.round(durationsMs.reduce((a, b) => a + b, 0) / durationsMs.length)
+            : 0;
+
+        // Calculate rates with precision (per spec format)
+        const completionRate = views > 0 ? Math.round((completions / views) * 1000) / 10 : 0;
+        const errorRate = totalInteractions > 0 ? Math.round((errors / totalInteractions) * 1000) / 10 : 0;
+        const abandonRate = views > 0 ? Math.round((abandons / views) * 1000) / 10 : 0;
+
+        // Generate breakdown based on groupBy
+        const breakdown = generateStatsBreakdown(items, groupBy);
+
+        // Return in spec format (Section 3.2)
+        return {
+            featureId,
+            timeRange: {
+                start: startDate.toISOString().split('T')[0],
+                end: endDate.toISOString().split('T')[0]
+            },
+            summary: {
+                uniqueUsers,
+                totalInteractions,
+                completionRate,
+                avgDurationMs,
+                errorRate,
+                abandonRate
+            },
+            breakdown,
+            // Include legacy fields for backward compatibility
+            totalInteractions,
+            uniqueUsers,
+            completions,
+            errors,
+            completionRate,
+            errorRate,
+            avgDuration: avgDurationMs
+        };
     } catch (error) {
         console.error('[FeatureAdoption] Failed to get stats:', error);
-        return { error: error.message };
+        return { error: error.message, errorCode: 'FAL_007' };
     }
 }
 
 /**
- * Compare multiple features on a specific metric
- * @param {Array<string>} featureIds - Features to compare
- * @param {string} metric - 'interactions', 'uniqueUsers', 'completionRate', 'errorRate'
- * @param {string} timeRange - Time range for comparison
- * @returns {Promise<Object>} - Comparison data
+ * Generate breakdown data based on groupBy parameter.
+ * @private
  */
-export async function getFeatureComparison(featureIds, metric = 'interactions', timeRange = 'month') {
-    if (!Array.isArray(featureIds) || featureIds.length === 0) {
-        return { error: 'featureIds must be a non-empty array' };
-    }
+function generateStatsBreakdown(items, groupBy) {
+    const breakdown = [];
 
-    const validMetrics = ['interactions', 'uniqueUsers', 'completionRate', 'errorRate', 'avgDuration'];
-    if (!validMetrics.includes(metric)) {
-        return { error: `Invalid metric. Valid: ${validMetrics.join(', ')}` };
-    }
-
-    const results = [];
-    for (const fid of featureIds) {
-        const stats = await getFeatureStats(fid, { timeRange });
-        if (!stats.error) {
-            let value;
-            switch (metric) {
-                case 'interactions': value = stats.totalInteractions; break;
-                case 'uniqueUsers': value = stats.uniqueUsers; break;
-                case 'completionRate': value = stats.completionRate; break;
-                case 'errorRate': value = stats.errorRate; break;
-                case 'avgDuration': value = stats.avgDuration; break;
-                default: value = stats.totalInteractions;
+    if (groupBy === 'day') {
+        const byDate = {};
+        items.forEach(item => {
+            const date = item.date || item.timestamp?.toISOString().split('T')[0];
+            if (!byDate[date]) {
+                byDate[date] = { users: new Set(), interactions: 0, completions: 0, errors: 0, views: 0, durations: [] };
             }
-            results.push({ featureId: fid, [metric]: value, raw: stats });
-        }
+            byDate[date].users.add(item.userId);
+            byDate[date].interactions++;
+            if (item.action === 'complete') byDate[date].completions++;
+            if (item.action === 'error') byDate[date].errors++;
+            if (item.action === 'view') byDate[date].views++;
+            if (item.durationMs || item.duration) byDate[date].durations.push(item.durationMs || item.duration);
+        });
+
+        Object.keys(byDate).sort().forEach(date => {
+            const d = byDate[date];
+            breakdown.push({
+                date,
+                uniqueUsers: d.users.size,
+                totalInteractions: d.interactions,
+                completionRate: d.views > 0 ? Math.round((d.completions / d.views) * 100) : 0,
+                errorRate: d.interactions > 0 ? Math.round((d.errors / d.interactions) * 100) : 0,
+                avgDurationMs: d.durations.length > 0 ? Math.round(d.durations.reduce((a, b) => a + b, 0) / d.durations.length) : 0
+            });
+        });
+    } else if (groupBy === 'week') {
+        const byWeek = {};
+        items.forEach(item => {
+            const date = new Date(item.timestamp);
+            const week = getISOWeek(date);
+            const weekKey = `${date.getFullYear()}-W${week.toString().padStart(2, '0')}`;
+            if (!byWeek[weekKey]) {
+                byWeek[weekKey] = { users: new Set(), interactions: 0, completions: 0, errors: 0, views: 0 };
+            }
+            byWeek[weekKey].users.add(item.userId);
+            byWeek[weekKey].interactions++;
+            if (item.action === 'complete') byWeek[weekKey].completions++;
+            if (item.action === 'error') byWeek[weekKey].errors++;
+            if (item.action === 'view') byWeek[weekKey].views++;
+        });
+
+        Object.keys(byWeek).sort().forEach(week => {
+            const w = byWeek[week];
+            breakdown.push({
+                week,
+                uniqueUsers: w.users.size,
+                totalInteractions: w.interactions,
+                completionRate: w.views > 0 ? Math.round((w.completions / w.views) * 100) : 0,
+                errorRate: w.interactions > 0 ? Math.round((w.errors / w.interactions) * 100) : 0
+            });
+        });
+    } else if (groupBy === 'month') {
+        const byMonth = {};
+        items.forEach(item => {
+            const date = new Date(item.timestamp);
+            const monthKey = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}`;
+            if (!byMonth[monthKey]) {
+                byMonth[monthKey] = { users: new Set(), interactions: 0, completions: 0, errors: 0, views: 0 };
+            }
+            byMonth[monthKey].users.add(item.userId);
+            byMonth[monthKey].interactions++;
+            if (item.action === 'complete') byMonth[monthKey].completions++;
+            if (item.action === 'error') byMonth[monthKey].errors++;
+            if (item.action === 'view') byMonth[monthKey].views++;
+        });
+
+        Object.keys(byMonth).sort().forEach(month => {
+            const m = byMonth[month];
+            breakdown.push({
+                month,
+                uniqueUsers: m.users.size,
+                totalInteractions: m.interactions,
+                completionRate: m.views > 0 ? Math.round((m.completions / m.views) * 100) : 0,
+                errorRate: m.interactions > 0 ? Math.round((m.errors / m.interactions) * 100) : 0
+            });
+        });
+    } else if (groupBy === 'role') {
+        const byRole = {};
+        items.forEach(item => {
+            const role = item.userRole || 'unknown';
+            if (!byRole[role]) {
+                byRole[role] = { users: new Set(), interactions: 0, completions: 0, errors: 0, views: 0 };
+            }
+            byRole[role].users.add(item.userId);
+            byRole[role].interactions++;
+            if (item.action === 'complete') byRole[role].completions++;
+            if (item.action === 'error') byRole[role].errors++;
+            if (item.action === 'view') byRole[role].views++;
+        });
+
+        Object.keys(byRole).forEach(role => {
+            const r = byRole[role];
+            breakdown.push({
+                role,
+                uniqueUsers: r.users.size,
+                totalInteractions: r.interactions,
+                completionRate: r.views > 0 ? Math.round((r.completions / r.views) * 100) : 0,
+                errorRate: r.interactions > 0 ? Math.round((r.errors / r.interactions) * 100) : 0
+            });
+        });
+    } else if (groupBy === 'device') {
+        const byDevice = {};
+        items.forEach(item => {
+            const device = item.deviceType || item.metadata?.deviceType || 'unknown';
+            if (!byDevice[device]) {
+                byDevice[device] = { users: new Set(), interactions: 0, completions: 0, errors: 0, views: 0 };
+            }
+            byDevice[device].users.add(item.userId);
+            byDevice[device].interactions++;
+            if (item.action === 'complete') byDevice[device].completions++;
+            if (item.action === 'error') byDevice[device].errors++;
+            if (item.action === 'view') byDevice[device].views++;
+        });
+
+        Object.keys(byDevice).forEach(device => {
+            const d = byDevice[device];
+            breakdown.push({
+                device,
+                uniqueUsers: d.users.size,
+                totalInteractions: d.interactions,
+                completionRate: d.views > 0 ? Math.round((d.completions / d.views) * 100) : 0,
+                errorRate: d.interactions > 0 ? Math.round((d.errors / d.interactions) * 100) : 0
+            });
+        });
     }
 
-    // Sort by metric value descending
-    results.sort((a, b) => (b[metric] || 0) - (a[metric] || 0));
+    return breakdown;
+}
 
+/**
+ * Get ISO week number.
+ * @private
+ */
+function getISOWeek(date) {
+    const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+    const dayNum = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+}
+
+/**
+ * Compares multiple features on a single metric.
+ * Per spec Section 3.2: getFeatureComparison(featureIds, metric, timeRange)
+ *
+ * @param {Array<string>} featureIds - Array of feature identifiers to compare
+ * @param {string} metric - 'uniqueUsers', 'completionRate', 'errorRate', 'avgDurationMs'
+ * @param {Object} timeRange - { start: Date, end: Date }
+ * @returns {Promise<Object>} - Comparison data with trend per spec
+ */
+export async function getFeatureComparison(featureIds, metric = 'uniqueUsers', timeRange) {
+    // Validate featureIds
+    if (!Array.isArray(featureIds) || featureIds.length === 0) {
+        return { error: 'FAL_003: featureIds must be a non-empty array', errorCode: 'FAL_003' };
+    }
+
+    // Validate metric - use spec naming
+    const validMetrics = ['uniqueUsers', 'completionRate', 'errorRate', 'avgDurationMs'];
+    // Also support legacy metric names
+    const metricMap = {
+        'interactions': 'uniqueUsers',
+        'avgDuration': 'avgDurationMs'
+    };
+    const normalizedMetric = metricMap[metric] || metric;
+
+    if (!validMetrics.includes(normalizedMetric)) {
+        return { error: `Invalid metric. Valid: ${validMetrics.join(', ')}`, errorCode: 'FAL_003' };
+    }
+
+    // Calculate date ranges for current and previous period (for trend)
+    let startDate, endDate, prevStartDate, prevEndDate;
+
+    if (timeRange && typeof timeRange === 'object' && timeRange.start) {
+        startDate = new Date(timeRange.start);
+        endDate = timeRange.end ? new Date(timeRange.end) : new Date();
+    } else {
+        // Default: last 30 days
+        endDate = new Date();
+        startDate = new Date();
+        const days = typeof timeRange === 'string' ?
+            (timeRange === 'week' ? 7 : timeRange === 'quarter' ? 90 : 30) : 30;
+        startDate.setDate(startDate.getDate() - days);
+    }
+
+    // Calculate previous period for trend
+    const periodMs = endDate - startDate;
+    prevEndDate = new Date(startDate);
+    prevStartDate = new Date(startDate.getTime() - periodMs);
+
+    const features = [];
+
+    for (const fid of featureIds) {
+        // Get current period stats
+        const currentStats = await getFeatureStats(fid, { start: startDate, end: endDate });
+        if (currentStats.error) continue;
+
+        // Get previous period stats for trend
+        const prevStats = await getFeatureStats(fid, { start: prevStartDate, end: prevEndDate });
+
+        // Extract value based on metric
+        let currentValue, prevValue;
+        switch (normalizedMetric) {
+            case 'uniqueUsers':
+                currentValue = currentStats.summary?.uniqueUsers || currentStats.uniqueUsers || 0;
+                prevValue = prevStats.summary?.uniqueUsers || prevStats.uniqueUsers || 0;
+                break;
+            case 'completionRate':
+                currentValue = currentStats.summary?.completionRate || currentStats.completionRate || 0;
+                prevValue = prevStats.summary?.completionRate || prevStats.completionRate || 0;
+                break;
+            case 'errorRate':
+                currentValue = currentStats.summary?.errorRate || currentStats.errorRate || 0;
+                prevValue = prevStats.summary?.errorRate || prevStats.errorRate || 0;
+                break;
+            case 'avgDurationMs':
+                currentValue = currentStats.summary?.avgDurationMs || currentStats.avgDuration || 0;
+                prevValue = prevStats.summary?.avgDurationMs || prevStats.avgDuration || 0;
+                break;
+            default:
+                currentValue = 0;
+                prevValue = 0;
+        }
+
+        // Calculate trend (per spec format: '+3.2%' or '-1.5%')
+        let trend = '0%';
+        if (prevValue > 0) {
+            const change = ((currentValue - prevValue) / prevValue) * 100;
+            trend = (change >= 0 ? '+' : '') + change.toFixed(1) + '%';
+        } else if (currentValue > 0) {
+            trend = '+100%';
+        }
+
+        features.push({
+            featureId: fid,
+            value: currentValue,
+            trend
+        });
+    }
+
+    // Sort by value descending
+    features.sort((a, b) => (b.value || 0) - (a.value || 0));
+
+    // Return in spec format
     return {
-        metric,
-        timeRange,
-        comparison: results,
-        winner: results[0]?.featureId || null
+        metric: normalizedMetric,
+        timeRange: {
+            start: startDate.toISOString().split('T')[0],
+            end: endDate.toISOString().split('T')[0]
+        },
+        features
     };
 }
 
 /**
- * Analyze funnel conversion rates
- * @param {string} funnelId - Funnel definition ID
- * @param {string} timeRange - Time range for analysis
- * @returns {Promise<Object>} - Funnel conversion data
+ * Analyzes conversion rates through a defined funnel.
+ * Per spec Section 3.2: getFunnelConversion(funnelId, timeRange)
+ *
+ * @param {string} funnelId - Funnel identifier from FeatureFunnels collection
+ * @param {Object} timeRange - { start: Date, end: Date }
+ * @returns {Promise<Object>} - Funnel conversion data with dropoffAnalysis per spec
  */
-export async function getFunnelConversion(funnelId, timeRange = 'month') {
+export async function getFunnelConversion(funnelId, timeRange) {
+    // Validate funnelId
+    if (!funnelId) {
+        return { error: 'FAL_005: funnelId is required', errorCode: 'FAL_005' };
+    }
+
     try {
         // Get funnel definition
         const funnelResult = await wixData.query(CONFIG.collections.funnels)
-            .eq('funnelId', funnelId)
+            .eq('funnelId', funnelId.toLowerCase())
             .find({ suppressAuth: true });
 
         if (funnelResult.items.length === 0) {
-            return { error: 'Funnel not found' };
+            return { error: 'FAL_005: Funnel not found', errorCode: 'FAL_005' };
         }
 
         const funnel = funnelResult.items[0];
-        const steps = funnel.steps; // Array of { featureId, action }
+        const steps = funnel.steps || [];
 
         // Calculate date range
-        let days = timeRange === 'week' ? 7 : timeRange === 'month' ? 30 : 90;
-        const startDate = new Date();
-        startDate.setDate(startDate.getDate() - days);
+        let startDate, endDate;
+        if (timeRange && typeof timeRange === 'object' && timeRange.start) {
+            startDate = new Date(timeRange.start);
+            endDate = timeRange.end ? new Date(timeRange.end) : new Date();
+        } else {
+            endDate = new Date();
+            startDate = new Date();
+            const days = typeof timeRange === 'string' ?
+                (timeRange === 'week' ? 7 : timeRange === 'quarter' ? 90 : 30) : 30;
+            startDate.setDate(startDate.getDate() - days);
+        }
 
         // Get all logs for funnel features
         const featureIds = steps.map(s => s.featureId);
         const logs = await wixData.query(CONFIG.collections.logs)
             .ge('timestamp', startDate)
+            .le('timestamp', endDate)
             .hasSome('featureId', featureIds)
-            .limit(5000)
+            .limit(10000)
+            .ascending('timestamp')
             .find({ suppressAuth: true });
 
-        // Group logs by user to track progression
+        // Group logs by user and sort by timestamp for journey tracking
         const userJourneys = {};
         logs.items.forEach(log => {
             if (!userJourneys[log.userId]) {
@@ -345,134 +818,263 @@ export async function getFunnelConversion(funnelId, timeRange = 'month') {
             userJourneys[log.userId].push({
                 featureId: log.featureId,
                 action: log.action,
-                timestamp: log.timestamp
+                timestamp: new Date(log.timestamp)
             });
         });
 
-        // Calculate conversion at each step
-        const stepMetrics = steps.map((step, idx) => {
-            const usersAtStep = Object.keys(userJourneys).filter(userId => {
+        // Sort each user's journey by timestamp
+        Object.keys(userJourneys).forEach(userId => {
+            userJourneys[userId].sort((a, b) => a.timestamp - b.timestamp);
+        });
+
+        // Calculate metrics for each step (per spec format)
+        const stepMetrics = [];
+        let previousStepUsers = new Set();
+
+        steps.forEach((step, idx) => {
+            const usersAtStep = new Set();
+            const timesToNext = [];
+
+            Object.keys(userJourneys).forEach(userId => {
                 const journey = userJourneys[userId];
-                // Check if user completed this step
-                return journey.some(j =>
-                    j.featureId === step.featureId &&
-                    (step.action === '*' || j.action === step.action)
-                );
-            }).length;
 
-            return {
-                step: idx + 1,
-                name: step.name || step.featureId,
+                // For first step, find users who did this step
+                // For subsequent steps, only count users who completed previous step
+                if (idx === 0 || previousStepUsers.has(userId)) {
+                    const stepEvent = journey.find(j =>
+                        j.featureId === step.featureId &&
+                        (step.action === '*' || j.action === step.action)
+                    );
+
+                    if (stepEvent) {
+                        usersAtStep.add(userId);
+
+                        // Calculate time to next step if not last step
+                        if (idx < steps.length - 1) {
+                            const nextStep = steps[idx + 1];
+                            const nextEvent = journey.find(j =>
+                                j.featureId === nextStep.featureId &&
+                                (nextStep.action === '*' || j.action === nextStep.action) &&
+                                j.timestamp > stepEvent.timestamp
+                            );
+                            if (nextEvent) {
+                                timesToNext.push(nextEvent.timestamp - stepEvent.timestamp);
+                            }
+                        }
+                    }
+                }
+            });
+
+            const entered = idx === 0 ? usersAtStep.size : previousStepUsers.size;
+            const completed = usersAtStep.size;
+            const conversionRate = entered > 0 ? Math.round((completed / entered) * 1000) / 10 : 0;
+            const avgTimeToNextMs = timesToNext.length > 0
+                ? Math.round(timesToNext.reduce((a, b) => a + b, 0) / timesToNext.length)
+                : null;
+
+            stepMetrics.push({
+                order: step.order || idx + 1,
                 featureId: step.featureId,
-                action: step.action,
-                users: usersAtStep
-            };
+                displayName: step.displayName || step.name || formatFeatureId(step.featureId),
+                entered,
+                completed,
+                conversionRate,
+                avgTimeToNextMs
+            });
+
+            previousStepUsers = usersAtStep;
         });
 
-        // Calculate conversion rates
-        const totalUsersStep1 = stepMetrics[0]?.users || 1;
-        stepMetrics.forEach((step, idx) => {
-            step.absoluteRate = Math.round((step.users / totalUsersStep1) * 100);
-            if (idx > 0) {
-                const prevUsers = stepMetrics[idx - 1].users || 1;
-                step.stepRate = Math.round((step.users / prevUsers) * 100);
-            } else {
-                step.stepRate = 100;
+        // Calculate overall metrics
+        const totalEntered = stepMetrics[0]?.entered || 0;
+        const totalCompleted = stepMetrics[stepMetrics.length - 1]?.completed || 0;
+        const overallConversionRate = totalEntered > 0
+            ? Math.round((totalCompleted / totalEntered) * 1000) / 10
+            : 0;
+
+        // Find biggest dropoff (per spec)
+        let biggestDropoff = null;
+        let maxLostUsers = 0;
+
+        for (let i = 1; i < stepMetrics.length; i++) {
+            const lostUsers = stepMetrics[i - 1].completed - stepMetrics[i].completed;
+            if (lostUsers > maxLostUsers) {
+                maxLostUsers = lostUsers;
+                biggestDropoff = {
+                    step: i + 1,
+                    lostUsers,
+                    reason: `${stepMetrics[i - 1].featureId}_to_${stepMetrics[i].featureId}`
+                };
             }
-        });
+        }
 
+        // Return in spec format
         return {
             funnelId,
-            funnelName: funnel.name,
-            timeRange,
+            displayName: funnel.displayName || funnel.name,
+            timeRange: {
+                start: startDate.toISOString().split('T')[0],
+                end: endDate.toISOString().split('T')[0]
+            },
+            totalEntered,
+            totalCompleted,
+            overallConversionRate,
             steps: stepMetrics,
-            overallConversion: stepMetrics[stepMetrics.length - 1]?.absoluteRate || 0,
-            dropOffStep: findDropOffStep(stepMetrics)
+            dropoffAnalysis: {
+                biggestDropoff
+            }
         };
     } catch (error) {
         console.error('[FeatureAdoption] Funnel analysis failed:', error);
-        return { error: error.message };
+        return { error: error.message, errorCode: 'FAL_007' };
     }
 }
 
 /**
- * Analyze cohort retention for a feature
- * @param {string} featureId - Feature to analyze
- * @param {string} cohortDate - Cohort start date (YYYY-MM-DD)
- * @param {number} periods - Number of periods to analyze
- * @returns {Promise<Object>} - Cohort retention data
+ * Analyzes retention for users who first used a feature on a specific date.
+ * Per spec Section 3.2: getCohortRetention(featureId, cohortDate, periods)
+ *
+ * @param {string} featureId - Feature identifier
+ * @param {Date|string} cohortDate - Date to define the cohort (users who first used on this date)
+ * @param {number} periods - Number of periods (weeks) to track
+ * @returns {Promise<Object>} - Cohort retention data per spec format
  */
 export async function getCohortRetention(featureId, cohortDate, periods = 8) {
+    // Validate inputs
+    if (!featureId) {
+        return { error: 'FAL_003: featureId is required', errorCode: 'FAL_003' };
+    }
+
+    if (!cohortDate) {
+        return { error: 'FAL_003: cohortDate is required', errorCode: 'FAL_003' };
+    }
+
     try {
         const cohortStart = new Date(cohortDate);
-        const cohortEnd = new Date(cohortDate);
-        cohortEnd.setDate(cohortEnd.getDate() + 7); // 1-week cohort window
+        const cohortStartStr = cohortStart.toISOString().split('T')[0];
 
-        // Get users who first used the feature in the cohort window
-        const initialLogs = await wixData.query(CONFIG.collections.logs)
+        // Get all logs for this feature to find first-use users
+        // First, find users who used the feature on the cohort date
+        const cohortEnd = new Date(cohortStart);
+        cohortEnd.setDate(cohortEnd.getDate() + 1);
+
+        const cohortDayLogs = await wixData.query(CONFIG.collections.logs)
             .eq('featureId', featureId.toLowerCase())
-            .eq('action', 'first_use')
             .ge('timestamp', cohortStart)
             .lt('timestamp', cohortEnd)
             .find({ suppressAuth: true });
 
-        const cohortUsers = new Set(initialLogs.items.map(l => l.userId));
+        // Get users from cohort day
+        const potentialCohortUsers = new Set(cohortDayLogs.items.map(l => l.userId));
+
+        // Check if these users had any earlier activity (to identify true first-use)
+        let cohortUsers = new Set();
+
+        if (potentialCohortUsers.size > 0) {
+            const priorLogs = await wixData.query(CONFIG.collections.logs)
+                .eq('featureId', featureId.toLowerCase())
+                .lt('timestamp', cohortStart)
+                .hasSome('userId', Array.from(potentialCohortUsers))
+                .limit(5000)
+                .find({ suppressAuth: true });
+
+            const usersWithPriorActivity = new Set(priorLogs.items.map(l => l.userId));
+
+            // Cohort = users on cohort date who had no prior activity
+            cohortUsers = new Set(
+                Array.from(potentialCohortUsers).filter(u => !usersWithPriorActivity.has(u))
+            );
+        }
+
         const cohortSize = cohortUsers.size;
 
         if (cohortSize === 0) {
-            return { error: 'No users in cohort', cohortDate, cohortSize: 0 };
+            // Try using 'first_use' action as fallback
+            const firstUseLogs = await wixData.query(CONFIG.collections.logs)
+                .eq('featureId', featureId.toLowerCase())
+                .eq('action', 'first_use')
+                .ge('timestamp', cohortStart)
+                .lt('timestamp', cohortEnd)
+                .find({ suppressAuth: true });
+
+            const firstUseUsers = new Set(firstUseLogs.items.map(l => l.userId));
+
+            if (firstUseUsers.size === 0) {
+                return {
+                    featureId,
+                    cohortDate: cohortStartStr,
+                    cohortSize: 0,
+                    retention: []
+                };
+            }
+
+            // Use first_use cohort
+            cohortUsers = firstUseUsers;
         }
 
-        // Track retention over periods (weeks)
+        // Track retention over periods (per spec format with period starting at 0)
         const retention = [];
-        for (let period = 0; period < periods; period++) {
+
+        // Period 0 is the cohort day itself (100% by definition)
+        retention.push({
+            period: 0,
+            retained: cohortUsers.size,
+            rate: 100.0
+        });
+
+        // Track subsequent periods (weeks)
+        for (let period = 1; period <= periods; period++) {
             const periodStart = new Date(cohortStart);
             periodStart.setDate(periodStart.getDate() + (period * 7));
             const periodEnd = new Date(periodStart);
             periodEnd.setDate(periodEnd.getDate() + 7);
 
+            // Skip if period is in the future
+            if (periodStart > new Date()) {
+                break;
+            }
+
             const periodLogs = await wixData.query(CONFIG.collections.logs)
                 .eq('featureId', featureId.toLowerCase())
                 .ge('timestamp', periodStart)
                 .lt('timestamp', periodEnd)
-                .limit(1000)
+                .hasSome('userId', Array.from(cohortUsers))
+                .limit(5000)
                 .find({ suppressAuth: true });
 
-            const activeUsers = new Set(
-                periodLogs.items
-                    .filter(l => cohortUsers.has(l.userId))
-                    .map(l => l.userId)
-            );
+            const activeUsers = new Set(periodLogs.items.map(l => l.userId));
+            const retained = activeUsers.size;
+            const rate = Math.round((retained / cohortUsers.size) * 1000) / 10;
 
             retention.push({
-                period: period + 1,
-                week: `Week ${period + 1}`,
-                startDate: periodStart.toISOString().split('T')[0],
-                activeUsers: activeUsers.size,
-                retentionRate: Math.round((activeUsers.size / cohortSize) * 100)
+                period,
+                retained,
+                rate
             });
         }
 
+        // Return in spec format
         return {
             featureId,
-            cohortDate,
-            cohortSize,
-            periods: retention,
-            avgRetention: Math.round(retention.reduce((a, r) => a + r.retentionRate, 0) / retention.length)
+            cohortDate: cohortStartStr,
+            cohortSize: cohortUsers.size,
+            retention
         };
     } catch (error) {
         console.error('[FeatureAdoption] Cohort analysis failed:', error);
-        return { error: error.message };
+        return { error: error.message, errorCode: 'FAL_007' };
     }
 }
 
 // ============================================
-// LIFECYCLE MANAGEMENT
+// LIFECYCLE MANAGEMENT (Section 3.3 of Spec)
 // ============================================
 
 /**
- * Generate a full lifecycle report for all tracked features
- * @returns {Promise<Array>} - Array of feature lifecycle data
+ * Returns lifecycle status for all registered features.
+ * Per spec Section 3.3: getFeatureLifecycleReport()
+ *
+ * @returns {Promise<Object>} - Lifecycle report with features array and summary
  */
 export async function getFeatureLifecycleReport() {
     try {
@@ -488,163 +1090,499 @@ export async function getFeatureLifecycleReport() {
 
         // Get recent logs for activity analysis
         const now = new Date();
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
         const thirtyDaysAgo = new Date();
         thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
         const sixtyDaysAgo = new Date();
         sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
 
+        // Last 7 days (for spec field)
+        const last7DaysLogs = await wixData.query(CONFIG.collections.logs)
+            .ge('timestamp', sevenDaysAgo)
+            .limit(5000)
+            .find({ suppressAuth: true });
+
         // Current period (last 30 days)
         const currentLogs = await wixData.query(CONFIG.collections.logs)
             .ge('timestamp', thirtyDaysAgo)
-            .limit(2000)
+            .limit(5000)
             .find({ suppressAuth: true });
 
         // Previous period (30-60 days ago) for trend comparison
         const previousLogs = await wixData.query(CONFIG.collections.logs)
             .ge('timestamp', sixtyDaysAgo)
             .lt('timestamp', thirtyDaysAgo)
-            .limit(2000)
+            .limit(5000)
             .find({ suppressAuth: true });
 
-        // Aggregate current period
+        // Aggregate by period
+        const last7DaysStats = aggregateByFeature(last7DaysLogs.items);
         const currentStats = aggregateByFeature(currentLogs.items);
         const previousStats = aggregateByFeature(previousLogs.items);
 
         // Build lifecycle report
-        const features = new Set([
+        const allFeatures = new Set([
             ...Object.keys(currentStats),
             ...Object.keys(previousStats),
             ...Object.keys(registry)
         ]);
 
-        const report = [];
-        for (const featureId of features) {
+        const features = [];
+        const byStatus = { beta: 0, active: 0, deprecated: 0, sunset: 0 };
+        const byHealth = { healthy: 0, warning: 0, critical: 0 };
+
+        for (const featureId of allFeatures) {
             const current = currentStats[featureId] || { count: 0, users: new Set(), errors: 0, completions: 0 };
             const previous = previousStats[featureId] || { count: 0, users: new Set() };
+            const last7Days = last7DaysStats[featureId] || { users: new Set() };
             const regData = registry[featureId] || {};
 
-            // Calculate lifecycle status
-            const status = calculateLifecycleStatus(featureId, current, previous, regData);
+            // Calculate days since launch
+            const launchDate = regData.launchDate || regData.createdDate;
+            const daysSinceLaunch = launchDate
+                ? Math.floor((now - new Date(launchDate)) / (1000 * 60 * 60 * 24))
+                : null;
 
             // Calculate health score
             const healthScore = calculateHealthScore(current);
 
-            // Calculate trend
-            const trend = calculateTrend(current.count, previous.count);
+            // Calculate trend (per spec format)
+            const trendCalc = calculateTrend(current.count, previous.count);
+            const trend = trendCalc.direction === 'up' ? '+' + trendCalc.percent + '%' :
+                trendCalc.direction === 'down' ? trendCalc.percent + '%' : '0%';
 
-            report.push({
+            // Get status from registry (use spec statuses)
+            const status = regData.status || 'active';
+
+            // Determine recommendation
+            const recommendation = getLifecycleRecommendation(healthScore, trendCalc, daysSinceLaunch, regData);
+
+            features.push({
                 featureId,
                 displayName: regData.displayName || formatFeatureId(featureId),
                 status,
+                category: regData.category || 'uncategorized',
+                launchDate: launchDate ? new Date(launchDate).toISOString().split('T')[0] : null,
+                daysSinceLaunch,
+                last7DaysUsers: last7Days.users?.size || 0,
+                last30DaysUsers: current.users.size,
                 healthScore,
-                interactions30d: current.count,
-                uniqueUsers30d: current.users.size,
-                completionRate: current.count > 0 ? Math.round((current.completions / current.count) * 100) : 0,
-                errorRate: current.count > 0 ? Math.round((current.errors / current.count) * 100) : 0,
                 trend,
-                trendPercent: trend.percent,
-                lastUsed: current.lastUsed || null,
-                createdDate: regData.createdDate || null,
-                category: regData.category || 'uncategorized'
+                recommendation
             });
+
+            // Update summary counters
+            if (byStatus[status] !== undefined) {
+                byStatus[status]++;
+            }
+
+            if (healthScore >= 70) {
+                byHealth.healthy++;
+            } else if (healthScore >= 40) {
+                byHealth.warning++;
+            } else {
+                byHealth.critical++;
+            }
         }
 
-        // Sort by status priority and then by interactions
-        const statusOrder = { 'At Risk': 0, 'Dead': 1, 'New': 2, 'Adopted': 3, 'Mature': 4 };
-        report.sort((a, b) => {
-            const statusDiff = (statusOrder[a.status] || 5) - (statusOrder[b.status] || 5);
-            if (statusDiff !== 0) return statusDiff;
-            return b.interactions30d - a.interactions30d;
-        });
+        // Sort by health score (lowest first to surface issues)
+        features.sort((a, b) => a.healthScore - b.healthScore);
 
-        return report;
+        // Return in spec format
+        return {
+            generatedAt: now.toISOString(),
+            features,
+            summary: {
+                total: features.length,
+                byStatus,
+                byHealth
+            }
+        };
     } catch (error) {
         console.error('[FeatureAdoption] Failed to generate report:', error);
-        return { error: error.message };
+        return { error: error.message, errorCode: 'FAL_007' };
     }
 }
 
 /**
- * Calculate health score for a feature (0-100)
- * @param {string} featureId - Feature to analyze
- * @returns {Promise<Object>} - Health score breakdown
+ * Get lifecycle recommendation based on metrics.
+ * @private
+ */
+function getLifecycleRecommendation(healthScore, trend, daysSinceLaunch, regData) {
+    if (healthScore >= 70 && trend.direction !== 'down') {
+        return 'Feature is performing well. Consider expanding to more user roles.';
+    }
+
+    if (healthScore < 40) {
+        if (daysSinceLaunch && daysSinceLaunch > 90) {
+            return 'Consider deprecation - feature has low adoption after extended availability.';
+        }
+        return 'Urgent: Low adoption. Review UX, add onboarding, or increase visibility.';
+    }
+
+    if (trend.direction === 'down' && Math.abs(trend.percent) > 20) {
+        return 'Warning: Usage declining. Investigate causes and consider improvements.';
+    }
+
+    if (daysSinceLaunch && daysSinceLaunch < 30 && healthScore < 60) {
+        return 'New feature - needs promotion. Consider adding to onboarding flow.';
+    }
+
+    return 'Monitor closely. Consider A/B testing improvements.';
+}
+
+/**
+ * Calculates composite health score (0-100) for a feature.
+ * Per spec Section 3.3: getFeatureHealthScore(featureId)
+ *
+ * Breakdown weights per spec:
+ * - adoptionRate (30%): % of target users using the feature
+ * - completionRate (25%): % completing primary action
+ * - errorRate (20%): 100 - actual error rate
+ * - retentionRate (15%): Users returning after first use
+ * - engagementDepth (10%): Avg interactions per session
+ *
+ * @param {string} featureId - Feature identifier
+ * @returns {Promise<Object>} - Health score with breakdown per spec
  */
 export async function getFeatureHealthScore(featureId) {
+    // Validate featureId
+    if (!featureId) {
+        return { error: 'FAL_003: featureId is required', errorCode: 'FAL_003' };
+    }
+
     try {
+        // Get stats for last 30 days
         const stats = await getFeatureStats(featureId, { timeRange: 30 });
         if (stats.error) return stats;
 
-        const score = calculateHealthScore({
-            count: stats.totalInteractions,
-            users: { size: stats.uniqueUsers },
-            completions: stats.completions || 0,
-            errors: stats.errors || 0
-        });
-
-        // Get expected users (could be from registry or default)
+        // Get registry data for expected users
         let expectedUsers = 50; // Default expectation
+        let regData = {};
         try {
             const regResult = await wixData.query(CONFIG.collections.registry)
-                .eq('featureId', featureId)
+                .eq('featureId', featureId.toLowerCase())
                 .find({ suppressAuth: true });
-            if (regResult.items.length > 0 && regResult.items[0].expectedUsers) {
-                expectedUsers = regResult.items[0].expectedUsers;
+            if (regResult.items.length > 0) {
+                regData = regResult.items[0];
+                if (regData.expectedUsers) {
+                    expectedUsers = regData.expectedUsers;
+                }
             }
         } catch (e) {
             // Registry may not exist
         }
 
-        const usageScore = Math.min(100, Math.round((stats.uniqueUsers / expectedUsers) * 100));
-        const completionScore = stats.completionRate || 0;
-        const errorFreeScore = 100 - (stats.errorRate || 0);
+        // Calculate individual metrics per spec weights
+        const uniqueUsers = stats.summary?.uniqueUsers || stats.uniqueUsers || 0;
+        const completionRate = stats.summary?.completionRate || stats.completionRate || 0;
+        const errorRate = stats.summary?.errorRate || stats.errorRate || 0;
 
+        // 1. Adoption Rate (30%): % of target users using the feature
+        const adoptionRate = Math.min(100, Math.round((uniqueUsers / expectedUsers) * 100));
+
+        // 2. Completion Rate (25%): Already calculated as percentage
+        const completionRateScore = Math.min(100, Math.round(completionRate));
+
+        // 3. Error Rate (20%): 100 - actual error rate (higher is better)
+        const errorRateScore = Math.max(0, Math.round(100 - errorRate));
+
+        // 4. Retention Rate (15%): Calculate from repeat users
+        // Query for users who used the feature more than once in the period
+        let retentionRateScore = 50; // Default to 50 if can't calculate
+        try {
+            const now = new Date();
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+            const allLogs = await wixData.query(CONFIG.collections.logs)
+                .eq('featureId', featureId.toLowerCase())
+                .ge('timestamp', thirtyDaysAgo)
+                .limit(5000)
+                .find({ suppressAuth: true });
+
+            // Count users with repeat visits
+            const userVisitCounts = {};
+            allLogs.items.forEach(log => {
+                const date = log.date || log.timestamp?.toISOString().split('T')[0];
+                if (!userVisitCounts[log.userId]) {
+                    userVisitCounts[log.userId] = new Set();
+                }
+                userVisitCounts[log.userId].add(date);
+            });
+
+            const totalUsers = Object.keys(userVisitCounts).length;
+            const repeatUsers = Object.values(userVisitCounts).filter(dates => dates.size > 1).length;
+            retentionRateScore = totalUsers > 0 ? Math.round((repeatUsers / totalUsers) * 100) : 0;
+        } catch (e) {
+            // Use default
+        }
+
+        // 5. Engagement Depth (10%): Avg interactions per session
+        let engagementDepthScore = 50; // Default
+        try {
+            const sessionsResult = await wixData.query(CONFIG.collections.logs)
+                .eq('featureId', featureId.toLowerCase())
+                .isNotEmpty('sessionId')
+                .limit(1000)
+                .find({ suppressAuth: true });
+
+            const sessionCounts = {};
+            sessionsResult.items.forEach(log => {
+                sessionCounts[log.sessionId] = (sessionCounts[log.sessionId] || 0) + 1;
+            });
+
+            const sessionIds = Object.keys(sessionCounts);
+            if (sessionIds.length > 0) {
+                const avgInteractionsPerSession = sessionIds.reduce((sum, id) => sum + sessionCounts[id], 0) / sessionIds.length;
+                // Score based on avg interactions (3+ is considered good engagement)
+                engagementDepthScore = Math.min(100, Math.round((avgInteractionsPerSession / 3) * 100));
+            }
+        } catch (e) {
+            // Use default
+        }
+
+        // Calculate weighted health score per spec
+        const weights = CONFIG.healthWeights;
+        const healthScore = Math.round(
+            (adoptionRate * weights.adoptionRate / 100) +
+            (completionRateScore * weights.completionRate / 100) +
+            (errorRateScore * weights.errorRate / 100) +
+            (retentionRateScore * weights.retentionRate / 100) +
+            (engagementDepthScore * weights.engagementDepth / 100)
+        );
+
+        // Determine status and thresholds
+        const status = healthScore >= 70 ? 'healthy' : healthScore >= 40 ? 'warning' : 'critical';
+
+        // Generate recommendation
+        const breakdown = {
+            adoptionRate,
+            completionRate: completionRateScore,
+            errorRate: errorRateScore,
+            retentionRate: retentionRateScore,
+            engagementDepth: engagementDepthScore
+        };
+        const recommendation = generateHealthRecommendation(healthScore, breakdown);
+
+        // Return in spec format
         return {
             featureId,
-            overallScore: score,
-            breakdown: {
-                usageScore,
-                completionScore: Math.round(completionScore),
-                errorFreeScore: Math.round(errorFreeScore)
+            healthScore,
+            breakdown,
+            thresholds: {
+                healthy: 70,
+                warning: 40,
+                critical: 0
             },
-            weights: CONFIG.healthWeights,
-            recommendation: getHealthRecommendation(score, { usageScore, completionScore, errorFreeScore })
+            status,
+            recommendation
         };
     } catch (error) {
         console.error('[FeatureAdoption] Health score failed:', error);
-        return { error: error.message };
+        return { error: error.message, errorCode: 'FAL_007' };
     }
 }
 
 /**
- * Get features that are at risk or need attention
- * @param {number} threshold - Health score threshold (default 50)
- * @returns {Promise<Array>} - Array of at-risk features
+ * Generate health recommendation based on breakdown.
+ * @private
  */
-export async function getAtRiskFeatures(threshold = 50) {
+function generateHealthRecommendation(healthScore, breakdown) {
+    const issues = [];
+    const actions = [];
+
+    if (breakdown.adoptionRate < 50) {
+        issues.push('Low adoption rate');
+        actions.push('Increase feature visibility through navigation or onboarding');
+    }
+    if (breakdown.completionRate < 50) {
+        issues.push('Low completion rate');
+        actions.push('Simplify user flow - users are not completing the primary action');
+    }
+    if (breakdown.errorRate < 80) {
+        issues.push('High error rate');
+        actions.push('Address errors - technical issues are blocking user success');
+    }
+    if (breakdown.retentionRate < 30) {
+        issues.push('Low retention');
+        actions.push('Improve value proposition - users are not returning');
+    }
+    if (breakdown.engagementDepth < 40) {
+        issues.push('Low engagement depth');
+        actions.push('Add interactive elements or clearer calls to action');
+    }
+
+    if (healthScore >= 70) {
+        return 'Feature is performing well. Monitor and consider expanding to more user segments.';
+    }
+
+    return issues.length > 0
+        ? `Issues: ${issues.join(', ')}. Actions: ${actions.join('; ')}`
+        : 'Monitor closely and consider A/B testing improvements.';
+}
+
+/**
+ * Returns features below their retirement threshold or showing declining health.
+ * Per spec Section 3.3: getAtRiskFeatures()
+ *
+ * @returns {Promise<Object>} - At-risk features with details per spec format
+ */
+export async function getAtRiskFeatures() {
     try {
+        const now = new Date();
+
+        // Get lifecycle report to get health scores and trends
         const report = await getFeatureLifecycleReport();
         if (report.error) return report;
 
-        return report.filter(f =>
-            f.status === FeatureCycles.AT_RISK ||
-            f.status === FeatureCycles.DEAD ||
-            f.healthScore < threshold
-        ).map(f => ({
-            ...f,
-            riskFactors: identifyRiskFactors(f)
-        }));
+        // Get registry data for retirement thresholds
+        const registryResult = await wixData.query(CONFIG.collections.registry)
+            .find({ suppressAuth: true })
+            .catch(() => ({ items: [] }));
+
+        const registry = {};
+        registryResult.items.forEach(f => {
+            registry[f.featureId] = f;
+        });
+
+        // Filter for at-risk features
+        const atRiskFeatures = [];
+
+        for (const feature of report.features) {
+            const regData = registry[feature.featureId] || {};
+            const retirementThreshold = regData.retirementThreshold || CONFIG.thresholds.deadDaysNoUse;
+
+            // Calculate days since significant use (>5 users)
+            let daysSinceSignificantUse = null;
+            if (feature.last7DaysUsers < 5 && feature.last30DaysUsers < 10) {
+                // Query for last significant use date
+                try {
+                    const recentLogs = await wixData.query(CONFIG.collections.logs)
+                        .eq('featureId', feature.featureId)
+                        .descending('timestamp')
+                        .limit(100)
+                        .find({ suppressAuth: true });
+
+                    // Group by day and find last day with 5+ users
+                    const byDay = {};
+                    recentLogs.items.forEach(log => {
+                        const day = log.date || log.timestamp?.toISOString().split('T')[0];
+                        if (!byDay[day]) byDay[day] = new Set();
+                        byDay[day].add(log.userId);
+                    });
+
+                    const significantDays = Object.entries(byDay)
+                        .filter(([_, users]) => users.size >= 5)
+                        .map(([day]) => day)
+                        .sort()
+                        .reverse();
+
+                    if (significantDays.length > 0) {
+                        const lastSignificantDate = new Date(significantDays[0]);
+                        daysSinceSignificantUse = Math.floor((now - lastSignificantDate) / (1000 * 60 * 60 * 24));
+                    } else {
+                        daysSinceSignificantUse = feature.daysSinceLaunch || 999;
+                    }
+                } catch (e) {
+                    daysSinceSignificantUse = feature.daysSinceLaunch || null;
+                }
+            }
+
+            // Determine if feature is at risk
+            const isAtRisk =
+                feature.healthScore < 40 ||
+                (daysSinceSignificantUse && daysSinceSignificantUse > retirementThreshold * 0.7) ||
+                (feature.trend && feature.trend.startsWith('-') && parseInt(feature.trend) < -30) ||
+                feature.status === 'deprecated';
+
+            if (!isAtRisk) continue;
+
+            // Identify risk level
+            let riskLevel = 'medium';
+            if (feature.healthScore < 20 || (daysSinceSignificantUse && daysSinceSignificantUse > retirementThreshold)) {
+                riskLevel = 'critical';
+            } else if (feature.healthScore < 40 || (daysSinceSignificantUse && daysSinceSignificantUse > retirementThreshold * 0.7)) {
+                riskLevel = 'high';
+            }
+
+            // Identify issues
+            const issues = [];
+            if (feature.healthScore < 40) issues.push('Low health score');
+            if (daysSinceSignificantUse && daysSinceSignificantUse > retirementThreshold * 0.5) {
+                issues.push(`No significant use in ${daysSinceSignificantUse} days`);
+            }
+            if (feature.trend && feature.trend.startsWith('-') && parseInt(feature.trend) < -20) {
+                issues.push(`Usage declining ${feature.trend}`);
+            }
+            if (feature.last7DaysUsers === 0) issues.push('Zero users in last 7 days');
+
+            // Determine recommended action
+            let recommendedAction;
+            if (riskLevel === 'critical') {
+                recommendedAction = 'Schedule for sunset. Notify dependent teams and migrate users.';
+            } else if (riskLevel === 'high') {
+                recommendedAction = 'Immediate investigation needed. Consider feature redesign or removal.';
+            } else {
+                recommendedAction = 'Monitor closely. Consider promotional campaigns or UX improvements.';
+            }
+
+            // Calculate estimated removal date
+            let estimatedRemovalDate = null;
+            if (daysSinceSignificantUse && daysSinceSignificantUse > 0) {
+                const daysUntilThreshold = Math.max(0, retirementThreshold - daysSinceSignificantUse);
+                const removalDate = new Date();
+                removalDate.setDate(removalDate.getDate() + daysUntilThreshold + 30); // 30 day grace period
+                estimatedRemovalDate = removalDate.toISOString().split('T')[0];
+            }
+
+            atRiskFeatures.push({
+                featureId: feature.featureId,
+                displayName: feature.displayName,
+                healthScore: feature.healthScore,
+                riskLevel,
+                daysSinceSignificantUse,
+                retirementThreshold,
+                issues,
+                recommendedAction,
+                estimatedRemovalDate
+            });
+        }
+
+        // Sort by risk level (critical first) then by health score
+        const riskOrder = { critical: 0, high: 1, medium: 2 };
+        atRiskFeatures.sort((a, b) => {
+            const riskDiff = (riskOrder[a.riskLevel] || 3) - (riskOrder[b.riskLevel] || 3);
+            if (riskDiff !== 0) return riskDiff;
+            return a.healthScore - b.healthScore;
+        });
+
+        // Return in spec format
+        return {
+            generatedAt: now.toISOString(),
+            atRiskFeatures
+        };
     } catch (error) {
         console.error('[FeatureAdoption] At-risk analysis failed:', error);
-        return { error: error.message };
+        return { error: error.message, errorCode: 'FAL_007' };
     }
 }
 
 /**
- * Aggregate daily metrics (run as scheduled job)
- * @returns {Promise<Object>} - Aggregation result
+ * Scheduled job that aggregates raw logs into daily metrics.
+ * Per spec Section 3.3: aggregateDailyMetrics()
+ *
+ * Uses yesterday's date by default.
+ * Creates records in FeatureMetricsDaily collection per spec schema (Section 2.4)
+ *
+ * @returns {Promise<Object>} - { success, date, featuresProcessed, recordsCreated, processingTimeMs }
  */
 export async function aggregateDailyMetrics() {
+    const startTime = Date.now();
+
     try {
+        // Default to yesterday
         const yesterday = new Date();
         yesterday.setDate(yesterday.getDate() - 1);
         const dateStr = yesterday.toISOString().split('T')[0];
@@ -656,7 +1594,14 @@ export async function aggregateDailyMetrics() {
             .catch(() => ({ items: [] }));
 
         if (existing.items.length > 0) {
-            return { success: true, message: 'Already aggregated', date: dateStr };
+            return {
+                success: true,
+                message: 'Already aggregated',
+                date: dateStr,
+                featuresProcessed: existing.items.length,
+                recordsCreated: 0,
+                processingTimeMs: Date.now() - startTime
+            };
         }
 
         // Get yesterday's logs
@@ -667,42 +1612,153 @@ export async function aggregateDailyMetrics() {
         const logs = await wixData.query(CONFIG.collections.logs)
             .ge('timestamp', dayStart)
             .lt('timestamp', dayEnd)
-            .limit(5000)
+            .limit(10000)
             .find({ suppressAuth: true });
 
-        // Aggregate by feature
-        const byFeature = aggregateByFeature(logs.items);
+        // Aggregate by feature with full metrics per spec schema (Section 2.4)
+        const byFeature = {};
 
-        // Store aggregated metrics
+        logs.items.forEach(log => {
+            const fid = log.featureId;
+            if (!byFeature[fid]) {
+                byFeature[fid] = {
+                    users: new Set(),
+                    sessions: new Set(),
+                    views: 0,
+                    clicks: 0,
+                    completions: 0,
+                    errors: 0,
+                    abandons: 0,
+                    totalDurationMs: 0,
+                    durationCount: 0,
+                    byRole: {},
+                    byDevice: {},
+                    conversionValues: []
+                };
+            }
+
+            const stats = byFeature[fid];
+            stats.users.add(log.userId);
+            if (log.sessionId) stats.sessions.add(log.sessionId);
+
+            // Count by action type
+            switch (log.action) {
+                case 'view': stats.views++; break;
+                case 'click': stats.clicks++; break;
+                case 'complete': stats.completions++; break;
+                case 'error': stats.errors++; break;
+                case 'abandon': stats.abandons++; break;
+            }
+
+            // Duration tracking
+            if (log.durationMs || log.duration) {
+                stats.totalDurationMs += log.durationMs || log.duration;
+                stats.durationCount++;
+            }
+
+            // Group by role
+            const role = log.userRole || 'unknown';
+            stats.byRole[role] = (stats.byRole[role] || 0) + 1;
+
+            // Group by device
+            const device = log.deviceType || log.metadata?.deviceType || 'unknown';
+            stats.byDevice[device] = (stats.byDevice[device] || 0) + 1;
+
+            // Track conversion values
+            if (log.conversionValue) {
+                stats.conversionValues.push(log.conversionValue);
+            }
+        });
+
+        // Build records per spec schema (Section 2.4 FeatureMetricsDaily)
         const metricsToInsert = [];
+
         for (const [featureId, stats] of Object.entries(byFeature)) {
+            const uniqueUsers = stats.users.size;
+            const uniqueSessions = stats.sessions.size;
+            const totalInteractions = stats.views + stats.clicks + stats.completions + stats.errors + stats.abandons;
+
+            // Calculate rates
+            const completionRate = stats.views > 0
+                ? Math.round((stats.completions / stats.views) * 1000) / 10
+                : 0;
+            const errorRate = totalInteractions > 0
+                ? Math.round((stats.errors / totalInteractions) * 1000) / 10
+                : 0;
+            const abandonRate = stats.views > 0
+                ? Math.round((stats.abandons / stats.views) * 1000) / 10
+                : 0;
+
+            // Calculate averages
+            const avgSessionDurationMs = stats.durationCount > 0
+                ? Math.round(stats.totalDurationMs / stats.durationCount)
+                : null;
+            const avgConversionValue = stats.conversionValues.length > 0
+                ? Math.round(stats.conversionValues.reduce((a, b) => a + b, 0) / stats.conversionValues.length * 100) / 100
+                : null;
+
             metricsToInsert.push({
+                // Core identifiers
                 date: dateStr,
                 featureId,
-                interactions: stats.count,
-                uniqueUsers: stats.users.size,
+
+                // User metrics
+                uniqueUsers,
+                uniqueSessions,
+
+                // Interaction counts
+                views: stats.views,
+                clicks: stats.clicks,
                 completions: stats.completions,
                 errors: stats.errors,
-                avgDuration: stats.totalDuration > 0 ? Math.round(stats.totalDuration / stats.durCount) : null,
-                byAction: stats.actions,
-                byRole: stats.roles
+                abandons: stats.abandons,
+
+                // Calculated rates
+                completionRate,
+                errorRate,
+                abandonRate,
+
+                // Duration and value metrics
+                avgSessionDurationMs,
+                avgConversionValue,
+
+                // Breakdowns (stored as JSON objects)
+                breakdownByRole: stats.byRole,
+                breakdownByDevice: stats.byDevice,
+
+                // Metadata
+                aggregatedAt: new Date()
             });
         }
 
         // Batch insert
+        let recordsCreated = 0;
         for (const metric of metricsToInsert) {
-            await wixData.insert(CONFIG.collections.metricsDaily, metric, { suppressAuth: true });
+            try {
+                await wixData.insert(CONFIG.collections.metricsDaily, metric, { suppressAuth: true });
+                recordsCreated++;
+            } catch (e) {
+                console.error(`[FeatureAdoption] Failed to insert metric for ${metric.featureId}:`, e.message);
+            }
         }
+
+        const processingTimeMs = Date.now() - startTime;
 
         return {
             success: true,
             date: dateStr,
             featuresProcessed: metricsToInsert.length,
-            totalInteractions: logs.items.length
+            recordsCreated,
+            processingTimeMs
         };
     } catch (error) {
         console.error('[FeatureAdoption] Daily aggregation failed:', error);
-        return { success: false, error: error.message };
+        return {
+            success: false,
+            error: error.message,
+            errorCode: 'FAL_007',
+            processingTimeMs: Date.now() - startTime
+        };
     }
 }
 
@@ -711,129 +1767,355 @@ export async function aggregateDailyMetrics() {
 // ============================================
 
 /**
- * Register a new feature in the registry
- * @param {Object} featureData - Feature definition
- * @param {string} featureData.featureId - Unique identifier
- * @param {string} featureData.displayName - Human-readable name
- * @param {string} [featureData.description] - Feature description
- * @param {string} [featureData.category] - Category: 'core', 'engagement', 'conversion', 'admin'
- * @param {number} [featureData.expectedUsers] - Expected monthly users
- * @returns {Promise<Object>} - Created feature record
+ * Register a new feature in the FeatureRegistry.
+ * Adds a new feature to the FeatureRegistry collection with lifecycle metadata.
+ *
+ * @param {Object} featureData - Feature definition object
+ * @param {string} featureData.featureId - Unique identifier (required)
+ * @param {string} featureData.displayName - Human-readable name (required)
+ * @param {string} [featureData.description] - What the feature does
+ * @param {string} [featureData.category] - Feature category: 'matching', 'communication', 'analytics', 'onboarding'
+ * @param {string} [featureData.status] - Lifecycle status: 'beta', 'active', 'deprecated', 'sunset' (default: 'beta')
+ * @param {string} [featureData.expectedUsagePattern] - How often feature should be used: 'daily', 'weekly', 'onboarding-only', 'event-driven'
+ * @param {Array<string>} [featureData.targetRoles] - Which user roles should use it (e.g., ['driver', 'recruiter'])
+ * @param {string} [featureData.owner] - Team/person responsible
+ * @param {string} [featureData.successMetric] - How to measure success (e.g., 'completion_rate > 40%')
+ * @param {number} [featureData.retirementThreshold] - Days without use before flagging (default: 30)
+ * @param {Array<string>} [featureData.relatedFeatures] - Features often used together
+ * @param {string} [featureData.documentationUrl] - Link to feature docs
+ * @returns {Promise<Object>} - { success: boolean, featureId?: string, registryId?: string, error?: string, errorCode?: string }
  */
 export async function registerFeature(featureData) {
-    if (!featureData.featureId || !featureData.displayName) {
-        return { error: 'featureId and displayName are required' };
+    // Validate required fields
+    if (!featureData.featureId) {
+        return {
+            success: false,
+            error: 'Missing required field: featureId',
+            errorCode: 'FAL_003'
+        };
     }
 
+    if (!featureData.displayName) {
+        return {
+            success: false,
+            error: 'Missing required field: displayName',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    // Validate status if provided
+    if (featureData.status && !CONFIG.validStatuses.includes(featureData.status)) {
+        return {
+            success: false,
+            error: `Invalid status: ${featureData.status}. Valid statuses: ${CONFIG.validStatuses.join(', ')}`,
+            errorCode: 'FAL_008'
+        };
+    }
+
+    const normalizedFeatureId = featureData.featureId.toLowerCase().trim();
+
+    // Build the registry record per spec (Section 2.2 FeatureRegistry)
     const record = {
-        featureId: featureData.featureId.toLowerCase().trim(),
+        // Core identifiers
+        featureId: normalizedFeatureId,
         displayName: featureData.displayName,
         description: featureData.description || '',
         category: featureData.category || 'uncategorized',
+
+        // Lifecycle
+        launchDate: new Date(),
+        status: featureData.status || 'beta',
+
+        // Usage expectations
+        expectedUsagePattern: featureData.expectedUsagePattern || 'event-driven',
+        targetRoles: Array.isArray(featureData.targetRoles) ? featureData.targetRoles : [],
+        owner: featureData.owner || '',
+        successMetric: featureData.successMetric || '',
+        retirementThreshold: featureData.retirementThreshold || 30,
+
+        // Relationships
+        relatedFeatures: Array.isArray(featureData.relatedFeatures) ? featureData.relatedFeatures : [],
+        documentationUrl: featureData.documentationUrl || '',
+
+        // Legacy fields for backward compatibility
         expectedUsers: featureData.expectedUsers || 50,
-        status: FeatureCycles.NEW,
         createdDate: new Date(),
         updatedDate: new Date()
     };
 
     try {
-        // Check if exists
+        // Check if feature already exists
         const existing = await wixData.query(CONFIG.collections.registry)
-            .eq('featureId', record.featureId)
+            .eq('featureId', normalizedFeatureId)
             .find({ suppressAuth: true })
             .catch(() => ({ items: [] }));
 
         if (existing.items.length > 0) {
-            return { error: 'Feature already registered', existing: existing.items[0] };
+            return {
+                success: false,
+                error: 'Feature already registered with this featureId',
+                errorCode: 'FAL_003',
+                existing: existing.items[0]
+            };
         }
 
         const result = await wixData.insert(CONFIG.collections.registry, record, { suppressAuth: true });
-        return { success: true, feature: result };
+
+        return {
+            success: true,
+            featureId: normalizedFeatureId,
+            registryId: result._id
+        };
     } catch (error) {
         console.error('[FeatureAdoption] Failed to register feature:', error);
-        return { error: error.message };
+        return {
+            success: false,
+            error: error.message,
+            errorCode: 'FAL_007'
+        };
     }
 }
 
 /**
- * Update a feature's status manually
- * @param {string} featureId - Feature to update
- * @param {string} status - New status from FeatureCycles
- * @param {string} [reason] - Reason for status change
- * @returns {Promise<Object>} - Updated feature record
+ * Update a feature's lifecycle status.
+ * Changes a feature's lifecycle status with validation of allowed transitions.
+ * Status lifecycle: beta -> active -> deprecated -> sunset (can reactivate deprecated -> active)
+ *
+ * @param {string} featureId - Feature identifier to update
+ * @param {string} status - New status: 'beta', 'active', 'deprecated', 'sunset'
+ * @param {string} [reason] - Explanation for status change
+ * @returns {Promise<Object>} - { success: boolean, featureId?: string, previousStatus?: string, newStatus?: string, updatedAt?: string, error?: string, errorCode?: string }
  */
 export async function updateFeatureStatus(featureId, status, reason = '') {
-    if (!Object.values(FeatureCycles).includes(status)) {
-        return { error: `Invalid status. Valid: ${Object.values(FeatureCycles).join(', ')}` };
+    // Validate required fields
+    if (!featureId) {
+        return {
+            success: false,
+            error: 'Missing required field: featureId',
+            errorCode: 'FAL_003'
+        };
     }
+
+    if (!status) {
+        return {
+            success: false,
+            error: 'Missing required field: status',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    // Validate status value per spec
+    if (!CONFIG.validStatuses.includes(status)) {
+        return {
+            success: false,
+            error: `Invalid status: ${status}. Valid statuses: ${CONFIG.validStatuses.join(', ')}`,
+            errorCode: 'FAL_008'
+        };
+    }
+
+    const normalizedFeatureId = featureId.toLowerCase().trim();
 
     try {
         const result = await wixData.query(CONFIG.collections.registry)
-            .eq('featureId', featureId.toLowerCase())
+            .eq('featureId', normalizedFeatureId)
             .find({ suppressAuth: true });
 
         if (result.items.length === 0) {
-            return { error: 'Feature not found' };
+            return {
+                success: false,
+                error: 'Feature not found in registry',
+                errorCode: 'FAL_001'
+            };
         }
 
         const feature = result.items[0];
+        const previousStatus = feature.status;
+
+        // Validate status transition per spec lifecycle: beta -> active -> deprecated -> sunset
+        // Allow reactivation: deprecated -> active (as noted in spec)
+        const validTransitions = {
+            'beta': ['active', 'deprecated', 'sunset'],
+            'active': ['deprecated', 'sunset'],
+            'deprecated': ['active', 'sunset'],  // Can reactivate
+            'sunset': []  // Terminal state
+        };
+
+        // If current status is in our new spec statuses, validate transition
+        if (CONFIG.validStatuses.includes(previousStatus)) {
+            const allowed = validTransitions[previousStatus] || [];
+            if (previousStatus !== status && !allowed.includes(status)) {
+                return {
+                    success: false,
+                    error: `Invalid status transition from '${previousStatus}' to '${status}'. Allowed transitions: ${allowed.join(', ') || 'none'}`,
+                    errorCode: 'FAL_008'
+                };
+            }
+        }
+
+        // Update the feature
+        const now = new Date();
         feature.status = status;
         feature.statusReason = reason;
-        feature.updatedDate = new Date();
+        feature.statusChangedAt = now;
+        feature.updatedDate = now;
+
+        // Store status history for audit trail
+        if (!Array.isArray(feature.statusHistory)) {
+            feature.statusHistory = [];
+        }
+        feature.statusHistory.push({
+            from: previousStatus,
+            to: status,
+            reason,
+            changedAt: now.toISOString()
+        });
 
         const updated = await wixData.update(CONFIG.collections.registry, feature, { suppressAuth: true });
-        return { success: true, feature: updated };
+
+        return {
+            success: true,
+            featureId: normalizedFeatureId,
+            previousStatus,
+            newStatus: status,
+            updatedAt: now.toISOString()
+        };
     } catch (error) {
         console.error('[FeatureAdoption] Failed to update status:', error);
-        return { error: error.message };
+        return {
+            success: false,
+            error: error.message,
+            errorCode: 'FAL_007'
+        };
     }
 }
 
 /**
- * Define a conversion funnel
- * @param {Object} funnelData - Funnel definition
- * @param {string} funnelData.funnelId - Unique identifier
- * @param {string} funnelData.name - Human-readable name
- * @param {Array<Object>} funnelData.steps - Array of { featureId, action, name }
- * @returns {Promise<Object>} - Created funnel record
+ * Define a conversion funnel.
+ * Creates or updates a conversion funnel definition in the FeatureFunnels collection.
+ *
+ * @param {Object} funnelData - Funnel definition object
+ * @param {string} funnelData.funnelId - Unique funnel identifier (required)
+ * @param {string} funnelData.displayName - Human-readable name (required)
+ * @param {string} [funnelData.description] - What this funnel measures
+ * @param {Array<Object>} funnelData.steps - Ordered step definitions (required)
+ * @param {number} funnelData.steps[].order - Step order (1-based)
+ * @param {string} funnelData.steps[].featureId - Feature identifier for this step
+ * @param {string} funnelData.steps[].action - Required action: 'view', 'click', 'complete', etc.
+ * @param {string} [funnelData.steps[].displayName] - Human-readable step name
+ * @param {boolean} [funnelData.steps[].optional] - Whether step is optional (default: false)
+ * @param {boolean} [funnelData.isActive] - Whether to track this funnel (default: true)
+ * @returns {Promise<Object>} - { success: boolean, funnelId?: string, stepsCount?: number, isNew?: boolean, error?: string, errorCode?: string }
  */
 export async function defineFunnel(funnelData) {
-    if (!funnelData.funnelId || !funnelData.name || !Array.isArray(funnelData.steps)) {
-        return { error: 'funnelId, name, and steps array are required' };
+    // Validate required fields
+    if (!funnelData.funnelId) {
+        return {
+            success: false,
+            error: 'Missing required field: funnelId',
+            errorCode: 'FAL_003'
+        };
     }
 
+    if (!funnelData.displayName) {
+        return {
+            success: false,
+            error: 'Missing required field: displayName',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    if (!Array.isArray(funnelData.steps) || funnelData.steps.length === 0) {
+        return {
+            success: false,
+            error: 'steps must be a non-empty array',
+            errorCode: 'FAL_003'
+        };
+    }
+
+    // Validate each step
+    for (let i = 0; i < funnelData.steps.length; i++) {
+        const step = funnelData.steps[i];
+        if (!step.featureId) {
+            return {
+                success: false,
+                error: `Step ${i + 1} is missing required field: featureId`,
+                errorCode: 'FAL_003'
+            };
+        }
+        if (!step.action) {
+            return {
+                success: false,
+                error: `Step ${i + 1} is missing required field: action`,
+                errorCode: 'FAL_003'
+            };
+        }
+        if (!CONFIG.validActions.includes(step.action) && step.action !== '*') {
+            return {
+                success: false,
+                error: `Step ${i + 1} has invalid action: ${step.action}`,
+                errorCode: 'FAL_002'
+            };
+        }
+    }
+
+    const normalizedFunnelId = funnelData.funnelId.toLowerCase().trim();
+
+    // Build the funnel record per spec (Section 2.3 FeatureFunnels)
     const record = {
-        funnelId: funnelData.funnelId.toLowerCase().trim(),
-        name: funnelData.name,
+        funnelId: normalizedFunnelId,
+        displayName: funnelData.displayName,
         description: funnelData.description || '',
         steps: funnelData.steps.map((s, i) => ({
-            order: i + 1,
-            featureId: s.featureId.toLowerCase(),
-            action: s.action || 'complete',
-            name: s.name || s.featureId
+            order: s.order || i + 1,
+            featureId: s.featureId.toLowerCase().trim(),
+            action: s.action,
+            displayName: s.displayName || s.name || formatFeatureId(s.featureId),
+            optional: s.optional || false
         })),
-        createdDate: new Date()
+        isActive: funnelData.isActive !== false,
+        createdAt: new Date(),
+        updatedAt: new Date()
     };
 
     try {
-        // Check if exists
+        // Check if funnel already exists
         const existing = await wixData.query(CONFIG.collections.funnels)
-            .eq('funnelId', record.funnelId)
+            .eq('funnelId', normalizedFunnelId)
             .find({ suppressAuth: true })
             .catch(() => ({ items: [] }));
 
+        let isNew = true;
+
         if (existing.items.length > 0) {
-            // Update existing
-            const updated = { ...existing.items[0], ...record, updatedDate: new Date() };
-            const result = await wixData.update(CONFIG.collections.funnels, updated, { suppressAuth: true });
-            return { success: true, funnel: result, updated: true };
+            // Update existing funnel
+            isNew = false;
+            const updated = {
+                ...existing.items[0],
+                displayName: record.displayName,
+                description: record.description,
+                steps: record.steps,
+                isActive: record.isActive,
+                updatedAt: new Date()
+            };
+            await wixData.update(CONFIG.collections.funnels, updated, { suppressAuth: true });
+        } else {
+            // Create new funnel
+            await wixData.insert(CONFIG.collections.funnels, record, { suppressAuth: true });
         }
 
-        const result = await wixData.insert(CONFIG.collections.funnels, record, { suppressAuth: true });
-        return { success: true, funnel: result };
+        return {
+            success: true,
+            funnelId: normalizedFunnelId,
+            stepsCount: record.steps.length,
+            isNew
+        };
     } catch (error) {
         console.error('[FeatureAdoption] Failed to define funnel:', error);
-        return { error: error.message };
+        return {
+            success: false,
+            error: error.message,
+            errorCode: 'FAL_007'
+        };
     }
 }
 

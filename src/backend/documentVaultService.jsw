@@ -1,0 +1,295 @@
+import wixData from 'wix-data';
+import wixAuth from 'wix-auth';
+import { getComplianceEvents, createComplianceEvent, updateComplianceEvent } from './complianceCalendarService';
+
+const COLLECTION = 'CarrierDocuments';
+
+// ============================================================
+// DOCUMENT MANAGEMENT
+// ============================================================
+
+/**
+ * Upload a document to the vault
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} documentData - { type, category, file_url, file_name, driverId, expirationDate, etc. }
+ * @returns {Promise<Object>} - Created document record
+ */
+export async function uploadDocument(carrierDot, documentData) {
+  if (!carrierDot) throw new Error('Carrier DOT required');
+
+  const newDoc = {
+    ...documentData,
+    carrier_dot: carrierDot,
+    version: 1,
+    status: 'active',
+    verification_status: 'pending',
+    is_expired: false,
+    _createdDate: new Date()
+  };
+
+  // Calculate expiration status
+  if (newDoc.expiration_date) {
+    const expDate = new Date(newDoc.expiration_date);
+    const now = new Date();
+    newDoc.is_expired = expDate < now;
+    newDoc.days_until_expiry = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
+  }
+
+  const result = await wixData.insert(COLLECTION, newDoc, { suppressAuth: true });
+
+  // Auto-create compliance event if expiration date exists
+  if (result.expiration_date && result.document_type) {
+    try {
+      await createComplianceEvent({
+        carrier_dot: carrierDot,
+        driver_id: result.driver_id,
+        event_type: result.document_type, // Map doc type to event type logic might be needed
+        event_category: result.document_category || 'license',
+        title: `Renew ${result.title || result.document_type}`,
+        due_date: result.expiration_date,
+        document_id: result._id,
+        status: 'upcoming' // Will be auto-calculated by createComplianceEvent anyway
+      });
+    } catch (err) {
+      console.error('Failed to auto-create compliance event:', err);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Get all documents for a carrier
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} filters - { category, type, driverId, status, expired }
+ * @returns {Promise<Array>} - List of documents
+ */
+export async function getDocuments(carrierDot, filters = {}) {
+  let query = wixData.query(COLLECTION).eq('carrier_dot', carrierDot);
+
+  if (filters.category) query = query.eq('document_category', filters.category);
+  if (filters.type) query = query.eq('document_type', filters.type);
+  if (filters.driverId) query = query.eq('driver_id', filters.driverId);
+  if (filters.status) query = query.eq('status', filters.status);
+  
+  if (filters.expired === true) query = query.eq('is_expired', true);
+  else if (filters.expired === false) query = query.eq('is_expired', false);
+
+  const result = await query.find({ suppressAuth: true });
+  return result.items;
+}
+
+/**
+ * Get a single document by ID
+ * @param {string} documentId - Document ID
+ * @returns {Promise<Object>} - Document
+ */
+export async function getDocument(documentId) {
+  return wixData.get(COLLECTION, documentId, { suppressAuth: true });
+}
+
+/**
+ * Update document metadata
+ * @param {string} documentId - Document ID
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<Object>} - Updated document
+ */
+export async function updateDocument(documentId, updates) {
+  // Prevent version overwrite via update
+  delete updates.version;
+  delete updates.previous_version_id;
+  
+  const existing = await getDocument(documentId);
+  if (!existing) throw new Error('Document not found');
+
+  const toUpdate = { ...existing, ...updates };
+  
+  // Recalc expiration if date changes
+  if (updates.expiration_date) {
+    const expDate = new Date(updates.expiration_date);
+    const now = new Date();
+    toUpdate.is_expired = expDate < now;
+    toUpdate.days_until_expiry = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
+  }
+
+  return wixData.update(COLLECTION, toUpdate, { suppressAuth: true });
+}
+
+/**
+ * Upload a new version of an existing document
+ * @param {string} documentId - Original document ID
+ * @param {Object} newVersionData - New file and metadata
+ * @returns {Promise<Object>} - New version document
+ */
+export async function uploadNewVersion(documentId, newVersionData) {
+  const previousDoc = await getDocument(documentId);
+  if (!previousDoc) throw new Error('Previous document not found');
+
+  // Archive previous
+  previousDoc.status = 'superseded';
+  await wixData.update(COLLECTION, previousDoc, { suppressAuth: true });
+
+  // Create new
+  const newDoc = {
+    ...previousDoc,
+    ...newVersionData,
+    _id: undefined, // Create new ID
+    version: (previousDoc.version || 1) + 1,
+    previous_version_id: previousDoc._id,
+    status: 'active',
+    verification_status: 'pending'
+  };
+
+  // Recalc expiration
+  if (newDoc.expiration_date) {
+    const expDate = new Date(newDoc.expiration_date);
+    const now = new Date();
+    newDoc.is_expired = expDate < now;
+    newDoc.days_until_expiry = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
+  }
+
+  return wixData.insert(COLLECTION, newDoc, { suppressAuth: true });
+}
+
+/**
+ * Get version history for a document
+ * @param {string} documentId - Document ID (or any version ID in chain)
+ * @returns {Promise<Array>} - All versions of document
+ */
+export async function getDocumentVersionHistory(documentId) {
+  // Find the 'active' or latest version if possible, or walk the chain.
+  // For simplicity, we can query by some common grouping ID if we had one, 
+  // but here we might rely on previous_version_id chain. 
+  // A better schema would have a 'root_document_id' field.
+  // For now, let's assume we find all by matching title + carrier + driver + type
+  
+  const doc = await getDocument(documentId);
+  if (!doc) return [];
+
+  const result = await wixData.query(COLLECTION)
+    .eq('carrier_dot', doc.carrier_dot)
+    .eq('document_type', doc.document_type)
+    .eq('driver_id', doc.driver_id)
+    .descending('version')
+    .find({ suppressAuth: true });
+
+  return result.items;
+}
+
+/**
+ * Archive a document (soft delete)
+ * @param {string} documentId - Document ID
+ * @returns {Promise<boolean>} - Success
+ */
+export async function archiveDocument(documentId) {
+  const doc = await getDocument(documentId);
+  if (!doc) return false;
+  doc.status = 'archived';
+  await wixData.update(COLLECTION, doc, { suppressAuth: true });
+  return true;
+}
+
+// ============================================================
+// EXPIRATION TRACKING
+// ============================================================
+
+/**
+ * Get documents expiring within a date range
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {number} daysAhead - Days to look ahead
+ * @returns {Promise<Array>} - Expiring documents
+ */
+export async function getExpiringDocuments(carrierDot, daysAhead = 30) {
+  const now = new Date();
+  const future = new Date();
+  future.setDate(future.getDate() + daysAhead);
+
+  const result = await wixData.query(COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .eq('status', 'active')
+    .eq('is_expired', false)
+    .le('expiration_date', future)
+    .ascending('expiration_date')
+    .find({ suppressAuth: true });
+
+  return result.items;
+}
+
+/**
+ * Get all expired documents
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Promise<Array>} - Expired documents
+ */
+export async function getExpiredDocuments(carrierDot) {
+  const result = await wixData.query(COLLECTION)
+    .eq('carrier_dot', carrierDot)
+    .eq('status', 'active')
+    .eq('is_expired', true)
+    .find({ suppressAuth: true });
+
+  return result.items;
+}
+
+// ============================================================
+// VERIFICATION
+// ============================================================
+
+/**
+ * Verify a document (admin action)
+ * @param {string} documentId - Document ID
+ * @param {string} verifierId - Verifying user ID
+ * @param {string} status - 'verified' or 'rejected'
+ * @param {string} notes - Verification notes
+ * @returns {Promise<Object>} - Updated document
+ */
+export async function verifyDocument(documentId, verifierId, status, notes = '') {
+  const doc = await getDocument(documentId);
+  if (!doc) throw new Error('Document not found');
+
+  doc.verification_status = status;
+  doc.verified_by = verifierId;
+  doc.verified_date = new Date();
+  doc.notes = notes;
+
+  // If rejected, maybe update status? Keeping active for now so they can see it's rejected.
+  
+  return wixData.update(COLLECTION, doc, { suppressAuth: true });
+}
+
+/**
+ * Process document expirations (Scheduled Job)
+ * Updates days_until_expiry and is_expired flags
+ */
+export async function updateDocumentExpirations() {
+  const now = new Date();
+  
+  // Get all active documents
+  // Pagination would be needed for scale
+  let query = wixData.query(COLLECTION).eq('status', 'active');
+  let result = await query.find({ suppressAuth: true });
+  let items = result.items;
+  
+  while(result.hasNext()) {
+      result = await result.next();
+      items = items.concat(result.items);
+  }
+
+  let updatedCount = 0;
+
+  for (const doc of items) {
+    if (!doc.expiration_date) continue;
+    
+    const expDate = new Date(doc.expiration_date);
+    const isExpired = expDate < now;
+    const daysUntil = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
+    
+    if (doc.is_expired !== isExpired || doc.days_until_expiry !== daysUntil) {
+      doc.is_expired = isExpired;
+      doc.days_until_expiry = daysUntil;
+      await wixData.update(COLLECTION, doc, { suppressAuth: true });
+      updatedCount++;
+    }
+  }
+
+  return { processed: items.length, updated: updatedCount };
+}
