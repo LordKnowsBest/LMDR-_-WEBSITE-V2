@@ -51,11 +51,12 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Implemented (observabilityService.jsw)*
 *Goal: Fix tracing and error handling gaps in matching engine.*
 
-## [ ] Track: Feature Adoption Log
+## [/] Track: Feature Adoption Log
 *Link: [./conductor/tracks/feature_adoption_log_20260120/](./conductor/tracks/feature_adoption_log_20260120/)*
 *Priority: High*
 *Goal: Visualize feature adoption and lifecycle to enable rapid shipping/disposal decisions.*
-*Status: In Progress (Backend + Tests Created)*
+*Status: In Progress (Backend + Tests + 4 Collections Created, Verification Pending)*
+*Collections: FeatureAdoptionLogs, FeatureRegistry, FeatureFunnels, FeatureMetricsDaily*
 
 ## [/] Track: UI/UX Consistency & Standardization
 *Link: [./conductor/tracks/ui_standardization_20260120/](./conductor/tracks/ui_standardization_20260120/)*
@@ -191,13 +192,14 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planned*
 *Goal: Fleet operations visibility - Driver Roster, Equipment Assignment, Driver Scorecard, Real-Time Location, Capacity Planning.*
 
-### [x] Track: Carrier Compliance
+### [/] Track: Carrier Compliance
 *Link: [./tracks/carrier_compliance_20260120/](./tracks/carrier_compliance_20260120/)*
 *Depends on: carrier_conversion_20260103*
 *Priority: Critical*
-*Status: Planned*
+*Status: In Progress (Infrastructure Complete - 6 Collections Created, Manual Testing Pending)*
 *Goal: DOT compliance management - Compliance Calendar, Document Vault, Qualification File Tracker, CSA Score Monitor, Incident Reporting.*
 *Business Impact: Avoid $10k+ DOT violations.*
+*Collections: ComplianceEvents, CarrierDocuments, QualificationFiles, CSAScoreHistory, IncidentReports, ComplianceAlerts*
 
 ### [ ] Track: Carrier Communication
 *Link: [./tracks/carrier_communication_20260120/](./tracks/carrier_communication_20260120/)*
