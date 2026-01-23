@@ -231,7 +231,7 @@ async function handleSearchParking(data) {
 
     // Track analytics
     const userId = wixUsers.currentUser.loggedIn ? wixUsers.currentUser.id : 'anonymous';
-    logFeatureInteraction('parking_finder', userId, 'search', {
+    logFeatureInteraction('parking_finder', userId, 'click', {
         metadata: { query: data.query, radius, filters }
     }).catch(err => console.warn('[RoadUtilities] Analytics error:', err));
 
@@ -319,7 +319,7 @@ async function handleSearchFuelPrices(data) {
 
     // Track analytics
     const userId = wixUsers.currentUser.loggedIn ? wixUsers.currentUser.id : 'anonymous';
-    logFeatureInteraction('fuel_optimizer', userId, 'search', {
+    logFeatureInteraction('fuel_optimizer', userId, 'click', {
         metadata: { query: data.query, radius, fuelCardType }
     }).catch(err => console.warn('[RoadUtilities] Analytics error:', err));
 
