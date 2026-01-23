@@ -71,7 +71,8 @@ const API_CONFIG = {
         },
         // Minnesota - MnDOT IRIS, 7 sites on I-94, I-35
         MINNESOTA: {
-            dynamicUrl: 'http://iris.dot.state.mn.us/iris/TPIMS_dynamic',
+            dynamicUrl: 'http://data.dot.state.mn.us/iris/TPIMS_dynamic',
+            staticUrl: 'http://data.dot.state.mn.us/iris/TPIMS_static',
             timeout: 8000,
             public: true
         },
@@ -481,6 +482,7 @@ async function queryKentuckyTPIMS() {
 /**
  * Query Minnesota TPIMS - MAASTO standard format
  * Coverage: I-94, I-35 (7 sites)
+ * Note: Minnesota uses separate static (locations) and dynamic (availability) files
  */
 async function queryMinnesotaTPIMS() {
     if (circuitBreaker.minnesota.status === 'OPEN') {
@@ -492,19 +494,57 @@ async function queryMinnesotaTPIMS() {
     }
 
     try {
-        const response = await fetch(API_CONFIG.TPIMS.MINNESOTA.dynamicUrl, {
-            method: 'GET',
-            headers: { 'Accept': 'application/json' }
-        });
+        // Fetch both static (coordinates) and dynamic (availability) data
+        const [staticResponse, dynamicResponse] = await Promise.all([
+            fetch(API_CONFIG.TPIMS.MINNESOTA.staticUrl, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' }
+            }),
+            fetch(API_CONFIG.TPIMS.MINNESOTA.dynamicUrl, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' }
+            })
+        ]);
 
-        if (!response.ok) throw new Error(`Minnesota TPIMS error: ${response.status}`);
+        if (!staticResponse.ok) throw new Error(`Minnesota TPIMS static error: ${staticResponse.status}`);
+        if (!dynamicResponse.ok) throw new Error(`Minnesota TPIMS dynamic error: ${dynamicResponse.status}`);
 
-        const data = await response.json();
+        const staticData = await staticResponse.json();
+        const dynamicData = await dynamicResponse.json();
+
+        // Create lookup map from static data (keyed by siteId)
+        const staticMap = new Map();
+        if (Array.isArray(staticData)) {
+            staticData.forEach(item => {
+                if (item.siteId) {
+                    staticMap.set(item.siteId, item);
+                }
+            });
+        }
+
+        // Merge dynamic data with static location info
+        const mergedData = Array.isArray(dynamicData) ? dynamicData.map(dynamic => {
+            const staticInfo = staticMap.get(dynamic.siteId) || {};
+            return {
+                ...dynamic,
+                // Add location from static data
+                latitude: staticInfo.location?.latitude,
+                longitude: staticInfo.location?.longitude,
+                city: staticInfo.location?.city,
+                streetAdr: staticInfo.location?.streetAdr,
+                // Add other static fields
+                siteName: staticInfo.name || dynamic.name,
+                relevantHighway: staticInfo.relevantHighway,
+                // Minnesota has amenities in static data
+                amenities: staticInfo.amenities || []
+            };
+        }) : [];
+
         circuitBreaker.minnesota.failures = 0;
         circuitBreaker.minnesota.status = 'CLOSED';
 
-        console.log(`[TPIMS] Minnesota returned ${Array.isArray(data) ? data.length : 0} locations`);
-        return normalizeMAASTO(data, 'MN', 'minnesota_tpims', 'MnDOT Sensors');
+        console.log(`[TPIMS] Minnesota merged ${mergedData.length} locations (static: ${staticData?.length || 0}, dynamic: ${dynamicData?.length || 0})`);
+        return normalizeMAASTO(mergedData, 'MN', 'minnesota_tpims', 'MnDOT Sensors');
     } catch (error) {
         circuitBreaker.minnesota.failures++;
         circuitBreaker.minnesota.lastFailure = Date.now();
