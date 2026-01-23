@@ -217,16 +217,16 @@ async function handleHtmlMessage(msg) {
  * @param {Object} data - Search parameters (lat, lng, radius, filters, query)
  */
 async function handleSearchParking(data) {
-    let lat = data.lat;
-    let lng = data.lng;
+    let lat = parseFloat(data.lat);
+    let lng = parseFloat(data.lng);
 
-    // Use default location if coordinates not provided
-    if (!lat || !lng) {
+    // Use default location if coordinates not provided or invalid
+    if (isNaN(lat) || isNaN(lng)) {
         lat = DEFAULT_LOCATION.lat;
         lng = DEFAULT_LOCATION.lng;
     }
 
-    const radius = data.radius || 25;
+    const radius = parseInt(data.radius, 10) || 25;
     const filters = data.filters || {};
 
     // Track analytics
@@ -312,9 +312,9 @@ async function handleReportParking(data) {
  * @param {Object} data - Search parameters (lat, lng, radius, fuelCardType, query)
  */
 async function handleSearchFuelPrices(data) {
-    const lat = data.lat || DEFAULT_LOCATION.lat;
-    const lng = data.lng || DEFAULT_LOCATION.lng;
-    const radius = data.radius || 50;
+    const lat = parseFloat(data.lat) || DEFAULT_LOCATION.lat;
+    const lng = parseFloat(data.lng) || DEFAULT_LOCATION.lng;
+    const radius = parseInt(data.radius, 10) || 50;
     const fuelCardType = data.fuelCardType || 'none';
 
     // Track analytics
