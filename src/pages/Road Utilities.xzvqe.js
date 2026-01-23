@@ -13,8 +13,8 @@ import wixLocation from 'wix-location';
 // CONFIGURATION
 // ============================================================================
 
-// Wix HTML component IDs follow #html1 through #html6 naming convention
-const POSSIBLE_HTML_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#html6'];
+// Road Utilities HTML component is #html4
+const POSSIBLE_HTML_IDS = ['#html4', '#html1', '#html2', '#html3', '#html5', '#html6'];
 
 let HTML_COMPONENT = null; // Will be set during initialization
 
