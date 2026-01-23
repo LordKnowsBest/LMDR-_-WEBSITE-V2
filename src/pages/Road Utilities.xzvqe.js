@@ -13,7 +13,10 @@ import wixLocation from 'wix-location';
 // CONFIGURATION
 // ============================================================================
 
-const HTML_COMPONENT_ID = '#html1'; // Adjust to match your editor component ID
+// Wix HTML component IDs follow #html1 through #html6 naming convention
+const POSSIBLE_HTML_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#html6'];
+
+let HTML_COMPONENT = null; // Will be set during initialization
 
 const MESSAGE_REGISTRY = {
     inbound: [
@@ -55,16 +58,17 @@ const DEFAULT_LOCATION = {
 $w.onReady(function () {
     console.log('[RoadUtilities] Page ready, initializing...');
 
-    const htmlComponent = $w(HTML_COMPONENT_ID);
+    // Find the HTML component by trying multiple possible IDs
+    HTML_COMPONENT = findHtmlComponent();
 
-    // Verify HTML component exists
-    if (!htmlComponent || !htmlComponent.onMessage) {
-        console.error('[RoadUtilities] HTML component not found:', HTML_COMPONENT_ID);
+    if (!HTML_COMPONENT) {
+        console.error('[RoadUtilities] HTML component not found. Tried:', POSSIBLE_HTML_IDS.join(', '));
+        console.error('[RoadUtilities] Please check the HTML component ID in the Wix editor and update POSSIBLE_HTML_IDS');
         return;
     }
 
     // Set up message listener from HTML component
-    htmlComponent.onMessage((event) => {
+    HTML_COMPONENT.onMessage((event) => {
         handleHtmlMessage(event.data);
     });
 
@@ -75,7 +79,7 @@ $w.onReady(function () {
 
     // Track page view
     const userId = wixUsers.currentUser.loggedIn ? wixUsers.currentUser.id : 'anonymous';
-    logFeatureInteraction('road_utilities', userId, 'page_view', {
+    logFeatureInteraction('road_utilities', userId, 'view', {
         metadata: { source: wixLocation.query?.source || 'direct' }
     }).catch(err => console.warn('[RoadUtilities] Analytics error:', err));
 
@@ -87,19 +91,37 @@ $w.onReady(function () {
 // ============================================================================
 
 /**
+ * Find HTML component by trying multiple possible IDs
+ * @returns {Object|null} The HTML component or null if not found
+ */
+function findHtmlComponent() {
+    for (const htmlId of POSSIBLE_HTML_IDS) {
+        try {
+            const component = $w(htmlId);
+            if (component && component.onMessage) {
+                console.log(`[RoadUtilities] Found HTML component: ${htmlId}`);
+                return component;
+            }
+        } catch (e) {
+            // Component doesn't exist, try next
+        }
+    }
+    return null;
+}
+
+/**
  * Send message to HTML component
  * @param {string} type - Message type from MESSAGE_REGISTRY.outbound
  * @param {Object} data - Payload data
  */
 function sendToHtml(type, data) {
-    const htmlComponent = $w(HTML_COMPONENT_ID);
-    if (!htmlComponent) {
+    if (!HTML_COMPONENT) {
         console.error('[RoadUtilities] Cannot send message, HTML component not found');
         return;
     }
 
     console.log(`[Velo->HTML] ${type}`, data);
-    htmlComponent.postMessage({ type, data });
+    HTML_COMPONENT.postMessage({ type, data });
 }
 
 /**
