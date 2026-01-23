@@ -72,6 +72,15 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: In Progress*
 *Standard: docs/MOBILE_OPTIMIZATION_GUIDE.md*
 
+## [ ] Track: Gamification System - Driver & Recruiter Progression
+*Link: [./tracks/gamification_strategy_20260123/](./tracks/gamification_strategy_20260123/)*
+*Depends on: driver_cockpit_20251221, reverse_matching_20251225, feature_adoption_log_20260120*
+*Priority: High*
+*Status: Planned*
+*Goal: Comprehensive dual-sided gamification with XP/levels for drivers ("Road to Success") and points/ranks for recruiters ("Talent Hunter"). Includes achievements, badges, streaks, challenges, leaderboards, and seasonal events.*
+*Business Impact: Engagement & Retention - Target +35% DAU, +20% 30-day retention, +40% profile completion.*
+*Phases: 7 (Foundation → Streaks → Achievements → Badges/Leaderboards → Challenges → UI → Integration)*
+
 ---
 
 # Infrastructure Tracks (Q1 2026)
