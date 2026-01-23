@@ -81,6 +81,16 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Business Impact: Engagement & Retention - Target +35% DAU, +20% 30-day retention, +40% profile completion.*
 *Phases: 7 (Foundation → Streaks → Achievements → Badges/Leaderboards → Challenges → UI → Integration)*
 
+## [ ] Track: External API Platform - Partner Data Services
+*Link: [./tracks/external_api_platform_20260123/](./tracks/external_api_platform_20260123/)*
+*Depends on: fmcsaService, aiEnrichment, parkingService, fuelService, driverMatching, ocrService, gamification_strategy_20260123*
+*Priority: Critical*
+*Status: Planned*
+*Goal: Monetize platform capabilities via B2B REST APIs - Safety & Compliance, Intelligence, Operational, Matching, Document, and Engagement (gamification white-label) APIs for external partners.*
+*Business Impact: Revenue Diversification - Target $300K ARR Year 1, 25 API partners, 1M+ monthly API calls.*
+*Phases: 8 (Gateway Infrastructure → Safety APIs → Intelligence APIs → Operational APIs → Matching APIs → Document APIs → Engagement APIs → Developer Portal)*
+*Pricing: Starter $199/mo, Growth $499/mo, Enterprise $999/mo + usage-based add-ons*
+
 ---
 
 # Infrastructure Tracks (Q1 2026)
