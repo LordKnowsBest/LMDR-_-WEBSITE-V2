@@ -328,11 +328,18 @@ async function handleSearchFuelPrices(data) {
         cardType: fuelCardType
     });
 
+    console.log('[RoadUtilities] Fuel search result:', {
+        success: result.success,
+        itemCount: result.items?.length || 0,
+        fromCache: result.fromCache
+    });
+
     if (result.success) {
         // Map results to include savings based on card type
+        // Use discount_applied from fuelService (already calculated)
         const items = result.items.map(station => ({
             ...station,
-            savings: fuelCardType !== 'none' ? (station.retail_price - station.diesel_price) : 0,
+            savings: station.discount_applied || station.savings_per_gallon || 0,
             accepts_card: fuelCardType !== 'none' && station.accepted_cards?.includes(fuelCardType),
             card_type: fuelCardType !== 'none' ? fuelCardType.toUpperCase() : null
         }));
