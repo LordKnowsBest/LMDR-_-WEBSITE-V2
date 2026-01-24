@@ -145,77 +145,126 @@ export async function getMatchesList(options = {}) {
     } = options;
 
     try {
-        let query = wixData.query(CONFIG.collections.matches);
+        let resultItems = [];
+        let totalCount = 0;
 
-        // Apply carrier filter
-        if (filters.carrierDOT) {
-            query = query.eq('carrier_dot', filters.carrierDOT);
-        }
+        // Dual-source routing for matches query
+        if (usesAirtable(COLLECTION_KEYS.matches)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.matches);
+            const filterParts = [];
 
-        // Apply carrier name search
-        if (filters.carrierName) {
-            query = query.contains('carrier_name', filters.carrierName);
-        }
+            if (filters.carrierDOT) {
+                filterParts.push(`{Carrier Dot} = '${filters.carrierDOT}'`);
+            }
+            if (filters.carrierName) {
+                filterParts.push(`SEARCH("${filters.carrierName.toLowerCase()}", LOWER({Carrier Name}))`);
+            }
+            if (filters.driverName) {
+                filterParts.push(`SEARCH("${filters.driverName.toLowerCase()}", LOWER({Driver Name}))`);
+            }
+            if (filters.minScore) {
+                filterParts.push(`{Match Score} >= ${parseInt(filters.minScore)}`);
+            }
+            if (filters.maxScore) {
+                filterParts.push(`{Match Score} <= ${parseInt(filters.maxScore)}`);
+            }
+            if (filters.action && filters.action !== 'all') {
+                filterParts.push(`{Action} = '${filters.action}'`);
+            }
+            if (filters.dateFrom) {
+                filterParts.push(`IS_AFTER({Timestamp}, '${new Date(filters.dateFrom).toISOString()}')`);
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                filterParts.push(`IS_BEFORE({Timestamp}, '${endDate.toISOString()}')`);
+            }
 
-        // Apply driver name search
-        if (filters.driverName) {
-            query = query.contains('driver_name', filters.driverName);
-        }
+            const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : (filterParts[0] || '');
+            const sortFieldMap = { timestamp: 'Timestamp', match_score: 'Match Score', carrier_name: 'Carrier Name' };
+            const airtableSortField = sortFieldMap[sortField] || 'Timestamp';
 
-        // Apply score range filter
-        if (filters.minScore) {
-            query = query.ge('match_score', parseInt(filters.minScore));
-        }
-        if (filters.maxScore) {
-            query = query.le('match_score', parseInt(filters.maxScore));
-        }
-
-        // Apply action filter
-        if (filters.action && filters.action !== 'all') {
-            query = query.eq('action', filters.action);
-        }
-
-        // Apply date range filter
-        if (filters.dateFrom) {
-            query = query.ge('timestamp', new Date(filters.dateFrom));
-        }
-        if (filters.dateTo) {
-            const endDate = new Date(filters.dateTo);
-            endDate.setHours(23, 59, 59, 999);
-            query = query.le('timestamp', endDate);
-        }
-
-        // Apply sorting
-        if (sortDirection === 'asc') {
-            query = query.ascending(sortField);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: airtableSortField, direction: sortDirection }],
+                maxRecords: pageSize
+            });
+            resultItems = result.records || [];
+            totalCount = resultItems.length;
         } else {
-            query = query.descending(sortField);
-        }
+            let query = wixData.query(CONFIG.collections.matches);
 
-        // Apply pagination
-        const skip = (page - 1) * pageSize;
-        query = query.skip(skip).limit(pageSize);
+            // Apply carrier filter
+            if (filters.carrierDOT) {
+                query = query.eq('carrier_dot', filters.carrierDOT);
+            }
 
-        // Execute query
-        const result = await query.find();
+            // Apply carrier name search
+            if (filters.carrierName) {
+                query = query.contains('carrier_name', filters.carrierName);
+            }
 
-        // Get total count
-        let countQuery = wixData.query(CONFIG.collections.matches);
-        if (filters.dateFrom) {
-            countQuery = countQuery.ge('timestamp', new Date(filters.dateFrom));
+            // Apply driver name search
+            if (filters.driverName) {
+                query = query.contains('driver_name', filters.driverName);
+            }
+
+            // Apply score range filter
+            if (filters.minScore) {
+                query = query.ge('match_score', parseInt(filters.minScore));
+            }
+            if (filters.maxScore) {
+                query = query.le('match_score', parseInt(filters.maxScore));
+            }
+
+            // Apply action filter
+            if (filters.action && filters.action !== 'all') {
+                query = query.eq('action', filters.action);
+            }
+
+            // Apply date range filter
+            if (filters.dateFrom) {
+                query = query.ge('timestamp', new Date(filters.dateFrom));
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                query = query.le('timestamp', endDate);
+            }
+
+            // Apply sorting
+            if (sortDirection === 'asc') {
+                query = query.ascending(sortField);
+            } else {
+                query = query.descending(sortField);
+            }
+
+            // Apply pagination
+            const skip = (page - 1) * pageSize;
+            query = query.skip(skip).limit(pageSize);
+
+            // Execute query
+            const result = await query.find();
+            resultItems = result.items;
+
+            // Get total count
+            let countQuery = wixData.query(CONFIG.collections.matches);
+            if (filters.dateFrom) {
+                countQuery = countQuery.ge('timestamp', new Date(filters.dateFrom));
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                countQuery = countQuery.le('timestamp', endDate);
+            }
+            if (filters.minScore) {
+                countQuery = countQuery.ge('match_score', parseInt(filters.minScore));
+            }
+            totalCount = await countQuery.count();
         }
-        if (filters.dateTo) {
-            const endDate = new Date(filters.dateTo);
-            endDate.setHours(23, 59, 59, 999);
-            countQuery = countQuery.le('timestamp', endDate);
-        }
-        if (filters.minScore) {
-            countQuery = countQuery.ge('match_score', parseInt(filters.minScore));
-        }
-        const totalCount = await countQuery.count();
 
         // Enrich matches with additional data
-        const enrichedMatches = await enrichMatches(result.items);
+        const enrichedMatches = await enrichMatches(resultItems);
 
         return {
             matches: enrichedMatches,

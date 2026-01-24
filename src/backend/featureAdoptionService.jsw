@@ -328,10 +328,11 @@ export async function logFeatureInteraction(featureId, userId, action, context =
     };
 
     try {
-        const result = await wixData.insert(CONFIG.collections.logs, record, { suppressAuth: true });
+        // Use dual-source routing for log insert
+        const result = await insertData(COLLECTION_KEYS.featureAdoptionLogs, CONFIG.collections.logs, record);
         return {
             success: true,
-            logId: result._id,
+            logId: result._id || result.id,
             timestamp
         };
     } catch (error) {
@@ -551,17 +552,26 @@ export async function getFeatureStats(featureId, timeRange, groupBy = 'day') {
     }
 
     try {
-        // Build query
-        let query = wixData.query(CONFIG.collections.logs)
-            .ge('timestamp', startDate)
-            .le('timestamp', endDate)
-            .eq('featureId', featureId.toLowerCase().trim());
+        // Use dual-source routing for metrics query
+        let items = [];
+        if (usesAirtable(COLLECTION_KEYS.featureAdoptionLogs)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.featureAdoptionLogs);
+            const startStr = startDate.toISOString();
+            const endStr = endDate.toISOString();
+            const filter = `AND({Feature Id} = '${featureId.toLowerCase().trim()}', IS_AFTER({Timestamp}, '${startStr}'), IS_BEFORE({Timestamp}, '${endStr}'))`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 5000 });
+            items = result.records || [];
+        } else {
+            let query = wixData.query(CONFIG.collections.logs)
+                .ge('timestamp', startDate)
+                .le('timestamp', endDate)
+                .eq('featureId', featureId.toLowerCase().trim());
 
-        const results = await query
-            .limit(5000)
-            .find({ suppressAuth: true });
-
-        const items = results.items;
+            const results = await query
+                .limit(5000)
+                .find({ suppressAuth: true });
+            items = results.items;
+        }
 
         // Calculate summary statistics per spec
         const uniqueUsers = new Set(items.map(i => i.userId)).size;
