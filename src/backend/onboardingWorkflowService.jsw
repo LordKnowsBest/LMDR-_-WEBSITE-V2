@@ -247,27 +247,36 @@ async function verifyRecruiterAccess(carrierId) {
       return { authorized: false, error: 'Not authenticated' };
     }
 
-    // Get carrier DOT from carrier ID
-    const carrier = await wixData.get(CONFIG.carriersCollection, carrierId, { suppressAuth: true });
+    // Get carrier DOT from carrier ID - use dual-source routing
+    const carrier = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrierId);
     if (!carrier) {
       return { authorized: false, error: 'Carrier not found' };
     }
 
     const carrierDot = String(carrier.dot_number).trim();
 
-    // Check RecruiterCarriers for access
-    const result = await wixData.query(CONFIG.recruiterCarriersCollection)
-      .eq('recruiter_id', userId)
-      .eq('carrier_dot', carrierDot)
-      .eq('is_active', true)
-      .limit(1)
-      .find({ suppressAuth: true });
+    // Check RecruiterCarriers for access - use dual-source routing
+    let accessItems = [];
+    if (usesAirtable(COLLECTION_KEYS.recruiterCarriers)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterCarriers);
+      const filter = `AND({Recruiter Id} = '${userId}', {Carrier Dot} = '${carrierDot}', {Is Active} = TRUE())`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+      accessItems = result.records || [];
+    } else {
+      const result = await wixData.query(CONFIG.recruiterCarriersCollection)
+        .eq('recruiter_id', userId)
+        .eq('carrier_dot', carrierDot)
+        .eq('is_active', true)
+        .limit(1)
+        .find({ suppressAuth: true });
+      accessItems = result.items;
+    }
 
-    if (result.items.length === 0) {
+    if (accessItems.length === 0) {
       return { authorized: false, error: 'No access to this carrier' };
     }
 
-    return { authorized: true, recruiterId: userId, carrierDot, carrierAccess: result.items[0] };
+    return { authorized: true, recruiterId: userId, carrierDot, carrierAccess: accessItems[0] };
   } catch (error) {
     console.error('verifyRecruiterAccess error:', error);
     return { authorized: false, error: error.message };
@@ -304,8 +313,8 @@ async function verifyCarrierAdminAccess(carrierId) {
  */
 async function verifyWorkflowAccess(workflowId) {
   try {
-    // Get the workflow
-    const workflow = await wixData.get(CONFIG.workflowsCollection, workflowId, { suppressAuth: true });
+    // Get the workflow - use dual-source routing
+    const workflow = await getRecord(COLLECTION_KEYS.workflows, CONFIG.workflowsCollection, workflowId);
     if (!workflow) {
       return { authorized: false, error: 'Workflow not found', workflow: null };
     }
@@ -370,7 +379,8 @@ async function logAuditEvent(action, targetType, targetId, details, actorId = nu
       timestamp: new Date()
     };
 
-    await wixData.insert(CONFIG.auditLogCollection, auditEntry, { suppressAuth: true });
+    // Use dual-source routing for audit log
+    await insertData(COLLECTION_KEYS.auditLog, CONFIG.auditLogCollection, auditEntry);
     console.log(`Audit: ${action} on ${targetType}:${targetId}`);
   } catch (error) {
     // Don't fail the main operation if audit logging fails
@@ -436,32 +446,41 @@ export async function createOnboardingWorkflow(driverId, carrierId, recruiterId 
 
     const effectiveRecruiterId = recruiterId || accessCheck.recruiterId;
 
-    // Verify driver exists
-    const driver = await wixData.get(CONFIG.driverProfilesCollection, driverId, { suppressAuth: true });
+    // Verify driver exists - use dual-source routing
+    const driver = await getRecord(COLLECTION_KEYS.driverProfiles, CONFIG.driverProfilesCollection, driverId);
     if (!driver) {
       return createErrorResponse(CONFIG.ERROR_CODES.NOT_FOUND, 'Driver profile not found');
     }
 
-    // Get carrier info
-    const carrier = await wixData.get(CONFIG.carriersCollection, carrierId, { suppressAuth: true });
+    // Get carrier info - use dual-source routing
+    const carrier = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrierId);
     if (!carrier) {
       return createErrorResponse(CONFIG.ERROR_CODES.NOT_FOUND, 'Carrier not found');
     }
 
-    // Check for existing active workflow for this driver-carrier combination
-    const existingWorkflow = await wixData.query(CONFIG.workflowsCollection)
-      .eq('driver_id', driverId)
-      .eq('carrier_id', carrierId)
-      .ne('status', CONFIG.STATUS.COMPLETED)
-      .ne('status', CONFIG.STATUS.CANCELLED)
-      .limit(1)
-      .find({ suppressAuth: true });
+    // Check for existing active workflow for this driver-carrier combination - use dual-source routing
+    let existingWorkflowItems = [];
+    if (usesAirtable(COLLECTION_KEYS.workflows)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.workflows);
+      const filter = `AND({Driver Id} = '${driverId}', {Carrier Id} = '${carrierId}', NOT(OR({Status} = '${CONFIG.STATUS.COMPLETED}', {Status} = '${CONFIG.STATUS.CANCELLED}')))`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+      existingWorkflowItems = result.records || [];
+    } else {
+      const existingWorkflow = await wixData.query(CONFIG.workflowsCollection)
+        .eq('driver_id', driverId)
+        .eq('carrier_id', carrierId)
+        .ne('status', CONFIG.STATUS.COMPLETED)
+        .ne('status', CONFIG.STATUS.CANCELLED)
+        .limit(1)
+        .find({ suppressAuth: true });
+      existingWorkflowItems = existingWorkflow.items;
+    }
 
-    if (existingWorkflow.items.length > 0) {
+    if (existingWorkflowItems.length > 0) {
       return createErrorResponse(
         CONFIG.ERROR_CODES.DUPLICATE_WORKFLOW,
         'An active onboarding workflow already exists for this driver and carrier',
-        { existingWorkflowId: existingWorkflow.items[0]._id }
+        { existingWorkflowId: existingWorkflowItems[0]._id || existingWorkflowItems[0].id }
       );
     }
 
@@ -513,21 +532,24 @@ export async function createOnboardingWorkflow(driverId, carrierId, recruiterId 
       _updatedDate: now
     };
 
-    const insertedWorkflow = await wixData.insert(CONFIG.workflowsCollection, workflowData, { suppressAuth: true });
+    // Insert workflow - use dual-source routing
+    const insertedWorkflow = await insertData(COLLECTION_KEYS.workflows, CONFIG.workflowsCollection, workflowData);
 
-    // Update driver profile with active workflow reference
-    await wixData.update(CONFIG.driverProfilesCollection, {
+    // Update driver profile with active workflow reference - use dual-source routing
+    const workflowId = insertedWorkflow._id || insertedWorkflow.id;
+    await updateData(COLLECTION_KEYS.driverProfiles, CONFIG.driverProfilesCollection, {
       ...driver,
-      active_workflow_id: insertedWorkflow._id,
+      _id: driver._id || driver.id,
+      active_workflow_id: workflowId,
       onboarding_status: 'in_progress',
       updated_date: now
-    }, { suppressAuth: true });
+    });
 
     // Log audit event
     await logAuditEvent(
       'createOnboardingWorkflow',
       'workflow',
-      insertedWorkflow._id,
+      workflowId,
       {
         driverId,
         carrierId,
@@ -540,12 +562,12 @@ export async function createOnboardingWorkflow(driverId, carrierId, recruiterId 
     // Calculate next steps
     const nextSteps = calculateNextSteps(insertedWorkflow);
 
-    console.log(`Created onboarding workflow ${insertedWorkflow._id} for driver ${driverId}`);
+    console.log(`Created onboarding workflow ${workflowId} for driver ${driverId}`);
 
     return {
       success: true,
       workflow: insertedWorkflow,
-      workflowId: insertedWorkflow._id,
+      workflowId: workflowId,
       nextSteps
     };
 
@@ -586,11 +608,11 @@ export async function getWorkflowStatus(workflowId) {
       getWorkflowDrugTests(workflowId)
     ]);
 
-    // Get orientation booking if scheduled
+    // Get orientation booking if scheduled - use dual-source routing
     let orientationBooking = null;
     if (workflow.orientation_slot_id) {
       try {
-        orientationBooking = await wixData.get(CONFIG.orientationSlotsCollection, workflow.orientation_slot_id, { suppressAuth: true });
+        orientationBooking = await getRecord(COLLECTION_KEYS.orientationSlots, CONFIG.orientationSlotsCollection, workflow.orientation_slot_id);
       } catch (e) {
         // Orientation slot may not exist
       }
@@ -670,97 +692,140 @@ export async function getActiveWorkflows(filters = {}) {
       includeCompleted = false
     } = filters;
 
-    // Build query
-    let query = wixData.query(CONFIG.workflowsCollection);
+    const effectiveRecruiterId = recruiterId || userId;
+    let workflowItems = [];
+    let totalCount = 0;
 
-    // If recruiterId filter is provided, use it; otherwise, get workflows for all carriers the user has access to
-    if (recruiterId) {
-      query = query.eq('recruiter_id', recruiterId);
+    // Dual-source routing for workflows query
+    if (usesAirtable(COLLECTION_KEYS.workflows)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.workflows);
+
+      // Build Airtable filter formula
+      const filterParts = [`{Recruiter Id} = '${effectiveRecruiterId}'`];
+
+      if (carrierId) {
+        filterParts.push(`{Carrier Id} = '${carrierId}'`);
+      }
+
+      if (status && status !== 'all') {
+        filterParts.push(`{Status} = '${status}'`);
+      } else if (!includeCompleted) {
+        filterParts.push(`NOT(OR({Status} = '${CONFIG.STATUS.COMPLETED}', {Status} = '${CONFIG.STATUS.CANCELLED}'))`);
+      }
+
+      if (driverId) {
+        filterParts.push(`{Driver Id} = '${driverId}'`);
+      }
+
+      const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : filterParts[0];
+
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        maxRecords: pageSize,
+        sort: [{ field: 'Updated Date', direction: 'desc' }]
+      });
+      workflowItems = result.records || [];
+      totalCount = workflowItems.length; // Note: Airtable doesn't have efficient count
     } else {
-      // Get all carriers this user has access to
-      const carrierAccessResult = await wixData.query(CONFIG.recruiterCarriersCollection)
-        .eq('recruiter_id', userId)
-        .eq('is_active', true)
-        .find({ suppressAuth: true });
+      // Build Wix query
+      let query = wixData.query(CONFIG.workflowsCollection);
 
-      if (carrierAccessResult.items.length === 0) {
-        return {
-          success: true,
-          workflows: [],
-          totalCount: 0,
-          page,
-          pageSize,
-          totalPages: 0
-        };
+      // If recruiterId filter is provided, use it; otherwise, get workflows for all carriers the user has access to
+      if (recruiterId) {
+        query = query.eq('recruiter_id', recruiterId);
+      } else {
+        // Get all carriers this user has access to
+        let carrierAccessItems = [];
+        if (usesAirtable(COLLECTION_KEYS.recruiterCarriers)) {
+          const rcTableName = getAirtableTableName(COLLECTION_KEYS.recruiterCarriers);
+          const rcFilter = `AND({Recruiter Id} = '${userId}', {Is Active} = TRUE())`;
+          const rcResult = await airtable.queryRecords(rcTableName, { filterByFormula: rcFilter });
+          carrierAccessItems = rcResult.records || [];
+        } else {
+          const carrierAccessResult = await wixData.query(CONFIG.recruiterCarriersCollection)
+            .eq('recruiter_id', userId)
+            .eq('is_active', true)
+            .find({ suppressAuth: true });
+          carrierAccessItems = carrierAccessResult.items;
+        }
+
+        if (carrierAccessItems.length === 0) {
+          return {
+            success: true,
+            workflows: [],
+            totalCount: 0,
+            page,
+            pageSize,
+            totalPages: 0
+          };
+        }
+
+        // Query by recruiter ID
+        query = query.eq('recruiter_id', userId);
       }
 
-      const carrierIds = carrierAccessResult.items.map(a => a.carrier_dot);
-
-      // Query by carrier DOT stored in metadata
-      // Note: This requires the carrier_dot to be stored in metadata or as a separate indexed field
-      query = query.eq('recruiter_id', userId);
-    }
-
-    // Apply carrier filter
-    if (carrierId) {
-      query = query.eq('carrier_id', carrierId);
-    }
-
-    // Apply status filter
-    if (status && status !== 'all') {
-      query = query.eq('status', status);
-    } else if (!includeCompleted) {
-      // Exclude completed and cancelled by default
-      query = query.ne('status', CONFIG.STATUS.COMPLETED)
-        .ne('status', CONFIG.STATUS.CANCELLED);
-    }
-
-    // Apply driver filter
-    if (driverId) {
-      query = query.eq('driver_id', driverId);
-    }
-
-    // Apply date range filter
-    if (dateRange) {
-      if (dateRange.from) {
-        query = query.ge('_createdDate', new Date(dateRange.from));
+      // Apply carrier filter
+      if (carrierId) {
+        query = query.eq('carrier_id', carrierId);
       }
-      if (dateRange.to) {
-        const endDate = new Date(dateRange.to);
-        endDate.setHours(23, 59, 59, 999);
-        query = query.le('_createdDate', endDate);
+
+      // Apply status filter
+      if (status && status !== 'all') {
+        query = query.eq('status', status);
+      } else if (!includeCompleted) {
+        // Exclude completed and cancelled by default
+        query = query.ne('status', CONFIG.STATUS.COMPLETED)
+          .ne('status', CONFIG.STATUS.CANCELLED);
       }
-    }
 
-    // Sort by most recent
-    query = query.descending('_updatedDate');
+      // Apply driver filter
+      if (driverId) {
+        query = query.eq('driver_id', driverId);
+      }
 
-    // Apply pagination
-    const skip = (page - 1) * pageSize;
-    query = query.skip(skip).limit(pageSize);
+      // Apply date range filter
+      if (dateRange) {
+        if (dateRange.from) {
+          query = query.ge('_createdDate', new Date(dateRange.from));
+        }
+        if (dateRange.to) {
+          const endDate = new Date(dateRange.to);
+          endDate.setHours(23, 59, 59, 999);
+          query = query.le('_createdDate', endDate);
+        }
+      }
 
-    const result = await query.find({ suppressAuth: true });
+      // Sort by most recent
+      query = query.descending('_updatedDate');
 
-    // Get total count for pagination
-    let countQuery = wixData.query(CONFIG.workflowsCollection);
-    if (recruiterId) {
-      countQuery = countQuery.eq('recruiter_id', recruiterId);
-    } else {
-      countQuery = countQuery.eq('recruiter_id', userId);
+      // Apply pagination
+      const skip = (page - 1) * pageSize;
+      query = query.skip(skip).limit(pageSize);
+
+      const result = await query.find({ suppressAuth: true });
+      workflowItems = result.items;
+
+      // Get total count for pagination
+      let countQuery = wixData.query(CONFIG.workflowsCollection);
+      if (recruiterId) {
+        countQuery = countQuery.eq('recruiter_id', recruiterId);
+      } else {
+        countQuery = countQuery.eq('recruiter_id', userId);
+      }
+      if (carrierId) {
+        countQuery = countQuery.eq('carrier_id', carrierId);
+      }
+      if (status && status !== 'all') {
+        countQuery = countQuery.eq('status', status);
+      } else if (!includeCompleted) {
+        countQuery = countQuery.ne('status', CONFIG.STATUS.COMPLETED)
+          .ne('status', CONFIG.STATUS.CANCELLED);
+      }
+      totalCount = await countQuery.count({ suppressAuth: true });
     }
-    if (carrierId) {
-      countQuery = countQuery.eq('carrier_id', carrierId);
-    }
-    if (status && status !== 'all') {
-      countQuery = countQuery.eq('status', status);
-    } else if (!includeCompleted) {
-      countQuery = countQuery.ne('status', CONFIG.STATUS.COMPLETED)
-        .ne('status', CONFIG.STATUS.CANCELLED);
-    }
-    const totalCount = await countQuery.count({ suppressAuth: true });
 
     // Enrich workflows with summary data
-    const enrichedWorkflows = result.items.map(workflow => {
+    const enrichedWorkflows = workflowItems.map(workflow => {
       const progress = calculateWorkflowProgress(workflow);
       const daysInProcess = Math.floor((new Date() - new Date(workflow._createdDate)) / (1000 * 60 * 60 * 24));
 
@@ -853,9 +918,10 @@ export async function updateWorkflowStatus(workflowId, newStatus, metadata = {})
       note: metadata.note || `Status changed from ${currentStatus} to ${newStatus}`
     });
 
-    // Prepare update data
-    const updateData = {
+    // Prepare update payload
+    const workflowUpdatePayload = {
       ...workflow,
+      _id: workflow._id || workflow.id,
       status: newStatus,
       status_history: JSON.stringify(statusHistory),
       _updatedDate: now
@@ -864,65 +930,67 @@ export async function updateWorkflowStatus(workflowId, newStatus, metadata = {})
     // Apply sub-status updates if provided
     if (metadata.subStatuses) {
       if (metadata.subStatuses.documents_status) {
-        updateData.documents_status = metadata.subStatuses.documents_status;
+        workflowUpdatePayload.documents_status = metadata.subStatuses.documents_status;
       }
       if (metadata.subStatuses.background_status) {
-        updateData.background_status = metadata.subStatuses.background_status;
+        workflowUpdatePayload.background_status = metadata.subStatuses.background_status;
       }
       if (metadata.subStatuses.drug_test_status) {
-        updateData.drug_test_status = metadata.subStatuses.drug_test_status;
+        workflowUpdatePayload.drug_test_status = metadata.subStatuses.drug_test_status;
       }
       if (metadata.subStatuses.orientation_status) {
-        updateData.orientation_status = metadata.subStatuses.orientation_status;
+        workflowUpdatePayload.orientation_status = metadata.subStatuses.orientation_status;
       }
     }
 
     // Handle specific status transitions
     if (newStatus === CONFIG.STATUS.COMPLETED) {
-      updateData.actual_start_date = now;
+      workflowUpdatePayload.actual_start_date = now;
 
-      // Update driver profile
-      const driver = await wixData.get(CONFIG.driverProfilesCollection, workflow.driver_id, { suppressAuth: true });
+      // Update driver profile - use dual-source routing
+      const driver = await getRecord(COLLECTION_KEYS.driverProfiles, CONFIG.driverProfilesCollection, workflow.driver_id);
       if (driver) {
-        await wixData.update(CONFIG.driverProfilesCollection, {
+        await updateData(COLLECTION_KEYS.driverProfiles, CONFIG.driverProfilesCollection, {
           ...driver,
+          _id: driver._id || driver.id,
           onboarding_status: 'complete',
           active_workflow_id: null,
           updated_date: now
-        }, { suppressAuth: true });
+        });
       }
     }
 
     if (newStatus === CONFIG.STATUS.CANCELLED) {
-      updateData.compliance_verified = false;
+      workflowUpdatePayload.compliance_verified = false;
 
-      // Update driver profile
-      const driver = await wixData.get(CONFIG.driverProfilesCollection, workflow.driver_id, { suppressAuth: true });
+      // Update driver profile - use dual-source routing
+      const driver = await getRecord(COLLECTION_KEYS.driverProfiles, CONFIG.driverProfilesCollection, workflow.driver_id);
       if (driver) {
-        await wixData.update(CONFIG.driverProfilesCollection, {
+        await updateData(COLLECTION_KEYS.driverProfiles, CONFIG.driverProfilesCollection, {
           ...driver,
+          _id: driver._id || driver.id,
           onboarding_status: 'not_started',
           active_workflow_id: null,
           updated_date: now
-        }, { suppressAuth: true });
+        });
       }
     }
 
     if (newStatus === CONFIG.STATUS.COMPLIANCE_VERIFIED) {
-      updateData.compliance_verified = true;
-      updateData.compliance_issues = [];
+      workflowUpdatePayload.compliance_verified = true;
+      workflowUpdatePayload.compliance_issues = [];
     }
 
     // Store additional metadata
     if (metadata.additionalData) {
-      updateData.metadata = {
-        ...updateData.metadata,
+      workflowUpdatePayload.metadata = {
+        ...workflowUpdatePayload.metadata,
         ...metadata.additionalData
       };
     }
 
-    // Update the workflow
-    const updatedWorkflow = await wixData.update(CONFIG.workflowsCollection, updateData, { suppressAuth: true });
+    // Update the workflow - use dual-source routing
+    const updatedWorkflow = await updateData(COLLECTION_KEYS.workflows, CONFIG.workflowsCollection, workflowUpdatePayload);
 
     // Log audit event
     await logAuditEvent(
@@ -1015,9 +1083,10 @@ export async function cancelWorkflow(workflowId, reason = '') {
       note: reason || 'Workflow cancelled'
     });
 
-    // Update the workflow
-    const updateData = {
+    // Update the workflow - use dual-source routing
+    const cancelPayload = {
       ...workflow,
+      _id: workflow._id || workflow.id,
       status: CONFIG.STATUS.CANCELLED,
       status_history: JSON.stringify(statusHistory),
       cancellation_reason: reason,
@@ -1026,31 +1095,42 @@ export async function cancelWorkflow(workflowId, reason = '') {
       _updatedDate: now
     };
 
-    const updatedWorkflow = await wixData.update(CONFIG.workflowsCollection, updateData, { suppressAuth: true });
+    const updatedWorkflow = await updateData(COLLECTION_KEYS.workflows, CONFIG.workflowsCollection, cancelPayload);
 
-    // Update driver profile
-    const driver = await wixData.get(CONFIG.driverProfilesCollection, workflow.driver_id, { suppressAuth: true });
-    if (driver && driver.active_workflow_id === workflowId) {
-      await wixData.update(CONFIG.driverProfilesCollection, {
+    // Update driver profile - use dual-source routing
+    const driver = await getRecord(COLLECTION_KEYS.driverProfiles, CONFIG.driverProfilesCollection, workflow.driver_id);
+    if (driver && (driver.active_workflow_id === workflowId || driver.active_workflow_id === (workflow._id || workflow.id))) {
+      await updateData(COLLECTION_KEYS.driverProfiles, CONFIG.driverProfilesCollection, {
         ...driver,
+        _id: driver._id || driver.id,
         onboarding_status: 'not_started',
         active_workflow_id: null,
         updated_date: now
-      }, { suppressAuth: true });
+      });
     }
 
-    // Cancel pending document requests
-    const pendingDocs = await wixData.query(CONFIG.documentRequestsCollection)
-      .eq('workflow_id', workflowId)
-      .eq('status', 'requested')
-      .find({ suppressAuth: true });
+    // Cancel pending document requests - use dual-source routing
+    let pendingDocItems = [];
+    if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
+      const filter = `AND({Workflow Id} = '${workflowId}', {Status} = 'requested')`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter });
+      pendingDocItems = result.records || [];
+    } else {
+      const pendingDocs = await wixData.query(CONFIG.documentRequestsCollection)
+        .eq('workflow_id', workflowId)
+        .eq('status', 'requested')
+        .find({ suppressAuth: true });
+      pendingDocItems = pendingDocs.items;
+    }
 
-    for (const doc of pendingDocs.items) {
-      await wixData.update(CONFIG.documentRequestsCollection, {
+    for (const doc of pendingDocItems) {
+      await updateData(COLLECTION_KEYS.documentRequests, CONFIG.documentRequestsCollection, {
         ...doc,
+        _id: doc._id || doc.id,
         status: 'cancelled',
         cancelled_date: now
-      }, { suppressAuth: true });
+      });
     }
 
     // Note: Background check and drug test cancellations may require API calls to providers
@@ -1118,7 +1198,8 @@ export async function getComplianceChecklist(workflowId) {
     };
 
     try {
-      const carrier = await wixData.get(CONFIG.carriersCollection, workflow.carrier_id, { suppressAuth: true });
+      // Get carrier config - use dual-source routing
+      const carrier = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, workflow.carrier_id);
       if (carrier && carrier.onboarding_config) {
         carrierConfig = { ...carrierConfig, ...carrier.onboarding_config };
       }
@@ -1274,10 +1355,16 @@ export async function getComplianceChecklist(workflowId) {
 // ============================================================================
 
 /**
- * Get documents for a workflow
+ * Get documents for a workflow - uses dual-source routing
  */
 async function getWorkflowDocuments(workflowId) {
   try {
+    if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
+      const filter = `{Workflow Id} = '${workflowId}'`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter });
+      return result.records || [];
+    }
     const result = await wixData.query(CONFIG.documentRequestsCollection)
       .eq('workflow_id', workflowId)
       .find({ suppressAuth: true });
@@ -1289,10 +1376,19 @@ async function getWorkflowDocuments(workflowId) {
 }
 
 /**
- * Get background checks for a workflow
+ * Get background checks for a workflow - uses dual-source routing
  */
 async function getWorkflowBackgroundChecks(workflowId) {
   try {
+    if (usesAirtable(COLLECTION_KEYS.backgroundChecks)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.backgroundChecks);
+      const filter = `{Workflow Id} = '${workflowId}'`;
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        sort: [{ field: 'Ordered Date', direction: 'desc' }]
+      });
+      return result.records || [];
+    }
     const result = await wixData.query(CONFIG.backgroundChecksCollection)
       .eq('workflow_id', workflowId)
       .descending('ordered_date')
@@ -1305,10 +1401,19 @@ async function getWorkflowBackgroundChecks(workflowId) {
 }
 
 /**
- * Get drug tests for a workflow
+ * Get drug tests for a workflow - uses dual-source routing
  */
 async function getWorkflowDrugTests(workflowId) {
   try {
+    if (usesAirtable(COLLECTION_KEYS.drugTests)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.drugTests);
+      const filter = `{Workflow Id} = '${workflowId}'`;
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        sort: [{ field: 'Created Date', direction: 'desc' }]
+      });
+      return result.records || [];
+    }
     const result = await wixData.query(CONFIG.drugTestsCollection)
       .eq('workflow_id', workflowId)
       .descending('_createdDate')
