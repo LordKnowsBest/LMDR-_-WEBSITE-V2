@@ -436,17 +436,41 @@ async function queryAllState511APIs() {
  */
 async function queryLocalDatabase(lat, lng, radius, options = {}) {
     try {
-        let query = wixData.query(COLLECTIONS.STATIONS);
+        let resultItems = [];
 
-        // Filter by state if specified
-        if (options.state) {
-            query = query.eq('state', options.state.toUpperCase());
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.weighStations)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.weighStations);
+            const filter = options.state ? `{State} = "${options.state.toUpperCase()}"` : '';
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                maxRecords: 500
+            });
+            resultItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                external_id: r['External Id'] || r.external_id,
+                name: r.Name || r.name,
+                state: r.State || r.state,
+                highway: r.Highway || r.highway,
+                direction: r.Direction || r.direction,
+                location: r.Location || r.location,
+                status: r.Status || r.status,
+                prepass_enabled: r['Prepass Enabled'] || r.prepass_enabled,
+                drivewyze_enabled: r['Drivewyze Enabled'] || r.drivewyze_enabled,
+                prepass_bypass_rate: r['Prepass Bypass Rate'] || r.prepass_bypass_rate,
+                drivewyze_bypass_rate: r['Drivewyze Bypass Rate'] || r.drivewyze_bypass_rate
+            }));
+        } else {
+            let query = wixData.query(COLLECTIONS.STATIONS);
+            if (options.state) {
+                query = query.eq('state', options.state.toUpperCase());
+            }
+            const result = await query.limit(500).find({ suppressAuth: true });
+            resultItems = result.items;
         }
 
-        const result = await query.limit(500).find({ suppressAuth: true });
-
         // Calculate distance and filter by radius
-        const stationsWithDistance = result.items.map(station => {
+        const stationsWithDistance = resultItems.map(station => {
             const stationLat = station.location?.lat;
             const stationLng = station.location?.lng;
             const distance = calculateDistance(lat, lng, stationLat, stationLng);
@@ -470,6 +494,27 @@ async function getRecentReports(stationId, hoursBack = 4) {
     const cutoff = new Date(Date.now() - hoursBack * 3600000);
 
     try {
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.weighStationReports)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.weighStationReports);
+            const filter = `AND({Station Id} = "${stationId}", {Reported At} > "${cutoff.toISOString()}")`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: 'Reported At', direction: 'desc' }],
+                maxRecords: 20
+            });
+            return (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                station_id: r['Station Id'] || r.station_id,
+                driver_id: r['Driver Id'] || r.driver_id,
+                report_type: r['Report Type'] || r.report_type,
+                wait_minutes: r['Wait Minutes'] || r.wait_minutes,
+                notes: r.Notes || r.notes,
+                reported_at: r['Reported At'] ? new Date(r['Reported At']) : (r.reported_at ? new Date(r.reported_at) : new Date())
+            }));
+        }
+
+        // Wix Data path
         const result = await wixData.query(COLLECTIONS.REPORTS)
             .eq('station_id', stationId)
             .gt('reported_at', cutoff)
@@ -569,16 +614,31 @@ export async function searchWeighStations(lat, lng, radius = 100, options = {}) 
     const cacheKey = `weighstations:${lat.toFixed(2)}:${lng.toFixed(2)}:${radius}:${options.state || 'all'}`;
 
     try {
-        // 1. Check cache first
-        const cached = await wixData.query(COLLECTIONS.CACHE)
-            .eq('cache_key', cacheKey)
-            .gt('expires_at', new Date())
-            .limit(1)
-            .find({ suppressAuth: true });
+        // 1. Check cache first using dual-source routing
+        let cachedItems = [];
+        if (usesAirtable(COLLECTION_KEYS.roadUtilityCache)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.roadUtilityCache);
+            const filter = `AND({Cache Key} = "${cacheKey}", {Expires At} > "${new Date().toISOString()}")`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                maxRecords: 1
+            });
+            if (result.records && result.records.length > 0) {
+                const r = result.records[0];
+                cachedItems = [{ data: r.Data || r.data, _id: r.id || r._id }];
+            }
+        } else {
+            const cached = await wixData.query(COLLECTIONS.CACHE)
+                .eq('cache_key', cacheKey)
+                .gt('expires_at', new Date())
+                .limit(1)
+                .find({ suppressAuth: true });
+            cachedItems = cached.items;
+        }
 
-        if (cached.items.length > 0) {
+        if (cachedItems.length > 0) {
             console.log('[WeighStation] Cache hit');
-            const items = cached.items[0].data;
+            const items = cachedItems[0].data;
 
             // Enrich with bypass probability
             const enriched = items.map(station => ({
@@ -633,16 +693,19 @@ export async function searchWeighStations(lat, lng, radius = 100, options = {}) 
             })
         );
 
-        // 8. Cache results (10-minute TTL)
+        // 8. Cache results (10-minute TTL) using dual-source routing
         const expiry = new Date();
         expiry.setMinutes(expiry.getMinutes() + 10);
 
-        await wixData.insert(COLLECTIONS.CACHE, {
+        const cacheRecord = {
             cache_key: cacheKey,
             cache_type: 'weighstation',
             data: enrichedStations,
             expires_at: expiry
-        }, { suppressAuth: true }).catch(err => console.error('[WeighStation] Cache insert failed:', err));
+        };
+
+        await insertData(COLLECTION_KEYS.roadUtilityCache, COLLECTIONS.CACHE, cacheRecord)
+            .catch(err => console.error('[WeighStation] Cache insert failed:', err));
 
         return { success: true, items: enrichedStations };
     } catch (error) {
@@ -730,10 +793,25 @@ export async function getStationStatus(stationId) {
     }
 
     try {
-        const station = await wixData.get(COLLECTIONS.STATIONS, stationId, { suppressAuth: true });
+        // Use dual-source routing
+        const station = await getRecord(COLLECTION_KEYS.weighStations, COLLECTIONS.STATIONS, stationId);
         if (!station) {
             return { success: false, error: 'Station not found' };
         }
+
+        // Normalize field names from Airtable
+        const normalizedStation = {
+            _id: station._id || station.id,
+            external_id: station.external_id || station['External Id'],
+            name: station.name || station.Name,
+            state: station.state || station.State,
+            highway: station.highway || station.Highway,
+            direction: station.direction || station.Direction,
+            location: station.location || station.Location,
+            status: station.status || station.Status,
+            prepass_enabled: station.prepass_enabled || station['Prepass Enabled'],
+            drivewyze_enabled: station.drivewyze_enabled || station['Drivewyze Enabled']
+        };
 
         // Get recent reports
         const reports = await getRecentReports(stationId);
@@ -742,7 +820,7 @@ export async function getStationStatus(stationId) {
         return {
             success: true,
             station: {
-                ...station,
+                ...normalizedStation,
                 wait_estimate: reportData.wait_estimate,
                 report_count: reportData.report_count,
                 recent_reports: reports.slice(0, 5)
@@ -771,16 +849,29 @@ export async function reportStationStatus(stationId, report) {
     }
 
     try {
-        // Rate limiting: 1 report per station per hour per driver
+        // Rate limiting: 1 report per station per hour per driver using dual-source routing
         const oneHourAgo = new Date(Date.now() - 3600000);
-        const recentReports = await wixData.query(COLLECTIONS.REPORTS)
-            .eq('station_id', stationId)
-            .eq('driver_id', report.driver_id)
-            .gt('reported_at', oneHourAgo)
-            .limit(1)
-            .find({ suppressAuth: true });
+        let recentReportCount = 0;
 
-        if (recentReports.items.length > 0) {
+        if (usesAirtable(COLLECTION_KEYS.weighStationReports)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.weighStationReports);
+            const filter = `AND({Station Id} = "${stationId}", {Driver Id} = "${report.driver_id}", {Reported At} > "${oneHourAgo.toISOString()}")`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                maxRecords: 1
+            });
+            recentReportCount = (result.records || []).length;
+        } else {
+            const recentReports = await wixData.query(COLLECTIONS.REPORTS)
+                .eq('station_id', stationId)
+                .eq('driver_id', report.driver_id)
+                .gt('reported_at', oneHourAgo)
+                .limit(1)
+                .find({ suppressAuth: true });
+            recentReportCount = recentReports.items.length;
+        }
+
+        if (recentReportCount > 0) {
             return { success: false, error: 'You have already reported for this station in the last hour' };
         }
 
@@ -796,18 +887,19 @@ export async function reportStationStatus(stationId, report) {
             expires_at: new Date(Date.now() + 4 * 3600000) // 4 hour TTL
         };
 
-        const result = await wixData.insert(COLLECTIONS.REPORTS, reportRecord, { suppressAuth: true });
+        // Use dual-source routing for insert
+        const result = await insertData(COLLECTION_KEYS.weighStationReports, COLLECTIONS.REPORTS, reportRecord);
 
-        // Update station's last_report_update timestamp
-        await wixData.update(COLLECTIONS.STATIONS, {
+        // Update station's last_report_update timestamp using dual-source routing
+        await updateData(COLLECTION_KEYS.weighStations, COLLECTIONS.STATIONS, {
             _id: stationId,
             last_report_update: new Date()
-        }, { suppressAuth: true }).catch(err => console.warn('[WeighStation] Failed to update station timestamp:', err));
+        }).catch(err => console.warn('[WeighStation] Failed to update station timestamp:', err));
 
         // Invalidate cache for this area
         invalidateCache(stationId).catch(err => console.warn('[WeighStation] Cache invalidation failed:', err));
 
-        return { success: true, reportId: result._id };
+        return { success: true, reportId: result._id || result.id };
     } catch (error) {
         console.error('[WeighStation] reportStationStatus failed:', error);
         return { success: false, error: error.message };
@@ -818,18 +910,29 @@ export async function reportStationStatus(stationId, report) {
  * Invalidate cache entries related to a station
  */
 async function invalidateCache(stationId) {
-    // Get station to find its location
-    const station = await wixData.get(COLLECTIONS.STATIONS, stationId, { suppressAuth: true }).catch(() => null);
+    // Get station to find its location using dual-source routing
+    const station = await getRecord(COLLECTION_KEYS.weighStations, COLLECTIONS.STATIONS, stationId).catch(() => null);
     if (!station) return;
 
-    // Delete cache entries that might include this station
+    // Delete cache entries that might include this station using dual-source routing
     // Simple approach: delete all weighstation caches (they're short-lived anyway)
-    const caches = await wixData.query(COLLECTIONS.CACHE)
-        .eq('cache_type', 'weighstation')
-        .find({ suppressAuth: true });
+    if (usesAirtable(COLLECTION_KEYS.roadUtilityCache)) {
+        const tableName = getAirtableTableName(COLLECTION_KEYS.roadUtilityCache);
+        const result = await airtable.queryRecords(tableName, {
+            filterByFormula: `{Cache Type} = "weighstation"`,
+            maxRecords: 100
+        });
+        for (const cache of (result.records || [])) {
+            await airtable.deleteRecord(tableName, cache.id || cache._id).catch(() => {});
+        }
+    } else {
+        const caches = await wixData.query(COLLECTIONS.CACHE)
+            .eq('cache_type', 'weighstation')
+            .find({ suppressAuth: true });
 
-    for (const cache of caches.items) {
-        await wixData.remove(COLLECTIONS.CACHE, cache._id, { suppressAuth: true }).catch(() => {});
+        for (const cache of caches.items) {
+            await wixData.remove(COLLECTIONS.CACHE, cache._id, { suppressAuth: true }).catch(() => {});
+        }
     }
 }
 
@@ -843,14 +946,40 @@ export async function getStationsByState(state) {
     }
 
     try {
-        const result = await wixData.query(COLLECTIONS.STATIONS)
-            .eq('state', state.toUpperCase())
-            .ascending('highway')
-            .ascending('direction')
-            .limit(100)
-            .find({ suppressAuth: true });
+        let resultItems = [];
 
-        return { success: true, items: result.items };
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.weighStations)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.weighStations);
+            const filter = `{State} = "${state.toUpperCase()}"`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: 'Highway', direction: 'asc' }, { field: 'Direction', direction: 'asc' }],
+                maxRecords: 100
+            });
+            resultItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                external_id: r['External Id'] || r.external_id,
+                name: r.Name || r.name,
+                state: r.State || r.state,
+                highway: r.Highway || r.highway,
+                direction: r.Direction || r.direction,
+                location: r.Location || r.location,
+                status: r.Status || r.status,
+                prepass_enabled: r['Prepass Enabled'] || r.prepass_enabled,
+                drivewyze_enabled: r['Drivewyze Enabled'] || r.drivewyze_enabled
+            }));
+        } else {
+            const result = await wixData.query(COLLECTIONS.STATIONS)
+                .eq('state', state.toUpperCase())
+                .ascending('highway')
+                .ascending('direction')
+                .limit(100)
+                .find({ suppressAuth: true });
+            resultItems = result.items;
+        }
+
+        return { success: true, items: resultItems };
     } catch (error) {
         console.error('[WeighStation] getStationsByState failed:', error);
         return { success: false, error: error.message };
@@ -867,17 +996,36 @@ export async function getDriverBypassServices(driverId) {
     }
 
     try {
-        const result = await wixData.query(COLLECTIONS.DRIVER_PREFS)
-            .eq('driver_id', driverId)
-            .limit(1)
-            .find({ suppressAuth: true });
+        let resultItems = [];
 
-        if (result.items.length > 0) {
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.driverBypassServices)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.driverBypassServices);
+            const filter = `{Driver Id} = "${driverId}"`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                maxRecords: 1
+            });
+            resultItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                driver_id: r['Driver Id'] || r.driver_id,
+                prepass: r.Prepass !== undefined ? r.Prepass : (r.prepass || false),
+                drivewyze: r.Drivewyze !== undefined ? r.Drivewyze : (r.drivewyze || false)
+            }));
+        } else {
+            const result = await wixData.query(COLLECTIONS.DRIVER_PREFS)
+                .eq('driver_id', driverId)
+                .limit(1)
+                .find({ suppressAuth: true });
+            resultItems = result.items;
+        }
+
+        if (resultItems.length > 0) {
             return {
                 success: true,
                 services: {
-                    prepass: result.items[0].prepass || false,
-                    drivewyze: result.items[0].drivewyze || false
+                    prepass: resultItems[0].prepass || false,
+                    drivewyze: resultItems[0].drivewyze || false
                 }
             };
         }
@@ -900,11 +1048,28 @@ export async function saveDriverBypassServices(driverId, services) {
     }
 
     try {
-        // Check if record exists
-        const existing = await wixData.query(COLLECTIONS.DRIVER_PREFS)
-            .eq('driver_id', driverId)
-            .limit(1)
-            .find({ suppressAuth: true });
+        // Check if record exists using dual-source routing
+        let existingRecord = null;
+
+        if (usesAirtable(COLLECTION_KEYS.driverBypassServices)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.driverBypassServices);
+            const filter = `{Driver Id} = "${driverId}"`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                maxRecords: 1
+            });
+            if (result.records && result.records.length > 0) {
+                existingRecord = { _id: result.records[0].id || result.records[0]._id };
+            }
+        } else {
+            const existing = await wixData.query(COLLECTIONS.DRIVER_PREFS)
+                .eq('driver_id', driverId)
+                .limit(1)
+                .find({ suppressAuth: true });
+            if (existing.items.length > 0) {
+                existingRecord = { _id: existing.items[0]._id };
+            }
+        }
 
         const record = {
             driver_id: driverId,
@@ -913,11 +1078,11 @@ export async function saveDriverBypassServices(driverId, services) {
             updated_at: new Date()
         };
 
-        if (existing.items.length > 0) {
-            record._id = existing.items[0]._id;
-            await wixData.update(COLLECTIONS.DRIVER_PREFS, record, { suppressAuth: true });
+        if (existingRecord) {
+            record._id = existingRecord._id;
+            await updateData(COLLECTION_KEYS.driverBypassServices, COLLECTIONS.DRIVER_PREFS, record);
         } else {
-            await wixData.insert(COLLECTIONS.DRIVER_PREFS, record, { suppressAuth: true });
+            await insertData(COLLECTION_KEYS.driverBypassServices, COLLECTIONS.DRIVER_PREFS, record);
         }
 
         return { success: true };
