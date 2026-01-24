@@ -19,6 +19,8 @@ import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
 import { currentMember } from 'wix-members-backend';
 import { log, logAIOperation, startTrace, endTrace } from 'backend/observabilityService';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
 
 // ============================================
 // CONFIGURATION & CONSTANTS
@@ -32,6 +34,69 @@ const CONFIG = {
     },
     cacheExpiry: 5 * 60 * 1000 // 5 minutes cache for config
 };
+
+// Collection keys for dual-source routing
+const COLLECTION_KEYS = {
+    routerConfig: 'aiRouterConfig',
+    usageLog: 'aiUsageLog',
+    auditLog: 'adminAuditLog'
+};
+
+// ============================================
+// DUAL-SOURCE DATA HELPERS
+// ============================================
+
+async function queryData(collectionKey, wixCollectionName, options = {}) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        const result = await airtable.queryRecords(tableName, {
+            filterByFormula: options.filter || '',
+            sort: options.sort,
+            maxRecords: options.limit || 100
+        });
+        return result.records || [];
+    }
+    let query = wixData.query(wixCollectionName);
+    if (options.eq) {
+        for (const [field, value] of Object.entries(options.eq)) {
+            query = query.eq(field, value);
+        }
+    }
+    if (options.ge) {
+        for (const [field, value] of Object.entries(options.ge)) {
+            query = query.ge(field, value);
+        }
+    }
+    if (options.limit) {
+        query = query.limit(options.limit);
+    }
+    const result = await query.find({ suppressAuth: true });
+    return result.items;
+}
+
+async function insertData(collectionKey, wixCollectionName, data) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.createRecord(tableName, data);
+    }
+    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
+}
+
+async function updateData(collectionKey, wixCollectionName, data) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.updateRecord(tableName, data._id || data.id, data);
+    }
+    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
+}
+
+async function removeData(collectionKey, wixCollectionName, recordId) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.deleteRecord(tableName, recordId);
+    }
+    return await wixData.remove(wixCollectionName, recordId, { suppressAuth: true });
+}
 
 // In-memory cache for router config
 let configCache = null;
