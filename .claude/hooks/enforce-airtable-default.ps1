@@ -92,13 +92,10 @@ if ($hasWixData -and -not $hasDualSource) {
 
 # Check 2: If this is config.jsw, ensure no unauthorized 'wix' values are being added
 if ($fileName -eq "config.jsw") {
-    # These 5 collections MUST remain in Wix (per spec.md)
+    # These 2 collections MUST remain in Wix (require Wix auth context)
     $allowedWixCollections = @(
         "adminUsers",           # Wix Members integration for authentication
-        "memberNotifications",  # Requires Wix auth context
-        "systemMetrics",        # Real-time Wix monitoring
-        "systemTraces",         # Wix observability integration
-        "featureAdoptionLogs"   # Wix user session tracking
+        "memberNotifications"   # Requires Wix auth context
     )
 
     # Find all 'wix' entries
@@ -117,12 +114,9 @@ if ($fileName -eq "config.jsw") {
             Write-Host "  Collection '$collectionName' is set to 'wix' but is not in the"
             Write-Host "  approved list of Wix-only collections."
             Write-Host ""
-            Write-Host "  Allowed Wix collections (5 total):"
+            Write-Host "  Allowed Wix collections (2 total):"
             Write-Host "    - adminUsers"
             Write-Host "    - memberNotifications"
-            Write-Host "    - systemMetrics"
-            Write-Host "    - systemTraces"
-            Write-Host "    - featureAdoptionLogs"
             Write-Host ""
             Write-Host "  Change:  $collectionName`: 'wix'"
             Write-Host "  To:      $collectionName`: 'airtable'"
