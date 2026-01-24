@@ -59,24 +59,46 @@ async function queryData(collectionKey, wixCollectionName, options = {}) {
  */
 export async function getBlogPosts(category = null, limit = 10, offset = 0) {
   try {
-    let query = wixData.query('BlogPosts')
-      .eq('is_published', true)
-      .descending('published_date');
+    // Use dual-source routing
+    let resultItems = [];
+    let totalCount = 0;
 
-    if (category && category !== 'all') {
-      query = query.eq('category', category);
+    if (usesAirtable(COLLECTION_KEYS.blogPosts)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.blogPosts);
+      let filterParts = [`{Is Published} = TRUE()`];
+      if (category && category !== 'all') {
+        filterParts.push(`{Category} = '${category}'`);
+      }
+      const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : filterParts[0];
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        sort: [{ field: 'Published Date', direction: 'desc' }],
+        maxRecords: limit
+      });
+      resultItems = result.records || [];
+      totalCount = resultItems.length;
+    } else {
+      let query = wixData.query('BlogPosts')
+        .eq('is_published', true)
+        .descending('published_date');
+
+      if (category && category !== 'all') {
+        query = query.eq('category', category);
+      }
+
+      const result = await query
+        .skip(offset)
+        .limit(limit)
+        .find();
+      resultItems = result.items;
+      totalCount = result.totalCount;
     }
-
-    const result = await query
-      .skip(offset)
-      .limit(limit)
-      .find();
 
     return {
       success: true,
-      posts: result.items.map(formatBlogPost),
-      totalCount: result.totalCount,
-      hasMore: offset + result.items.length < result.totalCount
+      posts: resultItems.map(formatBlogPost),
+      totalCount: totalCount,
+      hasMore: offset + resultItems.length < totalCount
     };
   } catch (err) {
     console.error('getBlogPosts error:', err);
@@ -90,30 +112,48 @@ export async function getBlogPosts(category = null, limit = 10, offset = 0) {
  */
 export async function getBlogPostBySlug(slug) {
   try {
-    const result = await wixData.query('BlogPosts')
-      .eq('slug', slug)
-      .eq('is_published', true)
-      .find();
+    // Use dual-source routing for post lookup
+    let post = null;
+    if (usesAirtable(COLLECTION_KEYS.blogPosts)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.blogPosts);
+      const filter = `AND({Slug} = '${slug}', {Is Published} = TRUE())`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+      post = (result.records || [])[0] || null;
+    } else {
+      const result = await wixData.query('BlogPosts')
+        .eq('slug', slug)
+        .eq('is_published', true)
+        .find();
+      post = result.items[0] || null;
+    }
 
-    if (result.items.length === 0) {
+    if (!post) {
       return { success: false, error: 'Post not found' };
     }
 
-    const post = result.items[0];
-
-    // Get related posts
-    const relatedResult = await wixData.query('BlogPosts')
-      .eq('category', post.category)
-      .eq('is_published', true)
-      .ne('_id', post._id)
-      .limit(3)
-      .find()
-      .catch(() => ({ items: [] }));
+    // Get related posts using dual-source routing
+    let relatedPosts = [];
+    if (usesAirtable(COLLECTION_KEYS.blogPosts)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.blogPosts);
+      const postId = post._id || post.id;
+      const filter = `AND({Category} = '${post.category}', {Is Published} = TRUE(), RECORD_ID() != '${postId}')`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 3 });
+      relatedPosts = result.records || [];
+    } else {
+      const relatedResult = await wixData.query('BlogPosts')
+        .eq('category', post.category)
+        .eq('is_published', true)
+        .ne('_id', post._id)
+        .limit(3)
+        .find()
+        .catch(() => ({ items: [] }));
+      relatedPosts = relatedResult.items;
+    }
 
     return {
       success: true,
       post: formatBlogPost(post, true),
-      relatedPosts: relatedResult.items.map(formatBlogPost)
+      relatedPosts: relatedPosts.map(formatBlogPost)
     };
   } catch (err) {
     console.error('getBlogPostBySlug error:', err);
@@ -126,29 +166,52 @@ export async function getBlogPostBySlug(slug) {
  */
 export async function getFeaturedBlogPost() {
   try {
-    const result = await wixData.query('BlogPosts')
-      .eq('is_published', true)
-      .eq('is_featured', true)
-      .descending('published_date')
-      .limit(1)
-      .find();
-
-    if (result.items.length === 0) {
-      // Fallback to most recent post
-      const fallbackResult = await wixData.query('BlogPosts')
+    // Use dual-source routing for featured post
+    let featuredPost = null;
+    if (usesAirtable(COLLECTION_KEYS.blogPosts)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.blogPosts);
+      let filter = `AND({Is Published} = TRUE(), {Is Featured} = TRUE())`;
+      let result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        sort: [{ field: 'Published Date', direction: 'desc' }],
+        maxRecords: 1
+      });
+      if ((result.records || []).length === 0) {
+        // Fallback to most recent post
+        filter = `{Is Published} = TRUE()`;
+        result = await airtable.queryRecords(tableName, {
+          filterByFormula: filter,
+          sort: [{ field: 'Published Date', direction: 'desc' }],
+          maxRecords: 1
+        });
+      }
+      featuredPost = (result.records || [])[0] || null;
+    } else {
+      const result = await wixData.query('BlogPosts')
         .eq('is_published', true)
+        .eq('is_featured', true)
         .descending('published_date')
         .limit(1)
         .find();
 
-      if (fallbackResult.items.length === 0) {
-        return { success: false, error: 'No posts found' };
+      if (result.items.length === 0) {
+        // Fallback to most recent post
+        const fallbackResult = await wixData.query('BlogPosts')
+          .eq('is_published', true)
+          .descending('published_date')
+          .limit(1)
+          .find();
+        featuredPost = fallbackResult.items[0] || null;
+      } else {
+        featuredPost = result.items[0];
       }
-
-      return { success: true, post: formatBlogPost(fallbackResult.items[0]) };
     }
 
-    return { success: true, post: formatBlogPost(result.items[0]) };
+    if (!featuredPost) {
+      return { success: false, error: 'No posts found' };
+    }
+
+    return { success: true, post: formatBlogPost(featuredPost) };
   } catch (err) {
     console.error('getFeaturedBlogPost error:', err);
     return { success: false, error: err.message };
@@ -160,15 +223,28 @@ export async function getFeaturedBlogPost() {
  */
 export async function getPopularBlogPosts(limit = 5) {
   try {
-    const result = await wixData.query('BlogPosts')
-      .eq('is_published', true)
-      .descending('view_count')
-      .limit(limit)
-      .find();
+    // Use dual-source routing
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.blogPosts)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.blogPosts);
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: `{Is Published} = TRUE()`,
+        sort: [{ field: 'View Count', direction: 'desc' }],
+        maxRecords: limit
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('BlogPosts')
+        .eq('is_published', true)
+        .descending('view_count')
+        .limit(limit)
+        .find();
+      resultItems = result.items;
+    }
 
     return {
       success: true,
-      posts: result.items.map(formatBlogPost)
+      posts: resultItems.map(formatBlogPost)
     };
   } catch (err) {
     console.error('getPopularBlogPosts error:', err);
@@ -181,19 +257,42 @@ export async function getPopularBlogPosts(limit = 5) {
  */
 export async function getBlogCategories() {
   try {
-    const result = await wixData.query('BlogCategories')
-      .ascending('display_order')
-      .find()
-      .catch(() => ({ items: [] }));
+    // Use dual-source routing for blog categories
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.blogCategories)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.blogCategories);
+      const result = await airtable.queryRecords(tableName, {
+        sort: [{ field: 'Display Order', direction: 'asc' }],
+        maxRecords: 100
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('BlogCategories')
+        .ascending('display_order')
+        .find()
+        .catch(() => ({ items: [] }));
+      resultItems = result.items;
+    }
 
     // If BlogCategories doesn't exist, derive from posts
-    if (result.items.length === 0) {
-      const postsResult = await wixData.query('BlogPosts')
-        .eq('is_published', true)
-        .find();
+    if (resultItems.length === 0) {
+      let postsItems = [];
+      if (usesAirtable(COLLECTION_KEYS.blogPosts)) {
+        const tableName = getAirtableTableName(COLLECTION_KEYS.blogPosts);
+        const result = await airtable.queryRecords(tableName, {
+          filterByFormula: `{Is Published} = TRUE()`,
+          maxRecords: 1000
+        });
+        postsItems = result.records || [];
+      } else {
+        const postsResult = await wixData.query('BlogPosts')
+          .eq('is_published', true)
+          .find();
+        postsItems = postsResult.items;
+      }
 
-      const categories = postsResult.items.reduce((acc, post) => {
-        const cat = post.category || 'General';
+      const categories = postsItems.reduce((acc, post) => {
+        const cat = post.category || post.Category || 'General';
         acc[cat] = (acc[cat] || 0) + 1;
         return acc;
       }, {});
@@ -210,11 +309,11 @@ export async function getBlogCategories() {
 
     return {
       success: true,
-      categories: result.items.map(cat => ({
-        name: cat.name,
-        slug: cat.slug,
-        description: cat.description,
-        postCount: cat.post_count || 0
+      categories: resultItems.map(cat => ({
+        name: cat.name || cat.Name,
+        slug: cat.slug || cat.Slug,
+        description: cat.description || cat.Description,
+        postCount: cat.post_count || cat['Post Count'] || 0
       }))
     };
   } catch (err) {
@@ -233,12 +332,24 @@ export async function getBlogCategories() {
  */
 export async function getComplianceGuide(slug) {
   try {
-    const result = await wixData.query('ComplianceGuides')
-      .eq('slug', slug)
-      .find()
-      .catch(() => ({ items: [] }));
+    // Use dual-source routing
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.complianceGuides)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.complianceGuides);
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: `{Slug} = '${slug}'`,
+        maxRecords: 1
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('ComplianceGuides')
+        .eq('slug', slug)
+        .find()
+        .catch(() => ({ items: [] }));
+      resultItems = result.items;
+    }
 
-    if (result.items.length === 0) {
+    if (resultItems.length === 0) {
       // Return default content if collection doesn't exist
       return {
         success: true,
@@ -246,18 +357,18 @@ export async function getComplianceGuide(slug) {
       };
     }
 
-    const guide = result.items[0];
+    const guide = resultItems[0];
 
     return {
       success: true,
       guide: {
-        title: guide.title,
-        category: guide.category,
-        content: guide.content_html,
-        lastUpdated: guide.last_updated || guide._updatedDate,
-        author: guide.author,
-        relatedRegulations: guide.related_regulations || [],
-        downloadUrl: guide.download_url
+        title: guide.title || guide.Title,
+        category: guide.category || guide.Category,
+        content: guide.content_html || guide['Content Html'],
+        lastUpdated: guide.last_updated || guide['Last Updated'] || guide._updatedDate,
+        author: guide.author || guide.Author,
+        relatedRegulations: guide.related_regulations || guide['Related Regulations'] || [],
+        downloadUrl: guide.download_url || guide['Download Url']
       }
     };
   } catch (err) {
@@ -271,13 +382,25 @@ export async function getComplianceGuide(slug) {
  */
 export async function getComplianceGuides() {
   try {
-    const result = await wixData.query('ComplianceGuides')
-      .ascending('category')
-      .ascending('display_order')
-      .find()
-      .catch(() => ({ items: [] }));
+    // Use dual-source routing
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.complianceGuides)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.complianceGuides);
+      const result = await airtable.queryRecords(tableName, {
+        sort: [{ field: 'Category', direction: 'asc' }, { field: 'Display Order', direction: 'asc' }],
+        maxRecords: 100
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('ComplianceGuides')
+        .ascending('category')
+        .ascending('display_order')
+        .find()
+        .catch(() => ({ items: [] }));
+      resultItems = result.items;
+    }
 
-    if (result.items.length === 0) {
+    if (resultItems.length === 0) {
       // Return default guides if collection doesn't exist
       return {
         success: true,
@@ -287,12 +410,12 @@ export async function getComplianceGuides() {
 
     return {
       success: true,
-      guides: result.items.map(g => ({
-        title: g.title,
-        slug: g.slug,
-        category: g.category,
-        excerpt: g.excerpt,
-        lastUpdated: g.last_updated || g._updatedDate
+      guides: resultItems.map(g => ({
+        title: g.title || g.Title,
+        slug: g.slug || g.Slug,
+        category: g.category || g.Category,
+        excerpt: g.excerpt || g.Excerpt,
+        lastUpdated: g.last_updated || g['Last Updated'] || g._updatedDate
       }))
     };
   } catch (err) {
@@ -311,29 +434,41 @@ export async function getComplianceGuides() {
  */
 export async function getBestPracticesGuide(slug) {
   try {
-    const result = await wixData.query('BestPracticesGuides')
-      .eq('slug', slug)
-      .find()
-      .catch(() => ({ items: [] }));
+    // Use dual-source routing
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.bestPracticesGuides)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.bestPracticesGuides);
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: `{Slug} = '${slug}'`,
+        maxRecords: 1
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('BestPracticesGuides')
+        .eq('slug', slug)
+        .find()
+        .catch(() => ({ items: [] }));
+      resultItems = result.items;
+    }
 
-    if (result.items.length === 0) {
+    if (resultItems.length === 0) {
       return {
         success: true,
         guide: getDefaultBestPracticesContent(slug)
       };
     }
 
-    const guide = result.items[0];
+    const guide = resultItems[0];
 
     return {
       success: true,
       guide: {
-        title: guide.title,
-        audience: guide.audience,
-        sections: guide.sections || [],
-        author: guide.author,
-        publishedDate: guide.published_date,
-        downloadUrl: guide.download_url
+        title: guide.title || guide.Title,
+        audience: guide.audience || guide.Audience,
+        sections: guide.sections || guide.Sections || [],
+        author: guide.author || guide.Author,
+        publishedDate: guide.published_date || guide['Published Date'],
+        downloadUrl: guide.download_url || guide['Download Url']
       }
     };
   } catch (err) {
@@ -352,12 +487,24 @@ export async function getBestPracticesGuide(slug) {
  */
 export async function getPartnerOnboarding(partnerCode) {
   try {
-    const result = await wixData.query('PartnerOnboarding')
-      .eq('partner_code', partnerCode.toUpperCase())
-      .find()
-      .catch(() => ({ items: [] }));
+    // Use dual-source routing
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.partnerOnboarding)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.partnerOnboarding);
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: `{Partner Code} = '${partnerCode.toUpperCase()}'`,
+        maxRecords: 1
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('PartnerOnboarding')
+        .eq('partner_code', partnerCode.toUpperCase())
+        .find()
+        .catch(() => ({ items: [] }));
+      resultItems = result.items;
+    }
 
-    if (result.items.length === 0) {
+    if (resultItems.length === 0) {
       // Return generic onboarding if no partner-specific content
       return {
         success: true,
@@ -365,27 +512,27 @@ export async function getPartnerOnboarding(partnerCode) {
       };
     }
 
-    const partner = result.items[0];
+    const partner = resultItems[0];
 
     return {
       success: true,
       partner: {
-        code: partner.partner_code,
-        name: partner.partner_name,
-        welcomeMessage: partner.welcome_message,
-        onboardingSteps: partner.onboarding_steps || [],
+        code: partner.partner_code || partner['Partner Code'],
+        name: partner.partner_name || partner['Partner Name'],
+        welcomeMessage: partner.welcome_message || partner['Welcome Message'],
+        onboardingSteps: partner.onboarding_steps || partner['Onboarding Steps'] || [],
         customBranding: {
-          logoUrl: partner.logo_url,
-          primaryColor: partner.primary_color,
-          accentColor: partner.accent_color
+          logoUrl: partner.logo_url || partner['Logo Url'],
+          primaryColor: partner.primary_color || partner['Primary Color'],
+          accentColor: partner.accent_color || partner['Accent Color']
         },
         contactInfo: {
-          name: partner.contact_name,
-          email: partner.contact_email,
-          phone: partner.contact_phone
+          name: partner.contact_name || partner['Contact Name'],
+          email: partner.contact_email || partner['Contact Email'],
+          phone: partner.contact_phone || partner['Contact Phone']
         },
-        benefits: partner.benefits || [],
-        requirements: partner.requirements || []
+        benefits: partner.benefits || partner.Benefits || [],
+        requirements: partner.requirements || partner.Requirements || []
       }
     };
   } catch (err) {
@@ -404,28 +551,40 @@ export async function getPartnerOnboarding(partnerCode) {
  */
 export async function getIndustryComparison(comparisonId = 'ai-vs-traditional') {
   try {
-    const result = await wixData.query('IndustryComparisons')
-      .eq('comparison_id', comparisonId)
-      .find()
-      .catch(() => ({ items: [] }));
+    // Use dual-source routing
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.industryComparisons)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.industryComparisons);
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: `{Comparison Id} = '${comparisonId}'`,
+        maxRecords: 1
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('IndustryComparisons')
+        .eq('comparison_id', comparisonId)
+        .find()
+        .catch(() => ({ items: [] }));
+      resultItems = result.items;
+    }
 
-    if (result.items.length === 0) {
+    if (resultItems.length === 0) {
       return {
         success: true,
         comparison: getDefaultIndustryComparison(comparisonId)
       };
     }
 
-    const comparison = result.items[0];
+    const comparison = resultItems[0];
 
     return {
       success: true,
       comparison: {
-        title: comparison.comparison_title,
-        traditional: comparison.traditional_method,
-        ai: comparison.ai_method,
-        metrics: comparison.metrics || [],
-        caseStudies: comparison.case_studies || []
+        title: comparison.comparison_title || comparison['Comparison Title'],
+        traditional: comparison.traditional_method || comparison['Traditional Method'],
+        ai: comparison.ai_method || comparison['Ai Method'],
+        metrics: comparison.metrics || comparison.Metrics || [],
+        caseStudies: comparison.case_studies || comparison['Case Studies'] || []
       }
     };
   } catch (err) {
@@ -444,18 +603,31 @@ export async function getIndustryComparison(comparisonId = 'ai-vs-traditional') 
  */
 export async function getFAQs(category) {
   try {
-    const result = await wixData.query('FAQs')
-      .eq('category', category)
-      .eq('is_active', true)
-      .ascending('display_order')
-      .find()
-      .catch(() => ({ items: [] }));
+    // Use dual-source routing
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.faqs)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.faqs);
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: `AND({Category} = '${category}', {Is Active} = TRUE())`,
+        sort: [{ field: 'Display Order', direction: 'asc' }],
+        maxRecords: 100
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('FAQs')
+        .eq('category', category)
+        .eq('is_active', true)
+        .ascending('display_order')
+        .find()
+        .catch(() => ({ items: [] }));
+      resultItems = result.items;
+    }
 
     return {
       success: true,
-      faqs: result.items.map(faq => ({
-        question: faq.question,
-        answer: faq.answer
+      faqs: resultItems.map(faq => ({
+        question: faq.question || faq.Question,
+        answer: faq.answer || faq.Answer
       }))
     };
   } catch (err) {
@@ -474,14 +646,27 @@ export async function getFAQs(category) {
  */
 export async function getPricingTiers(customerType = 'carrier') {
   try {
-    const result = await wixData.query('PricingTiers')
-      .eq('customer_type', customerType)
-      .eq('is_active', true)
-      .ascending('display_order')
-      .find()
-      .catch(() => ({ items: [] }));
+    // Use dual-source routing
+    let resultItems = [];
+    if (usesAirtable(COLLECTION_KEYS.pricingTiers)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.pricingTiers);
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: `AND({Customer Type} = '${customerType}', {Is Active} = TRUE())`,
+        sort: [{ field: 'Display Order', direction: 'asc' }],
+        maxRecords: 20
+      });
+      resultItems = result.records || [];
+    } else {
+      const result = await wixData.query('PricingTiers')
+        .eq('customer_type', customerType)
+        .eq('is_active', true)
+        .ascending('display_order')
+        .find()
+        .catch(() => ({ items: [] }));
+      resultItems = result.items;
+    }
 
-    if (result.items.length === 0) {
+    if (resultItems.length === 0) {
       return {
         success: true,
         tiers: getDefaultPricingTiers(customerType)
@@ -490,16 +675,16 @@ export async function getPricingTiers(customerType = 'carrier') {
 
     return {
       success: true,
-      tiers: result.items.map(tier => ({
-        name: tier.tier_name,
-        price: tier.price_display,
-        priceSubtext: tier.price_subtext,
-        description: tier.description,
-        features: tier.features || [],
-        ctaText: tier.cta_text || 'Get Started',
-        ctaLink: tier.cta_link || '/carrier-welcome',
-        isPopular: tier.is_popular,
-        badgeText: tier.badge_text
+      tiers: resultItems.map(tier => ({
+        name: tier.tier_name || tier['Tier Name'],
+        price: tier.price_display || tier['Price Display'],
+        priceSubtext: tier.price_subtext || tier['Price Subtext'],
+        description: tier.description || tier.Description,
+        features: tier.features || tier.Features || [],
+        ctaText: tier.cta_text || tier['Cta Text'] || 'Get Started',
+        ctaLink: tier.cta_link || tier['Cta Link'] || '/carrier-welcome',
+        isPopular: tier.is_popular || tier['Is Popular'],
+        badgeText: tier.badge_text || tier['Badge Text']
       }))
     };
   } catch (err) {
