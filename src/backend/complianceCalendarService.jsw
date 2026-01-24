@@ -115,6 +115,38 @@ const STATUS = {
  * @returns {Promise<Array>} - List of compliance events
  */
 export async function getComplianceEvents(carrierDot, filters = {}) {
+  // Use dual-source routing
+  if (usesAirtable(COLLECTION_KEYS.complianceEvents)) {
+    const tableName = getAirtableTableName(COLLECTION_KEYS.complianceEvents);
+    const filterParts = [`{Carrier Dot} = '${carrierDot}'`];
+
+    if (filters.status) {
+      filterParts.push(`{Status} = '${filters.status}'`);
+    }
+    if (filters.category) {
+      filterParts.push(`{Event Category} = '${filters.category}'`);
+    }
+    if (filters.driverId) {
+      filterParts.push(`{Driver Id} = '${filters.driverId}'`);
+    }
+    if (filters.dateRange) {
+      if (filters.dateRange.start) {
+        filterParts.push(`IS_AFTER({Due Date}, '${new Date(filters.dateRange.start).toISOString()}')`);
+      }
+      if (filters.dateRange.end) {
+        filterParts.push(`IS_BEFORE({Due Date}, '${new Date(filters.dateRange.end).toISOString()}')`);
+      }
+    }
+
+    const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : filterParts[0];
+    const result = await airtable.queryRecords(tableName, {
+      filterByFormula: filter,
+      sort: [{ field: 'Due Date', direction: 'asc' }]
+    });
+    return result.records || [];
+  }
+
+  // Wix Data path
   let query = wixData.query(COMPLIANCE_EVENTS_COLLECTION)
     .eq('carrier_dot', carrierDot);
 
@@ -177,7 +209,8 @@ export async function createComplianceEvent(eventData) {
   eventData.reminder_7_sent = false;
   eventData.reminder_due_sent = false;
 
-  const result = await wixData.insert(COMPLIANCE_EVENTS_COLLECTION, eventData, { suppressAuth: true });
+  // Use dual-source routing
+  const result = await insertData(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, eventData);
   return result;
 }
 
@@ -192,28 +225,29 @@ export async function updateComplianceEvent(eventId, updates) {
   delete updates._id;
   delete updates._owner;
 
-  // Get existing event
-  const existing = await wixData.get(COMPLIANCE_EVENTS_COLLECTION, eventId, { suppressAuth: true });
+  // Get existing event - use dual-source routing
+  const existing = await getRecord(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, eventId);
   if (!existing) {
     throw new Error(`Event ${eventId} not found`);
   }
 
   // Merge updates
-  const toUpdate = { ...existing, ...updates };
+  const toUpdate = { ...existing, ...updates, _id: existing._id || existing.id };
 
   // Re-calculate status if due_date changed and status wasn't manually set to completed
   if (updates.due_date && toUpdate.status !== STATUS.COMPLETED) {
     const now = new Date();
     const dueDate = new Date(updates.due_date);
     const diffDays = Math.ceil((dueDate - now) / (1000 * 60 * 60 * 24));
-    
+
     if (diffDays < 0) toUpdate.status = STATUS.OVERDUE;
     else if (diffDays <= 7) toUpdate.status = STATUS.DUE_SOON;
     else if (diffDays <= 30) toUpdate.status = STATUS.UPCOMING;
     else toUpdate.status = STATUS.PENDING;
   }
 
-  const result = await wixData.update(COMPLIANCE_EVENTS_COLLECTION, toUpdate, { suppressAuth: true });
+  // Use dual-source routing
+  const result = await updateData(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, toUpdate);
   return result;
 }
 
@@ -224,7 +258,8 @@ export async function updateComplianceEvent(eventId, updates) {
  * @returns {Promise<Object>} - Updated event with next occurrence if recurring
  */
 export async function completeComplianceEvent(eventId, documentId = null) {
-  const existing = await wixData.get(COMPLIANCE_EVENTS_COLLECTION, eventId, { suppressAuth: true });
+  // Use dual-source routing
+  const existing = await getRecord(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, eventId);
   if (!existing) throw new Error(`Event ${eventId} not found`);
 
   const updates = {
@@ -249,7 +284,8 @@ export async function completeComplianceEvent(eventId, documentId = null) {
  * @returns {Promise<boolean>} - Success
  */
 export async function deleteComplianceEvent(eventId) {
-  await wixData.remove(COMPLIANCE_EVENTS_COLLECTION, eventId, { suppressAuth: true });
+  // Use dual-source routing
+  await removeData(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, eventId);
   return true;
 }
 
@@ -397,19 +433,29 @@ export async function processComplianceReminders() {
   // that just crossed thresholds (e.g. 30 days out, 7 days out)
   // For this prototype, we'll scan active events
   
-  const activeEvents = await wixData.query(COMPLIANCE_EVENTS_COLLECTION)
-    .ne('status', STATUS.COMPLETED)
-    .find({ suppressAuth: true });
-    
-  for (const event of activeEvents.items) {
+  // Use dual-source routing for active events query
+  let activeEventItems = [];
+  if (usesAirtable(COLLECTION_KEYS.complianceEvents)) {
+    const tableName = getAirtableTableName(COLLECTION_KEYS.complianceEvents);
+    const filter = `{Status} != '${STATUS.COMPLETED}'`;
+    const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1000 });
+    activeEventItems = result.records || [];
+  } else {
+    const activeEvents = await wixData.query(COMPLIANCE_EVENTS_COLLECTION)
+      .ne('status', STATUS.COMPLETED)
+      .find({ suppressAuth: true });
+    activeEventItems = activeEvents.items;
+  }
+
+  for (const event of activeEventItems) {
     processedCount++;
     const dueDate = new Date(event.due_date);
     const diffTime = dueDate - today;
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
+
     let needsUpdate = false;
     let newStatus = event.status;
-    
+
     // Status Logic
     if (diffDays < 0 && event.status !== STATUS.OVERDUE) {
       newStatus = STATUS.OVERDUE;
@@ -424,30 +470,35 @@ export async function processComplianceReminders() {
 
     if (needsUpdate) {
       event.status = newStatus;
-      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+      event._id = event._id || event.id;
+      await updateData(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, event);
       updatedCount++;
     }
-    
+
     // Reminder Logic (Send Alerts)
     // We would integrate with emailService here
     // For now, we'll just log/create internal alerts
-    
+
     if (diffDays === 30 && !event.reminder_30_sent) {
       await createComplianceAlert(event, '30_day');
       event.reminder_30_sent = true;
-      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+      event._id = event._id || event.id;
+      await updateData(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, event);
     } else if (diffDays === 14 && !event.reminder_14_sent) {
       await createComplianceAlert(event, '14_day');
       event.reminder_14_sent = true;
-      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+      event._id = event._id || event.id;
+      await updateData(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, event);
     } else if (diffDays === 7 && !event.reminder_7_sent) {
       await createComplianceAlert(event, '7_day');
       event.reminder_7_sent = true;
-      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+      event._id = event._id || event.id;
+      await updateData(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, event);
     } else if (diffDays === 0 && !event.reminder_due_sent) {
       await createComplianceAlert(event, 'due_today');
       event.reminder_due_sent = true;
-      await wixData.update(COMPLIANCE_EVENTS_COLLECTION, event, { suppressAuth: true });
+      event._id = event._id || event.id;
+      await updateData(COLLECTION_KEYS.complianceEvents, COMPLIANCE_EVENTS_COLLECTION, event);
     }
   }
 

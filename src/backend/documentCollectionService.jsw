@@ -330,24 +330,20 @@ export async function requestDocuments(workflowId, documentTypes) {
     }
 
     try {
-        // Verify workflow exists
-        const workflowResult = await wixData.query(CONFIG.collections.onboardingWorkflows)
-            .eq('_id', workflowId)
-            .limit(1)
-            .find({ suppressAuth: true });
+        // Verify workflow exists - use dual-source routing
+        const workflow = await getRecord(COLLECTION_KEYS.onboardingWorkflows, CONFIG.collections.onboardingWorkflows, workflowId);
 
-        if (workflowResult.items.length === 0) {
+        if (!workflow) {
             return { success: false, error: 'Workflow not found' };
         }
 
-        const workflow = workflowResult.items[0];
         const now = new Date();
         const requestIds = [];
 
         // Generate upload token for this batch
         const { token, expiry } = generateUploadToken();
 
-        // Create document request records
+        // Create document request records - use dual-source routing
         for (const docType of documentTypes) {
             const metadata = getDocumentMetadata(docType);
 
@@ -375,17 +371,18 @@ export async function requestDocuments(workflowId, documentTypes) {
                 _updatedDate: now
             };
 
-            const inserted = await wixData.insert(CONFIG.collections.documentRequests, docRequest, { suppressAuth: true });
-            requestIds.push(inserted._id);
+            const inserted = await insertData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, docRequest);
+            requestIds.push(inserted._id || inserted.id);
         }
 
-        // Update workflow status
-        await wixData.update(CONFIG.collections.onboardingWorkflows, {
+        // Update workflow status - use dual-source routing
+        await updateData(COLLECTION_KEYS.onboardingWorkflows, CONFIG.collections.onboardingWorkflows, {
             ...workflow,
+            _id: workflow._id || workflow.id,
             documents_status: 'pending',
             status: 'documents_requested',
             _updatedDate: now
-        }, { suppressAuth: true });
+        });
 
         // Generate upload portal URL
         const uploadPortalUrl = `https://lastmilecdl.com/document-upload?token=${token}`;
@@ -422,11 +419,19 @@ export async function getDocumentStatus(workflowId) {
     }
 
     try {
-        const result = await wixData.query(CONFIG.collections.documentRequests)
-            .eq('workflow_id', workflowId)
-            .find({ suppressAuth: true });
-
-        const documents = result.items || [];
+        // Use dual-source routing
+        let documents = [];
+        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
+            const filter = `{Workflow Id} = '${workflowId}'`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter });
+            documents = result.records || [];
+        } else {
+            const result = await wixData.query(CONFIG.collections.documentRequests)
+                .eq('workflow_id', workflowId)
+                .find({ suppressAuth: true });
+            documents = result.items || [];
+        }
 
         // Calculate summary
         const total = documents.length;
@@ -507,18 +512,27 @@ export async function uploadDocument(token, documentType, fileData) {
     }
 
     try {
-        // Find document request by token and type
-        const result = await wixData.query(CONFIG.collections.documentRequests)
-            .eq('upload_token', token)
-            .eq('document_type', documentType)
-            .limit(1)
-            .find({ suppressAuth: true });
+        // Find document request by token and type - use dual-source routing
+        let docRequestItems = [];
+        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
+            const filter = `AND({Upload Token} = '${token}', {Document Type} = '${documentType}')`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+            docRequestItems = result.records || [];
+        } else {
+            const result = await wixData.query(CONFIG.collections.documentRequests)
+                .eq('upload_token', token)
+                .eq('document_type', documentType)
+                .limit(1)
+                .find({ suppressAuth: true });
+            docRequestItems = result.items;
+        }
 
-        if (result.items.length === 0) {
+        if (docRequestItems.length === 0) {
             return { success: false, error: 'Invalid token or document type' };
         }
 
-        const docRequest = result.items[0];
+        const docRequest = docRequestItems[0];
 
         // Check token expiry
         if (!isTokenValid(docRequest.upload_token_expiry)) {
