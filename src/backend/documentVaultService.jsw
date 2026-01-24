@@ -104,7 +104,8 @@ export async function uploadDocument(carrierDot, documentData) {
     newDoc.days_until_expiry = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
   }
 
-  const result = await wixData.insert(COLLECTION, newDoc, { suppressAuth: true });
+  // Use dual-source routing
+  const result = await insertData(COLLECTION_KEYS.carrierDocuments, COLLECTION, newDoc);
 
   // Auto-create compliance event if expiration date exists
   if (result.expiration_date && result.document_type) {
@@ -134,13 +135,43 @@ export async function uploadDocument(carrierDot, documentData) {
  * @returns {Promise<Array>} - List of documents
  */
 export async function getDocuments(carrierDot, filters = {}) {
+  // Dual-source routing
+  if (usesAirtable(COLLECTION_KEYS.carrierDocuments)) {
+    const tableName = getAirtableTableName(COLLECTION_KEYS.carrierDocuments);
+    const filterParts = [`{Carrier Dot} = "${carrierDot}"`];
+
+    if (filters.category) filterParts.push(`{Document Category} = "${filters.category}"`);
+    if (filters.type) filterParts.push(`{Document Type} = "${filters.type}"`);
+    if (filters.driverId) filterParts.push(`{Driver Id} = "${filters.driverId}"`);
+    if (filters.status) filterParts.push(`{Status} = "${filters.status}"`);
+    if (filters.expired === true) filterParts.push(`{Is Expired} = TRUE()`);
+    else if (filters.expired === false) filterParts.push(`{Is Expired} = FALSE()`);
+
+    const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : filterParts[0];
+    const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 500 });
+    return (result.records || []).map(r => ({
+      _id: r.id || r._id,
+      carrier_dot: r['Carrier Dot'] || r.carrier_dot,
+      document_type: r['Document Type'] || r.document_type,
+      document_category: r['Document Category'] || r.document_category,
+      driver_id: r['Driver Id'] || r.driver_id,
+      status: r.Status || r.status,
+      is_expired: r['Is Expired'] || r.is_expired,
+      expiration_date: r['Expiration Date'] || r.expiration_date,
+      file_url: r['File Url'] || r.file_url,
+      title: r.Title || r.title,
+      version: r.Version || r.version
+    }));
+  }
+
+  // Wix Data path
   let query = wixData.query(COLLECTION).eq('carrier_dot', carrierDot);
 
   if (filters.category) query = query.eq('document_category', filters.category);
   if (filters.type) query = query.eq('document_type', filters.type);
   if (filters.driverId) query = query.eq('driver_id', filters.driverId);
   if (filters.status) query = query.eq('status', filters.status);
-  
+
   if (filters.expired === true) query = query.eq('is_expired', true);
   else if (filters.expired === false) query = query.eq('is_expired', false);
 
@@ -154,7 +185,8 @@ export async function getDocuments(carrierDot, filters = {}) {
  * @returns {Promise<Object>} - Document
  */
 export async function getDocument(documentId) {
-  return wixData.get(COLLECTION, documentId, { suppressAuth: true });
+  // Use dual-source routing
+  return getRecord(COLLECTION_KEYS.carrierDocuments, COLLECTION, documentId);
 }
 
 /**
@@ -171,8 +203,8 @@ export async function updateDocument(documentId, updates) {
   const existing = await getDocument(documentId);
   if (!existing) throw new Error('Document not found');
 
-  const toUpdate = { ...existing, ...updates };
-  
+  const toUpdate = { ...existing, ...updates, _id: existing._id || existing.id };
+
   // Recalc expiration if date changes
   if (updates.expiration_date) {
     const expDate = new Date(updates.expiration_date);
@@ -181,7 +213,8 @@ export async function updateDocument(documentId, updates) {
     toUpdate.days_until_expiry = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
   }
 
-  return wixData.update(COLLECTION, toUpdate, { suppressAuth: true });
+  // Use dual-source routing
+  return updateData(COLLECTION_KEYS.carrierDocuments, COLLECTION, toUpdate);
 }
 
 /**
@@ -194,9 +227,9 @@ export async function uploadNewVersion(documentId, newVersionData) {
   const previousDoc = await getDocument(documentId);
   if (!previousDoc) throw new Error('Previous document not found');
 
-  // Archive previous
-  previousDoc.status = 'superseded';
-  await wixData.update(COLLECTION, previousDoc, { suppressAuth: true });
+  // Archive previous using dual-source routing
+  const archiveUpdate = { ...previousDoc, _id: previousDoc._id || previousDoc.id, status: 'superseded' };
+  await updateData(COLLECTION_KEYS.carrierDocuments, COLLECTION, archiveUpdate);
 
   // Create new
   const newDoc = {
@@ -204,7 +237,7 @@ export async function uploadNewVersion(documentId, newVersionData) {
     ...newVersionData,
     _id: undefined, // Create new ID
     version: (previousDoc.version || 1) + 1,
-    previous_version_id: previousDoc._id,
+    previous_version_id: previousDoc._id || previousDoc.id,
     status: 'active',
     verification_status: 'pending'
   };
@@ -217,7 +250,8 @@ export async function uploadNewVersion(documentId, newVersionData) {
     newDoc.days_until_expiry = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
   }
 
-  return wixData.insert(COLLECTION, newDoc, { suppressAuth: true });
+  // Use dual-source routing
+  return insertData(COLLECTION_KEYS.carrierDocuments, COLLECTION, newDoc);
 }
 
 /**
@@ -227,18 +261,42 @@ export async function uploadNewVersion(documentId, newVersionData) {
  */
 export async function getDocumentVersionHistory(documentId) {
   // Find the 'active' or latest version if possible, or walk the chain.
-  // For simplicity, we can query by some common grouping ID if we had one, 
-  // but here we might rely on previous_version_id chain. 
+  // For simplicity, we can query by some common grouping ID if we had one,
+  // but here we might rely on previous_version_id chain.
   // A better schema would have a 'root_document_id' field.
   // For now, let's assume we find all by matching title + carrier + driver + type
-  
+
   const doc = await getDocument(documentId);
   if (!doc) return [];
 
+  const carrierDot = doc.carrier_dot || doc['Carrier Dot'];
+  const docType = doc.document_type || doc['Document Type'];
+  const driverId = doc.driver_id || doc['Driver Id'];
+
+  // Dual-source routing
+  if (usesAirtable(COLLECTION_KEYS.carrierDocuments)) {
+    const tableName = getAirtableTableName(COLLECTION_KEYS.carrierDocuments);
+    const filter = `AND({Carrier Dot} = "${carrierDot}", {Document Type} = "${docType}", {Driver Id} = "${driverId}")`;
+    const result = await airtable.queryRecords(tableName, {
+      filterByFormula: filter,
+      sort: [{ field: 'Version', direction: 'desc' }],
+      maxRecords: 100
+    });
+    return (result.records || []).map(r => ({
+      _id: r.id || r._id,
+      carrier_dot: r['Carrier Dot'] || r.carrier_dot,
+      document_type: r['Document Type'] || r.document_type,
+      driver_id: r['Driver Id'] || r.driver_id,
+      version: r.Version || r.version,
+      status: r.Status || r.status,
+      file_url: r['File Url'] || r.file_url
+    }));
+  }
+
   const result = await wixData.query(COLLECTION)
-    .eq('carrier_dot', doc.carrier_dot)
-    .eq('document_type', doc.document_type)
-    .eq('driver_id', doc.driver_id)
+    .eq('carrier_dot', carrierDot)
+    .eq('document_type', docType)
+    .eq('driver_id', driverId)
     .descending('version')
     .find({ suppressAuth: true });
 
@@ -253,8 +311,10 @@ export async function getDocumentVersionHistory(documentId) {
 export async function archiveDocument(documentId) {
   const doc = await getDocument(documentId);
   if (!doc) return false;
-  doc.status = 'archived';
-  await wixData.update(COLLECTION, doc, { suppressAuth: true });
+
+  const archiveUpdate = { ...doc, _id: doc._id || doc.id, status: 'archived' };
+  // Use dual-source routing
+  await updateData(COLLECTION_KEYS.carrierDocuments, COLLECTION, archiveUpdate);
   return true;
 }
 
@@ -273,6 +333,25 @@ export async function getExpiringDocuments(carrierDot, daysAhead = 30) {
   const future = new Date();
   future.setDate(future.getDate() + daysAhead);
 
+  // Dual-source routing
+  if (usesAirtable(COLLECTION_KEYS.carrierDocuments)) {
+    const tableName = getAirtableTableName(COLLECTION_KEYS.carrierDocuments);
+    const filter = `AND({Carrier Dot} = "${carrierDot}", {Status} = "active", {Is Expired} = FALSE(), {Expiration Date} <= "${future.toISOString()}")`;
+    const result = await airtable.queryRecords(tableName, {
+      filterByFormula: filter,
+      sort: [{ field: 'Expiration Date', direction: 'asc' }],
+      maxRecords: 100
+    });
+    return (result.records || []).map(r => ({
+      _id: r.id || r._id,
+      carrier_dot: r['Carrier Dot'] || r.carrier_dot,
+      document_type: r['Document Type'] || r.document_type,
+      expiration_date: r['Expiration Date'] || r.expiration_date,
+      title: r.Title || r.title,
+      status: r.Status || r.status
+    }));
+  }
+
   const result = await wixData.query(COLLECTION)
     .eq('carrier_dot', carrierDot)
     .eq('status', 'active')
@@ -290,6 +369,22 @@ export async function getExpiringDocuments(carrierDot, daysAhead = 30) {
  * @returns {Promise<Array>} - Expired documents
  */
 export async function getExpiredDocuments(carrierDot) {
+  // Dual-source routing
+  if (usesAirtable(COLLECTION_KEYS.carrierDocuments)) {
+    const tableName = getAirtableTableName(COLLECTION_KEYS.carrierDocuments);
+    const filter = `AND({Carrier Dot} = "${carrierDot}", {Status} = "active", {Is Expired} = TRUE())`;
+    const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 100 });
+    return (result.records || []).map(r => ({
+      _id: r.id || r._id,
+      carrier_dot: r['Carrier Dot'] || r.carrier_dot,
+      document_type: r['Document Type'] || r.document_type,
+      expiration_date: r['Expiration Date'] || r.expiration_date,
+      title: r.Title || r.title,
+      status: r.Status || r.status,
+      is_expired: true
+    }));
+  }
+
   const result = await wixData.query(COLLECTION)
     .eq('carrier_dot', carrierDot)
     .eq('status', 'active')
@@ -315,14 +410,19 @@ export async function verifyDocument(documentId, verifierId, status, notes = '')
   const doc = await getDocument(documentId);
   if (!doc) throw new Error('Document not found');
 
-  doc.verification_status = status;
-  doc.verified_by = verifierId;
-  doc.verified_date = new Date();
-  doc.notes = notes;
+  const verifyUpdate = {
+    ...doc,
+    _id: doc._id || doc.id,
+    verification_status: status,
+    verified_by: verifierId,
+    verified_date: new Date(),
+    notes: notes
+  };
 
   // If rejected, maybe update status? Keeping active for now so they can see it's rejected.
-  
-  return wixData.update(COLLECTION, doc, { suppressAuth: true });
+
+  // Use dual-source routing
+  return updateData(COLLECTION_KEYS.carrierDocuments, COLLECTION, verifyUpdate);
 }
 
 /**
@@ -331,31 +431,50 @@ export async function verifyDocument(documentId, verifierId, status, notes = '')
  */
 export async function updateDocumentExpirations() {
   const now = new Date();
-  
-  // Get all active documents
-  // Pagination would be needed for scale
-  let query = wixData.query(COLLECTION).eq('status', 'active');
-  let result = await query.find({ suppressAuth: true });
-  let items = result.items;
-  
-  while(result.hasNext()) {
-      result = await result.next();
-      items = items.concat(result.items);
+
+  // Get all active documents using dual-source routing
+  let items = [];
+
+  if (usesAirtable(COLLECTION_KEYS.carrierDocuments)) {
+    const tableName = getAirtableTableName(COLLECTION_KEYS.carrierDocuments);
+    const result = await airtable.queryRecords(tableName, {
+      filterByFormula: `{Status} = "active"`,
+      maxRecords: 5000
+    });
+    items = (result.records || []).map(r => ({
+      _id: r.id || r._id,
+      expiration_date: r['Expiration Date'] || r.expiration_date,
+      is_expired: r['Is Expired'] || r.is_expired,
+      days_until_expiry: r['Days Until Expiry'] || r.days_until_expiry
+    }));
+  } else {
+    // Pagination would be needed for scale
+    let query = wixData.query(COLLECTION).eq('status', 'active');
+    let result = await query.find({ suppressAuth: true });
+    items = result.items;
+
+    while(result.hasNext()) {
+        result = await result.next();
+        items = items.concat(result.items);
+    }
   }
 
   let updatedCount = 0;
 
   for (const doc of items) {
     if (!doc.expiration_date) continue;
-    
+
     const expDate = new Date(doc.expiration_date);
     const isExpired = expDate < now;
     const daysUntil = Math.ceil((expDate - now) / (1000 * 60 * 60 * 24));
-    
+
     if (doc.is_expired !== isExpired || doc.days_until_expiry !== daysUntil) {
-      doc.is_expired = isExpired;
-      doc.days_until_expiry = daysUntil;
-      await wixData.update(COLLECTION, doc, { suppressAuth: true });
+      const expirationUpdate = {
+        _id: doc._id,
+        is_expired: isExpired,
+        days_until_expiry: daysUntil
+      };
+      await updateData(COLLECTION_KEYS.carrierDocuments, COLLECTION, expirationUpdate);
       updatedCount++;
     }
   }
