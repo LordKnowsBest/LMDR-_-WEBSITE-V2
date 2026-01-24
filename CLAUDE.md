@@ -11,6 +11,139 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is required because Wix syncs from the GitHub repository. Without pushing, changes won't appear in Wix.
 
+## Critical Data Routing: Dual-Source Pattern (Wix + Airtable)
+
+**CRITICAL RULE:** This project uses a dual-source data architecture where most data routes to **Airtable** for visibility, while auth-related data stays in **Wix**. You MUST follow this pattern when writing or modifying backend code.
+
+### The Golden Rule
+
+**NEVER call `wixData.*` directly in business logic functions.** Always use the dual-source helper functions.
+
+### Collections That Stay in Wix (ONLY THESE TWO)
+
+| Collection | Reason |
+|------------|--------|
+| `AdminUsers` | Auth/permissions - must stay in Wix |
+| `MemberNotifications` | Wix member system integration |
+
+**Everything else (~65+ collections) routes to Airtable.**
+
+### Required Helper Functions
+
+Every backend service that accesses data MUST define and use these helpers:
+
+```javascript
+import { usesAirtable, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// Collection key mapping (at top of file)
+const COLLECTION_KEYS = {
+    carriers: 'carriers',
+    drivers: 'driverProfiles',
+    // ... add all collections this service uses
+};
+
+// Helper functions (define once per service file)
+async function queryData(collectionKey, wixCollectionName, options = {}) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        const result = await airtable.queryRecords(tableName, {
+            filterByFormula: options.filter || '',
+            sort: options.sort,
+            maxRecords: options.limit || 100
+        });
+        return result.records || [];
+    }
+    // Wix fallback
+    let query = wixData.query(wixCollectionName);
+    // ... build query
+    const result = await query.find({ suppressAuth: true });
+    return result.items;
+}
+
+async function insertData(collectionKey, wixCollectionName, data) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.createRecord(tableName, data);
+    }
+    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
+}
+
+async function updateData(collectionKey, wixCollectionName, data) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.updateRecord(tableName, data._id || data.id, data);
+    }
+    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
+}
+
+async function getRecord(collectionKey, wixCollectionName, recordId) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.getRecord(tableName, recordId);
+    }
+    return await wixData.get(wixCollectionName, recordId, { suppressAuth: true });
+}
+
+async function removeData(collectionKey, wixCollectionName, recordId) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.deleteRecord(tableName, recordId);
+    }
+    return await wixData.remove(wixCollectionName, recordId, { suppressAuth: true });
+}
+```
+
+### Before/After Example
+
+```javascript
+// ❌ WRONG - Bypasses dual-source routing, data goes to Wix only
+const result = await wixData.query('Carriers').eq('status', 'active').find();
+await wixData.insert('AuditLog', { action: 'login', timestamp: new Date() });
+
+// ✅ CORRECT - Uses dual-source routing, data goes to Airtable
+const result = await queryData(COLLECTION_KEYS.carriers, 'Carriers', {
+    filter: `{Status} = "active"`
+});
+await insertData(COLLECTION_KEYS.auditLog, 'AuditLog', { action: 'login', timestamp: new Date() });
+```
+
+### Field Name Mapping
+
+Wix uses `snake_case`, Airtable uses `Title Case`. When reading from Airtable, normalize field names:
+
+```javascript
+// Normalize Airtable response to match Wix field names
+const normalizedRecords = (result.records || []).map(r => ({
+    _id: r.id || r._id,
+    carrier_name: r['Carrier Name'] || r.carrier_name,
+    dot_number: r['Dot Number'] || r.dot_number,
+    status: r.Status || r.status,
+    created_date: r['Created Date'] || r._createdDate
+}));
+```
+
+### Config File Reference
+
+Routing is controlled by `backend/config.js`:
+- `usesAirtable(collectionKey)` - Returns `true` if collection routes to Airtable
+- `getAirtableTableName(collectionKey)` - Returns the Airtable table name
+
+### Checklist When Modifying Backend Services
+
+1. **Check for direct `wixData.*` calls** - Search for `wixData.query`, `wixData.insert`, `wixData.update`, `wixData.get`, `wixData.remove`
+2. **Verify helpers exist** - Ensure the service has `queryData`, `insertData`, `updateData`, `getRecord`, `removeData` defined
+3. **Check COLLECTION_KEYS** - Ensure all collections used by the service are mapped
+4. **Replace bypasses** - Convert direct `wixData.*` calls to use the helpers
+5. **Handle field name mapping** - Normalize Airtable responses to match expected field names
+
+### Allowed Direct Wix Calls
+
+The ONLY acceptable direct `wixData.*` calls are:
+1. **Inside the helper functions themselves** (the Wix fallback path)
+2. **For `AdminUsers` collection** (auth must stay in Wix)
+3. **For `MemberNotifications` collection** (Wix member integration)
+
 ## Project Overview
 
 LMDR (Last Mile Driver Recruiting) is a Wix Velo site for matching CDL truck drivers with carriers. The site uses AI-powered enrichment to provide drivers with detailed carrier intelligence including FMCSA safety data, pay information, driver sentiment, and social media analysis.
