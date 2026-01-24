@@ -375,3 +375,524 @@ If critical issues require full rollback:
 | Type conversion errors | DOT number validated as Number before all queries |
 | Data loss | Wix collections kept as backup for 30 days |
 | Performance regression | Feature flags allow instant per-collection rollback |
+
+---
+
+## Phase 7: Service Refactoring - VERY HIGH Impact (8 files)
+
+> **Goal**: Refactor the 8 most complex backend services with highest wixData usage
+>
+> **Dependencies**: Phases 1-6 complete (all collections migrated)
+>
+> **Estimated Effort**: 3-4 weeks
+
+### 7.1 admin_dashboard_service.jsw (44 operations, 9 collections)
+
+- [ ] Task: Audit all 44 wixData operations in file
+- [ ] Task: Create airtableClient functions for dashboard aggregations
+- [ ] Task: Implement count query translations (Airtable doesn't have native count)
+- [ ] Task: Refactor `getSystemStats()` to use airtableClient
+- [ ] Task: Refactor `getRecentActivity()` to use airtableClient
+- [ ] Task: Refactor `getAlerts()` to use airtableClient
+- [ ] Task: Refactor `getAIUsageStats()` to use airtableClient
+- [ ] Task: Refactor `getHealthMetrics()` to use airtableClient
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify all dashboard widgets load correctly
+- [ ] Test: Verify stats accuracy matches Wix baseline
+
+### 7.2 admin_service.jsw (36 operations, 6 collections)
+
+- [ ] Task: Audit all 36 wixData operations in file
+- [ ] Task: Refactor multi-field `.or()` search chains to Airtable OR() formula
+- [ ] Task: Refactor `searchDrivers()` with complex filters
+- [ ] Task: Refactor `searchCarriers()` with complex filters
+- [ ] Task: Refactor `getDriverDetails()` to use airtableClient
+- [ ] Task: Refactor `updateDriverStatus()` to use airtableClient
+- [ ] Task: Refactor `bulkUpdateDrivers()` with batch limits (10 max)
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify admin search returns same results
+- [ ] Test: Verify bulk operations complete without errors
+
+### 7.3 carrierAdminService.jsw (30 operations, 6 collections)
+
+- [ ] Task: Audit all 30 wixData operations in file
+- [ ] Task: Refactor DOT number lookups (ensure Number type)
+- [ ] Task: Refactor `getCarrierWithEnrichment()` to use airtableClient
+- [ ] Task: Refactor `updateCarrierEnrichment()` to use airtableClient
+- [ ] Task: Refactor `getCarrierSafetyData()` to use airtableClient
+- [ ] Task: Refactor `linkCarrierToFMCSA()` to use airtableClient
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify FMCSA data flows correctly
+- [ ] Test: Verify enrichment cache TTL works
+
+### 7.4 recruiter_service.jsw (28 operations, 5 collections)
+
+- [ ] Task: Audit all 28 wixData operations in file
+- [ ] Task: Refactor `getRecruiterCarriers()` linked record queries
+- [ ] Task: Refactor `getDriverPipeline()` to use airtableClient
+- [ ] Task: Refactor `saveDriverToPipeline()` to use airtableClient
+- [ ] Task: Refactor `getOutreachHistory()` to use airtableClient
+- [ ] Task: Refactor access control queries (recruiterCarriers)
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify recruiter can only see authorized carriers
+- [ ] Test: Verify pipeline saves and loads correctly
+
+### 7.5 featureAdoptionService.jsw (28 operations, 4 collections)
+
+- [ ] Task: Audit all 28 wixData operations in file
+- [ ] Task: Refactor `logFeatureEvent()` to use airtableClient
+- [ ] Task: Refactor `getFeatureMetrics()` aggregations
+- [ ] Task: Refactor `getFunnelAnalytics()` to use airtableClient
+- [ ] Task: Refactor `getHealthScore()` calculations
+- [ ] Task: Handle high-volume event logging (consider batching)
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify feature tracking captures all events
+- [ ] Test: Verify analytics dashboard accuracy
+
+### 7.6 onboardingWorkflowService.jsw (27 operations, 7 collections)
+
+- [ ] Task: Audit all 27 wixData operations in file
+- [ ] Task: Refactor stateful workflow queries
+- [ ] Task: Refactor `getOnboardingStatus()` to use airtableClient
+- [ ] Task: Refactor `advanceOnboardingStep()` to use airtableClient
+- [ ] Task: Refactor `completeOnboarding()` to use airtableClient
+- [ ] Task: Handle 7-collection transaction consistency
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify full onboarding flow works
+- [ ] Test: Verify state transitions are atomic
+
+### 7.7 admin_match_service.jsw (26 operations, 3 collections)
+
+- [ ] Task: Audit all 26 wixData operations in file
+- [ ] Task: Refactor time-based analytics queries
+- [ ] Task: Refactor `getMatchAnalytics()` to use airtableClient
+- [ ] Task: Refactor `getMatchHistory()` with date filters
+- [ ] Task: Refactor `getDriverInterestTracking()` to use airtableClient
+- [ ] Task: Translate date range filters to Airtable formulas
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify match analytics accuracy
+- [ ] Test: Verify date filtering works correctly
+
+### 7.8 promptLibraryService.jsw (19 operations, 1 collection)
+
+- [ ] Task: Audit all 19 wixData operations in file
+- [ ] Task: Refactor `getPrompts()` to use airtableClient
+- [ ] Task: Refactor `savePrompt()` to use airtableClient
+- [ ] Task: Refactor `getPromptVersionHistory()` to use airtableClient
+- [ ] Task: Refactor `categorizePrompts()` to use airtableClient
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify prompt CRUD operations work
+- [ ] Test: Verify version history preserved
+
+---
+
+## Phase 8: Service Refactoring - HIGH Impact (6 files)
+
+> **Goal**: Refactor core matching and profile services
+>
+> **Dependencies**: Phase 7 complete
+>
+> **Estimated Effort**: 2-3 weeks
+
+### 8.1 driverMatching.jsw (18 operations)
+
+- [ ] Task: Audit all 18 wixData operations
+- [ ] Task: Refactor scoring algorithm queries
+- [ ] Task: Refactor `searchDriversForCarrier()` to use airtableClient
+- [ ] Task: Refactor `calculateMatchScore()` data fetches
+- [ ] Task: Refactor tier limit enforcement queries
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify match scores identical to baseline
+- [ ] Test: Verify tier limits enforced correctly
+
+### 8.2 carrierMatching.jsw (16 operations)
+
+- [ ] Task: Audit all 16 wixData operations
+- [ ] Task: Refactor weighted scoring queries
+- [ ] Task: Refactor `getMatchesForDriver()` to use airtableClient
+- [ ] Task: Refactor enrichment cache lookups
+- [ ] Task: Refactor carrier preference loading
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify match results identical
+- [ ] Test: Verify cache TTL works
+
+### 8.3 applicationService.jsw (15 operations)
+
+- [ ] Task: Audit all 15 wixData operations
+- [ ] Task: Refactor `submitApplication()` to use airtableClient
+- [ ] Task: Refactor `getApplicationsByDriver()` to use airtableClient
+- [ ] Task: Refactor `updateApplicationStatus()` to use airtableClient
+- [ ] Task: Refactor status lifecycle state machine
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Full application flow (apply → review → hire)
+- [ ] Test: Verify status transitions work
+
+### 8.4 driverProfiles.jsw (14 operations)
+
+- [ ] Task: Audit all 14 wixData operations
+- [ ] Task: Refactor `getDriverProfile()` to use airtableClient
+- [ ] Task: Refactor `updateDriverProfile()` to use airtableClient
+- [ ] Task: Refactor `calculateProfileCompleteness()` to use airtableClient
+- [ ] Task: Refactor Wix Member ID lookups
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify profile CRUD works
+- [ ] Test: Verify completeness score accurate
+
+### 8.5 memberService.jsw (12 operations)
+
+- [ ] Task: Audit all 12 wixData operations
+- [ ] Task: Refactor dashboard aggregations
+- [ ] Task: Refactor `getMemberSummary()` to use airtableClient
+- [ ] Task: Refactor `getNotifications()` to use airtableClient
+- [ ] Task: Refactor `getActivityHistory()` to use airtableClient
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify member dashboard loads
+- [ ] Test: Verify notifications display
+
+### 8.6 admin_audit_service.jsw (11 operations)
+
+- [ ] Task: Audit all 11 wixData operations
+- [ ] Task: Refactor append-only audit log writes
+- [ ] Task: Refactor `logAuditEvent()` to use airtableClient
+- [ ] Task: Refactor `getAuditHistory()` with filters
+- [ ] Task: Handle high-volume logging (batch inserts)
+- [ ] Task: Add DATA_SOURCE feature flag checks
+- [ ] Test: Verify all actions logged
+- [ ] Test: Verify audit trail queryable
+
+---
+
+## Phase 9: Service Refactoring - MEDIUM Impact (17 files)
+
+> **Goal**: Refactor all medium-complexity services
+>
+> **Dependencies**: Phase 8 complete
+>
+> **Estimated Effort**: 3-4 weeks
+
+### 9.1 Subscription & Billing Services
+
+- [ ] Task: Refactor `subscriptionService.jsw` (10 operations)
+  - [ ] `getSubscriptionStatus()` to airtableClient
+  - [ ] `checkQuota()` to airtableClient
+  - [ ] `recordUsage()` to airtableClient
+- [ ] Task: Refactor `stripeService.jsw` (9 operations)
+  - [ ] `upsertSubscription()` to airtableClient
+  - [ ] `getStripeCustomer()` to airtableClient
+  - [ ] Idempotency checks to airtableClient
+- [ ] Test: Verify subscription flow works
+- [ ] Test: Verify quota enforcement works
+
+### 9.2 Communication Services
+
+- [ ] Task: Refactor `messaging.jsw` (9 operations)
+  - [ ] `sendMessage()` to airtableClient
+  - [ ] `getConversation()` to airtableClient
+  - [ ] Permission validation queries
+- [ ] Task: Refactor `messagingRealtime.jsw` (2 operations)
+  - [ ] Timestamp-based polling queries
+- [ ] Task: Refactor `emailService.jsw` (6 operations)
+- [ ] Test: Verify messaging works end-to-end
+
+### 9.3 Enrichment & Intelligence Services
+
+- [ ] Task: Refactor `aiEnrichment.jsw` (8 operations)
+  - [ ] Cache lookups/writes
+  - [ ] Enrichment status updates
+- [ ] Task: Refactor `fmcsaService.jsw` (7 operations)
+  - [ ] Safety data cache
+  - [ ] DOT number lookups
+- [ ] Task: Refactor `socialScanner.jsw` (7 operations)
+- [ ] Task: Refactor `csaMonitorService.jsw` (4 operations)
+- [ ] Test: Verify enrichment pipeline works
+- [ ] Test: Verify cache TTL enforcement
+
+### 9.4 Recruiter & Outreach Services
+
+- [ ] Task: Refactor `recruiterStats.jsw` (5 operations)
+- [ ] Task: Refactor `interviewScheduler.jsw` (5 operations)
+- [ ] Task: Refactor `driverOutreach.jsw` (5 operations)
+- [ ] Task: Refactor `retentionService.jsw` (8 operations)
+- [ ] Test: Verify recruiter features work
+
+### 9.5 Content & Lead Services
+
+- [ ] Task: Refactor `contentService.jsw` (5 operations)
+- [ ] Task: Refactor `carrierLeadsService.jsw` (6 operations)
+- [ ] Task: Refactor `carrierPreferences.jsw` (4 operations)
+- [ ] Test: Verify content pages load
+- [ ] Test: Verify lead capture works
+
+### 9.6 Utility Services
+
+- [ ] Task: Refactor `ocrService.jsw` (4 operations)
+- [ ] Task: Refactor `observabilityService.jsw` (4 operations)
+- [ ] Test: Verify OCR document processing
+- [ ] Test: Verify logging works
+
+---
+
+## Phase 10: Service Refactoring - LOW Impact (13 files)
+
+> **Goal**: Refactor remaining services
+>
+> **Dependencies**: Phase 9 complete
+>
+> **Estimated Effort**: 1-2 weeks
+
+### 10.1 Operational Services
+
+- [ ] Task: Refactor `parkingService.jsw` (3 operations)
+- [ ] Task: Refactor `fuelService.jsw` (3 operations)
+- [ ] Task: Refactor `publicStatsService.jsw` (3 operations)
+- [ ] Test: Verify road utilities work
+
+### 10.2 Background Services
+
+- [ ] Task: Refactor `scheduler.jsw` (2 operations)
+- [ ] Task: Refactor `abandonmentEmailService.jsw` (2 operations)
+- [ ] Task: Refactor `aiRouterService.jsw` (1 operation)
+- [ ] Test: Verify scheduled jobs run
+
+### 10.3 Setup & Migration Services
+
+- [ ] Task: Review `setupCollections.jsw` - may need full rewrite
+- [ ] Task: Review migration scripts in `migrations/` folder
+- [ ] Task: Update any remaining minor services
+- [ ] Test: Verify setup utilities work
+
+---
+
+## Phase 11: Page Code Migration (9 files)
+
+> **Goal**: Update all Wix page code files that directly use wixData
+>
+> **Dependencies**: Backend services refactored (Phases 7-10)
+>
+> **Estimated Effort**: 1-2 weeks
+
+### 11.1 High-Priority Pages (WRITE operations)
+
+- [ ] Task: Refactor `Rapid Response - Job Description.*.js`
+  - [ ] Move INSERT operation to backend service call
+  - [ ] Use postMessage to call backend
+  - [ ] Remove direct wixData import
+- [ ] Test: Verify rapid response form submits correctly
+
+### 11.2 Driver-Facing Pages
+
+- [ ] Task: Refactor `Driver Dashboard.*.js`
+  - [ ] Replace wixData.query with backend service calls
+  - [ ] Update data binding to use service responses
+- [ ] Task: Refactor `Job Search.*.js`
+  - [ ] Move carrier/job queries to backend
+- [ ] Task: Refactor `Application Status.*.js`
+  - [ ] Move interest queries to backend
+- [ ] Test: Verify driver dashboard loads
+- [ ] Test: Verify job search works
+- [ ] Test: Verify application status displays
+
+### 11.3 Recruiter-Facing Pages
+
+- [ ] Task: Refactor `Recruiter Dashboard.*.js`
+  - [ ] Replace direct queries with service calls
+- [ ] Task: Refactor `Carrier Directory.*.js`
+  - [ ] Move carrier queries to backend
+- [ ] Test: Verify recruiter features work
+
+### 11.4 Content Pages
+
+- [ ] Task: Refactor `Blog.*.js`
+  - [ ] Move content queries to contentService
+- [ ] Task: Refactor `Pricing.*.js`
+  - [ ] Move pricing data to backend
+- [ ] Task: Refactor `FAQ.*.js`
+  - [ ] Move FAQ queries to backend
+- [ ] Test: Verify content pages load
+
+---
+
+## Phase 12: HTML Component Migration (43 files)
+
+> **Goal**: Update field names in all HTML components for Airtable compatibility
+>
+> **Dependencies**: Phase 11 complete
+>
+> **Estimated Effort**: 2-3 weeks
+
+### 12.1 Field Mapping Strategy
+
+- [ ] Task: Create `fieldMappings.js` in `src/public/js/`
+- [ ] Task: Document all snake_case → Title Case mappings
+- [ ] Task: Create helper function `toDisplayFormat(data, collection)`
+- [ ] Task: Create helper function `toBackendFormat(data, collection)`
+
+### 12.2 Admin HTML Files (10 files)
+
+- [ ] Task: Update `ADMIN_DASHBOARD.html` field references
+- [ ] Task: Update `ADMIN_DRIVERS.html` field references
+- [ ] Task: Update `ADMIN_CARRIERS.html` field references
+- [ ] Task: Update `ADMIN_MATCHES.html` field references
+- [ ] Task: Update `ADMIN_AUDIT.html` field references
+- [ ] Task: Update `ADMIN_AI_ROUTER.html` field references
+- [ ] Task: Update `ADMIN_CONTENT.html` field references
+- [ ] Task: Update `ADMIN_BILLING.html` field references
+- [ ] Task: Update `ADMIN_SETTINGS.html` field references
+- [ ] Task: Update `ADMIN_ANALYTICS.html` field references
+- [ ] Test: Verify all admin panels display data correctly
+
+### 12.3 Recruiter HTML Files (9 files)
+
+- [ ] Task: Update `RecruiterDashboard.html` field references
+- [ ] Task: Update `RecruiterDriverSearch.html` field references
+- [ ] Task: Update `RecruiterPipeline.html` field references
+- [ ] Task: Update `RecruiterMessaging.html` field references
+- [ ] Task: Update `RecruiterAnalytics.html` field references
+- [ ] Task: Update `RecruiterCarrierSelect.html` field references
+- [ ] Task: Update `RecruiterOnboarding.html` field references
+- [ ] Task: Update `RecruiterSettings.html` field references
+- [ ] Task: Update `RecruiterTelemetry.html` field references
+- [ ] Test: Verify all recruiter features work
+
+### 12.4 Driver HTML Files (5 files)
+
+- [ ] Task: Update `DRIVER_DASHBOARD.html` field references
+- [ ] Task: Update `DRIVER_PROFILE.html` field references
+- [ ] Task: Update `DRIVER_APPLICATIONS.html` field references
+- [ ] Task: Update `DRIVER_ROAD_UTILITIES.html` field references
+- [ ] Task: Update `AI_MATCHING.html` field references
+- [ ] Test: Verify driver dashboard and features work
+
+### 12.5 Carrier HTML Files (4 files)
+
+- [ ] Task: Update `CarrierOnboarding.html` field references
+- [ ] Task: Update `CarrierPreferences.html` field references
+- [ ] Task: Update `CarrierDirectory.html` field references
+- [ ] Task: Update `CarrierProfile.html` field references
+- [ ] Test: Verify carrier features work
+
+### 12.6 Landing & Utility HTML Files (15 files)
+
+- [ ] Task: Update all landing page forms with field mappings
+- [ ] Task: Update `_TEMPLATE_Carrier_Staffing_Form.html`
+- [ ] Task: Update utility components (sidebars, modals)
+- [ ] Test: Verify all forms submit correctly
+- [ ] Test: Verify landing pages display data
+
+---
+
+## Phase 13: Scheduled Jobs & Webhooks Migration
+
+> **Goal**: Migrate all background jobs and webhook handlers
+>
+> **Dependencies**: Phase 12 complete
+>
+> **Estimated Effort**: 1-2 weeks
+
+### 13.1 Scheduled Jobs (jobs.config)
+
+- [ ] Task: Update `runEnrichmentBatch` job
+  - [ ] Modify to use airtableClient for CarrierEnrichments
+  - [ ] Verify rate limiting with Airtable API limits
+- [ ] Task: Update `runBackfillMigration` job
+  - [ ] Modify to use airtableClient for DriverProfiles
+- [ ] Task: Update `processAbandonmentEmails` job
+  - [ ] Modify to use airtableClient for CheckoutAbandonment
+- [ ] Task: Update `updateCSAScores` job (if exists)
+  - [ ] Modify to use airtableClient for CarrierSafetyData
+- [ ] Task: Update `sendComplianceReminders` job (if exists)
+- [ ] Task: Update `generateLeaderboards` job (if exists)
+- [ ] Task: Update `cleanupExpiredCache` job (if exists)
+- [ ] Test: Run each job manually and verify completion
+- [ ] Test: Verify scheduled execution works
+
+### 13.2 Stripe Webhook Handler (http-functions.js)
+
+- [ ] Task: Update `checkout.session.completed` handler
+  - [ ] Create subscription in Airtable
+  - [ ] Verify idempotency with Airtable StripeEvents
+- [ ] Task: Update `invoice.paid` handler
+  - [ ] Reset quotas in Airtable ProfileViews
+  - [ ] Update subscription in Airtable
+- [ ] Task: Update `invoice.payment_failed` handler
+- [ ] Task: Update `customer.subscription.updated` handler
+- [ ] Task: Update `customer.subscription.deleted` handler
+- [ ] Task: Update `charge.refunded` handler
+- [ ] Task: Update `payment_intent.succeeded` handler
+- [ ] Task: Update `checkout.session.expired` handler
+- [ ] Test: Use Stripe CLI to test each webhook event
+- [ ] Test: Verify idempotency prevents duplicates
+- [ ] Test: Verify subscription status updates correctly
+
+### 13.3 Other Event Handlers
+
+- [ ] Task: Review any other HTTP functions for wixData usage
+- [ ] Task: Update notification handlers if applicable
+- [ ] Task: Update any real-time polling endpoints
+- [ ] Test: Verify all event-driven flows work
+
+---
+
+## Phase 14: Final Validation & Production Cutover
+
+> **Goal**: Complete testing, documentation, and production deployment
+>
+> **Dependencies**: All previous phases complete
+>
+> **Estimated Effort**: 2-3 weeks
+
+### 14.1 Comprehensive Regression Testing
+
+- [ ] Test: Driver registration → profile completion → job search → apply
+- [ ] Test: Recruiter login → driver search → message → interview → hire
+- [ ] Test: Carrier onboarding → preferences → staffing request
+- [ ] Test: Subscription purchase → tier enforcement → quota tracking
+- [ ] Test: Admin dashboard → all analytics → audit trail
+- [ ] Test: Content management → blog → FAQs → guides
+- [ ] Test: Scheduled jobs → enrichment → CSA → abandonment emails
+- [ ] Test: Webhooks → Stripe events → subscription lifecycle
+
+### 14.2 Performance Benchmarking
+
+- [ ] Task: Benchmark carrier search response times
+- [ ] Task: Benchmark driver matching algorithm
+- [ ] Task: Benchmark admin dashboard load time
+- [ ] Task: Benchmark message retrieval
+- [ ] Task: Document baseline vs Airtable performance
+- [ ] Test: All endpoints < 500ms P95
+- [ ] Test: No rate limit 429 errors under normal load
+
+### 14.3 Data Integrity Verification
+
+- [ ] Task: Compare record counts: Wix vs Airtable
+- [ ] Task: Spot-check 100 random records for accuracy
+- [ ] Task: Verify all linked records resolve correctly
+- [ ] Task: Verify all date fields preserved correctly
+- [ ] Task: Verify all numeric fields (especially DOT numbers)
+
+### 14.4 Documentation Updates
+
+- [ ] Task: Update CLAUDE.md with new architecture
+- [ ] Task: Update GEMINI.md with data layer changes
+- [ ] Task: Document airtableClient.jsw API
+- [ ] Task: Document field mappings reference
+- [ ] Task: Document rollback procedures
+- [ ] Task: Create troubleshooting guide
+
+### 14.5 Production Cutover
+
+- [ ] Task: Schedule maintenance window
+- [ ] Task: Enable all DATA_SOURCE flags to 'airtable'
+- [ ] Task: Monitor error rates for 24 hours
+- [ ] Task: Monitor performance for 48 hours
+- [ ] Task: Address any issues immediately
+- [ ] Task: Begin 30-day stability period
+
+### 14.6 Post-Migration Cleanup (After 30 days)
+
+- [ ] Task: Archive Wix collections (read-only)
+- [ ] Task: Remove feature flag fallback code
+- [ ] Task: Remove wixData imports from refactored services
+- [ ] Task: Delete migration scripts
+- [ ] Task: Update track status to COMPLETE
+- [ ] Task: Celebrate! 🎉

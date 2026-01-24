@@ -419,3 +419,270 @@ export const DATA_SOURCE = {
 - Error rate (target: < 0.1%)
 - Record counts match between Wix backup and Airtable
 - Rate limit 429 responses (target: 0 after optimization)
+
+---
+
+## 10. Full Codebase Impact Analysis
+
+### 10.1 Migration Scope Summary
+
+| Layer | Files Affected | Operations | Risk Level |
+|-------|----------------|------------|------------|
+| Backend Services (.jsw) | 44 files | 574 wixData calls | HIGH |
+| Page Code (.js) | 9 files | Direct collection access | MEDIUM |
+| HTML Components | 43 files | Field names in postMessage | MEDIUM |
+| Scheduled Jobs | 7 jobs | Collection dependencies | HIGH |
+| Webhooks | 8 event types | Real-time processing | CRITICAL |
+
+### 10.2 Backend Services Inventory (44 files, 574 operations)
+
+#### VERY HIGH Impact (8 files, 162 operations)
+| Service | Ops | Collections | Migration Notes |
+|---------|-----|-------------|-----------------|
+| `admin_dashboard_service.jsw` | 44 | 9 | Complex analytics, aggregations |
+| `admin_service.jsw` | 36 | 6 | Multi-field .or() search chains |
+| `carrierAdminService.jsw` | 30 | 6 | FMCSA integration, DOT lookups |
+| `recruiter_service.jsw` | 28 | 5 | Access control, carrier links |
+| `featureAdoptionService.jsw` | 28 | 4 | Custom analytics collections |
+| `onboardingWorkflowService.jsw` | 27 | 7 | Stateful multi-step workflows |
+| `admin_match_service.jsw` | 26 | 3 | Time-based analytics |
+| `promptLibraryService.jsw` | 19 | 1 | Version history, categories |
+
+#### HIGH Impact (6 files, 99 operations)
+| Service | Ops | Collections | Migration Notes |
+|---------|-----|-------------|-----------------|
+| `driverMatching.jsw` | 18 | 4 | Scoring algorithm, tier limits |
+| `carrierMatching.jsw` | 16 | 3 | Weighted scoring, enrichment cache |
+| `applicationService.jsw` | 15 | 3 | Status lifecycle management |
+| `driverProfiles.jsw` | 14 | 2 | Profile completeness, OCR links |
+| `memberService.jsw` | 12 | 4 | Dashboard aggregations |
+| `admin_audit_service.jsw` | 11 | 1 | Append-only audit log |
+
+#### MEDIUM Impact (17 files, 177 operations)
+| Service | Ops | Collections |
+|---------|-----|-------------|
+| `subscriptionService.jsw` | 10 | 3 |
+| `stripeService.jsw` | 9 | 4 |
+| `messaging.jsw` | 9 | 2 |
+| `retentionService.jsw` | 8 | 2 |
+| `aiEnrichment.jsw` | 8 | 2 |
+| `fmcsaService.jsw` | 7 | 2 |
+| `socialScanner.jsw` | 7 | 1 |
+| `carrierLeadsService.jsw` | 6 | 2 |
+| `emailService.jsw` | 6 | 2 |
+| `recruiterStats.jsw` | 5 | 2 |
+| `interviewScheduler.jsw` | 5 | 2 |
+| `driverOutreach.jsw` | 5 | 3 |
+| `contentService.jsw` | 5 | 5 |
+| `carrierPreferences.jsw` | 4 | 2 |
+| `ocrService.jsw` | 4 | 1 |
+| `observabilityService.jsw` | 4 | 3 |
+| `csaMonitorService.jsw` | 4 | 2 |
+
+#### LOW Impact (13 files, 136 operations)
+| Service | Ops | Collections |
+|---------|-----|-------------|
+| `parkingService.jsw` | 3 | 2 |
+| `fuelService.jsw` | 3 | 2 |
+| `publicStatsService.jsw` | 3 | 3 |
+| `messagingRealtime.jsw` | 2 | 1 |
+| `abandonmentEmailService.jsw` | 2 | 1 |
+| `http-functions.js` | 2 | 2 |
+| `scheduler.jsw` | 2 | 1 |
+| `aiRouterService.jsw` | 1 | 1 |
+| `setupCollections.jsw` | varies | All |
+| 4 other minor services | <5 each | Various |
+
+### 10.3 Page Code Files (9 files with direct wixData)
+
+| Page File | Operations | Collections | Risk |
+|-----------|------------|-------------|------|
+| `Rapid Response - Job Description.*.js` | INSERT | DriverCarrierInterests | HIGH |
+| `Carrier Directory.*.js` | READ | Carriers | MEDIUM |
+| `Driver Dashboard.*.js` | READ | DriverProfiles, Interests | MEDIUM |
+| `Recruiter Dashboard.*.js` | READ | Carriers, Views | MEDIUM |
+| `Job Search.*.js` | READ | DriverJobs, Carriers | MEDIUM |
+| `Application Status.*.js` | READ | DriverCarrierInterests | MEDIUM |
+| `Blog.*.js` | READ | BlogPosts, Categories | LOW |
+| `Pricing.*.js` | READ | PricingTiers, Features | LOW |
+| `FAQ.*.js` | READ | FAQs | LOW |
+
+### 10.4 HTML Components (43 files)
+
+#### Field Name Conversion Required
+All HTML files using postMessage to exchange data with backend need field name updates:
+
+**snake_case → Title Case Mapping:**
+```
+dot_number          → DOT Number
+mc_number           → MC Number
+legal_name          → Legal Name
+driver_name         → Driver Name
+carrier_name        → Carrier Name
+enrichment_status   → Enrichment Status
+safety_rating       → Safety Rating
+phy_city            → Physical City
+phy_state           → Physical State
+match_score         → Match Score
+profile_score       → Profile Score
+cdl_class           → CDL Class
+years_experience    → Years Experience
+home_zip            → Home Zip
+min_cpm             → Min CPM
+created_at          → Created
+updated_at          → Modified
+```
+
+#### HTML Files by Folder
+| Folder | Files | Primary Collections |
+|--------|-------|---------------------|
+| `admin/` | 10 | Carriers, Drivers, Stats |
+| `recruiter/` | 9 | Carriers, Drivers, Interests |
+| `driver/` | 5 | DriverProfiles, Jobs, Interests |
+| `carrier/` | 4 | Carriers, Onboarding |
+| `landing/` | 11 | CMS content |
+| `utility/` | 4 | Various |
+
+### 10.5 Scheduled Jobs (7 jobs in jobs.config)
+
+| Job | Schedule | Collections | Migration Risk |
+|-----|----------|-------------|----------------|
+| `runEnrichmentBatch` | Hourly | CarrierEnrichments, Carriers | HIGH |
+| `runBackfillMigration` | 30 min | DriverProfiles | HIGH |
+| `processAbandonmentEmails` | 15 min | CheckoutAbandonment | MEDIUM |
+| `updateCSAScores` | Weekly | CarrierSafetyData | MEDIUM |
+| `sendComplianceReminders` | Daily | ComplianceEvents | MEDIUM |
+| `generateLeaderboards` | Weekly | RecruiterStats | LOW |
+| `cleanupExpiredCache` | Daily | Various cache tables | LOW |
+
+### 10.6 Stripe Webhooks (8 event types)
+
+| Event | Handler | Collections | Risk |
+|-------|---------|-------------|------|
+| `checkout.session.completed` | Create subscription | CarrierSubscriptions | CRITICAL |
+| `invoice.paid` | Reset quotas | ProfileViews, Subscriptions | CRITICAL |
+| `invoice.payment_failed` | Update status | CarrierSubscriptions | HIGH |
+| `customer.subscription.updated` | Sync tier | CarrierSubscriptions | HIGH |
+| `customer.subscription.deleted` | Cancel | CarrierSubscriptions | HIGH |
+| `charge.refunded` | Log refund | BillingHistory | MEDIUM |
+| `payment_intent.succeeded` | Log payment | BillingHistory | MEDIUM |
+| `checkout.session.expired` | Abandonment | CheckoutAbandonment | LOW |
+
+### 10.7 Critical Data Dependencies
+
+```
+                    COLLECTION DEPENDENCY GRAPH
+                    ===========================
+
+                         +-------------+
+                         |   Carriers  |
+                         | (Hub Table) |
+                         +------+------+
+                                |
+        +-----------+-----------+-----------+-----------+
+        |           |           |           |           |
+        v           v           v           v           v
++-------+---+ +-----+-----+ +---+---+ +-----+-----+ +---+-------+
+| Enrichments| | SafetyData| | Jobs  | | Interests | |Subscriptions|
++-------+---+ +-----+-----+ +---+---+ +-----+-----+ +---+-------+
+                                            |
+                                    +-------+-------+
+                                    |               |
+                                    v               v
+                            +-------+---+   +------+------+
+                            |  Drivers  |   |  Messages   |
+                            | (Hub Table)|   +-------------+
+                            +-------+---+
+                                    |
+                    +---------------+---------------+
+                    |               |               |
+                    v               v               v
+            +-------+---+   +------+------+  +-----+-----+
+            | Activity  |   | Notifications|  | ProfileViews|
+            +-----------+   +-------------+  +-----------+
+```
+
+**Migration Order (respecting dependencies):**
+1. Carriers (hub) + DriverProfiles (hub) - FIRST
+2. CarrierEnrichments, CarrierSafetyData, DriverJobs
+3. DriverCarrierInterests (bridge table)
+4. Messages, Notifications, Activity
+5. Subscriptions, BillingHistory, ProfileViews
+6. CMS content (independent)
+7. Admin/logging tables (last)
+
+### 10.8 Refactoring Patterns
+
+#### Standard Service Refactoring Pattern
+```javascript
+// BEFORE (wixData)
+import wixData from 'wix-data';
+
+export async function getCarrierByDOT(dotNumber) {
+  const result = await wixData.query('Carriers')
+    .eq('dot_number', parseInt(dotNumber, 10))
+    .find({ suppressAuth: true });
+  return result.items[0] || null;
+}
+
+// AFTER (airtableClient abstraction)
+import { getCarrierByDOT } from 'backend/airtableClient';
+// OR with feature flag:
+import { DATA_SOURCE } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import wixData from 'wix-data';
+
+export async function getCarrierByDOT(dotNumber) {
+  if (DATA_SOURCE.carriers === 'airtable') {
+    return airtable.getCarrierByDOT(dotNumber);
+  }
+  // Fallback to wixData
+  const result = await wixData.query('Carriers')
+    .eq('dot_number', parseInt(dotNumber, 10))
+    .find({ suppressAuth: true });
+  return result.items[0] || null;
+}
+```
+
+#### HTML Component Field Mapping Pattern
+```javascript
+// In airtableClient.jsw - automatic field conversion
+const FIELD_MAPPINGS = {
+  Carriers: {
+    'dot_number': 'DOT Number',
+    'legal_name': 'Legal Name',
+    'mc_number': 'MC Number',
+    'phy_city': 'Physical City',
+    'phy_state': 'Physical State',
+    // ... all fields
+  },
+  // ... all collections
+};
+
+// Converts Airtable response to Wix format for backwards compatibility
+function toWixFormat(record, collection) {
+  const mapping = FIELD_MAPPINGS[collection];
+  const converted = { _id: record.id };
+  for (const [wixField, airtableField] of Object.entries(mapping)) {
+    converted[wixField] = record.fields[airtableField];
+  }
+  return converted;
+}
+```
+
+### 10.9 Estimated Timeline (Updated)
+
+| Phase | Weeks | Focus | Files |
+|-------|-------|-------|-------|
+| 1 | 1-2 | Infrastructure + abstraction layer | 3 new files |
+| 2 | 3-4 | Core collections (Carriers, Drivers) | 8 services |
+| 3 | 5-7 | Transaction & matching data | 12 services |
+| 4 | 8-10 | Communication & billing | 10 services |
+| 5 | 11-13 | Admin services (VERY HIGH impact) | 8 services |
+| 6 | 14-15 | Page code migration | 9 page files |
+| 7 | 16-17 | HTML component updates | 43 HTML files |
+| 8 | 18-19 | Scheduled jobs & webhooks | 7 jobs, 8 webhooks |
+| 9 | 20-22 | Remaining services + testing | 6 services |
+| 10 | 23-25 | Validation, docs, cutover | - |
+
+**Total: 25 weeks (6 months)**
