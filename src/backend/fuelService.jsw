@@ -153,22 +153,52 @@ export async function searchFuelPrices(lat, lng, radius = 50, options = {}) {
     const cacheKey = `fuel:${lat.toFixed(2)}:${lng.toFixed(2)}:${radius}:${options.cardType || 'none'}`;
 
     try {
-        // 1. Check cache first
-        const cached = await wixData.query(COLLECTIONS.CACHE)
-            .eq('cache_key', cacheKey)
-            .gt('expires_at', new Date())
-            .limit(1)
-            .find({ suppressAuth: true });
-
-        if (cached.items.length > 0) {
-            console.log('[FuelService] Cache hit for:', cacheKey);
-            return { success: true, items: cached.items[0].data, fromCache: true };
+        // 1. Check cache first using dual-source routing
+        let cachedItems = [];
+        if (usesAirtable(COLLECTION_KEYS.roadUtilityCache)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.roadUtilityCache);
+            const filter = `AND({Cache Key} = "${cacheKey}", {Expires At} > "${new Date().toISOString()}")`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+            if (result.records && result.records.length > 0) {
+                cachedItems = [{ data: result.records[0].Data || result.records[0].data }];
+            }
+        } else {
+            const cached = await wixData.query(COLLECTIONS.CACHE)
+                .eq('cache_key', cacheKey)
+                .gt('expires_at', new Date())
+                .limit(1)
+                .find({ suppressAuth: true });
+            cachedItems = cached.items;
         }
 
-        // 2. Query local database (populated by scheduled job from GasBuddy/OPIS)
-        const results = await wixData.query(COLLECTIONS.PRICES)
-            .limit(1000)
-            .find({ suppressAuth: true });
+        if (cachedItems.length > 0) {
+            console.log('[FuelService] Cache hit for:', cacheKey);
+            return { success: true, items: cachedItems[0].data, fromCache: true };
+        }
+
+        // 2. Query local database using dual-source routing
+        let items = [];
+        if (usesAirtable(COLLECTION_KEYS.fuelPrices)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.fuelPrices);
+            const result = await airtable.queryRecords(tableName, { maxRecords: 1000 });
+            items = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                station_id: r['Station Id'] || r.station_id,
+                brand: r.Brand || r.brand,
+                name: r.Name || r.name,
+                location: r.Location || r.location,
+                diesel_price: r['Diesel Price'] || r.diesel_price,
+                def_price: r['Def Price'] || r.def_price,
+                card_discounts: r['Card Discounts'] || r.card_discounts,
+                amenities: r.Amenities || r.amenities,
+                address: r.Address || r.address
+            }));
+        } else {
+            const results = await wixData.query(COLLECTIONS.PRICES)
+                .limit(1000)
+                .find({ suppressAuth: true });
+            items = results.items || [];
+        }
 
         let items = results.items || [];
         console.log('[FuelService] Database query returned:', items.length, 'items');
@@ -250,16 +280,19 @@ export async function searchFuelPrices(lat, lng, radius = 50, options = {}) {
         // 7. Limit to top 25 results
         finalItems = finalItems.slice(0, 25);
 
-        // 8. Store in cache
+        // 8. Store in cache using dual-source routing
         const expiry = new Date();
         expiry.setMinutes(expiry.getMinutes() + CACHE_TTL_MINUTES);
 
-        await wixData.insert(COLLECTIONS.CACHE, {
+        const cacheRecord = {
             cache_key: cacheKey,
             cache_type: 'fuel',
             data: finalItems,
             expires_at: expiry
-        }, { suppressAuth: true }).catch(err => console.warn('[FuelService] Cache write failed:', err.message));
+        };
+
+        await insertData(COLLECTION_KEYS.roadUtilityCache, COLLECTIONS.CACHE, cacheRecord)
+            .catch(err => console.warn('[FuelService] Cache write failed:', err.message));
 
         return { success: true, items: finalItems };
     } catch (error) {
@@ -494,22 +527,32 @@ export async function linkFuelCard(driverId, cardInfo) {
     }
 
     try {
-        // Check if card already linked
-        const existing = await wixData.query(COLLECTIONS.CARDS)
-            .eq('driver_id', driverId)
-            .eq('card_type', cardInfo.cardType)
-            .eq('card_number_last4', cardInfo.last4)
-            .limit(1)
-            .find({ suppressAuth: true });
+        // Check if card already linked using dual-source routing
+        let existingCount = 0;
+        if (usesAirtable(COLLECTION_KEYS.fuelCards)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.fuelCards);
+            const filter = `AND({Driver Id} = "${driverId}", {Card Type} = "${cardInfo.cardType}", {Card Number Last4} = "${cardInfo.last4}")`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+            existingCount = (result.records || []).length;
+        } else {
+            const existing = await wixData.query(COLLECTIONS.CARDS)
+                .eq('driver_id', driverId)
+                .eq('card_type', cardInfo.cardType)
+                .eq('card_number_last4', cardInfo.last4)
+                .limit(1)
+                .find({ suppressAuth: true });
+            existingCount = existing.items.length;
+        }
 
-        if (existing.items.length > 0) {
+        if (existingCount > 0) {
             return { success: false, error: 'This card is already linked to your account' };
         }
 
-        // Check max cards limit (5 per driver)
-        const cardCount = await wixData.query(COLLECTIONS.CARDS)
-            .eq('driver_id', driverId)
-            .count({ suppressAuth: true });
+        // Check max cards limit (5 per driver) using dual-source routing
+        const cardCount = await countData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, {
+            eq: { driver_id: driverId },
+            filter: `{Driver Id} = "${driverId}"`
+        });
 
         if (cardCount >= 5) {
             return { success: false, error: 'Maximum of 5 fuel cards allowed per driver' };
@@ -527,7 +570,8 @@ export async function linkFuelCard(driverId, cardInfo) {
             linked_at: new Date()
         };
 
-        const result = await wixData.insert(COLLECTIONS.CARDS, record, { suppressAuth: true });
+        // Use dual-source routing
+        const result = await insertData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, record);
 
         return {
             success: true,
@@ -553,12 +597,34 @@ export async function getDriverFuelCards(driverId) {
     if (!driverId) return { success: false, error: 'driverId is required' };
 
     try {
-        const result = await wixData.query(COLLECTIONS.CARDS)
-            .eq('driver_id', driverId)
-            .descending('is_primary')
-            .find({ suppressAuth: true });
+        let resultItems = [];
 
-        const cards = result.items.map(card => ({
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.fuelCards)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.fuelCards);
+            const filter = `{Driver Id} = "${driverId}"`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: 'Is Primary', direction: 'desc' }],
+                maxRecords: 100
+            });
+            resultItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                card_type: r['Card Type'] || r.card_type,
+                card_number_last4: r['Card Number Last4'] || r.card_number_last4,
+                nickname: r.Nickname || r.nickname,
+                is_primary: r['Is Primary'] || r.is_primary,
+                linked_at: r['Linked At'] || r.linked_at
+            }));
+        } else {
+            const result = await wixData.query(COLLECTIONS.CARDS)
+                .eq('driver_id', driverId)
+                .descending('is_primary')
+                .find({ suppressAuth: true });
+            resultItems = result.items;
+        }
+
+        const cards = resultItems.map(card => ({
             _id: card._id,
             cardType: card.card_type,
             last4: card.card_number_last4,
@@ -585,24 +651,38 @@ export async function unlinkFuelCard(driverId, cardId) {
     }
 
     try {
-        // Verify ownership
-        const card = await wixData.get(COLLECTIONS.CARDS, cardId, { suppressAuth: true });
-        if (!card || card.driver_id !== driverId) {
+        // Verify ownership using dual-source routing
+        const card = await getRecord(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, cardId);
+        const cardDriverId = card?.driver_id || card?.['Driver Id'];
+        if (!card || cardDriverId !== driverId) {
             return { success: false, error: 'Card not found or access denied' };
         }
 
-        await wixData.remove(COLLECTIONS.CARDS, cardId, { suppressAuth: true });
+        // Remove using dual-source routing
+        await removeData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, cardId);
 
         // If this was primary, make another card primary
-        if (card.is_primary) {
-            const remaining = await wixData.query(COLLECTIONS.CARDS)
-                .eq('driver_id', driverId)
-                .limit(1)
-                .find({ suppressAuth: true });
+        const isPrimary = card.is_primary || card['Is Primary'];
+        if (isPrimary) {
+            let remainingItems = [];
+            if (usesAirtable(COLLECTION_KEYS.fuelCards)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.fuelCards);
+                const filter = `{Driver Id} = "${driverId}"`;
+                const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+                remainingItems = (result.records || []).map(r => ({
+                    _id: r.id || r._id,
+                    is_primary: true
+                }));
+            } else {
+                const remaining = await wixData.query(COLLECTIONS.CARDS)
+                    .eq('driver_id', driverId)
+                    .limit(1)
+                    .find({ suppressAuth: true });
+                remainingItems = remaining.items.map(r => ({ _id: r._id, is_primary: true }));
+            }
 
-            if (remaining.items.length > 0) {
-                remaining.items[0].is_primary = true;
-                await wixData.update(COLLECTIONS.CARDS, remaining.items[0], { suppressAuth: true });
+            if (remainingItems.length > 0) {
+                await updateData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, remainingItems[0]);
             }
         }
 
