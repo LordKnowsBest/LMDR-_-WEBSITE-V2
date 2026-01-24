@@ -40,7 +40,8 @@ async function insertData(collectionKey, wixCollectionName, data) {
 async function updateData(collectionKey, wixCollectionName, data) {
     if (usesAirtable(collectionKey)) {
         const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
+        const { _id, ...fields } = data;
+        return await airtable.updateRecord(tableName, _id, fields);
     }
     return await wixData.update(wixCollectionName, data, { suppressAuth: true });
 }
@@ -51,6 +52,78 @@ async function getRecord(collectionKey, wixCollectionName, recordId) {
         return await airtable.getRecord(tableName, recordId);
     }
     return await wixData.get(wixCollectionName, recordId, { suppressAuth: true });
+}
+
+/**
+ * Query records with filtering - routes to Airtable or Wix based on config
+ * @param {string} collectionKey - camelCase collection key for config lookup
+ * @param {string} wixCollectionName - Wix collection name
+ * @param {Object} options - Query options
+ * @param {Object} options.filters - Key-value filters { fieldName: value }
+ * @param {string} options.sortField - Field to sort by
+ * @param {string} options.sortDirection - 'asc' or 'desc'
+ * @param {number} options.limit - Max records to return
+ * @returns {Promise<{items: Array}>}
+ */
+async function queryData(collectionKey, wixCollectionName, options = {}) {
+    const { filters = {}, sortField, sortDirection = 'desc', limit = 100 } = options;
+
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+
+        // Build Airtable filter formula
+        const filterClauses = Object.entries(filters).map(([field, value]) => {
+            // Convert snake_case to Title Case for Airtable
+            const airtableField = field
+                .split('_')
+                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                .join(' ');
+
+            if (typeof value === 'boolean') {
+                return `{${airtableField}} = ${value ? 'TRUE()' : 'FALSE()'}`;
+            }
+            return `{${airtableField}} = '${value}'`;
+        });
+
+        const filterFormula = filterClauses.length > 1
+            ? `AND(${filterClauses.join(', ')})`
+            : filterClauses[0] || '';
+
+        const airtableOptions = {
+            maxRecords: limit
+        };
+
+        if (filterFormula) {
+            airtableOptions.filterByFormula = filterFormula;
+        }
+
+        if (sortField) {
+            // Convert snake_case to Title Case
+            const airtableSortField = sortField
+                .split('_')
+                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                .join(' ');
+            airtableOptions.sort = [{ field: airtableSortField, direction: sortDirection }];
+        }
+
+        const result = await airtable.queryRecords(tableName, airtableOptions);
+        return { items: result.records || [] };
+    }
+
+    // Wix query
+    let query = wixData.query(wixCollectionName);
+
+    for (const [field, value] of Object.entries(filters)) {
+        query = query.eq(field, value);
+    }
+
+    if (sortField) {
+        query = sortDirection === 'desc'
+            ? query.descending(sortField)
+            : query.ascending(sortField);
+    }
+
+    return await query.limit(limit).find({ suppressAuth: true });
 }
 
 // ============================================================================
@@ -126,12 +199,16 @@ export async function trackAbandonedCheckout(session) {
     console.log(`[AbandonmentEmail] Tracking abandonment for ${email}, plan: ${planType}`);
 
     // Check if we already have an active abandonment for this email
-    const existing = await wixData.query(CONFIG.collection)
-      .eq('email', email)
-      .eq('recovered', false)
-      .descending('_createdDate')
-      .limit(1)
-      .find({ suppressAuth: true });
+    const existing = await queryData(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      {
+        filters: { email: email, recovered: false },
+        sortField: '_createdDate',
+        sortDirection: 'desc',
+        limit: 1
+      }
+    );
 
     // If there's a recent abandonment (within 24 hours), update it instead of creating new
     if (existing.items.length > 0) {
@@ -140,13 +217,17 @@ export async function trackAbandonedCheckout(session) {
 
       if (hoursSinceCreated < 24) {
         // Update the existing record with new session info
-        const updated = await wixData.update(CONFIG.collection, {
-          ...existingRecord,
-          stripeSessionId: session.id,
-          planType: planType,
-          abandonedAt: new Date(),
-          lastAttemptUrl: session.url
-        }, { suppressAuth: true });
+        const updated = await updateData(
+          COLLECTION_KEYS.checkoutAbandonment,
+          CONFIG.collection,
+          {
+            ...existingRecord,
+            stripeSessionId: session.id,
+            planType: planType,
+            abandonedAt: new Date(),
+            lastAttemptUrl: session.url
+          }
+        );
 
         console.log(`[AbandonmentEmail] Updated existing abandonment ${updated._id} for ${email}`);
         return { success: true, abandonmentId: updated._id, updated: true };
@@ -180,7 +261,11 @@ export async function trackAbandonedCheckout(session) {
       companyName: session.metadata?.company_name || ''
     };
 
-    const result = await wixData.insert(CONFIG.collection, abandonmentRecord, { suppressAuth: true });
+    const result = await insertData(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      abandonmentRecord
+    );
 
     console.log(`[AbandonmentEmail] Created abandonment record ${result._id} for ${email}`);
 
@@ -213,12 +298,16 @@ export async function markCheckoutRecovered(email, sessionId) {
     }
 
     // Find active abandonment for this email
-    const result = await wixData.query(CONFIG.collection)
-      .eq('email', email)
-      .eq('recovered', false)
-      .descending('_createdDate')
-      .limit(1)
-      .find({ suppressAuth: true });
+    const result = await queryData(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      {
+        filters: { email: email, recovered: false },
+        sortField: '_createdDate',
+        sortDirection: 'desc',
+        limit: 1
+      }
+    );
 
     if (result.items.length === 0) {
       return { success: true, wasAbandoned: false };
@@ -227,12 +316,16 @@ export async function markCheckoutRecovered(email, sessionId) {
     const abandonment = result.items[0];
 
     // Update as recovered
-    await wixData.update(CONFIG.collection, {
-      ...abandonment,
-      recovered: true,
-      recoveredAt: new Date(),
-      recoverySessionId: sessionId
-    }, { suppressAuth: true });
+    await updateData(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      {
+        ...abandonment,
+        recovered: true,
+        recoveredAt: new Date(),
+        recoverySessionId: sessionId
+      }
+    );
 
     console.log(`[AbandonmentEmail] Marked abandonment ${abandonment._id} as recovered for ${email}`);
 
@@ -267,11 +360,14 @@ export async function processAbandonmentEmails() {
 
   try {
     // Get all unrecovered abandonments that still have emails to send
-    const abandonments = await wixData.query(CONFIG.collection)
-      .eq('recovered', false)
-      .eq('email3Sent', false)  // Only get records that haven't completed the sequence
-      .limit(100)
-      .find({ suppressAuth: true });
+    const abandonments = await queryData(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      {
+        filters: { recovered: false, email3Sent: false },
+        limit: 100
+      }
+    );
 
     if (abandonments.items.length === 0) {
       console.log('[AbandonmentEmail] No pending abandonments to process');
@@ -556,7 +652,11 @@ async function findOrCreateContact(email, firstName) {
 export async function markEmailSent(recordId, emailNumber) {
   try {
     // Get the current record
-    const record = await wixData.get(CONFIG.collection, recordId, { suppressAuth: true });
+    const record = await getRecord(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      recordId
+    );
 
     if (!record) {
       console.error(`[AbandonmentEmail] Record ${recordId} not found`);
@@ -566,11 +666,15 @@ export async function markEmailSent(recordId, emailNumber) {
     const fieldName = `email${emailNumber}Sent`;
     const dateName = `email${emailNumber}SentAt`;
 
-    await wixData.update(CONFIG.collection, {
-      ...record,
-      [fieldName]: true,
-      [dateName]: new Date()
-    }, { suppressAuth: true });
+    await updateData(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      {
+        ...record,
+        [fieldName]: true,
+        [dateName]: new Date()
+      }
+    );
 
     console.log(`[AbandonmentEmail] Marked email ${emailNumber} as sent for record ${recordId}`);
     return true;
@@ -587,13 +691,17 @@ export async function markEmailSent(recordId, emailNumber) {
  */
 async function logEmailSend(abandonmentId, templateId, recipientEmail) {
   try {
-    await wixData.insert(CONFIG.emailLogCollection, {
-      abandonmentId: abandonmentId,
-      templateId: templateId,
-      recipientEmail: recipientEmail,
-      sentAt: new Date(),
-      emailType: 'checkout_abandonment'
-    }, { suppressAuth: true });
+    await insertData(
+      COLLECTION_KEYS.abandonmentEmailLog,
+      CONFIG.emailLogCollection,
+      {
+        abandonmentId: abandonmentId,
+        templateId: templateId,
+        recipientEmail: recipientEmail,
+        sentAt: new Date(),
+        emailType: 'checkout_abandonment'
+      }
+    );
   } catch (error) {
     // Don't throw - logging failure shouldn't break email sending
     console.error('[AbandonmentEmail] logEmailSend error:', error);
@@ -656,9 +764,21 @@ export async function getAbandonmentStats() {
     const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
 
     // Get total abandonments in last 30 days
-    const totalResult = await wixData.query(CONFIG.collection)
-      .ge('abandonedAt', thirtyDaysAgo)
-      .find({ suppressAuth: true });
+    // Note: For date range queries, we need to use the Airtable-specific or Wix-specific approach
+    let totalResult;
+    if (usesAirtable(COLLECTION_KEYS.checkoutAbandonment)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.checkoutAbandonment);
+      const filter = `IS_AFTER({Abandoned At}, '${thirtyDaysAgo.toISOString()}')`;
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        maxRecords: 1000
+      });
+      totalResult = { items: result.records || [] };
+    } else {
+      totalResult = await wixData.query(CONFIG.collection)
+        .ge('abandonedAt', thirtyDaysAgo)
+        .find({ suppressAuth: true });
+    }
 
     const total = totalResult.items.length;
 
@@ -699,10 +819,15 @@ export async function getAbandonmentStats() {
  */
 export async function getRecentAbandonments(limit = 50) {
   try {
-    const result = await wixData.query(CONFIG.collection)
-      .descending('abandonedAt')
-      .limit(limit)
-      .find({ suppressAuth: true });
+    const result = await queryData(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      {
+        sortField: 'abandonedAt',
+        sortDirection: 'desc',
+        limit: limit
+      }
+    );
 
     return {
       success: true,
@@ -737,7 +862,11 @@ export async function sendManualAbandonmentEmail(abandonmentId, emailNumber) {
       return { success: false, error: 'Invalid parameters' };
     }
 
-    const abandonment = await wixData.get(CONFIG.collection, abandonmentId, { suppressAuth: true });
+    const abandonment = await getRecord(
+      COLLECTION_KEYS.checkoutAbandonment,
+      CONFIG.collection,
+      abandonmentId
+    );
 
     if (!abandonment) {
       return { success: false, error: 'Abandonment not found' };
