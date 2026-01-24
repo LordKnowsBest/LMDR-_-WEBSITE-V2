@@ -3,6 +3,8 @@
 // ============================================================================
 
 import wixData from 'wix-data';
+import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
 
 // ============================================================================
 // CONFIGURATION
@@ -36,6 +38,7 @@ const CONFIG = {
 /**
  * Submit a new carrier staffing request (lead)
  * Called from the Last Mile Staffing landing page form
+ * Supports both Wix and Airtable data sources based on config
  *
  * @param {Object} leadData
  * @param {string} leadData.companyName - Carrier company name
@@ -75,6 +78,8 @@ export async function submitCarrierStaffingRequest(leadData) {
     }
 
     const now = new Date();
+    const carriersCollectionKey = 'carriers';
+    const leadsCollectionKey = 'carrierStaffingRequests';
 
     // Check if we can link to an existing carrier by DOT number
     let linkedCarrierId = null;
@@ -83,14 +88,29 @@ export async function submitCarrierStaffingRequest(leadData) {
         // Convert DOT number to number for query (Carriers collection stores dot_number as NUMBER)
         const dotNumberAsNumber = parseInt(leadData.dotNumber.trim(), 10);
 
-        const carrierResult = await wixData.query(CONFIG.carriersCollection)
-          .eq('dot_number', dotNumberAsNumber)
-          .limit(1)
-          .find({ suppressAuth: true });
+        if (usesAirtable(carriersCollectionKey)) {
+          // Airtable path for carrier lookup
+          const tableName = getAirtableTableName(carriersCollectionKey);
+          const formula = `{DOT Number} = ${dotNumberAsNumber}`;
+          const result = await airtable.queryRecords(tableName, {
+            filterByFormula: formula,
+            maxRecords: 1
+          });
+          if (result.records && result.records.length > 0) {
+            linkedCarrierId = result.records[0]._id;
+            console.log(`✅ Linked to existing carrier (Airtable): ${linkedCarrierId}`);
+          }
+        } else {
+          // Wix path for carrier lookup
+          const carrierResult = await wixData.query(CONFIG.carriersCollection)
+            .eq('dot_number', dotNumberAsNumber)
+            .limit(1)
+            .find({ suppressAuth: true });
 
-        if (carrierResult.items.length > 0) {
-          linkedCarrierId = carrierResult.items[0]._id;
-          console.log(`✅ Linked to existing carrier: ${linkedCarrierId}`);
+          if (carrierResult.items.length > 0) {
+            linkedCarrierId = carrierResult.items[0]._id;
+            console.log(`✅ Linked to existing carrier: ${linkedCarrierId}`);
+          }
         }
       } catch (e) {
         // Continue without linking - carrier lookup is optional
@@ -126,10 +146,18 @@ export async function submitCarrierStaffingRequest(leadData) {
       source_url: leadData.sourceUrl || '/last-mile-staffing'
     };
 
-    // Insert the lead
-    const inserted = await wixData.insert(CONFIG.leadsCollection, leadRecord, { suppressAuth: true });
-
-    console.log(`✅ New carrier staffing request submitted: ${inserted._id} from ${leadData.companyName}`);
+    // Insert the lead based on data source
+    let inserted;
+    if (usesAirtable(leadsCollectionKey)) {
+      // Airtable path
+      const tableName = getAirtableTableName(leadsCollectionKey);
+      inserted = await airtable.createRecord(tableName, leadRecord);
+      console.log(`✅ New carrier staffing request submitted to Airtable: ${inserted._id} from ${leadData.companyName}`);
+    } else {
+      // Wix path
+      inserted = await wixData.insert(CONFIG.leadsCollection, leadRecord, { suppressAuth: true });
+      console.log(`✅ New carrier staffing request submitted: ${inserted._id} from ${leadData.companyName}`);
+    }
 
     return {
       success: true,
@@ -152,12 +180,26 @@ export async function submitCarrierStaffingRequest(leadData) {
 
 /**
  * Get the status of a submitted lead by ID
+ * Supports both Wix and Airtable data sources based on config
  * @param {string} leadId - The lead ID
  * @returns {Promise<{success: boolean, lead?: Object, error?: string}>}
  */
 export async function getLeadStatus(leadId) {
   try {
-    const lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
+    const collectionKey = 'carrierStaffingRequests';
+    let lead = null;
+
+    if (usesAirtable(collectionKey)) {
+      // Airtable path
+      const tableName = getAirtableTableName(collectionKey);
+      lead = await airtable.getRecord(tableName, leadId);
+      if (lead && lead.error) {
+        lead = null;
+      }
+    } else {
+      // Wix path
+      lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
+    }
 
     if (!lead) {
       return { success: false, error: 'Lead not found' };
@@ -185,6 +227,7 @@ export async function getLeadStatus(leadId) {
 
 /**
  * Get all carrier staffing requests for admin review
+ * Supports both Wix and Airtable data sources based on config
  * @param {Object} options
  * @param {string} [options.status] - Filter by status
  * @param {number} [options.limit] - Max results (default 50)
@@ -193,29 +236,57 @@ export async function getLeadStatus(leadId) {
  */
 export async function getCarrierLeads(options = {}) {
   try {
-    let query = wixData.query(CONFIG.leadsCollection);
-
-    // Apply status filter if provided
-    if (options.status) {
-      query = query.eq('status', options.status);
-    }
-
-    // Sort by newest first
-    query = query.descending('submitted_date');
-
-    // Pagination
+    const collectionKey = 'carrierStaffingRequests';
     const limit = options.limit || 50;
     const skip = options.skip || 0;
-    query = query.limit(limit).skip(skip);
 
-    const result = await query.find({ suppressAuth: true });
+    if (usesAirtable(collectionKey)) {
+      // Airtable path
+      const tableName = getAirtableTableName(collectionKey);
+      let filterFormula = null;
 
-    return {
-      success: true,
-      leads: result.items,
-      totalCount: result.totalCount,
-      hasMore: result.hasNext()
-    };
+      // Apply status filter if provided
+      if (options.status) {
+        filterFormula = `{Status} = '${options.status}'`;
+      }
+
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filterFormula,
+        sort: [{ field: 'Submitted Date', direction: 'desc' }],
+        maxRecords: limit
+        // Note: Airtable pagination uses offset token, not skip
+      });
+
+      return {
+        success: true,
+        leads: result.records || [],
+        totalCount: result.records ? result.records.length : 0,
+        hasMore: !!result.offset
+      };
+    } else {
+      // Wix path
+      let query = wixData.query(CONFIG.leadsCollection);
+
+      // Apply status filter if provided
+      if (options.status) {
+        query = query.eq('status', options.status);
+      }
+
+      // Sort by newest first
+      query = query.descending('submitted_date');
+
+      // Pagination
+      query = query.limit(limit).skip(skip);
+
+      const result = await query.find({ suppressAuth: true });
+
+      return {
+        success: true,
+        leads: result.items,
+        totalCount: result.totalCount,
+        hasMore: result.hasNext()
+      };
+    }
   } catch (error) {
     console.error('❌ Error getting carrier leads:', error);
     return { success: false, error: error.message, leads: [] };
@@ -228,6 +299,7 @@ export async function getCarrierLeads(options = {}) {
 
 /**
  * Update the status of a lead (admin function)
+ * Supports both Wix and Airtable data sources based on config
  * @param {string} leadId - The lead ID
  * @param {string} newStatus - The new status
  * @param {string} [notes] - Optional notes about the status change
@@ -235,7 +307,20 @@ export async function getCarrierLeads(options = {}) {
  */
 export async function updateLeadStatus(leadId, newStatus, notes = '') {
   try {
-    const lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
+    const collectionKey = 'carrierStaffingRequests';
+    let lead = null;
+
+    if (usesAirtable(collectionKey)) {
+      // Airtable path - get existing record
+      const tableName = getAirtableTableName(collectionKey);
+      lead = await airtable.getRecord(tableName, leadId);
+      if (lead && lead.error) {
+        return { success: false, error: 'Lead not found' };
+      }
+    } else {
+      // Wix path - get existing record
+      lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
+    }
 
     if (!lead) {
       return { success: false, error: 'Lead not found' };
@@ -258,16 +343,28 @@ export async function updateLeadStatus(leadId, newStatus, notes = '') {
       notes: notes
     });
 
-    const updatedLead = {
-      ...lead,
+    // Prepare update fields
+    const updateFields = {
       status: newStatus,
       last_updated: now,
       status_history: JSON.stringify(statusHistory)
     };
 
-    const updated = await wixData.update(CONFIG.leadsCollection, updatedLead, { suppressAuth: true });
-
-    console.log(`✅ Lead ${leadId} status updated: ${lead.status} → ${newStatus}`);
+    let updated;
+    if (usesAirtable(collectionKey)) {
+      // Airtable path - update record
+      const tableName = getAirtableTableName(collectionKey);
+      updated = await airtable.updateRecord(tableName, leadId, updateFields);
+      console.log(`✅ Lead ${leadId} status updated in Airtable: ${lead.status} → ${newStatus}`);
+    } else {
+      // Wix path - update record
+      const updatedLead = {
+        ...lead,
+        ...updateFields
+      };
+      updated = await wixData.update(CONFIG.leadsCollection, updatedLead, { suppressAuth: true });
+      console.log(`✅ Lead ${leadId} status updated: ${lead.status} → ${newStatus}`);
+    }
 
     return { success: true, lead: updated };
   } catch (error) {

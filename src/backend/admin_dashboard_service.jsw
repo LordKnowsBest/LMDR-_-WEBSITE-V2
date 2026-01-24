@@ -1,16 +1,34 @@
 /**
  * Admin Dashboard Service - Backend functions for Admin Dashboard Overview
  * Provides system-wide statistics, alerts, activity feeds, and health metrics
+ *
+ * DUAL-SOURCE SUPPORT: This service supports both Wix and Airtable data sources.
+ * The data source is determined by the config.jsw configuration.
+ *
+ * Collections used:
+ * - DriverProfiles (drivers)
+ * - Carriers (carriers)
+ * - MatchEvents (matches)
+ * - DriverCarrierInterests (interests)
+ * - CarrierEnrichments (enrichments)
+ * - CarrierSafetyData (safetyData)
+ * - AdminAuditLog (auditLog)
+ * - SystemAlerts (alerts)
+ * - AIUsageLog (aiUsageLog)
  */
 
 import wixData from 'wix-data';
 import { currentMember } from 'wix-members-backend';
+import { getDataSource, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
 
 // ============================================
 // CONFIGURATION
 // ============================================
 
 const CONFIG = {
+    // Collection config keys mapped to Wix collection names
+    // These keys are used with getDataSource() to check the data source
     collections: {
         drivers: 'DriverProfiles',
         carriers: 'Carriers',
@@ -21,6 +39,18 @@ const CONFIG = {
         auditLog: 'AdminAuditLog',
         alerts: 'SystemAlerts',
         aiUsageLog: 'AIUsageLog'
+    },
+    // Config keys for data source lookup (camelCase)
+    configKeys: {
+        drivers: 'driverProfiles',
+        carriers: 'carriers',
+        matches: 'matchEvents',
+        interests: 'driverCarrierInterests',
+        enrichments: 'carrierEnrichments',
+        safetyData: 'carrierSafetyData',
+        auditLog: 'auditLog',
+        alerts: 'systemAlerts',
+        aiUsageLog: 'aiUsageLog'
     },
     // Token pricing per 1M tokens (approximate USD costs)
     tokenPricing: {
@@ -62,6 +92,258 @@ async function requireAdmin() {
     const authorized = await isAdmin();
     if (!authorized) {
         throw new Error('Unauthorized: Admin access required');
+    }
+}
+
+// ============================================
+// DUAL-SOURCE DATA HELPERS
+// ============================================
+
+/**
+ * Get the data source for a collection
+ * @param {string} collectionKey - Key from CONFIG.configKeys
+ * @returns {'wix' | 'airtable'}
+ */
+function getSource(collectionKey) {
+    const configKey = CONFIG.configKeys[collectionKey];
+    return getDataSource(configKey);
+}
+
+/**
+ * Query and count records from appropriate data source
+ * @param {string} collectionKey - Key from CONFIG.collections
+ * @param {Object} options - Query options
+ * @returns {Promise<number>} Count of matching records
+ */
+async function countFromSource(collectionKey, options = {}) {
+    const configKey = CONFIG.configKeys[collectionKey];
+    const collectionName = CONFIG.collections[collectionKey];
+
+    if (getDataSource(configKey) === 'airtable') {
+        // Build Airtable filter formula
+        let filterFormula = '';
+        const conditions = [];
+
+        if (options.eq) {
+            for (const [field, value] of Object.entries(options.eq)) {
+                const airtableField = field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                if (typeof value === 'string') {
+                    conditions.push(`{${airtableField}} = '${value}'`);
+                } else if (typeof value === 'boolean') {
+                    conditions.push(`{${airtableField}} = ${value ? 'TRUE()' : 'FALSE()'}`);
+                } else {
+                    conditions.push(`{${airtableField}} = ${value}`);
+                }
+            }
+        }
+
+        if (options.ge) {
+            for (const [field, value] of Object.entries(options.ge)) {
+                const airtableField = field === '_createdDate' ? 'Created' : field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                if (value instanceof Date) {
+                    conditions.push(`IS_AFTER({${airtableField}}, '${value.toISOString()}')`);
+                } else {
+                    conditions.push(`{${airtableField}} >= ${value}`);
+                }
+            }
+        }
+
+        if (options.lt) {
+            for (const [field, value] of Object.entries(options.lt)) {
+                const airtableField = field === '_createdDate' ? 'Created' : field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                if (value instanceof Date) {
+                    conditions.push(`IS_BEFORE({${airtableField}}, '${value.toISOString()}')`);
+                } else {
+                    conditions.push(`{${airtableField}} < ${value}`);
+                }
+            }
+        }
+
+        if (conditions.length > 0) {
+            filterFormula = conditions.length === 1 ? conditions[0] : `AND(${conditions.join(', ')})`;
+        }
+
+        const records = await airtable.getAllRecords(collectionName, filterFormula || null);
+        return records.length;
+    } else {
+        // Wix Data source
+        let query = wixData.query(collectionName);
+
+        if (options.eq) {
+            for (const [field, value] of Object.entries(options.eq)) {
+                query = query.eq(field, value);
+            }
+        }
+
+        if (options.ge) {
+            for (const [field, value] of Object.entries(options.ge)) {
+                query = query.ge(field, value);
+            }
+        }
+
+        if (options.lt) {
+            for (const [field, value] of Object.entries(options.lt)) {
+                query = query.lt(field, value);
+            }
+        }
+
+        return await query.count();
+    }
+}
+
+/**
+ * Query records from appropriate data source
+ * @param {string} collectionKey - Key from CONFIG.collections
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} Query result with items
+ */
+async function queryFromSource(collectionKey, options = {}) {
+    const configKey = CONFIG.configKeys[collectionKey];
+    const collectionName = CONFIG.collections[collectionKey];
+
+    if (getDataSource(configKey) === 'airtable') {
+        // Build Airtable query options
+        const airtableOptions = {};
+        const conditions = [];
+
+        if (options.eq) {
+            for (const [field, value] of Object.entries(options.eq)) {
+                const airtableField = field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                if (typeof value === 'string') {
+                    conditions.push(`{${airtableField}} = '${value}'`);
+                } else if (typeof value === 'boolean') {
+                    conditions.push(`{${airtableField}} = ${value ? 'TRUE()' : 'FALSE()'}`);
+                } else {
+                    conditions.push(`{${airtableField}} = ${value}`);
+                }
+            }
+        }
+
+        if (options.ge) {
+            for (const [field, value] of Object.entries(options.ge)) {
+                const airtableField = field === '_createdDate' ? 'Created' :
+                                     field === 'timestamp' ? 'Timestamp' :
+                                     field === 'enriched_date' ? 'Enriched Date' :
+                                     field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                if (value instanceof Date) {
+                    conditions.push(`IS_AFTER({${airtableField}}, '${value.toISOString()}')`);
+                } else {
+                    conditions.push(`{${airtableField}} >= ${value}`);
+                }
+            }
+        }
+
+        if (options.lt) {
+            for (const [field, value] of Object.entries(options.lt)) {
+                const airtableField = field === '_createdDate' ? 'Created' :
+                                     field === 'timestamp' ? 'Timestamp' :
+                                     field === 'enriched_date' ? 'Enriched Date' :
+                                     field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                if (value instanceof Date) {
+                    conditions.push(`IS_BEFORE({${airtableField}}, '${value.toISOString()}')`);
+                } else {
+                    conditions.push(`{${airtableField}} < ${value}`);
+                }
+            }
+        }
+
+        if (conditions.length > 0) {
+            airtableOptions.filterByFormula = conditions.length === 1 ? conditions[0] : `AND(${conditions.join(', ')})`;
+        }
+
+        if (options.limit) {
+            airtableOptions.maxRecords = options.limit;
+        }
+
+        if (options.sortField) {
+            const airtableSortField = options.sortField === '_createdDate' ? 'Created' :
+                                     options.sortField === 'timestamp' ? 'Timestamp' :
+                                     options.sortField.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            airtableOptions.sort = [{
+                field: airtableSortField,
+                direction: options.sortDirection || 'desc'
+            }];
+        }
+
+        const result = await airtable.queryRecords(collectionName, airtableOptions);
+        return {
+            items: result.records || [],
+            totalCount: result.records?.length || 0
+        };
+    } else {
+        // Wix Data source
+        let query = wixData.query(collectionName);
+
+        if (options.eq) {
+            for (const [field, value] of Object.entries(options.eq)) {
+                query = query.eq(field, value);
+            }
+        }
+
+        if (options.ge) {
+            for (const [field, value] of Object.entries(options.ge)) {
+                query = query.ge(field, value);
+            }
+        }
+
+        if (options.lt) {
+            for (const [field, value] of Object.entries(options.lt)) {
+                query = query.lt(field, value);
+            }
+        }
+
+        if (options.sortField) {
+            if (options.sortDirection === 'asc') {
+                query = query.ascending(options.sortField);
+            } else {
+                query = query.descending(options.sortField);
+            }
+        }
+
+        if (options.limit) {
+            query = query.limit(options.limit);
+        }
+
+        const findOptions = options.suppressAuth ? { suppressAuth: true } : {};
+        return await query.find(findOptions);
+    }
+}
+
+/**
+ * Get a single record by ID from appropriate data source
+ * @param {string} collectionKey - Key from CONFIG.collections
+ * @param {string} recordId - Record ID
+ * @returns {Promise<Object|null>} Record or null
+ */
+async function getFromSource(collectionKey, recordId) {
+    const configKey = CONFIG.configKeys[collectionKey];
+    const collectionName = CONFIG.collections[collectionKey];
+
+    if (getDataSource(configKey) === 'airtable') {
+        const result = await airtable.getRecord(collectionName, recordId);
+        return result.error ? null : result;
+    } else {
+        return await wixData.get(collectionName, recordId);
+    }
+}
+
+/**
+ * Update a record in appropriate data source
+ * @param {string} collectionKey - Key from CONFIG.collections
+ * @param {Object} record - Record to update (must include _id)
+ * @param {Object} options - Update options
+ * @returns {Promise<Object>} Updated record
+ */
+async function updateInSource(collectionKey, record, options = {}) {
+    const configKey = CONFIG.configKeys[collectionKey];
+    const collectionName = CONFIG.collections[collectionKey];
+
+    if (getDataSource(configKey) === 'airtable') {
+        const { _id, ...fields } = record;
+        return await airtable.updateRecord(collectionName, _id, fields);
+    } else {
+        const updateOptions = options.suppressAuth ? { suppressAuth: true } : {};
+        return await wixData.update(collectionName, record, updateOptions);
     }
 }
 
@@ -117,24 +399,25 @@ export async function getDashboardOverview() {
 // ============================================
 
 async function getDriverStats() {
+    // Collection: DriverProfiles (drivers)
     const now = new Date();
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     const [total, active, pending, newThisWeek, newThisMonth] = await Promise.all([
-        wixData.query(CONFIG.collections.drivers).count(),
-        wixData.query(CONFIG.collections.drivers).eq('status', 'active').count(),
-        wixData.query(CONFIG.collections.drivers).eq('verificationStatus', 'in_review').count(),
-        wixData.query(CONFIG.collections.drivers).ge('_createdDate', weekAgo).count(),
-        wixData.query(CONFIG.collections.drivers).ge('_createdDate', monthAgo).count()
+        countFromSource('drivers', {}),
+        countFromSource('drivers', { eq: { status: 'active' } }),
+        countFromSource('drivers', { eq: { verificationStatus: 'in_review' } }),
+        countFromSource('drivers', { ge: { _createdDate: weekAgo } }),
+        countFromSource('drivers', { ge: { _createdDate: monthAgo } })
     ]);
 
     // Calculate week-over-week growth
     const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
-    const previousWeek = await wixData.query(CONFIG.collections.drivers)
-        .ge('_createdDate', twoWeeksAgo)
-        .lt('_createdDate', weekAgo)
-        .count();
+    const previousWeek = await countFromSource('drivers', {
+        ge: { _createdDate: twoWeeksAgo },
+        lt: { _createdDate: weekAgo }
+    });
 
     const weeklyGrowth = previousWeek > 0
         ? Math.round(((newThisWeek - previousWeek) / previousWeek) * 100)
@@ -156,22 +439,38 @@ async function getDriverStats() {
 // ============================================
 
 async function getCarrierStats() {
+    // Collection: Carriers (carriers)
     const now = new Date();
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
     const [total, active, flagged, newThisWeek] = await Promise.all([
-        wixData.query(CONFIG.collections.carriers).count(),
-        wixData.query(CONFIG.collections.carriers).eq('status', 'active').count(),
-        wixData.query(CONFIG.collections.carriers).eq('isFlagged', true).count(),
-        wixData.query(CONFIG.collections.carriers).ge('_createdDate', weekAgo).count()
+        countFromSource('carriers', {}),
+        countFromSource('carriers', { eq: { status: 'active' } }),
+        countFromSource('carriers', { eq: { isFlagged: true } }),
+        countFromSource('carriers', { ge: { _createdDate: weekAgo } })
     ]);
 
-    // Fleet size distribution
-    const [small, medium, large] = await Promise.all([
-        wixData.query(CONFIG.collections.carriers).lt('nbr_power_unit', 50).count(),
-        wixData.query(CONFIG.collections.carriers).ge('nbr_power_unit', 50).lt('nbr_power_unit', 200).count(),
-        wixData.query(CONFIG.collections.carriers).ge('nbr_power_unit', 200).count()
-    ]);
+    // Fleet size distribution - for Airtable, we need a different approach
+    const configKey = CONFIG.configKeys.carriers;
+    let small = 0, medium = 0, large = 0;
+
+    if (getDataSource(configKey) === 'airtable') {
+        // For Airtable, fetch all carriers and count locally
+        const allCarriers = await airtable.getAllRecords(CONFIG.collections.carriers);
+        for (const carrier of allCarriers) {
+            const units = carrier.nbr_power_unit || carrier.total_power_units || 0;
+            if (units < 50) small++;
+            else if (units < 200) medium++;
+            else large++;
+        }
+    } else {
+        // Wix Data source
+        [small, medium, large] = await Promise.all([
+            wixData.query(CONFIG.collections.carriers).lt('nbr_power_unit', 50).count(),
+            wixData.query(CONFIG.collections.carriers).ge('nbr_power_unit', 50).lt('nbr_power_unit', 200).count(),
+            wixData.query(CONFIG.collections.carriers).ge('nbr_power_unit', 200).count()
+        ]);
+    }
 
     return {
         total,
@@ -188,22 +487,23 @@ async function getCarrierStats() {
 // ============================================
 
 async function getMatchStats() {
+    // Collections: MatchEvents (matches), DriverCarrierInterests (interests)
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     const [totalMatches, todayMatches, weekMatches, monthMatches] = await Promise.all([
-        wixData.query(CONFIG.collections.matches).count(),
-        wixData.query(CONFIG.collections.matches).ge('timestamp', today).count(),
-        wixData.query(CONFIG.collections.matches).ge('timestamp', weekAgo).count(),
-        wixData.query(CONFIG.collections.matches).ge('timestamp', monthAgo).count()
+        countFromSource('matches', {}),
+        countFromSource('matches', { ge: { timestamp: today } }),
+        countFromSource('matches', { ge: { timestamp: weekAgo } }),
+        countFromSource('matches', { ge: { timestamp: monthAgo } })
     ]);
 
     // Driver interests/applications
     const [totalInterests, weekInterests] = await Promise.all([
-        wixData.query(CONFIG.collections.interests).count(),
-        wixData.query(CONFIG.collections.interests).ge('_createdDate', weekAgo).count()
+        countFromSource('interests', {}),
+        countFromSource('interests', { ge: { _createdDate: weekAgo } })
     ]);
 
     // Calculate daily average
@@ -227,25 +527,26 @@ async function getMatchStats() {
 // ============================================
 
 async function getEnrichmentStats() {
+    // Collections: CarrierEnrichments (enrichments), Carriers (carriers)
     const now = new Date();
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
 
     const [totalEnrichments, totalCarriers] = await Promise.all([
-        wixData.query(CONFIG.collections.enrichments).count(),
-        wixData.query(CONFIG.collections.carriers).count()
+        countFromSource('enrichments', {}),
+        countFromSource('carriers', {})
     ]);
 
     // Fresh enrichments (< 7 days old)
-    const freshEnrichments = await wixData.query(CONFIG.collections.enrichments)
-        .ge('enriched_date', weekAgo)
-        .count();
+    const freshEnrichments = await countFromSource('enrichments', {
+        ge: { enriched_date: weekAgo }
+    });
 
     // Stale enrichments (7-14 days old)
-    const staleEnrichments = await wixData.query(CONFIG.collections.enrichments)
-        .ge('enriched_date', twoWeeksAgo)
-        .lt('enriched_date', weekAgo)
-        .count();
+    const staleEnrichments = await countFromSource('enrichments', {
+        ge: { enriched_date: twoWeeksAgo },
+        lt: { enriched_date: weekAgo }
+    });
 
     // Expired enrichments (> 14 days old)
     const expiredEnrichments = totalEnrichments - freshEnrichments - staleEnrichments;
@@ -270,24 +571,29 @@ async function getEnrichmentStats() {
 // ============================================
 
 async function getRecentActivity() {
+    // Collections: AdminAuditLog (auditLog), MatchEvents (matches), DriverProfiles (drivers)
     try {
         // Get recent admin actions
-        const adminActions = await wixData.query(CONFIG.collections.auditLog)
-            .descending('timestamp')
-            .limit(10)
-            .find({ suppressAuth: true });
+        const adminActions = await queryFromSource('auditLog', {
+            sortField: 'timestamp',
+            sortDirection: 'desc',
+            limit: 10,
+            suppressAuth: true
+        });
 
         // Get recent matches
-        const recentMatches = await wixData.query(CONFIG.collections.matches)
-            .descending('timestamp')
-            .limit(10)
-            .find();
+        const recentMatches = await queryFromSource('matches', {
+            sortField: 'timestamp',
+            sortDirection: 'desc',
+            limit: 10
+        });
 
         // Get recent driver registrations
-        const recentDrivers = await wixData.query(CONFIG.collections.drivers)
-            .descending('_createdDate')
-            .limit(5)
-            .find();
+        const recentDrivers = await queryFromSource('drivers', {
+            sortField: '_createdDate',
+            sortDirection: 'desc',
+            limit: 5
+        });
 
         // Combine and sort by timestamp
         const activities = [];
@@ -343,21 +649,24 @@ async function getRecentActivity() {
 // ============================================
 
 async function getSystemAlerts() {
+    // Collections: SystemAlerts (alerts), DriverProfiles (drivers), Carriers (carriers), CarrierEnrichments (enrichments)
     try {
         // Get unresolved alerts
-        const alerts = await wixData.query(CONFIG.collections.alerts)
-            .eq('resolved', false)
-            .descending('createdAt')
-            .limit(10)
-            .find({ suppressAuth: true });
+        const alerts = await queryFromSource('alerts', {
+            eq: { resolved: false },
+            sortField: 'createdAt',
+            sortDirection: 'desc',
+            limit: 10,
+            suppressAuth: true
+        });
 
         // Also generate dynamic alerts based on system state
         const dynamicAlerts = [];
 
         // Check for pending driver verifications
-        const pendingVerifications = await wixData.query(CONFIG.collections.drivers)
-            .eq('verificationStatus', 'in_review')
-            .count();
+        const pendingVerifications = await countFromSource('drivers', {
+            eq: { verificationStatus: 'in_review' }
+        });
 
         if (pendingVerifications > 5) {
             dynamicAlerts.push({
@@ -371,9 +680,9 @@ async function getSystemAlerts() {
         }
 
         // Check for flagged carriers
-        const flaggedCarriers = await wixData.query(CONFIG.collections.carriers)
-            .eq('isFlagged', true)
-            .count();
+        const flaggedCarriers = await countFromSource('carriers', {
+            eq: { isFlagged: true }
+        });
 
         if (flaggedCarriers > 0) {
             dynamicAlerts.push({
@@ -388,9 +697,9 @@ async function getSystemAlerts() {
 
         // Check for stale enrichments
         const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
-        const expiredEnrichments = await wixData.query(CONFIG.collections.enrichments)
-            .lt('enriched_date', twoWeeksAgo)
-            .count();
+        const expiredEnrichments = await countFromSource('enrichments', {
+            lt: { enriched_date: twoWeeksAgo }
+        });
 
         if (expiredEnrichments > 10) {
             dynamicAlerts.push({
@@ -426,19 +735,20 @@ async function getSystemAlerts() {
 // ============================================
 
 async function getPlatformHealth() {
+    // Collections: MatchEvents (matches), CarrierEnrichments (enrichments)
     try {
         const now = new Date();
         const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
 
         // Check recent activity as proxy for health
-        const recentMatches = await wixData.query(CONFIG.collections.matches)
-            .ge('timestamp', hourAgo)
-            .count();
+        const recentMatches = await countFromSource('matches', {
+            ge: { timestamp: hourAgo }
+        });
 
         // Check enrichment system
-        const recentEnrichments = await wixData.query(CONFIG.collections.enrichments)
-            .ge('enriched_date', hourAgo)
-            .count();
+        const recentEnrichments = await countFromSource('enrichments', {
+            ge: { enriched_date: hourAgo }
+        });
 
         // Calculate health scores
         const matchingHealth = recentMatches > 0 ? 100 : 50;
@@ -479,10 +789,11 @@ async function getPlatformHealth() {
  * @returns {Promise<Object>} - Updated alert
  */
 export async function resolveAlert(alertId) {
+    // Collection: SystemAlerts (alerts)
     await requireAdmin();
 
     try {
-        const alert = await wixData.get(CONFIG.collections.alerts, alertId);
+        const alert = await getFromSource('alerts', alertId);
         if (!alert) {
             throw new Error('Alert not found');
         }
@@ -493,7 +804,7 @@ export async function resolveAlert(alertId) {
         alert.resolvedBy = member?._id || 'admin';
         alert.resolvedAt = new Date();
 
-        const updated = await wixData.update(CONFIG.collections.alerts, alert, { suppressAuth: true });
+        const updated = await updateInSource('alerts', alert, { suppressAuth: true });
 
         return updated;
 
@@ -512,14 +823,15 @@ export async function resolveAlert(alertId) {
  * @returns {Promise<Object>} - Quick stats
  */
 export async function getQuickStats() {
+    // Collections: DriverProfiles (drivers), Carriers (carriers)
     await requireAdmin();
 
     try {
         const [drivers, carriers, pendingVerifications, flaggedCarriers] = await Promise.all([
-            wixData.query(CONFIG.collections.drivers).count(),
-            wixData.query(CONFIG.collections.carriers).count(),
-            wixData.query(CONFIG.collections.drivers).eq('verificationStatus', 'in_review').count(),
-            wixData.query(CONFIG.collections.carriers).eq('isFlagged', true).count()
+            countFromSource('drivers', {}),
+            countFromSource('carriers', {}),
+            countFromSource('drivers', { eq: { verificationStatus: 'in_review' } }),
+            countFromSource('carriers', { eq: { isFlagged: true } })
         ]);
 
         return {
@@ -546,6 +858,7 @@ export async function getQuickStats() {
  * @returns {Promise<Object>} - Chart data
  */
 export async function getActivityChartData(period = 'week') {
+    // Collections: MatchEvents (matches), DriverProfiles (drivers)
     await requireAdmin();
 
     try {
@@ -554,18 +867,20 @@ export async function getActivityChartData(period = 'week') {
         const startDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 
         // Get matches in period
-        const matches = await wixData.query(CONFIG.collections.matches)
-            .ge('timestamp', startDate)
-            .ascending('timestamp')
-            .limit(1000)
-            .find();
+        const matches = await queryFromSource('matches', {
+            ge: { timestamp: startDate },
+            sortField: 'timestamp',
+            sortDirection: 'asc',
+            limit: 1000
+        });
 
         // Get new drivers in period
-        const drivers = await wixData.query(CONFIG.collections.drivers)
-            .ge('_createdDate', startDate)
-            .ascending('_createdDate')
-            .limit(1000)
-            .find();
+        const drivers = await queryFromSource('drivers', {
+            ge: { _createdDate: startDate },
+            sortField: '_createdDate',
+            sortDirection: 'asc',
+            limit: 1000
+        });
 
         // Group by day
         const matchesByDay = {};
@@ -614,6 +929,7 @@ export async function getActivityChartData(period = 'week') {
  * @returns {Promise<Object>} - AI usage data
  */
 export async function getAIUsageStats(period = 'week') {
+    // Collection: AIUsageLog (aiUsageLog)
     await requireAdmin();
 
     try {
@@ -632,10 +948,11 @@ export async function getAIUsageStats(period = 'week') {
         }
 
         // Fetch usage logs for the period
-        const usageLogs = await wixData.query(CONFIG.collections.aiUsageLog)
-            .ge('timestamp', startDate)
-            .limit(1000)
-            .find({ suppressAuth: true });
+        const usageLogs = await queryFromSource('aiUsageLog', {
+            ge: { timestamp: startDate },
+            limit: 1000,
+            suppressAuth: true
+        });
 
         // Calculate stats by provider
         const providerStats = {};
@@ -797,11 +1114,13 @@ function getBudgetStatus(monthlyProjection) {
  * Get usage statistics by function
  */
 async function getFunctionUsageStats(startDate) {
+    // Collection: AIUsageLog (aiUsageLog)
     try {
-        const logs = await wixData.query(CONFIG.collections.aiUsageLog)
-            .ge('timestamp', startDate)
-            .limit(1000)
-            .find({ suppressAuth: true });
+        const logs = await queryFromSource('aiUsageLog', {
+            ge: { timestamp: startDate },
+            limit: 1000,
+            suppressAuth: true
+        });
 
         const functionStats = {};
 
@@ -876,12 +1195,15 @@ function getFunctionDisplayName(functionId) {
  * Get usage trends over time
  */
 async function getUsageTrends(startDate, period) {
+    // Collection: AIUsageLog (aiUsageLog)
     try {
-        const logs = await wixData.query(CONFIG.collections.aiUsageLog)
-            .ge('timestamp', startDate)
-            .ascending('timestamp')
-            .limit(1000)
-            .find({ suppressAuth: true });
+        const logs = await queryFromSource('aiUsageLog', {
+            ge: { timestamp: startDate },
+            sortField: 'timestamp',
+            sortDirection: 'asc',
+            limit: 1000,
+            suppressAuth: true
+        });
 
         // Determine grouping interval
         const days = period === 'day' ? 1 : period === 'month' ? 30 : 7;
@@ -949,16 +1271,18 @@ async function getUsageTrends(startDate, period) {
  * Get AI health check for dashboard
  */
 export async function getAIHealthCheck() {
+    // Collection: AIUsageLog (aiUsageLog)
     await requireAdmin();
 
     try {
         const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
         // Get recent logs
-        const recentLogs = await wixData.query(CONFIG.collections.aiUsageLog)
-            .ge('timestamp', hourAgo)
-            .limit(100)
-            .find({ suppressAuth: true });
+        const recentLogs = await queryFromSource('aiUsageLog', {
+            ge: { timestamp: hourAgo },
+            limit: 100,
+            suppressAuth: true
+        });
 
         if (recentLogs.items.length === 0) {
             return {

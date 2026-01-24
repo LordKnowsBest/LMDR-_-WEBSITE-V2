@@ -1,0 +1,533 @@
+/**
+ * Data Access Layer - Dual-Source Data Operations
+ *
+ * Provides a unified interface for data operations that automatically routes
+ * to either Wix Data or Airtable based on the config.jsw settings.
+ *
+ * This module wraps common database operations and handles:
+ * - Source routing based on feature flags
+ * - Field name transformations between Wix and Airtable
+ * - Consistent response formats across both sources
+ *
+ * @module backend/dataAccess
+ */
+
+import wixData from 'wix-data';
+import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// ============================================================================
+// QUERY OPERATIONS
+// ============================================================================
+
+/**
+ * Query records from the configured data source
+ *
+ * @param {string} collectionKey - The camelCase collection key from config.jsw
+ * @param {Object} options - Query options
+ * @param {Object} [options.filters] - Filter conditions { field: value } or { field: { op: value }}
+ * @param {number} [options.limit] - Maximum records to return
+ * @param {number} [options.skip] - Number of records to skip (pagination)
+ * @param {Array<{field: string, direction: 'asc'|'desc'}>} [options.sort] - Sort configuration
+ * @param {boolean} [options.suppressAuth] - Wix-specific: bypass permissions
+ * @returns {Promise<{success: boolean, items: Array, totalCount?: number, error?: string}>}
+ */
+export async function queryRecords(collectionKey, options = {}) {
+  try {
+    if (usesAirtable(collectionKey)) {
+      return await queryAirtable(collectionKey, options);
+    }
+    return await queryWix(collectionKey, options);
+  } catch (error) {
+    console.error(`[dataAccess] queryRecords error (${collectionKey}):`, error.message);
+    return { success: false, items: [], error: error.message };
+  }
+}
+
+/**
+ * Internal: Query Wix Data
+ */
+async function queryWix(collectionKey, options) {
+  const collectionName = getWixCollectionName(collectionKey);
+  let query = wixData.query(collectionName);
+
+  // Apply filters
+  if (options.filters) {
+    query = applyWixFilters(query, options.filters);
+  }
+
+  // Apply sorting
+  if (options.sort && Array.isArray(options.sort)) {
+    for (const sortItem of options.sort) {
+      if (sortItem.direction === 'desc') {
+        query = query.descending(sortItem.field);
+      } else {
+        query = query.ascending(sortItem.field);
+      }
+    }
+  }
+
+  // Apply limit
+  if (options.limit) {
+    query = query.limit(options.limit);
+  }
+
+  // Apply skip (pagination)
+  if (options.skip) {
+    query = query.skip(options.skip);
+  }
+
+  // Execute query
+  const queryOptions = options.suppressAuth ? { suppressAuth: true } : {};
+  const result = await query.find(queryOptions);
+
+  return {
+    success: true,
+    items: result.items,
+    totalCount: result.totalCount
+  };
+}
+
+/**
+ * Apply filters to Wix query
+ */
+function applyWixFilters(query, filters) {
+  for (const [field, value] of Object.entries(filters)) {
+    if (value === null || value === undefined) continue;
+
+    // Handle operator objects
+    if (typeof value === 'object' && !Array.isArray(value)) {
+      for (const [op, operand] of Object.entries(value)) {
+        switch (op) {
+          case 'eq': query = query.eq(field, operand); break;
+          case 'ne': query = query.ne(field, operand); break;
+          case 'gt': query = query.gt(field, operand); break;
+          case 'gte': case 'ge': query = query.ge(field, operand); break;
+          case 'lt': query = query.lt(field, operand); break;
+          case 'lte': case 'le': query = query.le(field, operand); break;
+          case 'contains': query = query.contains(field, operand); break;
+          case 'hasSome': query = query.hasSome(field, operand); break;
+          case 'hasAll': query = query.hasAll(field, operand); break;
+          case 'startsWith': query = query.startsWith(field, operand); break;
+          case 'isEmpty': query = query.isEmpty(field); break;
+          case 'isNotEmpty': query = query.isNotEmpty(field); break;
+        }
+      }
+    } else if (Array.isArray(value)) {
+      // Default array behavior: hasSome
+      query = query.hasSome(field, value);
+    } else {
+      // Simple equality
+      query = query.eq(field, value);
+    }
+  }
+  return query;
+}
+
+/**
+ * Internal: Query Airtable
+ */
+async function queryAirtable(collectionKey, options) {
+  const queryOptions = {};
+
+  // Build filter formula if filters provided
+  if (options.filters && Object.keys(options.filters).length > 0) {
+    queryOptions.filterByFormula = airtable.buildFilterFormula(options.filters, getWixCollectionName(collectionKey));
+  }
+
+  // Apply sorting
+  if (options.sort && Array.isArray(options.sort)) {
+    queryOptions.sort = options.sort.map(s => ({
+      field: s.field,
+      direction: s.direction || 'asc'
+    }));
+  }
+
+  // Apply limit
+  if (options.limit) {
+    queryOptions.maxRecords = options.limit;
+  }
+
+  // Execute query
+  const result = await airtable.queryRecords(getWixCollectionName(collectionKey), queryOptions);
+
+  if (result.error) {
+    return { success: false, items: [], error: result.error };
+  }
+
+  return {
+    success: true,
+    items: result.records || [],
+    totalCount: result.records?.length || 0
+  };
+}
+
+// ============================================================================
+// GET SINGLE RECORD
+// ============================================================================
+
+/**
+ * Get a single record by ID
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {string} recordId - The record ID
+ * @param {Object} [options] - Options
+ * @param {boolean} [options.suppressAuth] - Wix-specific: bypass permissions
+ * @returns {Promise<Object|null>} The record or null if not found
+ */
+export async function getRecord(collectionKey, recordId, options = {}) {
+  try {
+    if (usesAirtable(collectionKey)) {
+      const result = await airtable.getRecord(getWixCollectionName(collectionKey), recordId);
+      if (result.error) return null;
+      return result;
+    }
+
+    const collectionName = getWixCollectionName(collectionKey);
+    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+    return await wixData.get(collectionName, recordId, wixOptions);
+  } catch (error) {
+    console.error(`[dataAccess] getRecord error (${collectionKey}/${recordId}):`, error.message);
+    return null;
+  }
+}
+
+// ============================================================================
+// INSERT OPERATIONS
+// ============================================================================
+
+/**
+ * Insert a new record
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {Object} data - The record data
+ * @param {Object} [options] - Options
+ * @param {boolean} [options.suppressAuth] - Wix-specific: bypass permissions
+ * @returns {Promise<{success: boolean, record?: Object, error?: string}>}
+ */
+export async function insertRecord(collectionKey, data, options = {}) {
+  try {
+    if (usesAirtable(collectionKey)) {
+      const result = await airtable.createRecord(getWixCollectionName(collectionKey), data);
+      if (result.error) {
+        return { success: false, error: result.error };
+      }
+      return { success: true, record: result };
+    }
+
+    const collectionName = getWixCollectionName(collectionKey);
+    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+    const inserted = await wixData.insert(collectionName, data, wixOptions);
+    return { success: true, record: inserted };
+  } catch (error) {
+    console.error(`[dataAccess] insertRecord error (${collectionKey}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// UPDATE OPERATIONS
+// ============================================================================
+
+/**
+ * Update an existing record
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {Object} data - The record data (must include _id)
+ * @param {Object} [options] - Options
+ * @param {boolean} [options.suppressAuth] - Wix-specific: bypass permissions
+ * @returns {Promise<{success: boolean, record?: Object, error?: string}>}
+ */
+export async function updateRecord(collectionKey, data, options = {}) {
+  try {
+    if (!data._id) {
+      return { success: false, error: 'Record _id is required for update' };
+    }
+
+    if (usesAirtable(collectionKey)) {
+      const { _id, ...fields } = data;
+      const result = await airtable.updateRecord(getWixCollectionName(collectionKey), _id, fields);
+      if (result.error) {
+        return { success: false, error: result.error };
+      }
+      return { success: true, record: result };
+    }
+
+    const collectionName = getWixCollectionName(collectionKey);
+    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+    const updated = await wixData.update(collectionName, data, wixOptions);
+    return { success: true, record: updated };
+  } catch (error) {
+    console.error(`[dataAccess] updateRecord error (${collectionKey}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// DELETE OPERATIONS
+// ============================================================================
+
+/**
+ * Delete a record by ID
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {string} recordId - The record ID
+ * @param {Object} [options] - Options
+ * @param {boolean} [options.suppressAuth] - Wix-specific: bypass permissions
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function deleteRecord(collectionKey, recordId, options = {}) {
+  try {
+    if (usesAirtable(collectionKey)) {
+      const result = await airtable.deleteRecord(getWixCollectionName(collectionKey), recordId);
+      if (result.error) {
+        return { success: false, error: result.error };
+      }
+      return { success: true };
+    }
+
+    const collectionName = getWixCollectionName(collectionKey);
+    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+    await wixData.remove(collectionName, recordId, wixOptions);
+    return { success: true };
+  } catch (error) {
+    console.error(`[dataAccess] deleteRecord error (${collectionKey}/${recordId}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// FIND BY FIELD
+// ============================================================================
+
+/**
+ * Find a single record by a field value
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {string} fieldName - The field to search
+ * @param {*} value - The value to match
+ * @param {Object} [options] - Options
+ * @returns {Promise<Object|null>} The first matching record or null
+ */
+export async function findByField(collectionKey, fieldName, value, options = {}) {
+  const result = await queryRecords(collectionKey, {
+    filters: { [fieldName]: value },
+    limit: 1,
+    suppressAuth: options.suppressAuth
+  });
+
+  if (!result.success || result.items.length === 0) {
+    return null;
+  }
+
+  return result.items[0];
+}
+
+// ============================================================================
+// BULK OPERATIONS
+// ============================================================================
+
+/**
+ * Insert multiple records
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {Array<Object>} records - Array of records to insert
+ * @param {Object} [options] - Options
+ * @returns {Promise<{success: boolean, records?: Array, errors?: Array}>}
+ */
+export async function bulkInsert(collectionKey, records, options = {}) {
+  try {
+    if (!records || records.length === 0) {
+      return { success: true, records: [] };
+    }
+
+    if (usesAirtable(collectionKey)) {
+      const result = await airtable.bulkCreate(getWixCollectionName(collectionKey), records);
+      return result;
+    }
+
+    // Wix bulk insert
+    const collectionName = getWixCollectionName(collectionKey);
+    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+    const inserted = await wixData.bulkInsert(collectionName, records, wixOptions);
+    return { success: true, records: inserted.insertedItemIds.map((id, i) => ({ ...records[i], _id: id })) };
+  } catch (error) {
+    console.error(`[dataAccess] bulkInsert error (${collectionKey}):`, error.message);
+    return { success: false, errors: [{ error: error.message }] };
+  }
+}
+
+/**
+ * Update multiple records
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {Array<Object>} records - Array of records with _id and fields to update
+ * @param {Object} [options] - Options
+ * @returns {Promise<{success: boolean, records?: Array, errors?: Array}>}
+ */
+export async function bulkUpdate(collectionKey, records, options = {}) {
+  try {
+    if (!records || records.length === 0) {
+      return { success: true, records: [] };
+    }
+
+    if (usesAirtable(collectionKey)) {
+      const result = await airtable.bulkUpdate(getWixCollectionName(collectionKey), records);
+      return result;
+    }
+
+    // Wix bulk update
+    const collectionName = getWixCollectionName(collectionKey);
+    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+    const updated = await wixData.bulkUpdate(collectionName, records, wixOptions);
+    return { success: true, records: updated.updatedItems || records };
+  } catch (error) {
+    console.error(`[dataAccess] bulkUpdate error (${collectionKey}):`, error.message);
+    return { success: false, errors: [{ error: error.message }] };
+  }
+}
+
+// ============================================================================
+// GET ALL RECORDS (with pagination handling)
+// ============================================================================
+
+/**
+ * Get all records from a collection, handling pagination automatically
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {Object} [options] - Options
+ * @param {Object} [options.filters] - Filter conditions
+ * @param {Array} [options.sort] - Sort configuration
+ * @returns {Promise<Array>} All matching records
+ */
+export async function getAllRecords(collectionKey, options = {}) {
+  try {
+    if (usesAirtable(collectionKey)) {
+      let filterFormula = null;
+      if (options.filters && Object.keys(options.filters).length > 0) {
+        filterFormula = airtable.buildFilterFormula(options.filters, getWixCollectionName(collectionKey));
+      }
+      return await airtable.getAllRecords(getWixCollectionName(collectionKey), filterFormula, options.sort);
+    }
+
+    // Wix: paginate through all results
+    const allItems = [];
+    let skip = 0;
+    const pageSize = 1000; // Wix max per query
+
+    while (true) {
+      const result = await queryRecords(collectionKey, {
+        ...options,
+        limit: pageSize,
+        skip
+      });
+
+      if (!result.success || result.items.length === 0) break;
+
+      allItems.push(...result.items);
+
+      if (result.items.length < pageSize) break;
+      skip += pageSize;
+    }
+
+    return allItems;
+  } catch (error) {
+    console.error(`[dataAccess] getAllRecords error (${collectionKey}):`, error.message);
+    return [];
+  }
+}
+
+// ============================================================================
+// UPSERT OPERATION
+// ============================================================================
+
+/**
+ * Upsert a record (update if exists, create if not)
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {string} lookupField - The field to use for finding existing record
+ * @param {*} lookupValue - The value to match
+ * @param {Object} data - The data to set/update
+ * @param {Object} [options] - Options
+ * @returns {Promise<{success: boolean, record?: Object, isNew?: boolean, error?: string}>}
+ */
+export async function upsertRecord(collectionKey, lookupField, lookupValue, data, options = {}) {
+  try {
+    // Find existing record
+    const existing = await findByField(collectionKey, lookupField, lookupValue, options);
+
+    if (existing) {
+      // Update existing
+      const updateData = { ...existing, ...data };
+      const result = await updateRecord(collectionKey, updateData, options);
+      return { ...result, isNew: false };
+    }
+
+    // Insert new
+    const insertData = { [lookupField]: lookupValue, ...data };
+    const result = await insertRecord(collectionKey, insertData, options);
+    return { ...result, isNew: true };
+  } catch (error) {
+    console.error(`[dataAccess] upsertRecord error (${collectionKey}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// COUNT RECORDS
+// ============================================================================
+
+/**
+ * Count records matching filters
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @param {Object} [filters] - Filter conditions
+ * @param {Object} [options] - Options
+ * @returns {Promise<number>} Count of matching records
+ */
+export async function countRecords(collectionKey, filters = {}, options = {}) {
+  try {
+    if (usesAirtable(collectionKey)) {
+      let filterFormula = null;
+      if (Object.keys(filters).length > 0) {
+        filterFormula = airtable.buildFilterFormula(filters, getWixCollectionName(collectionKey));
+      }
+      return await airtable.countRecords(getWixCollectionName(collectionKey), filterFormula);
+    }
+
+    // Wix count
+    const collectionName = getWixCollectionName(collectionKey);
+    let query = wixData.query(collectionName);
+
+    if (Object.keys(filters).length > 0) {
+      query = applyWixFilters(query, filters);
+    }
+
+    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+    const result = await query.count(wixOptions);
+    return result;
+  } catch (error) {
+    console.error(`[dataAccess] countRecords error (${collectionKey}):`, error.message);
+    return 0;
+  }
+}
+
+// ============================================================================
+// UTILITY: Get Data Source Info
+// ============================================================================
+
+/**
+ * Get information about which data source is being used for a collection
+ *
+ * @param {string} collectionKey - The camelCase collection key
+ * @returns {Object} { source: 'wix'|'airtable', collectionName: string }
+ */
+export function getDataSourceInfo(collectionKey) {
+  const isAirtable = usesAirtable(collectionKey);
+  return {
+    source: isAirtable ? 'airtable' : 'wix',
+    collectionName: isAirtable
+      ? getAirtableTableName(collectionKey)
+      : getWixCollectionName(collectionKey)
+  };
+}

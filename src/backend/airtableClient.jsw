@@ -1,0 +1,1399 @@
+/**
+ * Airtable Client - Core Abstraction Layer for Wix-Airtable Integration
+ *
+ * This module provides a complete abstraction layer for interacting with Airtable,
+ * replacing wixData calls with Airtable API calls. It handles:
+ * - Rate limiting (5 requests/second with 200ms delays)
+ * - Field name transformations (Wix snake_case <-> Airtable Title Case)
+ * - Pagination for large result sets
+ * - Error handling with exponential backoff for rate limits
+ * - Bulk operations (max 10 records per request)
+ *
+ * @module backend/airtableClient
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const CONFIG = {
+  baseId: 'app9N1YCJ3gdhExA0', // Last Mile Driver Recruiting base
+  baseUrl: 'https://api.airtable.com/v0',
+  secretNames: ['AIRTABLE_PAT', 'AIRTABLE_API_KEY'], // Try PAT first, then legacy key
+
+  // Rate Limiting: Airtable allows 5 requests/second
+  rateLimit: {
+    requestDelayMs: 200, // 200ms between requests = 5/sec max
+    maxRetries: 5,
+    baseBackoffMs: 1000,
+    maxBackoffMs: 32000
+  },
+
+  // Pagination
+  pagination: {
+    maxRecordsPerPage: 100 // Airtable's max
+  },
+
+  // Request timeout
+  timeoutMs: 30000
+};
+
+// ============================================================================
+// TABLE NAME MAPPINGS (Wix Collection -> Airtable Table)
+// ============================================================================
+
+/**
+ * Maps Wix collection names to Airtable table names.
+ * All Airtable tables use v2_ prefix per migration standards.
+ */
+const TABLE_NAMES = {
+  // Core Data
+  'Carriers': 'v2_Carriers',
+  'DriverProfiles': 'v2_Driver Profiles',
+  'DriverJobs': 'v2_Driver Jobs',
+
+  // Matching & Interests
+  'DriverCarrierInterests': 'v2_Driver Carrier Interests',
+  'CarrierDriverViews': 'v2_Carrier Driver Views',
+  'MatchEvents': 'v2_Match Events',
+  'CarrierHiringPreferences': 'v2_Carrier Hiring Preferences',
+  'DriverInterests': 'v2_Driver Interests',
+
+  // Messaging & Notifications
+  'Messages': 'v2_Messages',
+  'MemberNotifications': 'v2_Member Notifications',
+  'MemberActivity': 'v2_Member Activity',
+
+  // Enrichment & Cache
+  'CarrierEnrichments': 'v2_Carrier Enrichments',
+  'CarrierSafetyData': 'v2_Carrier Safety Data',
+
+  // Billing & Subscriptions
+  'CarrierSubscriptions': 'v2_Carrier Subscriptions',
+  'ProfileViews': 'v2_Profile Views',
+  'BillingHistory': 'v2_Billing History',
+  'StripeEvents': 'v2_Stripe Events',
+
+  // Onboarding & Admin
+  'PartnerOnboarding': 'v2_Partner Onboarding',
+  'CarrierOnboarding': 'v2_Carrier Onboarding',
+  'recruiterCarriers': 'v2_Recruiter Carriers',
+
+  // Content & CMS
+  'BlogPosts': 'v2_Blog Posts',
+  'BlogCategories': 'v2_Blog Categories',
+  'FAQs': 'v2_FAQs',
+  'ComplianceGuides': 'v2_Compliance Guides',
+  'BestPracticesGuides': 'v2_Best Practices Guides',
+  'PricingTiers': 'v2_Pricing Tiers',
+  'ServiceFeatures': 'v2_Service Features',
+  'CaseStudies': 'v2_Case Studies',
+  'IndustryComparisons': 'v2_Industry Comparisons',
+
+  // Reviews & Testimonials
+  'CarrierReviews': 'v2_Carrier Reviews',
+  'CarrierTestimonials': 'v2_Carrier Testimonials',
+  'DriverTestimonials': 'v2_Driver Testimonials',
+
+  // Admin
+  'AdminUsers': 'v2_Admin Users',
+  'JobPostings': 'v2_Job Postings',
+  'TeamMembers': 'v2_Team Members',
+  'CompanyMilestones': 'v2_Company Milestones',
+
+  // Leads & Requests
+  'carrierStaffingRequests': 'v2_Carrier Staffing Requests',
+
+  // AI & Prompts
+  'AIRouterConfig': 'v2_AI Router Config',
+  'AIUsageLog': 'v2_AI Usage Log',
+  'AdminAuditLog': 'v2_Admin Audit Log',
+  'PromptLibrary': 'v2_Prompt Library'
+};
+
+// ============================================================================
+// FIELD NAME MAPPINGS (Wix snake_case <-> Airtable Title Case)
+// ============================================================================
+
+/**
+ * Field mappings per table.
+ * Keys are Wix field names (snake_case), values are Airtable field names (Title Case).
+ * Common fields like _id, _createdDate, _updatedDate are handled automatically.
+ */
+const FIELD_MAPPINGS = {
+  // Common fields across all tables
+  '_common': {
+    '_id': 'Record ID',
+    '_createdDate': 'Created',
+    '_updatedDate': 'Last Modified',
+    '_owner': 'Owner'
+  },
+
+  'Carriers': {
+    'dot_number': 'DOT Number',
+    'mc_number': 'MC Number',
+    'company_name': 'Company Name',
+    'legal_name': 'Legal Name',
+    'dba_name': 'DBA Name',
+    'operating_status': 'Operating Status',
+    'safety_rating': 'Safety Rating',
+    'total_drivers': 'Total Drivers',
+    'total_power_units': 'Total Power Units',
+    'phy_city': 'Physical City',
+    'phy_state': 'Physical State',
+    'phy_zip': 'Physical ZIP',
+    'mail_city': 'Mailing City',
+    'mail_state': 'Mailing State',
+    'mail_zip': 'Mailing ZIP',
+    'telephone': 'Telephone',
+    'email': 'Email',
+    'website': 'Website',
+    'operation_type': 'Operation Type',
+    'cargo_types': 'Cargo Types',
+    'equipment_types': 'Equipment Types',
+    'pay_rate_min': 'Pay Rate Min',
+    'pay_rate_max': 'Pay Rate Max',
+    'pay_type': 'Pay Type',
+    'home_time': 'Home Time',
+    'avg_truck_age': 'Average Truck Age',
+    'turnover_rate': 'Turnover Rate',
+    'hiring_status': 'Hiring Status',
+    'enrichment_status': 'Enrichment Status',
+    'last_enriched': 'Last Enriched',
+    'quality_score': 'Quality Score',
+    'is_featured': 'Is Featured',
+    'logo_url': 'Logo URL',
+    'description': 'Description'
+  },
+
+  'DriverProfiles': {
+    'member_id': 'Member ID',
+    'first_name': 'First Name',
+    'last_name': 'Last Name',
+    'email': 'Email',
+    'phone': 'Phone',
+    'city': 'City',
+    'state': 'State',
+    'zip_code': 'ZIP Code',
+    'cdl_class': 'CDL Class',
+    'cdl_state': 'CDL State',
+    'cdl_number': 'CDL Number',
+    'cdl_expiration': 'CDL Expiration',
+    'endorsements': 'Endorsements',
+    'years_experience': 'Years Experience',
+    'current_employer': 'Current Employer',
+    'current_salary': 'Current Salary',
+    'desired_salary': 'Desired Salary',
+    'desired_home_time': 'Desired Home Time',
+    'preferred_operation_types': 'Preferred Operation Types',
+    'preferred_cargo_types': 'Preferred Cargo Types',
+    'willing_to_relocate': 'Willing to Relocate',
+    'preferred_states': 'Preferred States',
+    'has_hazmat': 'Has Hazmat',
+    'has_tanker': 'Has Tanker',
+    'has_doubles_triples': 'Has Doubles/Triples',
+    'has_passenger': 'Has Passenger',
+    'has_twic': 'Has TWIC',
+    'accidents_last_3_years': 'Accidents Last 3 Years',
+    'violations_last_3_years': 'Violations Last 3 Years',
+    'dui_history': 'DUI History',
+    'felony_history': 'Felony History',
+    'available_date': 'Available Date',
+    'job_seeking_status': 'Job Seeking Status',
+    'is_searchable': 'Is Searchable',
+    'profile_completeness': 'Profile Completeness',
+    'resume_url': 'Resume URL',
+    'photo_url': 'Photo URL',
+    'last_active': 'Last Active',
+    'notes': 'Notes'
+  },
+
+  'DriverJobs': {
+    'carrier_id': 'Carrier',
+    'title': 'Title',
+    'description': 'Description',
+    'job_type': 'Job Type',
+    'operation_type': 'Operation Type',
+    'cargo_types': 'Cargo Types',
+    'equipment_types': 'Equipment Types',
+    'pay_rate_min': 'Pay Rate Min',
+    'pay_rate_max': 'Pay Rate Max',
+    'pay_type': 'Pay Type',
+    'home_time': 'Home Time',
+    'location_city': 'Location City',
+    'location_state': 'Location State',
+    'location_zip': 'Location ZIP',
+    'experience_required': 'Experience Required',
+    'cdl_class_required': 'CDL Class Required',
+    'endorsements_required': 'Endorsements Required',
+    'benefits': 'Benefits',
+    'sign_on_bonus': 'Sign-On Bonus',
+    'status': 'Status',
+    'posted_date': 'Posted Date',
+    'expires_date': 'Expires Date',
+    'views_count': 'Views Count',
+    'applications_count': 'Applications Count'
+  },
+
+  'DriverCarrierInterests': {
+    'driver_id': 'Driver',
+    'carrier_id': 'Carrier',
+    'job_id': 'Job',
+    'interest_type': 'Interest Type',
+    'status': 'Status',
+    'match_score': 'Match Score',
+    'applied_date': 'Applied Date',
+    'last_status_change': 'Last Status Change',
+    'notes': 'Notes',
+    'recruiter_notes': 'Recruiter Notes'
+  },
+
+  'Messages': {
+    'sender_id': 'Sender ID',
+    'sender_type': 'Sender Type',
+    'recipient_id': 'Recipient ID',
+    'recipient_type': 'Recipient Type',
+    'thread_id': 'Thread ID',
+    'subject': 'Subject',
+    'body': 'Body',
+    'is_read': 'Is Read',
+    'read_date': 'Read Date',
+    'is_archived': 'Is Archived',
+    'attachments': 'Attachments'
+  },
+
+  'CarrierSubscriptions': {
+    'carrier_dot': 'Carrier DOT',
+    'carrier_id': 'Carrier',
+    'stripe_customer_id': 'Stripe Customer ID',
+    'stripe_subscription_id': 'Stripe Subscription ID',
+    'tier': 'Tier',
+    'status': 'Status',
+    'current_period_start': 'Current Period Start',
+    'current_period_end': 'Current Period End',
+    'cancel_at_period_end': 'Cancel at Period End',
+    'views_used': 'Views Used',
+    'views_limit': 'Views Limit',
+    'jobs_used': 'Jobs Used',
+    'jobs_limit': 'Jobs Limit',
+    'last_quota_reset': 'Last Quota Reset'
+  },
+
+  'carrierStaffingRequests': {
+    'company_name': 'Company Name',
+    'contact_name': 'Contact Name',
+    'email': 'Email',
+    'phone': 'Phone',
+    'dot_number': 'DOT Number',
+    'linked_carrier_id': 'Linked Carrier',
+    'staffing_type': 'Staffing Type',
+    'drivers_needed': 'Drivers Needed',
+    'driver_types': 'Driver Types',
+    'urgency': 'Urgency',
+    'notes': 'Notes',
+    'status': 'Status',
+    'source': 'Source',
+    'utm_source': 'UTM Source',
+    'utm_medium': 'UTM Medium',
+    'utm_campaign': 'UTM Campaign'
+  }
+};
+
+// ============================================================================
+// RATE LIMITING STATE
+// ============================================================================
+
+let lastRequestTime = 0;
+const requestQueue = [];
+let isProcessingQueue = false;
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Promise-based delay
+ * @param {number} ms - Milliseconds to wait
+ * @returns {Promise<void>}
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Get the API key from Wix Secrets Manager
+ * @returns {Promise<string>} The Airtable API key
+ * @throws {Error} If no API key is found
+ */
+async function getApiKey() {
+  for (const secretName of CONFIG.secretNames) {
+    try {
+      const key = await getSecret(secretName);
+      if (key) {
+        return key;
+      }
+    } catch (e) {
+      // Try next secret name
+    }
+  }
+  throw new Error('Airtable API key not found in Secrets Manager. Add AIRTABLE_PAT or AIRTABLE_API_KEY.');
+}
+
+/**
+ * Get the Airtable table name for a Wix collection
+ * @param {string} wixCollectionName - The Wix collection name
+ * @returns {string} The Airtable table name
+ */
+function getTableName(wixCollectionName) {
+  const tableName = TABLE_NAMES[wixCollectionName];
+  if (!tableName) {
+    // If not mapped, assume it's already an Airtable table name or use v2_ prefix
+    console.warn(`⚠️ Airtable: No mapping for collection "${wixCollectionName}", using as-is`);
+    return wixCollectionName;
+  }
+  return tableName;
+}
+
+/**
+ * Get field mappings for a table
+ * @param {string} tableName - The Wix collection name
+ * @returns {Object} Field mappings (wix -> airtable)
+ */
+function getFieldMappings(tableName) {
+  return {
+    ...FIELD_MAPPINGS['_common'],
+    ...(FIELD_MAPPINGS[tableName] || {})
+  };
+}
+
+/**
+ * Get reverse field mappings for a table (airtable -> wix)
+ * @param {string} tableName - The Wix collection name
+ * @returns {Object} Reverse field mappings
+ */
+function getReverseFieldMappings(tableName) {
+  const mappings = getFieldMappings(tableName);
+  const reverse = {};
+  for (const [wix, airtable] of Object.entries(mappings)) {
+    reverse[airtable] = wix;
+  }
+  return reverse;
+}
+
+// ============================================================================
+// FIELD TRANSFORMATION FUNCTIONS
+// ============================================================================
+
+/**
+ * Transform a record from Wix format to Airtable format
+ * @param {Object} record - The Wix-formatted record
+ * @param {string} tableName - The Wix collection name
+ * @returns {Object} Airtable-formatted fields object
+ */
+export function toAirtableFormat(record, tableName) {
+  const mappings = getFieldMappings(tableName);
+  const airtableFields = {};
+
+  for (const [wixField, value] of Object.entries(record)) {
+    // Skip internal Wix fields that Airtable manages
+    if (['_id', '_createdDate', '_updatedDate', '_owner'].includes(wixField)) {
+      continue;
+    }
+
+    // Get the Airtable field name
+    const airtableField = mappings[wixField];
+
+    if (airtableField) {
+      // Use mapped name
+      airtableFields[airtableField] = transformValueToAirtable(value);
+    } else {
+      // Convert snake_case to Title Case if no explicit mapping
+      const titleCase = wixField
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+      airtableFields[titleCase] = transformValueToAirtable(value);
+    }
+  }
+
+  return airtableFields;
+}
+
+/**
+ * Transform a record from Airtable format to Wix format
+ * @param {Object} airtableRecord - The Airtable record (with id and fields)
+ * @param {string} tableName - The Wix collection name
+ * @returns {Object} Wix-formatted record
+ */
+export function toWixFormat(airtableRecord, tableName) {
+  const reverseMappings = getReverseFieldMappings(tableName);
+  const wixRecord = {
+    _id: airtableRecord.id,
+    _createdDate: airtableRecord.createdTime ? new Date(airtableRecord.createdTime) : null
+  };
+
+  const fields = airtableRecord.fields || {};
+
+  for (const [airtableField, value] of Object.entries(fields)) {
+    // Check for explicit reverse mapping
+    const wixField = reverseMappings[airtableField];
+
+    if (wixField) {
+      // Use mapped name
+      wixRecord[wixField] = transformValueFromAirtable(value);
+    } else {
+      // Convert Title Case to snake_case if no explicit mapping
+      const snakeCase = airtableField
+        .replace(/([A-Z])/g, '_$1')
+        .replace(/\s+/g, '_')
+        .toLowerCase()
+        .replace(/^_/, '')
+        .replace(/__+/g, '_');
+      wixRecord[snakeCase] = transformValueFromAirtable(value);
+    }
+  }
+
+  return wixRecord;
+}
+
+/**
+ * Transform a value for Airtable storage
+ * @param {*} value - The value to transform
+ * @returns {*} The transformed value
+ */
+function transformValueToAirtable(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  // Handle Date objects
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  // Handle arrays (for multi-select or linked records)
+  if (Array.isArray(value)) {
+    return value.map(v => transformValueToAirtable(v));
+  }
+
+  // Handle objects (stringify for long text fields)
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+
+  return value;
+}
+
+/**
+ * Transform a value from Airtable format
+ * @param {*} value - The Airtable value
+ * @returns {*} The transformed value
+ */
+function transformValueFromAirtable(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  // Try to parse JSON strings back to objects
+  if (typeof value === 'string') {
+    // Check if it looks like JSON
+    if ((value.startsWith('{') && value.endsWith('}')) ||
+        (value.startsWith('[') && value.endsWith(']'))) {
+      try {
+        return JSON.parse(value);
+      } catch (e) {
+        // Not valid JSON, return as-is
+        return value;
+      }
+    }
+
+    // Check if it's an ISO date string
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) {
+      return new Date(value);
+    }
+  }
+
+  return value;
+}
+
+// ============================================================================
+// RATE-LIMITED REQUEST HANDLER
+// ============================================================================
+
+/**
+ * Execute a rate-limited request to Airtable
+ * Ensures at least 200ms between requests (5/sec limit)
+ * @param {Function} requestFn - The request function to execute
+ * @returns {Promise<*>} The request result
+ */
+async function executeRateLimited(requestFn) {
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastRequestTime;
+
+  if (timeSinceLastRequest < CONFIG.rateLimit.requestDelayMs) {
+    await sleep(CONFIG.rateLimit.requestDelayMs - timeSinceLastRequest);
+  }
+
+  lastRequestTime = Date.now();
+  return requestFn();
+}
+
+// ============================================================================
+// CORE API REQUEST FUNCTION
+// ============================================================================
+
+/**
+ * Make a request to the Airtable API with rate limiting and error handling
+ *
+ * @param {string} endpoint - The API endpoint (relative to base URL + base ID)
+ * @param {string} method - HTTP method (GET, POST, PATCH, DELETE)
+ * @param {Object} [body] - Request body for POST/PATCH requests
+ * @returns {Promise<Object>} The API response
+ * @throws {Error} If the request fails after retries
+ *
+ * @example
+ * // Get a record
+ * const record = await airtableRequest('/v2_Carriers/recXXX', 'GET');
+ *
+ * @example
+ * // Create a record
+ * const newRecord = await airtableRequest('/v2_Carriers', 'POST', {
+ *   fields: { 'Company Name': 'Test Carrier' }
+ * });
+ */
+export async function airtableRequest(endpoint, method = 'GET', body = null) {
+  const apiKey = await getApiKey();
+  const url = `${CONFIG.baseUrl}/${CONFIG.baseId}${endpoint}`;
+
+  const headers = {
+    'Authorization': `Bearer ${apiKey}`,
+    'Content-Type': 'application/json'
+  };
+
+  const options = {
+    method,
+    headers
+  };
+
+  if (body && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
+    options.body = JSON.stringify(body);
+  }
+
+  let lastError;
+
+  for (let attempt = 0; attempt < CONFIG.rateLimit.maxRetries; attempt++) {
+    try {
+      const response = await executeRateLimited(() => fetch(url, options));
+
+      // Handle rate limiting (429)
+      if (response.status === 429) {
+        const retryAfter = parseInt(response.headers.get('Retry-After') || '30', 10);
+        const backoff = Math.min(
+          CONFIG.rateLimit.baseBackoffMs * Math.pow(2, attempt) + Math.random() * 1000,
+          CONFIG.rateLimit.maxBackoffMs
+        );
+        const waitTime = Math.max(retryAfter * 1000, backoff);
+
+        console.warn(`⚠️ Airtable rate limited. Waiting ${waitTime}ms before retry ${attempt + 1}/${CONFIG.rateLimit.maxRetries}`);
+        await sleep(waitTime);
+        continue;
+      }
+
+      // Handle other errors
+      if (!response.ok) {
+        const errorBody = await response.text();
+        let errorMessage;
+        try {
+          const errorJson = JSON.parse(errorBody);
+          errorMessage = errorJson.error?.message || errorJson.error || errorBody;
+        } catch {
+          errorMessage = errorBody;
+        }
+
+        // Don't retry client errors (4xx except 429)
+        if (response.status >= 400 && response.status < 500) {
+          throw new Error(`Airtable API error (${response.status}): ${errorMessage}`);
+        }
+
+        // Retry server errors (5xx)
+        lastError = new Error(`Airtable API error (${response.status}): ${errorMessage}`);
+        const backoff = CONFIG.rateLimit.baseBackoffMs * Math.pow(2, attempt);
+        console.warn(`⚠️ Airtable server error. Retry ${attempt + 1}/${CONFIG.rateLimit.maxRetries} in ${backoff}ms`);
+        await sleep(backoff);
+        continue;
+      }
+
+      // Success - parse and return
+      const responseText = await response.text();
+      if (!responseText) {
+        return { success: true };
+      }
+
+      return JSON.parse(responseText);
+
+    } catch (error) {
+      lastError = error;
+
+      // Network errors - retry with backoff
+      if (error.message.includes('fetch') || error.message.includes('network')) {
+        const backoff = CONFIG.rateLimit.baseBackoffMs * Math.pow(2, attempt);
+        console.warn(`⚠️ Airtable network error. Retry ${attempt + 1}/${CONFIG.rateLimit.maxRetries} in ${backoff}ms`);
+        await sleep(backoff);
+        continue;
+      }
+
+      // Other errors - don't retry
+      throw error;
+    }
+  }
+
+  // All retries exhausted
+  console.error('❌ Airtable request failed after all retries:', lastError?.message);
+  throw lastError || new Error('Airtable request failed after max retries');
+}
+
+// ============================================================================
+// CRUD OPERATIONS
+// ============================================================================
+
+/**
+ * Get a single record by ID
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {string} recordId - The Airtable record ID
+ * @returns {Promise<Object>} The record in Wix format
+ *
+ * @example
+ * const carrier = await getRecord('Carriers', 'recXXXXXXXXXXXXXX');
+ */
+export async function getRecord(tableName, recordId) {
+  const airtableTable = getTableName(tableName);
+  const encodedTable = encodeURIComponent(airtableTable);
+
+  try {
+    const response = await airtableRequest(`/${encodedTable}/${recordId}`, 'GET');
+    return toWixFormat(response, tableName);
+  } catch (error) {
+    console.error(`❌ Airtable getRecord error (${tableName}/${recordId}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Query records with optional filtering, sorting, and pagination
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {Object} [options] - Query options
+ * @param {string} [options.filterByFormula] - Airtable formula for filtering
+ * @param {Array<Object>} [options.sort] - Sort configuration [{field, direction}]
+ * @param {number} [options.maxRecords] - Maximum records to return
+ * @param {string} [options.offset] - Pagination offset token
+ * @param {Array<string>} [options.fields] - Specific fields to return
+ * @param {string} [options.view] - Airtable view name
+ * @returns {Promise<Object>} { records: Array, offset?: string }
+ *
+ * @example
+ * // Get carriers in Texas
+ * const result = await queryRecords('Carriers', {
+ *   filterByFormula: "{Physical State} = 'TX'",
+ *   sort: [{ field: 'Company Name', direction: 'asc' }],
+ *   maxRecords: 50
+ * });
+ */
+export async function queryRecords(tableName, options = {}) {
+  const airtableTable = getTableName(tableName);
+  const encodedTable = encodeURIComponent(airtableTable);
+
+  // Build query parameters
+  const params = new URLSearchParams();
+
+  if (options.filterByFormula) {
+    params.append('filterByFormula', options.filterByFormula);
+  }
+
+  if (options.sort && Array.isArray(options.sort)) {
+    options.sort.forEach((sortConfig, index) => {
+      params.append(`sort[${index}][field]`, sortConfig.field);
+      params.append(`sort[${index}][direction]`, sortConfig.direction || 'asc');
+    });
+  }
+
+  if (options.maxRecords) {
+    params.append('maxRecords', String(options.maxRecords));
+  }
+
+  if (options.offset) {
+    params.append('offset', options.offset);
+  }
+
+  if (options.fields && Array.isArray(options.fields)) {
+    options.fields.forEach(field => {
+      params.append('fields[]', field);
+    });
+  }
+
+  if (options.view) {
+    params.append('view', options.view);
+  }
+
+  const queryString = params.toString();
+  const endpoint = `/${encodedTable}${queryString ? '?' + queryString : ''}`;
+
+  try {
+    const response = await airtableRequest(endpoint, 'GET');
+
+    const records = (response.records || []).map(record => toWixFormat(record, tableName));
+
+    return {
+      records,
+      offset: response.offset || null,
+      hasMore: !!response.offset
+    };
+  } catch (error) {
+    console.error(`❌ Airtable queryRecords error (${tableName}):`, error.message);
+    return { success: false, error: error.message, records: [] };
+  }
+}
+
+/**
+ * Get all records from a table, automatically handling pagination
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {string} [filterFormula] - Optional Airtable filter formula
+ * @param {Array<Object>} [sort] - Optional sort configuration
+ * @returns {Promise<Array<Object>>} All matching records in Wix format
+ *
+ * @example
+ * // Get all active carriers
+ * const carriers = await getAllRecords('Carriers', "{Hiring Status} = 'active'");
+ */
+export async function getAllRecords(tableName, filterFormula = null, sort = null) {
+  const allRecords = [];
+  let offset = null;
+
+  do {
+    const options = {
+      maxRecords: CONFIG.pagination.maxRecordsPerPage
+    };
+
+    if (filterFormula) {
+      options.filterByFormula = filterFormula;
+    }
+
+    if (sort) {
+      options.sort = sort;
+    }
+
+    if (offset) {
+      options.offset = offset;
+    }
+
+    const result = await queryRecords(tableName, options);
+
+    if (result.error) {
+      console.error(`❌ Airtable getAllRecords error (${tableName}):`, result.error);
+      break;
+    }
+
+    allRecords.push(...result.records);
+    offset = result.offset;
+
+    // Log progress for large datasets
+    if (allRecords.length > 0 && allRecords.length % 500 === 0) {
+      console.log(`📊 Airtable: Fetched ${allRecords.length} records from ${tableName}...`);
+    }
+
+  } while (offset);
+
+  console.log(`✅ Airtable: Retrieved ${allRecords.length} total records from ${tableName}`);
+  return allRecords;
+}
+
+/**
+ * Create a new record
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {Object} fields - The record fields in Wix format
+ * @returns {Promise<Object>} The created record in Wix format
+ *
+ * @example
+ * const newCarrier = await createRecord('Carriers', {
+ *   company_name: 'Test Trucking LLC',
+ *   dot_number: 1234567,
+ *   phy_state: 'TX'
+ * });
+ */
+export async function createRecord(tableName, fields) {
+  const airtableTable = getTableName(tableName);
+  const encodedTable = encodeURIComponent(airtableTable);
+
+  const airtableFields = toAirtableFormat(fields, tableName);
+
+  try {
+    const response = await airtableRequest(`/${encodedTable}`, 'POST', {
+      fields: airtableFields,
+      typecast: true // Allow automatic type conversion
+    });
+
+    console.log(`✅ Airtable: Created record in ${tableName}: ${response.id}`);
+    return toWixFormat(response, tableName);
+  } catch (error) {
+    console.error(`❌ Airtable createRecord error (${tableName}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Update an existing record
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {string} recordId - The Airtable record ID
+ * @param {Object} fields - The fields to update in Wix format
+ * @returns {Promise<Object>} The updated record in Wix format
+ *
+ * @example
+ * const updated = await updateRecord('Carriers', 'recXXX', {
+ *   hiring_status: 'active',
+ *   pay_rate_max: 85000
+ * });
+ */
+export async function updateRecord(tableName, recordId, fields) {
+  const airtableTable = getTableName(tableName);
+  const encodedTable = encodeURIComponent(airtableTable);
+
+  const airtableFields = toAirtableFormat(fields, tableName);
+
+  try {
+    const response = await airtableRequest(`/${encodedTable}/${recordId}`, 'PATCH', {
+      fields: airtableFields,
+      typecast: true
+    });
+
+    console.log(`✅ Airtable: Updated record ${recordId} in ${tableName}`);
+    return toWixFormat(response, tableName);
+  } catch (error) {
+    console.error(`❌ Airtable updateRecord error (${tableName}/${recordId}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Delete a record
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {string} recordId - The Airtable record ID
+ * @returns {Promise<Object>} { success: boolean, deleted: boolean, id: string }
+ *
+ * @example
+ * await deleteRecord('Carriers', 'recXXXXXXXXXXXXXX');
+ */
+export async function deleteRecord(tableName, recordId) {
+  const airtableTable = getTableName(tableName);
+  const encodedTable = encodeURIComponent(airtableTable);
+
+  try {
+    const response = await airtableRequest(`/${encodedTable}/${recordId}`, 'DELETE');
+
+    console.log(`✅ Airtable: Deleted record ${recordId} from ${tableName}`);
+    return {
+      success: true,
+      deleted: response.deleted || true,
+      id: response.id || recordId
+    };
+  } catch (error) {
+    console.error(`❌ Airtable deleteRecord error (${tableName}/${recordId}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// BULK OPERATIONS
+// ============================================================================
+
+/**
+ * Create multiple records in bulk (max 10 per request)
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {Array<Object>} records - Array of records in Wix format (max 10)
+ * @returns {Promise<Object>} { success: boolean, records: Array, errors?: Array }
+ *
+ * @example
+ * const result = await bulkCreate('Carriers', [
+ *   { company_name: 'Carrier 1', dot_number: 1111111 },
+ *   { company_name: 'Carrier 2', dot_number: 2222222 }
+ * ]);
+ */
+export async function bulkCreate(tableName, records) {
+  if (!records || records.length === 0) {
+    return { success: true, records: [] };
+  }
+
+  const airtableTable = getTableName(tableName);
+  const encodedTable = encodeURIComponent(airtableTable);
+
+  // Airtable limits bulk operations to 10 records
+  const chunks = [];
+  for (let i = 0; i < records.length; i += 10) {
+    chunks.push(records.slice(i, i + 10));
+  }
+
+  const allCreated = [];
+  const errors = [];
+
+  for (const chunk of chunks) {
+    const airtableRecords = chunk.map(record => ({
+      fields: toAirtableFormat(record, tableName)
+    }));
+
+    try {
+      const response = await airtableRequest(`/${encodedTable}`, 'POST', {
+        records: airtableRecords,
+        typecast: true
+      });
+
+      const created = (response.records || []).map(r => toWixFormat(r, tableName));
+      allCreated.push(...created);
+
+    } catch (error) {
+      console.error(`❌ Airtable bulkCreate error (${tableName}):`, error.message);
+      errors.push({ chunk, error: error.message });
+    }
+  }
+
+  console.log(`✅ Airtable: Bulk created ${allCreated.length}/${records.length} records in ${tableName}`);
+
+  return {
+    success: errors.length === 0,
+    records: allCreated,
+    errors: errors.length > 0 ? errors : undefined
+  };
+}
+
+/**
+ * Update multiple records in bulk (max 10 per request)
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {Array<Object>} records - Array of records with _id and fields to update
+ * @returns {Promise<Object>} { success: boolean, records: Array, errors?: Array }
+ *
+ * @example
+ * const result = await bulkUpdate('Carriers', [
+ *   { _id: 'recXXX', hiring_status: 'active' },
+ *   { _id: 'recYYY', hiring_status: 'paused' }
+ * ]);
+ */
+export async function bulkUpdate(tableName, records) {
+  if (!records || records.length === 0) {
+    return { success: true, records: [] };
+  }
+
+  const airtableTable = getTableName(tableName);
+  const encodedTable = encodeURIComponent(airtableTable);
+
+  // Airtable limits bulk operations to 10 records
+  const chunks = [];
+  for (let i = 0; i < records.length; i += 10) {
+    chunks.push(records.slice(i, i + 10));
+  }
+
+  const allUpdated = [];
+  const errors = [];
+
+  for (const chunk of chunks) {
+    const airtableRecords = chunk.map(record => {
+      const { _id, ...fields } = record;
+      return {
+        id: _id,
+        fields: toAirtableFormat(fields, tableName)
+      };
+    });
+
+    try {
+      const response = await airtableRequest(`/${encodedTable}`, 'PATCH', {
+        records: airtableRecords,
+        typecast: true
+      });
+
+      const updated = (response.records || []).map(r => toWixFormat(r, tableName));
+      allUpdated.push(...updated);
+
+    } catch (error) {
+      console.error(`❌ Airtable bulkUpdate error (${tableName}):`, error.message);
+      errors.push({ chunk, error: error.message });
+    }
+  }
+
+  console.log(`✅ Airtable: Bulk updated ${allUpdated.length}/${records.length} records in ${tableName}`);
+
+  return {
+    success: errors.length === 0,
+    records: allUpdated,
+    errors: errors.length > 0 ? errors : undefined
+  };
+}
+
+/**
+ * Delete multiple records in bulk (max 10 per request)
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {Array<string>} recordIds - Array of record IDs to delete
+ * @returns {Promise<Object>} { success: boolean, deleted: Array, errors?: Array }
+ *
+ * @example
+ * await bulkDelete('Messages', ['recXXX', 'recYYY', 'recZZZ']);
+ */
+export async function bulkDelete(tableName, recordIds) {
+  if (!recordIds || recordIds.length === 0) {
+    return { success: true, deleted: [] };
+  }
+
+  const airtableTable = getTableName(tableName);
+  const encodedTable = encodeURIComponent(airtableTable);
+
+  // Airtable limits bulk operations to 10 records
+  const chunks = [];
+  for (let i = 0; i < recordIds.length; i += 10) {
+    chunks.push(recordIds.slice(i, i + 10));
+  }
+
+  const allDeleted = [];
+  const errors = [];
+
+  for (const chunk of chunks) {
+    // Build query string for bulk delete
+    const params = chunk.map(id => `records[]=${id}`).join('&');
+
+    try {
+      const response = await airtableRequest(`/${encodedTable}?${params}`, 'DELETE');
+
+      const deleted = (response.records || []).map(r => r.id);
+      allDeleted.push(...deleted);
+
+    } catch (error) {
+      console.error(`❌ Airtable bulkDelete error (${tableName}):`, error.message);
+      errors.push({ chunk, error: error.message });
+    }
+  }
+
+  console.log(`✅ Airtable: Bulk deleted ${allDeleted.length}/${recordIds.length} records from ${tableName}`);
+
+  return {
+    success: errors.length === 0,
+    deleted: allDeleted,
+    errors: errors.length > 0 ? errors : undefined
+  };
+}
+
+// ============================================================================
+// QUERY BUILDER HELPERS
+// ============================================================================
+
+/**
+ * Build an Airtable filter formula from Wix-style query conditions
+ *
+ * @param {Object} conditions - Query conditions { field: value } or { field: { op: value }}
+ * @param {string} tableName - The Wix collection name (for field name mapping)
+ * @returns {string} Airtable filter formula
+ *
+ * @example
+ * // Simple equality
+ * buildFilterFormula({ phy_state: 'TX' }, 'Carriers')
+ * // Returns: "{Physical State} = 'TX'"
+ *
+ * @example
+ * // With operators
+ * buildFilterFormula({
+ *   pay_rate_min: { gte: 50000 },
+ *   hiring_status: 'active'
+ * }, 'Carriers')
+ * // Returns: "AND({Pay Rate Min} >= 50000, {Hiring Status} = 'active')"
+ */
+export function buildFilterFormula(conditions, tableName) {
+  const mappings = getFieldMappings(tableName);
+  const clauses = [];
+
+  for (const [wixField, value] of Object.entries(conditions)) {
+    // Get Airtable field name
+    let airtableField = mappings[wixField];
+    if (!airtableField) {
+      // Convert snake_case to Title Case
+      airtableField = wixField
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+    }
+
+    // Handle operator objects
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [op, operand] of Object.entries(value)) {
+        clauses.push(buildOperatorClause(airtableField, op, operand));
+      }
+    } else {
+      // Simple equality
+      clauses.push(formatValue(airtableField, '=', value));
+    }
+  }
+
+  if (clauses.length === 0) {
+    return '';
+  }
+
+  if (clauses.length === 1) {
+    return clauses[0];
+  }
+
+  return `AND(${clauses.join(', ')})`;
+}
+
+/**
+ * Build a single operator clause
+ */
+function buildOperatorClause(field, op, value) {
+  const operators = {
+    'eq': '=',
+    'ne': '!=',
+    'gt': '>',
+    'gte': '>=',
+    'lt': '<',
+    'lte': '<=',
+    'contains': 'FIND',
+    'startsWith': 'LEFT',
+    'isEmpty': 'BLANK',
+    'isNotEmpty': 'NOT_BLANK'
+  };
+
+  const airtableOp = operators[op] || op;
+
+  // Special handling for certain operators
+  if (op === 'contains') {
+    const escapedValue = String(value).replace(/'/g, "\\'");
+    return `FIND('${escapedValue}', {${field}}) > 0`;
+  }
+
+  if (op === 'startsWith') {
+    const escapedValue = String(value).replace(/'/g, "\\'");
+    return `LEFT({${field}}, ${value.length}) = '${escapedValue}'`;
+  }
+
+  if (op === 'isEmpty') {
+    return `{${field}} = BLANK()`;
+  }
+
+  if (op === 'isNotEmpty') {
+    return `{${field}} != BLANK()`;
+  }
+
+  return formatValue(field, airtableOp, value);
+}
+
+/**
+ * Format a value for Airtable formula
+ */
+function formatValue(field, operator, value) {
+  let formattedValue;
+
+  if (typeof value === 'string') {
+    // Escape single quotes and wrap in quotes
+    formattedValue = `'${value.replace(/'/g, "\\'")}'`;
+  } else if (typeof value === 'boolean') {
+    formattedValue = value ? 'TRUE()' : 'FALSE()';
+  } else if (value === null) {
+    formattedValue = 'BLANK()';
+  } else {
+    formattedValue = String(value);
+  }
+
+  return `{${field}} ${operator} ${formattedValue}`;
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+/**
+ * Find a record by a specific field value (convenience wrapper)
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {string} fieldName - The field name in Wix format
+ * @param {*} value - The value to search for
+ * @returns {Promise<Object|null>} The first matching record or null
+ *
+ * @example
+ * const carrier = await findByField('Carriers', 'dot_number', 1234567);
+ */
+export async function findByField(tableName, fieldName, value) {
+  const formula = buildFilterFormula({ [fieldName]: value }, tableName);
+
+  const result = await queryRecords(tableName, {
+    filterByFormula: formula,
+    maxRecords: 1
+  });
+
+  if (result.error || !result.records || result.records.length === 0) {
+    return null;
+  }
+
+  return result.records[0];
+}
+
+/**
+ * Check if a record exists by field value
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {string} fieldName - The field name in Wix format
+ * @param {*} value - The value to search for
+ * @returns {Promise<boolean>} True if a matching record exists
+ */
+export async function exists(tableName, fieldName, value) {
+  const record = await findByField(tableName, fieldName, value);
+  return record !== null;
+}
+
+/**
+ * Count records matching a filter
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {string} [filterFormula] - Optional filter formula
+ * @returns {Promise<number>} The count of matching records
+ */
+export async function countRecords(tableName, filterFormula = null) {
+  const records = await getAllRecords(tableName, filterFormula);
+  return records.length;
+}
+
+/**
+ * Upsert a record (update if exists, create if not)
+ *
+ * @param {string} tableName - The Wix collection name
+ * @param {string} lookupField - The field to use for finding existing record
+ * @param {*} lookupValue - The value to match
+ * @param {Object} fields - The fields to set
+ * @returns {Promise<Object>} The created or updated record
+ *
+ * @example
+ * const carrier = await upsertRecord('Carriers', 'dot_number', 1234567, {
+ *   company_name: 'Updated Trucking LLC',
+ *   hiring_status: 'active'
+ * });
+ */
+export async function upsertRecord(tableName, lookupField, lookupValue, fields) {
+  const existing = await findByField(tableName, lookupField, lookupValue);
+
+  if (existing && existing._id) {
+    // Update existing record
+    return updateRecord(tableName, existing._id, fields);
+  } else {
+    // Create new record
+    return createRecord(tableName, { [lookupField]: lookupValue, ...fields });
+  }
+}
+
+// ============================================================================
+// CONFIGURATION GETTERS
+// ============================================================================
+
+/**
+ * Get all table name mappings
+ * @returns {Object} The TABLE_NAMES mapping object
+ */
+export function getTableMappings() {
+  return { ...TABLE_NAMES };
+}
+
+/**
+ * Get field mappings for a specific table
+ * @param {string} tableName - The Wix collection name
+ * @returns {Object} The field mappings for that table
+ */
+export function getTableFieldMappings(tableName) {
+  return getFieldMappings(tableName);
+}
+
+/**
+ * Add or update table name mapping at runtime
+ * @param {string} wixCollection - The Wix collection name
+ * @param {string} airtableTable - The Airtable table name
+ */
+export function setTableMapping(wixCollection, airtableTable) {
+  TABLE_NAMES[wixCollection] = airtableTable;
+  console.log(`📝 Airtable: Added table mapping ${wixCollection} -> ${airtableTable}`);
+}
+
+/**
+ * Add or update field mappings for a table at runtime
+ * @param {string} tableName - The Wix collection name
+ * @param {Object} mappings - Field mappings { wixField: airtableField }
+ */
+export function setFieldMappings(tableName, mappings) {
+  FIELD_MAPPINGS[tableName] = {
+    ...(FIELD_MAPPINGS[tableName] || {}),
+    ...mappings
+  };
+  console.log(`📝 Airtable: Updated field mappings for ${tableName}`);
+}
+
+// ============================================================================
+// TEST/DEBUG FUNCTIONS
+// ============================================================================
+
+/**
+ * Test the Airtable connection
+ * @returns {Promise<Object>} Connection status and base info
+ */
+export async function testConnection() {
+  try {
+    const apiKey = await getApiKey();
+
+    // Try to list tables (this validates both API key and base ID)
+    const response = await fetch(`https://api.airtable.com/v0/meta/bases/${CONFIG.baseId}/tables`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return {
+        success: false,
+        error: `API returned ${response.status}: ${error}`,
+        baseId: CONFIG.baseId
+      };
+    }
+
+    const data = await response.json();
+    const tableNames = (data.tables || []).map(t => t.name);
+
+    return {
+      success: true,
+      message: 'Airtable connection successful',
+      baseId: CONFIG.baseId,
+      tableCount: tableNames.length,
+      tables: tableNames.slice(0, 10), // Show first 10 tables
+      hasMore: tableNames.length > 10
+    };
+
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+      baseId: CONFIG.baseId
+    };
+  }
+}
+
+/**
+ * Get the current rate limit state
+ * @returns {Object} Rate limit info
+ */
+export function getRateLimitInfo() {
+  return {
+    lastRequestTime,
+    delayMs: CONFIG.rateLimit.requestDelayMs,
+    maxRetries: CONFIG.rateLimit.maxRetries,
+    timeSinceLastRequest: Date.now() - lastRequestTime
+  };
+}

@@ -3,6 +3,11 @@ import wixUsersBackend from 'wix-users-backend';
 import { mediaManager } from 'wix-media-backend';
 import { extractInfoFromDocument } from 'backend/ocrService.jsw';
 
+// Dual-source data access
+import { usesAirtable, getWixCollectionName } from 'backend/config';
+import * as dataAccess from 'backend/dataAccess';
+import * as airtable from 'backend/airtableClient';
+
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
@@ -156,15 +161,17 @@ export async function getOrCreateDriverProfile() {
 
 /**
  * Get profile by Wix user ID
+ * Supports dual data sources via config.jsw
  */
 async function getProfileByUserId(userId) {
   try {
-    const result = await wixData.query(CONFIG.profilesCollection)
-      .eq('_owner', userId)
-      .limit(1)
-      .find({ suppressAuth: true });
-    
-    return result.items.length > 0 ? result.items[0] : null;
+    const result = await dataAccess.queryRecords('driverProfiles', {
+      filters: { _owner: userId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    return result.success && result.items.length > 0 ? result.items[0] : null;
   } catch (error) {
     console.error('Profile lookup error:', error);
     return null;
@@ -173,10 +180,11 @@ async function getProfileByUserId(userId) {
 
 /**
  * Get profile by profile ID (for admin/internal use)
+ * Supports dual data sources via config.jsw
  */
 export async function getProfileById(profileId) {
   try {
-    const result = await wixData.get(CONFIG.profilesCollection, profileId, { suppressAuth: true });
+    const result = await dataAccess.getRecord('driverProfiles', profileId, { suppressAuth: true });
     return result ? enrichProfile(result) : null;
   } catch (error) {
     console.error('Profile get error:', error);
@@ -245,9 +253,14 @@ async function createNewProfile(userId, userObject) {
     updated_date: now
   };
   
-  const options = { suppressAuth: true };
-  const inserted = await wixData.insert(CONFIG.profilesCollection, profileData, options);
-  
+  // Use dual-source data access for insert
+  const insertResult = await dataAccess.insertRecord('driverProfiles', profileData, { suppressAuth: true });
+
+  if (!insertResult.success) {
+    throw new Error(insertResult.error || 'Failed to create profile');
+  }
+
+  const inserted = insertResult.record;
   console.log(`✅ Created new profile with ID: ${inserted._id}`);
   return inserted;
 }
@@ -307,16 +320,21 @@ export async function updateDriverPreferences(preferences) {
       updatedData.profile_status = CONFIG.STATUS.INCOMPLETE;
     }
     
-    const options = { suppressAuth: true };
-    const updated = await wixData.update(CONFIG.profilesCollection, updatedData, options);
-    
+    // Use dual-source data access for update
+    const updateResult = await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
+
+    if (!updateResult.success) {
+      throw new Error(updateResult.error || 'Failed to update preferences');
+    }
+
+    const updated = updateResult.record;
     console.log(`✅ Updated preferences for user ${userId}`);
-    
+
     return {
       success: true,
       profile: enrichProfile(updated)
     };
-    
+
   } catch (error) {
     console.error('❌ Error updating preferences:', error);
     return { success: false, error: error.message };
@@ -382,9 +400,14 @@ export async function updateDriverDocuments(docData) {
       updatedData.profile_status = CONFIG.STATUS.ACTIVE;
     }
     
-    const options = { suppressAuth: true };
-    const updated = await wixData.update(CONFIG.profilesCollection, updatedData, options);
-    
+    // Use dual-source data access for update
+    const updateResult = await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
+
+    if (!updateResult.success) {
+      throw new Error(updateResult.error || 'Failed to update documents');
+    }
+
+    const updated = updateResult.record;
     console.log(`✅ Updated documents for user ${userId}`);
     
     // OCR Processing (New for Phase 7)
@@ -422,11 +445,11 @@ export async function updateDriverDocuments(docData) {
             }
         });
 
-        // Final save with OCR data
+        // Final save with OCR data using dual-source data access
         updatedData.profile_completeness_score = calculateCompleteness(updatedData);
         if (updatedData.profile_completeness_score >= 80) updatedData.profile_status = CONFIG.STATUS.ACTIVE;
-        
-        await wixData.update(CONFIG.profilesCollection, updatedData, options);
+
+        await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
         console.log('✅ Profile enriched via OCR extraction');
     }
 
@@ -481,16 +504,21 @@ export async function updateDriverQualifications(qualifications) {
       updatedData.profile_status = CONFIG.STATUS.ACTIVE;
     }
     
-    const options = { suppressAuth: true };
-    const updated = await wixData.update(CONFIG.profilesCollection, updatedData, options);
-    
+    // Use dual-source data access for update
+    const updateResult = await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
+
+    if (!updateResult.success) {
+      throw new Error(updateResult.error || 'Failed to update qualifications');
+    }
+
+    const updated = updateResult.record;
     console.log(`✅ Updated qualifications for user ${userId}`);
-    
+
     return {
       success: true,
       profile: enrichProfile(updated)
     };
-    
+
   } catch (error) {
     console.error('❌ Error updating qualifications:', error);
     return { success: false, error: error.message };
@@ -520,17 +548,22 @@ export async function setDiscoverability(isDiscoverable) {
       is_discoverable: Boolean(isDiscoverable),
       updated_date: new Date()
     };
-    
-    const options = { suppressAuth: true };
-    const updated = await wixData.update(CONFIG.profilesCollection, updatedData, options);
-    
+
+    // Use dual-source data access for update
+    const updateResult = await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
+
+    if (!updateResult.success) {
+      throw new Error(updateResult.error || 'Failed to update discoverability');
+    }
+
+    const updated = updateResult.record;
     console.log(`✅ Set discoverability to ${isDiscoverable} for user ${userId}`);
-    
+
     return {
       success: true,
       profile: enrichProfile(updated)
     };
-    
+
   } catch (error) {
     console.error('❌ Error setting discoverability:', error);
     return { success: false, error: error.message };
@@ -563,25 +596,28 @@ export async function logCarrierInterest(carrierData) {
     
     const now = new Date();
     
-    // Check for existing interest record
-    const existingInterest = await wixData.query(CONFIG.interestsCollection)
-      .eq('driver_id', profile._id)
-      .eq('carrier_dot', String(carrierData.carrierDOT))
-      .limit(1)
-      .find({ suppressAuth: true });
-    
-    if (existingInterest.items.length > 0) {
+    // Check for existing interest record using dual-source data access
+    const existingResult = await dataAccess.queryRecords('driverCarrierInterests', {
+      filters: {
+        driver_id: profile._id,
+        carrier_dot: String(carrierData.carrierDOT)
+      },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (existingResult.success && existingResult.items.length > 0) {
       // Update existing record with new timestamp
-      const existing = existingInterest.items[0];
-      const updated = await wixData.update(CONFIG.interestsCollection, {
+      const existing = existingResult.items[0];
+      const updateResult = await dataAccess.updateRecord('driverCarrierInterests', {
         ...existing,
         match_score: carrierData.matchScore || existing.match_score,
         action: carrierData.action || 'interested',
         action_timestamp: now
       }, { suppressAuth: true });
-      
+
       console.log(`📝 Updated existing interest for DOT ${carrierData.carrierDOT}`);
-      return { success: true, interest: updated, isUpdate: true };
+      return { success: true, interest: updateResult.record, isUpdate: true };
     }
     
     // Create new interest record
@@ -598,17 +634,21 @@ export async function logCarrierInterest(carrierData) {
       notes: null
     };
     
-    const options = { suppressAuth: true };
-    const inserted = await wixData.insert(CONFIG.interestsCollection, interestData, options);
-    
+    // Use dual-source data access for insert
+    const insertResult = await dataAccess.insertRecord('driverCarrierInterests', interestData, { suppressAuth: true });
+
+    if (!insertResult.success) {
+      throw new Error(insertResult.error || 'Failed to log interest');
+    }
+
     console.log(`✅ Logged interest: Driver ${profile._id} → Carrier DOT ${carrierData.carrierDOT}`);
-    
+
     return {
       success: true,
-      interest: inserted,
+      interest: insertResult.record,
       isNew: true
     };
-    
+
   } catch (error) {
     console.error('❌ Error logging carrier interest:', error);
     return { success: false, error: error.message };
@@ -633,18 +673,23 @@ export async function getDriverInterests() {
       return { success: false, error: 'Profile not found', interests: [] };
     }
     
-    const result = await wixData.query(CONFIG.interestsCollection)
-      .eq('driver_id', profile._id)
-      .descending('action_timestamp')
-      .limit(100)
-      .find({ suppressAuth: true });
-    
+    const result = await dataAccess.queryRecords('driverCarrierInterests', {
+      filters: { driver_id: profile._id },
+      sort: [{ field: 'action_timestamp', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    if (!result.success) {
+      return { success: false, error: result.error, interests: [] };
+    }
+
     console.log(`📋 Found ${result.items.length} interests for driver ${profile._id}`);
-    
+
     return {
       success: true,
       interests: result.items,
-      totalCount: result.totalCount
+      totalCount: result.totalCount || result.items.length
     };
     
   } catch (error) {
@@ -671,18 +716,25 @@ export async function removeCarrierInterest(carrierDOT) {
       return { success: false, error: 'Profile not found' };
     }
     
-    const existing = await wixData.query(CONFIG.interestsCollection)
-      .eq('driver_id', profile._id)
-      .eq('carrier_dot', String(carrierDOT))
-      .limit(1)
-      .find({ suppressAuth: true });
-    
-    if (existing.items.length === 0) {
+    const existingResult = await dataAccess.queryRecords('driverCarrierInterests', {
+      filters: {
+        driver_id: profile._id,
+        carrier_dot: String(carrierDOT)
+      },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (!existingResult.success || existingResult.items.length === 0) {
       return { success: false, error: 'Interest not found' };
     }
-    
-    await wixData.remove(CONFIG.interestsCollection, existing.items[0]._id, { suppressAuth: true });
-    
+
+    const deleteResult = await dataAccess.deleteRecord('driverCarrierInterests', existingResult.items[0]._id, { suppressAuth: true });
+
+    if (!deleteResult.success) {
+      throw new Error(deleteResult.error || 'Failed to remove interest');
+    }
+
     console.log(`🗑️ Removed interest for DOT ${carrierDOT}`);
     return { success: true };
     
@@ -703,11 +755,16 @@ export async function removeCarrierInterest(carrierDOT) {
 export async function getCarrierInterestStats(carrierDOT) {
   try {
     const dotString = String(carrierDOT);
-    
-    const result = await wixData.query(CONFIG.interestsCollection)
-      .eq('carrier_dot', dotString)
-      .find({ suppressAuth: true });
-    
+
+    const result = await dataAccess.queryRecords('driverCarrierInterests', {
+      filters: { carrier_dot: dotString },
+      suppressAuth: true
+    });
+
+    if (!result.success) {
+      return { success: false, error: result.error };
+    }
+
     const interests = result.items;
     
     // Aggregate stats (no PII)
@@ -767,12 +824,11 @@ export async function getDriverActivityStats() {
     const now = new Date();
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    
-    // Get all profiles
-    const profileResult = await wixData.query(CONFIG.profilesCollection)
-      .find({ suppressAuth: true });
-    
-    const profiles = profileResult.items;
+
+    // Get all profiles using dual-source data access
+    const profileResult = await dataAccess.getAllRecords('driverProfiles', { suppressAuth: true });
+
+    const profiles = profileResult || [];
     
     // Calculate stats
     const stats = {
@@ -817,12 +873,15 @@ export async function getDriverActivityStats() {
       ? Math.round((totalSearches / profiles.length) * 10) / 10 
       : 0;
     
-    // Get interest stats
-    const interestResult = await wixData.query(CONFIG.interestsCollection)
-      .ge('action_timestamp', thirtyDaysAgo)
-      .find({ suppressAuth: true });
-    
-    stats.total_interests_30_days = interestResult.totalCount;
+    // Get interest stats using dual-source data access
+    const interestResult = await dataAccess.queryRecords('driverCarrierInterests', {
+      filters: {
+        action_timestamp: { gte: thirtyDaysAgo }
+      },
+      suppressAuth: true
+    });
+
+    stats.total_interests_30_days = interestResult.success ? (interestResult.totalCount || interestResult.items.length) : 0;
     
     return { success: true, stats };
     

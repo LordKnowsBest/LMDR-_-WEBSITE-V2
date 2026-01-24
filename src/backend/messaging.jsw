@@ -3,6 +3,113 @@ import wixUsersBackend from 'wix-users-backend';
 import { sendMessageNotification } from 'backend/emailService';
 
 // ============================================================================
+// Data Source Configuration
+// ============================================================================
+import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// Collection keys (camelCase, matching config.jsw)
+const MESSAGES_KEY = 'messages';
+const DRIVER_CARRIER_INTERESTS_KEY = 'driverCarrierInterests';
+const RECRUITER_CARRIERS_KEY = 'recruiterCarriers';
+const DRIVER_PROFILES_KEY = 'driverProfiles';
+
+// Legacy collection names for wixData
+const MESSAGES_COLLECTION = 'Messages';
+const DRIVER_CARRIER_INTERESTS_COLLECTION = 'DriverCarrierInterests';
+const RECRUITER_CARRIERS_COLLECTION = 'recruiterCarriers';
+const DRIVER_PROFILES_COLLECTION = 'DriverProfiles';
+
+// ============================================================================
+// Data Abstraction Layer Helpers
+// ============================================================================
+
+/**
+ * Query records from the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Function} wixQueryBuilder - Function that builds and executes wixData query
+ * @param {Object} airtableOptions - Options for Airtable query
+ * @returns {Promise<Object>} Query result with items array
+ */
+async function queryData(collectionKey, wixQueryBuilder, airtableOptions = {}) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      const result = await airtable.queryRecords(tableName, airtableOptions);
+      return { items: result.records || [], totalCount: (result.records || []).length };
+    } catch (error) {
+      console.error(`[Messaging] Airtable query error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  return await wixQueryBuilder();
+}
+
+/**
+ * Get a single record by ID
+ * @param {string} collectionKey - camelCase collection key
+ * @param {string} recordId - Record ID
+ * @returns {Promise<Object|null>} Record or null
+ */
+async function getRecord(collectionKey, recordId) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      return await airtable.getRecord(tableName, recordId);
+    } catch (error) {
+      console.error(`[Messaging] Airtable get error for ${collectionKey}:`, error.message);
+      return null;
+    }
+  }
+  // Use Wix
+  const wixCollection = getWixCollectionName(collectionKey);
+  return await wixData.get(wixCollection, recordId, { suppressAuth: true });
+}
+
+/**
+ * Insert a record into the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Object} record - Record to insert
+ * @returns {Promise<Object>} Inserted record
+ */
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      return await airtable.createRecord(tableName, record);
+    } catch (error) {
+      console.error(`[Messaging] Airtable insert error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  const wixCollection = getWixCollectionName(collectionKey);
+  return await wixData.insert(wixCollection, record);
+}
+
+/**
+ * Bulk update records
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Array} records - Records to update
+ * @returns {Promise<Object>} Update result
+ */
+async function bulkUpdateData(collectionKey, records) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      return await airtable.bulkUpdate(tableName, records);
+    } catch (error) {
+      console.error(`[Messaging] Airtable bulk update error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  const wixCollection = getWixCollectionName(collectionKey);
+  return await wixData.bulkUpdate(wixCollection, records);
+}
+
+// ============================================================================
 // SECURITY HELPERS
 // ============================================================================
 
@@ -13,9 +120,9 @@ import { sendMessageNotification } from 'backend/emailService';
  */
 async function validateSenderPermission(applicationId, senderId, senderType) {
     try {
-        const application = await wixData.get('DriverCarrierInterests', applicationId, { suppressAuth: true });
+        const application = await getRecord(DRIVER_CARRIER_INTERESTS_KEY, applicationId);
         if (!application) {
-            console.warn('⚠️ Application not found:', applicationId);
+            console.warn('Warning: Application not found:', applicationId);
             return false;
         }
 
@@ -23,20 +130,34 @@ async function validateSenderPermission(applicationId, senderId, senderType) {
             // Driver must own this application
             const isOwner = application.driver_id === senderId;
             if (!isOwner) {
-                console.warn('⚠️ Driver permission denied - not application owner');
+                console.warn('Warning: Driver permission denied - not application owner');
             }
             return isOwner;
         } else if (senderType === 'recruiter') {
             // Recruiter must have access to this carrier
-            const recruiterAccess = await wixData.query('recruiterCarriers')
-                .eq('recruiter_id', senderId)
-                .eq('carrier_dot', application.carrier_dot)
-                .eq('is_active', true)
-                .find({ suppressAuth: true });
+            let recruiterAccessItems = [];
 
-            const hasAccess = recruiterAccess.items.length > 0;
+            if (usesAirtable(RECRUITER_CARRIERS_KEY)) {
+                // Airtable query
+                const filter = `AND({Recruiter ID} = '${senderId}', {Carrier DOT} = '${application.carrier_dot}', {Is Active} = TRUE())`;
+                const result = await airtable.queryRecords(getAirtableTableName(RECRUITER_CARRIERS_KEY), {
+                    filterByFormula: filter,
+                    maxRecords: 1
+                });
+                recruiterAccessItems = result.records || [];
+            } else {
+                // Wix query
+                const recruiterAccess = await wixData.query(RECRUITER_CARRIERS_COLLECTION)
+                    .eq('recruiter_id', senderId)
+                    .eq('carrier_dot', application.carrier_dot)
+                    .eq('is_active', true)
+                    .find({ suppressAuth: true });
+                recruiterAccessItems = recruiterAccess.items;
+            }
+
+            const hasAccess = recruiterAccessItems.length > 0;
             if (!hasAccess) {
-                console.warn('⚠️ Recruiter permission denied - no carrier access');
+                console.warn('Warning: Recruiter permission denied - no carrier access');
             }
             return hasAccess;
         }
@@ -68,9 +189,9 @@ function sanitizeContent(content) {
 async function triggerMessageNotification(receiverId, senderId, senderType, applicationId, messageContent) {
     try {
         // Get application details for context
-        const application = await wixData.get('DriverCarrierInterests', applicationId, { suppressAuth: true });
+        const application = await getRecord(DRIVER_CARRIER_INTERESTS_KEY, applicationId);
         if (!application) {
-            console.warn('⚠️ Cannot notify - application not found');
+            console.warn('Warning: Cannot notify - application not found');
             return;
         }
 
@@ -82,12 +203,27 @@ async function triggerMessageNotification(receiverId, senderId, senderType, appl
 
         if (senderType === 'driver') {
             // Driver sent message -> notify recruiter
-            const driverProfile = await wixData.query('DriverProfiles')
-                .eq('user_id', senderId)
-                .limit(1)
-                .find({ suppressAuth: true });
-            if (driverProfile.items.length > 0) {
-                senderName = driverProfile.items[0].first_name || 'A driver';
+            let driverProfileItems = [];
+
+            if (usesAirtable(DRIVER_PROFILES_KEY)) {
+                // Airtable query
+                const filter = `{User ID} = '${senderId}'`;
+                const result = await airtable.queryRecords(getAirtableTableName(DRIVER_PROFILES_KEY), {
+                    filterByFormula: filter,
+                    maxRecords: 1
+                });
+                driverProfileItems = result.records || [];
+            } else {
+                // Wix query
+                const driverProfile = await wixData.query(DRIVER_PROFILES_COLLECTION)
+                    .eq('user_id', senderId)
+                    .limit(1)
+                    .find({ suppressAuth: true });
+                driverProfileItems = driverProfile.items;
+            }
+
+            if (driverProfileItems.length > 0) {
+                senderName = driverProfileItems[0].first_name || 'A driver';
             }
             isDriver = false; // Receiver is recruiter
         } else {
@@ -96,12 +232,27 @@ async function triggerMessageNotification(receiverId, senderId, senderType, appl
             isDriver = true; // Receiver is driver
 
             // Get driver name for personalization
-            const driverProfile = await wixData.query('DriverProfiles')
-                .eq('user_id', receiverId)
-                .limit(1)
-                .find({ suppressAuth: true });
-            if (driverProfile.items.length > 0) {
-                recipientName = driverProfile.items[0].first_name || 'Driver';
+            let driverProfileItems = [];
+
+            if (usesAirtable(DRIVER_PROFILES_KEY)) {
+                // Airtable query
+                const filter = `{User ID} = '${receiverId}'`;
+                const result = await airtable.queryRecords(getAirtableTableName(DRIVER_PROFILES_KEY), {
+                    filterByFormula: filter,
+                    maxRecords: 1
+                });
+                driverProfileItems = result.records || [];
+            } else {
+                // Wix query
+                const driverProfile = await wixData.query(DRIVER_PROFILES_COLLECTION)
+                    .eq('user_id', receiverId)
+                    .limit(1)
+                    .find({ suppressAuth: true });
+                driverProfileItems = driverProfile.items;
+            }
+
+            if (driverProfileItems.length > 0) {
+                recipientName = driverProfileItems[0].first_name || 'Driver';
             }
         }
 
@@ -114,9 +265,9 @@ async function triggerMessageNotification(receiverId, senderId, senderType, appl
             isDriver
         });
 
-        console.log(`📧 Message notification sent to ${receiverId}`);
+        console.log(`Email notification sent to ${receiverId}`);
     } catch (error) {
-        console.error('❌ triggerMessageNotification error:', error);
+        console.error('triggerMessageNotification error:', error);
         throw error; // Re-throw so caller's .catch() handles it
     }
 }
@@ -165,11 +316,11 @@ export async function sendMessage(applicationId, content, receiverId, senderType
             is_read: false
         };
 
-        const result = await wixData.insert('Messages', newMessage);
+        const result = await insertData(MESSAGES_KEY, newMessage);
 
         // Send email notification (non-blocking)
         triggerMessageNotification(receiverId, userId, senderType, applicationId, sanitizedContent)
-            .catch(err => console.warn('⚠️ Notification failed (non-critical):', err.message));
+            .catch(err => console.warn('Warning: Notification failed (non-critical):', err.message));
 
         return { success: true, message: result };
     } catch (error) {
@@ -180,18 +331,32 @@ export async function sendMessage(applicationId, content, receiverId, senderType
 
 /**
  * Retrieves the conversation for a specific application.
- * @param {string} applicationId 
+ * @param {string} applicationId
  */
 export async function getConversation(applicationId) {
     if (!applicationId) return { success: false, error: 'Missing applicationId' };
 
     try {
-        const results = await wixData.query('Messages')
-            .eq('application_id', applicationId)
-            .ascending('timestamp')
-            .find();
+        let items = [];
 
-        return { success: true, messages: results.items };
+        if (usesAirtable(MESSAGES_KEY)) {
+            // Airtable query
+            const filter = `{Application ID} = '${applicationId}'`;
+            const result = await airtable.queryRecords(getAirtableTableName(MESSAGES_KEY), {
+                filterByFormula: filter,
+                sort: [{ field: 'Timestamp', direction: 'asc' }]
+            });
+            items = result.records || [];
+        } else {
+            // Wix query
+            const results = await wixData.query(MESSAGES_COLLECTION)
+                .eq('application_id', applicationId)
+                .ascending('timestamp')
+                .find();
+            items = results.items;
+        }
+
+        return { success: true, messages: items };
     } catch (error) {
         console.error('Error fetching conversation:', error);
         return { success: false, error: error.message };
@@ -206,12 +371,25 @@ export async function getUnreadCount() {
         const userId = await getCurrentUserId();
         if (!userId) return { success: false, error: 'Not authenticated' };
 
-        const results = await wixData.query('Messages')
-            .eq('receiver_id', userId)
-            .eq('is_read', false)
-            .count();
+        let count = 0;
 
-        return { success: true, count: results };
+        if (usesAirtable(MESSAGES_KEY)) {
+            // Airtable query - count matching records
+            const filter = `AND({Receiver ID} = '${userId}', {Is Read} = FALSE())`;
+            const result = await airtable.queryRecords(getAirtableTableName(MESSAGES_KEY), {
+                filterByFormula: filter
+            });
+            count = (result.records || []).length;
+        } else {
+            // Wix query
+            const results = await wixData.query(MESSAGES_COLLECTION)
+                .eq('receiver_id', userId)
+                .eq('is_read', false)
+                .count();
+            count = results;
+        }
+
+        return { success: true, count };
     } catch (error) {
         console.error('Error counting unread messages:', error);
         return { success: false, error: error.message };
@@ -220,22 +398,35 @@ export async function getUnreadCount() {
 
 /**
  * Marks all messages in a conversation as read for the receiver.
- * @param {string} applicationId 
+ * @param {string} applicationId
  */
 export async function markAsRead(applicationId) {
     try {
         const userId = await getCurrentUserId();
         if (!userId) return { success: false, error: 'Not authenticated' };
 
-        const unreadResults = await wixData.query('Messages')
-            .eq('application_id', applicationId)
-            .eq('receiver_id', userId)
-            .eq('is_read', false)
-            .find();
+        let unreadItems = [];
 
-        if (unreadResults.items.length > 0) {
-            const updates = unreadResults.items.map(msg => ({ ...msg, is_read: true }));
-            await wixData.bulkUpdate('Messages', updates);
+        if (usesAirtable(MESSAGES_KEY)) {
+            // Airtable query
+            const filter = `AND({Application ID} = '${applicationId}', {Receiver ID} = '${userId}', {Is Read} = FALSE())`;
+            const result = await airtable.queryRecords(getAirtableTableName(MESSAGES_KEY), {
+                filterByFormula: filter
+            });
+            unreadItems = result.records || [];
+        } else {
+            // Wix query
+            const unreadResults = await wixData.query(MESSAGES_COLLECTION)
+                .eq('application_id', applicationId)
+                .eq('receiver_id', userId)
+                .eq('is_read', false)
+                .find();
+            unreadItems = unreadResults.items;
+        }
+
+        if (unreadItems.length > 0) {
+            const updates = unreadItems.map(msg => ({ ...msg, is_read: true }));
+            await bulkUpdateData(MESSAGES_KEY, updates);
         }
 
         return { success: true };

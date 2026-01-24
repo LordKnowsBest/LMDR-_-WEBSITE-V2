@@ -4,6 +4,8 @@
  * Enables carriers to search, filter, and match with qualified CDL drivers.
  * This is the primary revenue driver for the platform (paid subscription service).
  *
+ * Supports dual data sources (Wix and Airtable) via config.jsw feature flags.
+ *
  * @module backend/driverMatching
  * @see conductor/tracks/reverse_matching_20251225/spec.md
  */
@@ -16,6 +18,11 @@ import { calculateDriverMatchScore, generateDriverMatchRationale } from 'backend
 import { startTrace, endTrace, log, logDatabase } from 'backend/observabilityService';
 import { withRetry } from 'backend/utils/retryUtils';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
+
+// Dual-source data access
+import { usesAirtable, getWixCollectionName } from 'backend/config';
+import * as dataAccess from 'backend/dataAccess';
+import * as airtable from 'backend/airtableClient';
 
 // ============================================================================
 // CONSTANTS
@@ -61,6 +68,7 @@ async function verifyAuthenticated() {
 /**
  * Verifies the user has an allowed role/badge (recruiter or admin)
  * Checks both Wix roles and member badges
+ * Supports dual data sources via config.jsw
  * @returns {Promise<{success: boolean, roles?: Array, error?: string}>}
  */
 async function verifyRole() {
@@ -82,6 +90,7 @@ async function verifyRole() {
 
     // If no Wix role, check for badge assignments
     // Query the member's badges via the MemberBadges collection
+    // Note: Member badges always use Wix (system collection)
     const badgeResult = await wixData.query('Members/Badges')
       .eq('memberId', currentUser.id)
       .find({ suppressAuth: true });
@@ -113,6 +122,7 @@ async function verifyRole() {
 /**
  * Verifies the user is authorized to access the specified carrier.
  * Checks the 'recruiterCarriers' collection for a valid recruiter-carrier association.
+ * Supports dual data sources via config.jsw
  *
  * @param {string} carrierDot - The carrier DOT number
  * @param {string} userId - The user ID
@@ -120,15 +130,18 @@ async function verifyRole() {
  */
 async function verifyCarrierAuthorization(carrierDot, userId) {
   try {
-    // Check if the user has access to this carrier
-    const accessResult = await wixData.query('recruiterCarriers')
-      .eq('recruiter_id', userId)
-      .eq('carrier_dot', carrierDot)
-      .eq('is_active', true)
-      .limit(1)
-      .find({ suppressAuth: true });
+    // Check if the user has access to this carrier using dual-source data access
+    const accessResult = await dataAccess.queryRecords('recruiterCarriers', {
+      filters: {
+        recruiter_id: userId,
+        carrier_dot: carrierDot,
+        is_active: true
+      },
+      limit: 1,
+      suppressAuth: true
+    });
 
-    if (accessResult.items.length === 0) {
+    if (!accessResult.success || accessResult.items.length === 0) {
       return {
         success: false,
         error: 'You are not authorized to access this carrier\'s data.'
@@ -222,17 +235,21 @@ function applyFilters(query, filters) {
 
 /**
  * Gets carrier hiring preferences if available
+ * Supports dual data sources via config.jsw
  * @param {string} carrierDot - The carrier DOT number
  * @returns {Promise<Object|null>}
  */
 async function getCarrierPreferences(carrierDot) {
   try {
-    const result = await wixData.query('CarrierHiringPreferences')
-      .eq('carrier_dot', carrierDot)
-      .eq('is_active', true)
-      .find();
+    const result = await dataAccess.queryRecords('carrierHiringPreferences', {
+      filters: {
+        carrier_dot: carrierDot,
+        is_active: true
+      },
+      limit: 1
+    });
 
-    return result.items.length > 0 ? result.items[0] : null;
+    return result.success && result.items.length > 0 ? result.items[0] : null;
   } catch (err) {
     return null;
   }
@@ -240,19 +257,23 @@ async function getCarrierPreferences(carrierDot) {
 
 /**
  * Checks if a driver has expressed interest in a carrier
+ * Supports dual data sources via config.jsw
  * @param {string} carrierDot - The carrier DOT number
  * @param {string} driverId - The driver ID
  * @returns {Promise<{hasInterest: boolean, interestDate?: Date}>}
  */
 async function checkDriverInterest(carrierDot, driverId) {
   try {
-    const result = await wixData.query('DriverInterests')
-      .eq('driver_id', driverId)
-      .eq('carrier_dot', carrierDot)
-      .eq('status', 'interested')
-      .find();
+    const result = await dataAccess.queryRecords('driverInterests', {
+      filters: {
+        driver_id: driverId,
+        carrier_dot: carrierDot,
+        status: 'interested'
+      },
+      limit: 1
+    });
 
-    if (result.items.length > 0) {
+    if (result.success && result.items.length > 0) {
       return {
         hasInterest: true,
         interestDate: result.items[0].created_date
@@ -337,26 +358,70 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
 
     // Build base query FIRST - exclude non-searchable and hidden drivers
     // (Query drivers before preferences to avoid mock state issues in tests)
-    let query = wixData.query('DriverProfiles')
-      .eq('is_searchable', true)
-      .ne('visibility_level', 'hidden');
+    // Supports dual data sources via config.jsw
 
-    // Apply filters
-    query = applyFilters(query, filters);
-
-    // Execute query with timing and retry
     const queryStartTime = Date.now();
+    let drivers = [];
 
-    // Wrap database query in retry logic
-    const queryResult = await withRetry(async () => {
-      return await query.find();
-    }, {
-      context: 'findMatchingDrivers_query',
-      traceId
-    });
+    // Check which data source to use for DriverProfiles
+    if (usesAirtable('driverProfiles')) {
+      // Airtable query path
+      const airtableFilters = {
+        is_searchable: true
+      };
+
+      // Build filter formula for Airtable
+      let filterFormula = "AND({Is Searchable} = TRUE(), {Visibility Level} != 'hidden'";
+
+      // Add dynamic filters
+      if (filters.cdl_types && Array.isArray(filters.cdl_types) && filters.cdl_types.length > 0) {
+        const cdlConditions = filters.cdl_types.map(t => `{CDL Class} = '${t}'`).join(', ');
+        filterFormula += `, OR(${cdlConditions})`;
+      }
+
+      if (filters.min_experience && typeof filters.min_experience === 'number') {
+        filterFormula += `, {Years Experience} >= ${filters.min_experience}`;
+      }
+
+      if (filters.availability && typeof filters.availability === 'string') {
+        filterFormula += `, {Availability} = '${filters.availability}'`;
+      }
+
+      filterFormula += ')';
+
+      const airtableResult = await withRetry(async () => {
+        return await airtable.queryRecords('DriverProfiles', {
+          filterByFormula: filterFormula,
+          maxRecords: 1000
+        });
+      }, {
+        context: 'findMatchingDrivers_airtable_query',
+        traceId
+      });
+
+      drivers = airtableResult.records || [];
+    } else {
+      // Wix Data query path (existing logic)
+      let query = wixData.query('DriverProfiles')
+        .eq('is_searchable', true)
+        .ne('visibility_level', 'hidden');
+
+      // Apply filters
+      query = applyFilters(query, filters);
+
+      // Execute query with timing and retry
+      // Wrap database query in retry logic
+      const queryResult = await withRetry(async () => {
+        return await query.find();
+      }, {
+        context: 'findMatchingDrivers_query',
+        traceId
+      });
+
+      drivers = queryResult.items;
+    }
 
     const queryLatency = Date.now() - queryStartTime;
-    let drivers = queryResult.items;
 
     await logDatabase({
       operation: 'query',
@@ -671,8 +736,8 @@ export async function getDriverProfile(carrierDot, driverId, options = {}) {
       };
     }
 
-    // Get driver profile
-    const driver = await wixData.get('DriverProfiles', driverId);
+    // Get driver profile using dual-source data access
+    const driver = await dataAccess.getRecord('driverProfiles', driverId, { suppressAuth: true });
 
     if (!driver) {
       return {
@@ -689,7 +754,7 @@ export async function getDriverProfile(carrierDot, driverId, options = {}) {
       };
     }
 
-    // Record the view in CarrierDriverViews
+    // Record the view in CarrierDriverViews using dual-source data access
     const viewRecord = {
       carrier_dot: carrierDot,
       driver_id: driverId,
@@ -703,7 +768,7 @@ export async function getDriverProfile(carrierDot, driverId, options = {}) {
       viewRecord.match_score = options.matchScore;
     }
 
-    await wixData.insert('CarrierDriverViews', viewRecord, { suppressAuth: true });
+    await dataAccess.insertRecord('carrierDriverViews', viewRecord, { suppressAuth: true });
 
     // Record profile view for quota tracking
     const viewResult = await recordProfileView(carrierDot, driverId, { userId });
@@ -765,14 +830,17 @@ export async function detectMutualMatch(carrierDot, driverId) {
       return { success: false, error: accessCheck.error };
     }
 
-    // Query DriverInterests collection for this driver-carrier pair
-    const result = await wixData.query('DriverInterests')
-      .eq('driver_id', driverId)
-      .eq('carrier_dot', carrierDot)
-      .eq('status', 'interested')
-      .find();
+    // Query DriverInterests collection for this driver-carrier pair using dual-source
+    const result = await dataAccess.queryRecords('driverInterests', {
+      filters: {
+        driver_id: driverId,
+        carrier_dot: carrierDot,
+        status: 'interested'
+      },
+      limit: 1
+    });
 
-    if (result.items.length > 0) {
+    if (result.success && result.items.length > 0) {
       const interest = result.items[0];
       return {
         success: true,

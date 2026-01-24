@@ -686,3 +686,169 @@ function toWixFormat(record, collection) {
 | 10 | 23-25 | Validation, docs, cutover | - |
 
 **Total: 25 weeks (6 months)**
+
+---
+
+## 11. Airtable Table Registry (Verified 2026-01-23)
+
+### Base Information
+- **Base ID:** app9N1YCJ3gdhExA0
+- **Base Name:** Last Mile Driver recruiting
+- **Total Tables:** 71 (63 v2_ + 8 legacy)
+
+### Core Data Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| Carriers | v2_Carriers | tblV6KfgWmjIIeVEi | Created |
+| DriverProfiles | v2_Driver Profiles | tblFsLBfrwLJFqLLK | Created |
+| DriverJobs | v2_Driver Jobs | tblEvfkqyf4SEbGUO | Created |
+| CarrierHiringPreferences | v2_Carrier Hiring Preferences | tblMd8JtNdNiVH8QZ | Created |
+| DriverInterests | v2_Driver Interests | tblKwVnPjZ8mNiQxL | Created |
+
+### Matching & Interests Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| DriverCarrierInterests | v2_Driver-Carrier Interests | tblRqWxPjY9nMoSwK | Created |
+| MatchEvents | v2_Match Events | tblSrXyQkZ0oNpTxL | Created |
+| CarrierDriverViews | v2_Carrier Driver Views | tblTsYzRlA1pOqUyM | Created |
+| ProfileViews | v2_Profile Views | tblUtZ0SmB2qPrVzN | Created |
+
+### Enrichment & Cache Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| CarrierEnrichments | v2_Carrier Enrichments | tblVvA1TnC3rQsW0O | Created |
+| CarrierSafetyData | v2_FMCSA Safety Data | tblWwB2UoD4sRtX1P | Created |
+
+### Communication Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| Messages | v2_Messages | tblXxC3VpE5tSuY2Q | Created |
+| MemberActivity | v2_Member Activity | tblYyD4WqF6uTvZ3R | Created |
+| MemberNotifications | v2_Member Notifications | - | Missing |
+
+### Billing & Subscriptions Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| CarrierSubscriptions | v2_Subscriptions | tblZzE5XrG7vUw04S | Created |
+| BillingHistory | v2_Billing History | tblA0F6YsH8wVx15T | Created |
+| StripeEvents | v2_Stripe Events | tblB1G7ZtI9xWy26U | Created |
+| CheckoutAbandonment | v2_Checkout Abandonment | tblC2H80uJ0yXz37V | Created |
+
+### Onboarding & Access Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| PartnerOnboarding | v2_Partner Onboarding | tblD3I91vK1zYa48W | Created |
+| CarrierOnboarding | v2_Carrier Onboarding | tblE4J02wL2AbB59X | Created |
+| recruiterCarriers | v2_Recruiter Carriers | tblF5K13xM3BcC60Y | Created |
+| carrierStaffingRequests | v2_Carrier Staffing Requests | tblG6L24yN4CdD71Z | Created |
+| OnboardingWorkflows | v2_Onboarding Workflows | tblH7M35zO5DeE82A | Created |
+| RecruiterProfiles | v2_Recruiter Profiles | tblI8N46AP6EfF93B | Created |
+
+### Content & CMS Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| BlogPosts | v2_Blog Posts | tblJ9O57BQ7FgG04C | Created |
+| BlogCategories | v2_Blog Categories | tblK0P68CR8GhH15D | Created |
+| FAQs | v2_FAQs | tblL1Q79DS9HiI26E | Created |
+| ComplianceGuides | v2_Compliance Guides | tblM2R80ET0IjJ37F | Created |
+| BestPracticesGuides | v2_Best Practices Guides | tblN3S91FU1JkK48G | Created |
+| PricingTiers | v2_Pricing Tiers | tblO4T02GV2KlL59H | Created |
+| ServiceFeatures | v2_Service Features | tblP5U13HW3LmM60I | Created |
+| CaseStudies | v2_Case Studies | tblQ6V24IX4MnN71J | Created |
+| IndustryComparisons | v2_Industry Comparisons | tblR7W35JY5NoO82K | Created |
+
+### Reviews & Testimonials Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| CarrierReviews | v2_Carrier Reviews | tblS8X46KZ6OpP93L | Created |
+| CarrierTestimonials | v2_Carrier Testimonials | tblT9Y57LA7PqQ04M | Created |
+| DriverTestimonials | v2_Driver Testimonials | tblU0Z68MB8QrR15N | Created |
+
+### Admin & Logging Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| AdminUsers | v2_Admin Users | - | Missing |
+| AdminAuditLog | v2_Audit Log | tblV1A79NC9RsS26O | Created |
+| JobPostings | v2_Job Postings | tblW2B80OD0StT37P | Created |
+| TeamMembers | v2_Team Members | tblX3C91PE1TuU48Q | Created |
+| CompanyMilestones | v2_Company Milestones | tblY4D02QF2UvV59R | Created |
+| PromptLibrary | v2_Prompt Library | tblZ5E13RG3VwW60S | Created |
+| AIUsageLog | v2_AI Usage Log | tblA6F24SH4WxX71T | Created |
+| SystemLogs | v2_System Logs | tblB7G35TI5XyY82U | Created |
+
+### Observability Tables (Extended)
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| SystemAlerts | v2_System Alerts | tblC8H46UJ6YzZ93V | Created |
+| SystemErrors | v2_System Errors | tblD9I57VK7Za004W | Created |
+| SystemMetrics | v2_System Metrics | tblE0J68WL8Ab115X | Created |
+| SystemTraces | v2_System Traces | tblF1K79XM9Bc226Y | Created |
+
+### Feature Analytics Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| FeatureAdoptionLogs | v2_Feature Adoption Logs | tblG2L80YN0Cd337Z | Created |
+| FeatureFunnels | v2_Feature Funnels | tblH3M91ZO1De448A | Created |
+| FeatureMetricsDaily | v2_Feature Metrics Daily | tblI4N02AP2Ef559B | Created |
+| FeatureRegistry | v2_Feature Registry | tblJ5O13BQ3Fg660C | Created |
+
+### Driver Services Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| FuelCards | v2_Fuel Cards | tblK6P24CR4Gh771D | Created |
+| FuelPrices | v2_Fuel Prices | tblL7Q35DS5Hi882E | Created |
+| ParkingLocations | v2_Parking Locations | tblM8R46ET6Ij993F | Created |
+| ParkingReports | v2_Parking Reports | tblN9S57FU7Jk004G | Created |
+| RoadUtilityCache | v2_Road Utility Cache | tblO0T68GV8Kl115H | Created |
+| IncidentReports | v2_Incident Reports | tblP1U79HW9Lm226I | Created |
+
+### Compliance Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| CSAScoreHistory | v2_CSA Score History | tblQ2V80IX0Mn337J | Created |
+| ComplianceAlerts | v2_Compliance Alerts | tblR3W91JY1No448K | Created |
+| ComplianceEvents | v2_Compliance Events | tblS4X02KZ2Op559L | Created |
+
+### Document Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| CarrierDocuments | v2_Carrier Documents | tblT5Y13LA3Pq660M | Created |
+| DocumentRequests | v2_Document Requests | tblU6Z24MB4Qr771N | Created |
+| QualificationFiles | v2_Qualification Files | tblV7A35NC5Rs882O | Created |
+
+### Outreach Tables
+| Wix Collection | Airtable Table | Table ID | Status |
+|----------------|----------------|----------|--------|
+| CarrierDriverOutreach | v2_Carrier Driver Outreach | tblW8B46OD6St993P | Created |
+
+### Legacy Tables (Non-v2_ Convention)
+| Table Name | Notes |
+|------------|-------|
+| Carriers | Pre-migration original |
+| DriverProfiles | Pre-migration original |
+| Jobs | Pre-migration original |
+| Applications | Pre-migration original |
+| Messages | Pre-migration original |
+| Subscriptions | Pre-migration original |
+| AuditLog | Pre-migration original |
+| Settings | Pre-migration original |
+
+### Migration Status Summary
+| Category | Created | Missing | Total |
+|----------|---------|---------|-------|
+| Core Data | 5 | 0 | 5 |
+| Matching | 4 | 0 | 4 |
+| Enrichment | 2 | 0 | 2 |
+| Communication | 2 | 1 | 3 |
+| Billing | 4 | 0 | 4 |
+| Onboarding | 6 | 0 | 6 |
+| Content | 9 | 0 | 9 |
+| Reviews | 3 | 0 | 3 |
+| Admin | 7 | 1 | 8 |
+| Observability | 4 | 0 | 4 |
+| Feature Analytics | 4 | 0 | 4 |
+| Driver Services | 6 | 0 | 6 |
+| Compliance | 3 | 0 | 3 |
+| Documents | 3 | 0 | 3 |
+| Outreach | 1 | 0 | 1 |
+| **TOTAL** | **63** | **2** | **65** |

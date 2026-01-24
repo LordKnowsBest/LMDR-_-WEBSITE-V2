@@ -2,6 +2,8 @@ import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
 import wixData from 'wix-data';
 import { log, logExternalAPI } from 'backend/observabilityService';
+import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
 
 // ============================================================================
 // CONFIGURATION
@@ -739,18 +741,37 @@ function normalizeApiResponse(dotNumber, carrierData, basicsData) {
 
 /**
  * Get cached safety data for a DOT number
+ * Supports both Wix and Airtable data sources based on config
  */
 async function getCachedSafetyData(dotNumber) {
   try {
-    const result = await wixData.query(CONFIG.safetyDataCollection)
-      .eq('dot_number', String(dotNumber))
-      .find();
+    const collectionKey = 'carrierSafetyData';
+    let cached = null;
 
-    if (result.items.length === 0) {
-      return null;
+    if (usesAirtable(collectionKey)) {
+      // Airtable path
+      const tableName = getAirtableTableName(collectionKey);
+      const formula = `{DOT Number} = '${String(dotNumber)}'`;
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: formula,
+        maxRecords: 1
+      });
+      if (result.records && result.records.length > 0) {
+        cached = result.records[0];
+      }
+    } else {
+      // Wix path
+      const result = await wixData.query(CONFIG.safetyDataCollection)
+        .eq('dot_number', String(dotNumber))
+        .find();
+      if (result.items.length > 0) {
+        cached = result.items[0];
+      }
     }
 
-    const cached = result.items[0];
+    if (!cached) {
+      return null;
+    }
 
     // Calculate cache age
     const fetchedDate = cached.fetched_date ? new Date(cached.fetched_date) : null;
@@ -784,9 +805,11 @@ function isStale(fetchedDate) {
 
 /**
  * Save safety data to cache
+ * Supports both Wix and Airtable data sources based on config
  */
 async function cacheSafetyData(safetyData) {
   try {
+    const collectionKey = 'carrierSafetyData';
     const options = { suppressAuth: true };
 
     // Check for existing record
@@ -800,23 +823,47 @@ async function cacheSafetyData(safetyData) {
       crashes: JSON.stringify(safetyData.crashes || {})
     };
 
-    if (existing && existing._id) {
-      // Update existing
-      await wixData.update(CONFIG.safetyDataCollection, {
-        ...dataToStore,
-        _id: existing._id,
-        lookup_count: (existing.lookup_count || 0) + 1,
-        last_lookup_date: new Date()
-      }, options);
-      console.log(`📝 Updated cached safety data for DOT ${safetyData.dot_number}`);
+    if (usesAirtable(collectionKey)) {
+      // Airtable path
+      const tableName = getAirtableTableName(collectionKey);
+
+      if (existing && existing._id) {
+        // Update existing
+        await airtable.updateRecord(tableName, existing._id, {
+          ...dataToStore,
+          lookup_count: (existing.lookup_count || 0) + 1,
+          last_lookup_date: new Date()
+        });
+        console.log(`📝 Updated cached safety data in Airtable for DOT ${safetyData.dot_number}`);
+      } else {
+        // Insert new
+        await airtable.createRecord(tableName, {
+          ...dataToStore,
+          lookup_count: 1,
+          last_lookup_date: new Date()
+        });
+        console.log(`📝 Created new cached safety data in Airtable for DOT ${safetyData.dot_number}`);
+      }
     } else {
-      // Insert new
-      await wixData.insert(CONFIG.safetyDataCollection, {
-        ...dataToStore,
-        lookup_count: 1,
-        last_lookup_date: new Date()
-      }, options);
-      console.log(`📝 Created new cached safety data for DOT ${safetyData.dot_number}`);
+      // Wix path
+      if (existing && existing._id) {
+        // Update existing
+        await wixData.update(CONFIG.safetyDataCollection, {
+          ...dataToStore,
+          _id: existing._id,
+          lookup_count: (existing.lookup_count || 0) + 1,
+          last_lookup_date: new Date()
+        }, options);
+        console.log(`📝 Updated cached safety data for DOT ${safetyData.dot_number}`);
+      } else {
+        // Insert new
+        await wixData.insert(CONFIG.safetyDataCollection, {
+          ...dataToStore,
+          lookup_count: 1,
+          last_lookup_date: new Date()
+        }, options);
+        console.log(`📝 Created new cached safety data for DOT ${safetyData.dot_number}`);
+      }
     }
 
   } catch (error) {

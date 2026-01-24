@@ -7,10 +7,22 @@ import { getSecret } from 'wix-secrets-backend';
 import wixData from 'wix-data';
 
 // ============================================================================
+// Data Source Configuration
+// ============================================================================
+import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// ============================================================================
 // CONFIGURATION
 // ============================================================================
 
 const CONFIG = {
+  // Collection keys (camelCase, matching config.jsw)
+  subscriptionsKey: 'carrierSubscriptions',
+  stripeEventsKey: 'stripeEvents',
+  billingHistoryKey: 'billingHistory',
+
+  // Legacy collection names for wixData (kept for backward compatibility)
   subscriptionsCollection: 'CarrierSubscriptions',
   stripeEventsCollection: 'StripeEvents',
   billingHistoryCollection: 'BillingHistory',
@@ -117,6 +129,75 @@ async function stripeRequest(endpoint, method = 'GET', body = null) {
   }
 
   return data;
+}
+
+// ============================================================================
+// Data Abstraction Layer Helpers
+// ============================================================================
+
+/**
+ * Query records from the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Function} wixQueryBuilder - Function that builds and executes wixData query
+ * @param {Object} airtableOptions - Options for Airtable query
+ * @returns {Promise<Object>} Query result with items array
+ */
+async function queryData(collectionKey, wixQueryBuilder, airtableOptions = {}) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      const result = await airtable.queryRecords(tableName, airtableOptions);
+      return { items: result.records || [], totalCount: (result.records || []).length };
+    } catch (error) {
+      console.error(`[StripeService] Airtable query error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  return await wixQueryBuilder();
+}
+
+/**
+ * Insert a record into the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Object} record - Record to insert
+ * @returns {Promise<Object>} Inserted record
+ */
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      return await airtable.createRecord(tableName, record);
+    } catch (error) {
+      console.error(`[StripeService] Airtable insert error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  const wixCollection = getWixCollectionName(collectionKey);
+  return await wixData.insert(wixCollection, record, { suppressAuth: true });
+}
+
+/**
+ * Update a record in the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Object} record - Record with _id to update
+ * @returns {Promise<Object>} Updated record
+ */
+async function updateData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      const { _id, ...fields } = record;
+      return await airtable.updateRecord(tableName, _id, fields);
+    } catch (error) {
+      console.error(`[StripeService] Airtable update error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  const wixCollection = getWixCollectionName(collectionKey);
+  return await wixData.update(wixCollection, record, { suppressAuth: true });
 }
 
 // ============================================================================
@@ -261,17 +342,33 @@ export async function createPortalSession(carrierDot, returnUrl) {
  */
 export async function getSubscriptionByCarrier(carrierDot) {
   try {
-    const result = await wixData.query(CONFIG.subscriptionsCollection)
-      .eq('carrier_dot', String(carrierDot).trim())
-      .descending('_createdDate')
-      .limit(1)
-      .find({ suppressAuth: true });
+    const dotTrimmed = String(carrierDot).trim();
+    let items = [];
 
-    if (result.items.length === 0) {
+    if (usesAirtable(CONFIG.subscriptionsKey)) {
+      // Airtable query
+      const filter = `{Carrier DOT} = '${dotTrimmed}'`;
+      const result = await airtable.queryRecords(getAirtableTableName(CONFIG.subscriptionsKey), {
+        filterByFormula: filter,
+        sort: [{ field: 'Created', direction: 'desc' }],
+        maxRecords: 1
+      });
+      items = result.records || [];
+    } else {
+      // Wix query
+      const result = await wixData.query(CONFIG.subscriptionsCollection)
+        .eq('carrier_dot', dotTrimmed)
+        .descending('_createdDate')
+        .limit(1)
+        .find({ suppressAuth: true });
+      items = result.items;
+    }
+
+    if (items.length === 0) {
       return null;
     }
 
-    return result.items[0];
+    return items[0];
   } catch (error) {
     console.error('[StripeService] getSubscriptionByCarrier error:', error);
     return null;
@@ -361,9 +458,9 @@ export async function upsertSubscription(stripeSubscription, customerId) {
     const priceId = stripeSubscription.items?.data[0]?.price?.id;
     let planType = 'pro'; // default
 
-    if (priceId === secrets.priceEnterprise) {
+    if (priceId === secrets.priceEnterprise || priceId === secrets.priceEnterprise6Month) {
       planType = 'enterprise';
-    } else if (priceId === secrets.pricePro) {
+    } else if (priceId === secrets.pricePro || priceId === secrets.priceProMonthly || priceId === secrets.pricePro6Month) {
       planType = 'pro';
     }
 
@@ -390,13 +487,13 @@ export async function upsertSubscription(stripeSubscription, customerId) {
 
     let result;
     if (existing) {
-      result = await wixData.update(CONFIG.subscriptionsCollection, {
+      result = await updateData(CONFIG.subscriptionsKey, {
         ...existing,
         ...subscriptionData
-      }, { suppressAuth: true });
+      });
       console.log(`[StripeService] Updated subscription for carrier ${carrierDot}`);
     } else {
-      result = await wixData.insert(CONFIG.subscriptionsCollection, subscriptionData, { suppressAuth: true });
+      result = await insertData(CONFIG.subscriptionsKey, subscriptionData);
       console.log(`[StripeService] Created subscription for carrier ${carrierDot}`);
     }
 
@@ -422,13 +519,13 @@ export async function resetQuota(carrierDot, periodStart, periodEnd) {
       return { success: false, error: 'Subscription not found' };
     }
 
-    await wixData.update(CONFIG.subscriptionsCollection, {
+    await updateData(CONFIG.subscriptionsKey, {
       ...subscription,
       views_used_this_month: 0,
       current_period_start: periodStart,
       current_period_end: periodEnd,
       quota_reset_date: periodEnd
-    }, { suppressAuth: true });
+    });
 
     console.log(`[StripeService] Reset quota for carrier ${carrierDot}`);
 
@@ -447,22 +544,36 @@ export async function resetQuota(carrierDot, periodStart, periodEnd) {
  */
 export async function updateSubscriptionStatus(stripeSubscriptionId, status) {
   try {
-    const result = await wixData.query(CONFIG.subscriptionsCollection)
-      .eq('stripe_subscription_id', stripeSubscriptionId)
-      .limit(1)
-      .find({ suppressAuth: true });
+    let items = [];
 
-    if (result.items.length === 0) {
+    if (usesAirtable(CONFIG.subscriptionsKey)) {
+      // Airtable query
+      const filter = `{Stripe Subscription ID} = '${stripeSubscriptionId}'`;
+      const result = await airtable.queryRecords(getAirtableTableName(CONFIG.subscriptionsKey), {
+        filterByFormula: filter,
+        maxRecords: 1
+      });
+      items = result.records || [];
+    } else {
+      // Wix query
+      const result = await wixData.query(CONFIG.subscriptionsCollection)
+        .eq('stripe_subscription_id', stripeSubscriptionId)
+        .limit(1)
+        .find({ suppressAuth: true });
+      items = result.items;
+    }
+
+    if (items.length === 0) {
       return { success: false, error: 'Subscription not found' };
     }
 
-    const subscription = result.items[0];
+    const subscription = items[0];
 
-    await wixData.update(CONFIG.subscriptionsCollection, {
+    await updateData(CONFIG.subscriptionsKey, {
       ...subscription,
       status,
       is_active: status === 'active'
-    }, { suppressAuth: true });
+    });
 
     console.log(`[StripeService] Updated subscription ${stripeSubscriptionId} status to ${status}`);
 
@@ -485,7 +596,7 @@ export async function updateSubscriptionStatus(stripeSubscriptionId, status) {
  */
 export async function recordBillingEvent(carrierDot, eventType, details = {}) {
   try {
-    await wixData.insert(CONFIG.billingHistoryCollection, {
+    await insertData(CONFIG.billingHistoryKey, {
       carrier_dot: carrierDot,
       event_type: eventType,
       amount: details.amount || 0,
@@ -493,7 +604,7 @@ export async function recordBillingEvent(carrierDot, eventType, details = {}) {
       invoice_id: details.invoiceId,
       description: details.description,
       timestamp: new Date()
-    }, { suppressAuth: true });
+    });
 
     console.log(`[StripeService] Recorded billing event ${eventType} for carrier ${carrierDot}`);
   } catch (error) {
@@ -509,15 +620,31 @@ export async function recordBillingEvent(carrierDot, eventType, details = {}) {
  */
 export async function getBillingHistory(carrierDot, limit = 50) {
   try {
-    const result = await wixData.query(CONFIG.billingHistoryCollection)
-      .eq('carrier_dot', String(carrierDot).trim())
-      .descending('timestamp')
-      .limit(limit)
-      .find({ suppressAuth: true });
+    const dotTrimmed = String(carrierDot).trim();
+    let items = [];
+
+    if (usesAirtable(CONFIG.billingHistoryKey)) {
+      // Airtable query
+      const filter = `{Carrier DOT} = '${dotTrimmed}'`;
+      const result = await airtable.queryRecords(getAirtableTableName(CONFIG.billingHistoryKey), {
+        filterByFormula: filter,
+        sort: [{ field: 'Timestamp', direction: 'desc' }],
+        maxRecords: limit
+      });
+      items = result.records || [];
+    } else {
+      // Wix query
+      const result = await wixData.query(CONFIG.billingHistoryCollection)
+        .eq('carrier_dot', dotTrimmed)
+        .descending('timestamp')
+        .limit(limit)
+        .find({ suppressAuth: true });
+      items = result.items;
+    }
 
     return {
       success: true,
-      history: result.items.map(item => ({
+      history: items.map(item => ({
         eventType: item.event_type,
         amount: item.amount,
         currency: item.currency,
@@ -543,12 +670,26 @@ export async function getBillingHistory(carrierDot, limit = 50) {
  */
 export async function isEventProcessed(eventId) {
   try {
-    const result = await wixData.query(CONFIG.stripeEventsCollection)
-      .eq('event_id', eventId)
-      .limit(1)
-      .find({ suppressAuth: true });
+    let items = [];
 
-    return result.items.length > 0;
+    if (usesAirtable(CONFIG.stripeEventsKey)) {
+      // Airtable query
+      const filter = `{Event ID} = '${eventId}'`;
+      const result = await airtable.queryRecords(getAirtableTableName(CONFIG.stripeEventsKey), {
+        filterByFormula: filter,
+        maxRecords: 1
+      });
+      items = result.records || [];
+    } else {
+      // Wix query
+      const result = await wixData.query(CONFIG.stripeEventsCollection)
+        .eq('event_id', eventId)
+        .limit(1)
+        .find({ suppressAuth: true });
+      items = result.items;
+    }
+
+    return items.length > 0;
   } catch (error) {
     console.error('[StripeService] isEventProcessed error:', error);
     return false;
@@ -563,13 +704,13 @@ export async function isEventProcessed(eventId) {
  */
 export async function logStripeEvent(eventId, eventType, data = {}) {
   try {
-    await wixData.insert(CONFIG.stripeEventsCollection, {
+    await insertData(CONFIG.stripeEventsKey, {
       event_id: eventId,
       event_type: eventType,
       carrier_dot: data.carrierDot,
       processed_at: new Date(),
       data_summary: JSON.stringify(data).substring(0, 1000) // Limit size
-    }, { suppressAuth: true });
+    });
 
     console.log(`[StripeService] Logged event ${eventId} (${eventType})`);
   } catch (error) {

@@ -2,6 +2,11 @@ import wixData from 'wix-data';
 import { getOrCreateDriverProfile, updateDriverPreferences, logCarrierInterest } from 'backend/driverProfiles';
 import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
 
+// Dual-source data access
+import { usesAirtable, getWixCollectionName } from 'backend/config';
+import * as dataAccess from 'backend/dataAccess';
+import * as airtable from 'backend/airtableClient';
+
 // ============================================================================
 // SHARED SCORING MODULE
 // ============================================================================
@@ -22,23 +27,43 @@ const CONFIG = {
 // CACHE LOOKUP
 // ============================================================================
 
+/**
+ * Get existing enrichments from cache
+ * Supports dual data sources via config.jsw
+ */
 async function getExistingEnrichments(dotNumbers) {
   if (!dotNumbers || dotNumbers.length === 0) return {};
-  
+
   try {
     const dotStrings = dotNumbers.map(d => String(d));
-    
-    const result = await wixData.query(CONFIG.enrichmentsCollection)
-      .hasSome('dot_number', dotStrings)
-      .find();
-    
+    let items = [];
+
+    // Check which data source to use for CarrierEnrichments
+    if (usesAirtable('carrierEnrichments')) {
+      // Airtable query - build OR formula for multiple DOT numbers
+      const dotConditions = dotStrings.map(d => `{DOT Number} = '${d}'`).join(', ');
+      const filterFormula = `OR(${dotConditions})`;
+
+      const result = await airtable.queryRecords('CarrierEnrichments', {
+        filterByFormula: filterFormula
+      });
+
+      items = result.records || [];
+    } else {
+      // Wix Data query (existing logic)
+      const result = await wixData.query(CONFIG.enrichmentsCollection)
+        .hasSome('dot_number', dotStrings)
+        .find();
+      items = result.items;
+    }
+
     const enrichmentMap = {};
-    for (const item of result.items) {
+    for (const item of items) {
       const enrichedDate = item.enriched_date;
-      const daysSince = enrichedDate 
+      const daysSince = enrichedDate
         ? (Date.now() - new Date(enrichedDate).getTime()) / (1000 * 60 * 60 * 24)
         : 999;
-      
+
       if (daysSince <= 14) {
         enrichmentMap[item.dot_number] = {
           ...item,
@@ -47,10 +72,10 @@ async function getExistingEnrichments(dotNumbers) {
         };
       }
     }
-    
+
     console.log(`📦 Found ${Object.keys(enrichmentMap).length} cached enrichments`);
     return enrichmentMap;
-    
+
   } catch (error) {
     console.error('Cache lookup error:', error.message);
     return {};
@@ -104,16 +129,33 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
   }
   
   try {
-    // STEP 1: Query the database
+    // STEP 1: Query the database (supports dual data sources)
     console.log('📌 Step 1: Querying Carriers collection...');
     const queryStartTime = Date.now();
-    const query = wixData.query(CONFIG.collectionsName).limit(500);
-    const results = await query.find();
+    let carrierItems = [];
+
+    // Check which data source to use for Carriers
+    if (usesAirtable('carriers')) {
+      // Airtable query path
+      const airtableResult = await airtable.queryRecords('Carriers', {
+        maxRecords: 500
+      });
+      carrierItems = airtableResult.records || [];
+    } else {
+      // Wix Data query path (existing logic)
+      const query = wixData.query(CONFIG.collectionsName).limit(500);
+      const results = await query.find();
+      carrierItems = results.items;
+    }
+
     const queryLatency = Date.now() - queryStartTime;
 
-    await logDatabase({ operation: 'query', collection: CONFIG.collectionsName, affectedRows: results.items.length, latencyMs: queryLatency, traceId });
+    await logDatabase({ operation: 'query', collection: CONFIG.collectionsName, affectedRows: carrierItems.length, latencyMs: queryLatency, traceId });
 
-    console.log(`📊 Step 2: Query complete. Found ${results.items.length} carriers`);
+    console.log(`📊 Step 2: Query complete. Found ${carrierItems.length} carriers`);
+
+    // Create a results object for compatibility with existing code
+    const results = { items: carrierItems };
     
     if (results.items.length === 0) {
       console.warn('⚠️ No carriers found in database');
@@ -315,11 +357,11 @@ export async function logMatchEvent(matchEvent) {
   }
   
   // FALLBACK: Use the legacy MatchEvents collection for anonymous users
+  // Supports dual data sources via config.jsw
   try {
     const score = parseInt(matchEvent.matchScore);
-    const options = { suppressAuth: true };
 
-    await wixData.insert('MatchEvents', {
+    const matchEventData = {
       driver_zip: matchEvent.driverZip,
       driver_name: matchEvent.driverName || 'Anonymous',
       carrier_dot: String(matchEvent.carrierDOT),
@@ -327,11 +369,17 @@ export async function logMatchEvent(matchEvent) {
       match_score: isNaN(score) ? 0 : score,
       action: matchEvent.action,
       timestamp: new Date()
-    }, options);
-    
+    };
+
+    const insertResult = await dataAccess.insertRecord('matchEvents', matchEventData, { suppressAuth: true });
+
+    if (!insertResult.success) {
+      throw new Error(insertResult.error);
+    }
+
     console.log('✅ Match event logged to MatchEvents (legacy)');
     return { success: true, method: 'legacy' };
-    
+
   } catch (error) {
     console.error('❌ Error logging match:', error);
     return { success: false, error: error.message };
@@ -360,13 +408,27 @@ export async function getDriverSavedCarriers() {
       return { success: true, carriers: [], totalCount: 0 };
     }
     
-    // Get carrier details
-    const carrierResult = await wixData.query(CONFIG.collectionsName)
-      .hasSome('dot_number', dotNumbers)
-      .find();
-    
+    // Get carrier details using dual-source data access
+    let carrierItems = [];
+
+    if (usesAirtable('carriers')) {
+      // Airtable query - build OR formula for multiple DOT numbers
+      const dotConditions = dotNumbers.map(d => `{DOT Number} = '${d}'`).join(', ');
+      const filterFormula = `OR(${dotConditions})`;
+
+      const airtableResult = await airtable.queryRecords('Carriers', {
+        filterByFormula: filterFormula
+      });
+      carrierItems = airtableResult.records || [];
+    } else {
+      const carrierResult = await wixData.query(CONFIG.collectionsName)
+        .hasSome('dot_number', dotNumbers)
+        .find();
+      carrierItems = carrierResult.items;
+    }
+
     const carrierMap = {};
-    for (const carrier of carrierResult.items) {
+    for (const carrier of carrierItems) {
       carrierMap[carrier.dot_number] = normalizeCarrier(carrier);
     }
     

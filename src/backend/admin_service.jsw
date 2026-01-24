@@ -1,11 +1,401 @@
 /**
  * Admin Service - Backend functions for Admin Portal
  * Handles driver management, analytics, and administrative operations
+ *
+ * DUAL-SOURCE SUPPORT: This service supports both Wix and Airtable data sources.
+ * The data source is determined by the config.jsw configuration.
+ *
+ * Collections used:
+ * - DriverProfiles (drivers)
+ * - Carriers (carriers)
+ * - DriverCarrierInterests (applications)
+ * - MatchEvents (matches)
+ * - CarrierEnrichments (enrichments)
+ * - AdminAuditLog (auditLog)
  */
 
 import wixData from 'wix-data';
 import { currentMember } from 'wix-members-backend';
 import { triggeredEmails } from 'wix-crm-backend';
+import { getDataSource, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// ============================================
+// COLLECTION CONFIGURATION
+// ============================================
+
+const COLLECTIONS = {
+    drivers: {
+        wixName: 'DriverProfiles',
+        configKey: 'driverProfiles'
+    },
+    carriers: {
+        wixName: 'Carriers',
+        configKey: 'carriers'
+    },
+    applications: {
+        wixName: 'DriverCarrierInterests',
+        configKey: 'driverCarrierInterests'
+    },
+    matches: {
+        wixName: 'MatchEvents',
+        configKey: 'matchEvents'
+    },
+    enrichments: {
+        wixName: 'CarrierEnrichments',
+        configKey: 'carrierEnrichments'
+    },
+    auditLog: {
+        wixName: 'AdminAuditLog',
+        configKey: 'auditLog'
+    }
+};
+
+// ============================================
+// DUAL-SOURCE DATA HELPERS
+// ============================================
+
+/**
+ * Get the data source for a collection
+ * @param {string} collectionKey - Key from COLLECTIONS
+ * @returns {'wix' | 'airtable'}
+ */
+function getSource(collectionKey) {
+    return getDataSource(COLLECTIONS[collectionKey].configKey);
+}
+
+/**
+ * Get the collection name for the current data source
+ * @param {string} collectionKey - Key from COLLECTIONS
+ * @returns {string}
+ */
+function getCollectionName(collectionKey) {
+    return COLLECTIONS[collectionKey].wixName;
+}
+
+/**
+ * Query records from appropriate data source with full query support
+ * @param {string} collectionKey - Key from COLLECTIONS
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} Query result with items
+ */
+async function queryFromSource(collectionKey, options = {}) {
+    const collectionName = getCollectionName(collectionKey);
+
+    if (getSource(collectionKey) === 'airtable') {
+        const airtableOptions = {};
+        const conditions = [];
+
+        // Handle equality conditions
+        if (options.eq) {
+            for (const [field, value] of Object.entries(options.eq)) {
+                const airtableField = mapFieldToAirtable(field);
+                conditions.push(formatAirtableCondition(airtableField, '=', value));
+            }
+        }
+
+        // Handle contains conditions
+        if (options.contains) {
+            for (const [field, value] of Object.entries(options.contains)) {
+                const airtableField = mapFieldToAirtable(field);
+                conditions.push(`FIND(LOWER('${value}'), LOWER({${airtableField}})) > 0`);
+            }
+        }
+
+        // Handle greater than or equal conditions
+        if (options.ge) {
+            for (const [field, value] of Object.entries(options.ge)) {
+                const airtableField = mapFieldToAirtable(field);
+                if (value instanceof Date) {
+                    conditions.push(`IS_AFTER({${airtableField}}, '${value.toISOString()}')`);
+                } else {
+                    conditions.push(`{${airtableField}} >= ${value}`);
+                }
+            }
+        }
+
+        // Handle less than conditions
+        if (options.lt) {
+            for (const [field, value] of Object.entries(options.lt)) {
+                const airtableField = mapFieldToAirtable(field);
+                if (value instanceof Date) {
+                    conditions.push(`IS_BEFORE({${airtableField}}, '${value.toISOString()}')`);
+                } else {
+                    conditions.push(`{${airtableField}} < ${value}`);
+                }
+            }
+        }
+
+        // Handle not equal conditions
+        if (options.ne) {
+            for (const [field, value] of Object.entries(options.ne)) {
+                const airtableField = mapFieldToAirtable(field);
+                conditions.push(formatAirtableCondition(airtableField, '!=', value));
+            }
+        }
+
+        // Handle hasSome conditions
+        if (options.hasSome) {
+            for (const [field, values] of Object.entries(options.hasSome)) {
+                const airtableField = mapFieldToAirtable(field);
+                const orConditions = values.map(v => formatAirtableCondition(airtableField, '=', v));
+                if (orConditions.length === 1) {
+                    conditions.push(orConditions[0]);
+                } else if (orConditions.length > 1) {
+                    conditions.push(`OR(${orConditions.join(', ')})`);
+                }
+            }
+        }
+
+        if (conditions.length > 0) {
+            airtableOptions.filterByFormula = conditions.length === 1 ? conditions[0] : `AND(${conditions.join(', ')})`;
+        }
+
+        if (options.limit) {
+            airtableOptions.maxRecords = options.limit;
+        }
+
+        if (options.skip) {
+            // Airtable doesn't support skip directly, we need to fetch more and slice
+            airtableOptions.maxRecords = (options.limit || 100) + (options.skip || 0);
+        }
+
+        if (options.sortField) {
+            const airtableSortField = mapFieldToAirtable(options.sortField);
+            airtableOptions.sort = [{
+                field: airtableSortField,
+                direction: options.sortDirection || 'desc'
+            }];
+        }
+
+        const result = await airtable.queryRecords(collectionName, airtableOptions);
+        let records = result.records || [];
+
+        // Handle skip (since Airtable doesn't support offset natively)
+        if (options.skip && options.skip > 0) {
+            records = records.slice(options.skip);
+        }
+
+        if (options.limit) {
+            records = records.slice(0, options.limit);
+        }
+
+        return {
+            items: records,
+            totalCount: result.records?.length || 0
+        };
+    } else {
+        // Wix Data source
+        let query = wixData.query(collectionName);
+
+        if (options.eq) {
+            for (const [field, value] of Object.entries(options.eq)) {
+                query = query.eq(field, value);
+            }
+        }
+
+        if (options.contains) {
+            for (const [field, value] of Object.entries(options.contains)) {
+                query = query.contains(field, value);
+            }
+        }
+
+        if (options.ge) {
+            for (const [field, value] of Object.entries(options.ge)) {
+                query = query.ge(field, value);
+            }
+        }
+
+        if (options.lt) {
+            for (const [field, value] of Object.entries(options.lt)) {
+                query = query.lt(field, value);
+            }
+        }
+
+        if (options.ne) {
+            for (const [field, value] of Object.entries(options.ne)) {
+                query = query.ne(field, value);
+            }
+        }
+
+        if (options.hasSome) {
+            for (const [field, values] of Object.entries(options.hasSome)) {
+                query = query.hasSome(field, values);
+            }
+        }
+
+        if (options.sortField) {
+            if (options.sortDirection === 'asc') {
+                query = query.ascending(options.sortField);
+            } else {
+                query = query.descending(options.sortField);
+            }
+        }
+
+        if (options.skip) {
+            query = query.skip(options.skip);
+        }
+
+        if (options.limit) {
+            query = query.limit(options.limit);
+        }
+
+        const findOptions = options.suppressAuth ? { suppressAuth: true } : {};
+        return await query.find(findOptions);
+    }
+}
+
+/**
+ * Count records from appropriate data source
+ * @param {string} collectionKey - Key from COLLECTIONS
+ * @param {Object} options - Query options
+ * @returns {Promise<number>}
+ */
+async function countFromSource(collectionKey, options = {}) {
+    const collectionName = getCollectionName(collectionKey);
+
+    if (getSource(collectionKey) === 'airtable') {
+        // For Airtable, we need to query and count
+        const result = await queryFromSource(collectionKey, { ...options, limit: 10000 });
+        return result.items?.length || 0;
+    } else {
+        let query = wixData.query(collectionName);
+
+        if (options.eq) {
+            for (const [field, value] of Object.entries(options.eq)) {
+                query = query.eq(field, value);
+            }
+        }
+
+        if (options.ge) {
+            for (const [field, value] of Object.entries(options.ge)) {
+                query = query.ge(field, value);
+            }
+        }
+
+        if (options.ne) {
+            for (const [field, value] of Object.entries(options.ne)) {
+                query = query.ne(field, value);
+            }
+        }
+
+        return await query.count();
+    }
+}
+
+/**
+ * Get a single record by ID
+ * @param {string} collectionKey - Key from COLLECTIONS
+ * @param {string} recordId - Record ID
+ * @returns {Promise<Object|null>}
+ */
+async function getFromSource(collectionKey, recordId) {
+    const collectionName = getCollectionName(collectionKey);
+
+    if (getSource(collectionKey) === 'airtable') {
+        const result = await airtable.getRecord(collectionName, recordId);
+        return result.error ? null : result;
+    } else {
+        return await wixData.get(collectionName, recordId);
+    }
+}
+
+/**
+ * Update a record
+ * @param {string} collectionKey - Key from COLLECTIONS
+ * @param {Object} record - Record to update
+ * @param {Object} options - Update options
+ * @returns {Promise<Object>}
+ */
+async function updateInSource(collectionKey, record, options = {}) {
+    const collectionName = getCollectionName(collectionKey);
+
+    if (getSource(collectionKey) === 'airtable') {
+        const { _id, ...fields } = record;
+        return await airtable.updateRecord(collectionName, _id, fields);
+    } else {
+        const updateOptions = options.suppressAuth ? { suppressAuth: true } : {};
+        return await wixData.update(collectionName, record, updateOptions);
+    }
+}
+
+/**
+ * Insert a record
+ * @param {string} collectionKey - Key from COLLECTIONS
+ * @param {Object} record - Record to insert
+ * @param {Object} options - Insert options
+ * @returns {Promise<Object>}
+ */
+async function insertInSource(collectionKey, record, options = {}) {
+    const collectionName = getCollectionName(collectionKey);
+
+    if (getSource(collectionKey) === 'airtable') {
+        return await airtable.createRecord(collectionName, record);
+    } else {
+        const insertOptions = options.suppressAuth ? { suppressAuth: true } : {};
+        return await wixData.insert(collectionName, record, insertOptions);
+    }
+}
+
+/**
+ * Map Wix field name to Airtable field name
+ * @param {string} field - Wix field name
+ * @returns {string} Airtable field name
+ */
+function mapFieldToAirtable(field) {
+    const fieldMap = {
+        '_id': 'Record ID',
+        '_createdDate': 'Created',
+        '_updatedDate': 'Last Modified',
+        '_owner': 'Owner',
+        'firstName': 'First Name',
+        'lastName': 'Last Name',
+        'email': 'Email',
+        'phone': 'Phone',
+        'status': 'Status',
+        'verificationStatus': 'Verification Status',
+        'membershipTier': 'Membership Tier',
+        'profileCompletion': 'Profile Completion',
+        'dot_number': 'DOT Number',
+        'legal_name': 'Legal Name',
+        'dba_name': 'DBA Name',
+        'phy_city': 'Physical City',
+        'phy_state': 'Physical State',
+        'nbr_power_unit': 'Total Power Units',
+        'safety_rating': 'Safety Rating',
+        'admin_status': 'Admin Status',
+        'is_flagged': 'Is Flagged',
+        'isFlagged': 'Is Flagged',
+        'mc_number': 'MC Number',
+        'driverId': 'Driver',
+        'carrierId': 'Carrier',
+        'action': 'Action',
+        'targetType': 'Target Type',
+        'targetId': 'Target ID',
+        'timestamp': 'Timestamp'
+    };
+
+    return fieldMap[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/**
+ * Format a value for Airtable filter formula
+ * @param {string} field - Airtable field name
+ * @param {string} operator - Comparison operator
+ * @param {*} value - Value to compare
+ * @returns {string} Airtable formula clause
+ */
+function formatAirtableCondition(field, operator, value) {
+    if (typeof value === 'string') {
+        return `{${field}} ${operator} '${value.replace(/'/g, "\\'")}'`;
+    } else if (typeof value === 'boolean') {
+        return `{${field}} ${operator} ${value ? 'TRUE()' : 'FALSE()'}`;
+    } else if (value === null) {
+        return operator === '=' ? `{${field}} = BLANK()` : `{${field}} != BLANK()`;
+    } else {
+        return `{${field}} ${operator} ${value}`;
+    }
+}
 
 // ============================================
 // AUTHORIZATION
@@ -52,6 +442,7 @@ async function requireAdmin() {
  * @returns {Promise<Object>} - Drivers list with pagination info
  */
 export async function getDriversList(options = {}) {
+    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     const {
@@ -63,29 +454,22 @@ export async function getDriversList(options = {}) {
     } = options;
 
     try {
-        let query = wixData.query('DriverProfiles');
-
-        // Apply search filter
-        if (filters.search) {
-            const searchTerm = filters.search.toLowerCase();
-            query = query.contains('firstName', searchTerm)
-                .or(wixData.query('DriverProfiles').contains('lastName', searchTerm))
-                .or(wixData.query('DriverProfiles').contains('email', searchTerm));
-        }
+        // Build query options
+        const queryOptions = {};
 
         // Apply status filter
         if (filters.status && filters.status !== 'all') {
-            query = query.eq('status', filters.status);
+            queryOptions.eq = { ...queryOptions.eq, status: filters.status };
         }
 
         // Apply verification filter
         if (filters.verification && filters.verification !== 'all') {
-            query = query.eq('verificationStatus', filters.verification);
+            queryOptions.eq = { ...queryOptions.eq, verificationStatus: filters.verification };
         }
 
         // Apply tier filter
         if (filters.tier && filters.tier !== 'all') {
-            query = query.eq('membershipTier', filters.tier);
+            queryOptions.eq = { ...queryOptions.eq, membershipTier: filters.tier };
         }
 
         // Apply sorting
@@ -95,29 +479,64 @@ export async function getDriversList(options = {}) {
             lastActive: '_updatedDate'
         };
         const dbSortField = sortFieldMap[sortField] || '_updatedDate';
-
-        if (sortDirection === 'asc') {
-            query = query.ascending(dbSortField);
-        } else {
-            query = query.descending(dbSortField);
-        }
+        queryOptions.sortField = dbSortField;
+        queryOptions.sortDirection = sortDirection;
 
         // Apply pagination
         const skip = (page - 1) * pageSize;
-        query = query.skip(skip).limit(pageSize);
+        queryOptions.skip = skip;
+        queryOptions.limit = pageSize;
 
-        // Execute query
-        const result = await query.find();
+        // For search, we need special handling
+        let result;
+        if (filters.search && getSource('drivers') === 'wix') {
+            // Wix-specific: use OR queries for search
+            const searchTerm = filters.search.toLowerCase();
+            let query = wixData.query('DriverProfiles');
 
-        // Get total count (without pagination)
-        let countQuery = wixData.query('DriverProfiles');
+            query = query.contains('firstName', searchTerm)
+                .or(wixData.query('DriverProfiles').contains('lastName', searchTerm))
+                .or(wixData.query('DriverProfiles').contains('email', searchTerm));
+
+            if (filters.status && filters.status !== 'all') {
+                query = query.eq('status', filters.status);
+            }
+            if (filters.verification && filters.verification !== 'all') {
+                query = query.eq('verificationStatus', filters.verification);
+            }
+            if (filters.tier && filters.tier !== 'all') {
+                query = query.eq('membershipTier', filters.tier);
+            }
+
+            if (sortDirection === 'asc') {
+                query = query.ascending(dbSortField);
+            } else {
+                query = query.descending(dbSortField);
+            }
+
+            query = query.skip(skip).limit(pageSize);
+            result = await query.find();
+        } else if (filters.search && getSource('drivers') === 'airtable') {
+            // Airtable: use FIND for text search
+            const searchTerm = filters.search.toLowerCase();
+            queryOptions.contains = {
+                firstName: searchTerm
+            };
+            // Note: Airtable OR search would require a custom formula
+            result = await queryFromSource('drivers', queryOptions);
+        } else {
+            result = await queryFromSource('drivers', queryOptions);
+        }
+
+        // Get total count
+        const countOptions = {};
         if (filters.status && filters.status !== 'all') {
-            countQuery = countQuery.eq('status', filters.status);
+            countOptions.eq = { ...countOptions.eq, status: filters.status };
         }
         if (filters.verification && filters.verification !== 'all') {
-            countQuery = countQuery.eq('verificationStatus', filters.verification);
+            countOptions.eq = { ...countOptions.eq, verificationStatus: filters.verification };
         }
-        const countResult = await countQuery.count();
+        const countResult = await countFromSource('drivers', countOptions);
 
         // Transform drivers for frontend
         const drivers = result.items.map(driver => ({
@@ -156,27 +575,30 @@ export async function getDriversList(options = {}) {
  * @returns {Promise<Object>} - Driver details
  */
 export async function getDriverDetail(driverId) {
+    // Collections: DriverProfiles (drivers), DriverCarrierInterests (applications), MatchEvents (matches)
     await requireAdmin();
 
     try {
-        const driver = await wixData.get('DriverProfiles', driverId);
+        const driver = await getFromSource('drivers', driverId);
         if (!driver) {
             throw new Error('Driver not found');
         }
 
         // Get application history
-        const applications = await wixData.query('DriverCarrierInterests')
-            .eq('driverId', driverId)
-            .descending('_createdDate')
-            .limit(20)
-            .find();
+        const applications = await queryFromSource('applications', {
+            eq: { driverId: driverId },
+            sortField: '_createdDate',
+            sortDirection: 'desc',
+            limit: 20
+        });
 
         // Get match history
-        const matches = await wixData.query('MatchEvents')
-            .eq('driverId', driverId)
-            .descending('_createdDate')
-            .limit(20)
-            .find();
+        const matches = await queryFromSource('matches', {
+            eq: { driverId: driverId },
+            sortField: '_createdDate',
+            sortDirection: 'desc',
+            limit: 20
+        });
 
         return {
             ...driver,
@@ -204,6 +626,7 @@ export async function getDriverDetail(driverId) {
  * @returns {Promise<Object>} - Updated driver
  */
 export async function updateDriverStatus(driverId, status, reason = '') {
+    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     const validStatuses = ['active', 'pending', 'suspended', 'incomplete'];
@@ -212,7 +635,7 @@ export async function updateDriverStatus(driverId, status, reason = '') {
     }
 
     try {
-        const driver = await wixData.get('DriverProfiles', driverId);
+        const driver = await getFromSource('drivers', driverId);
         if (!driver) {
             throw new Error('Driver not found');
         }
@@ -228,7 +651,7 @@ export async function updateDriverStatus(driverId, status, reason = '') {
             changedBy: 'admin' // Could enhance to include admin ID
         });
 
-        const updated = await wixData.update('DriverProfiles', driver);
+        const updated = await updateInSource('drivers', driver);
 
         // Log admin action
         await logAdminAction('updateDriverStatus', driverId, { previousStatus, newStatus: status, reason });
@@ -247,10 +670,11 @@ export async function updateDriverStatus(driverId, status, reason = '') {
  * @returns {Promise<Object>} - Updated driver
  */
 export async function verifyDriver(driverId) {
+    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
-        const driver = await wixData.get('DriverProfiles', driverId);
+        const driver = await getFromSource('drivers', driverId);
         if (!driver) {
             throw new Error('Driver not found');
         }
@@ -259,7 +683,7 @@ export async function verifyDriver(driverId) {
         driver.verifiedAt = new Date();
         driver.status = 'active';
 
-        const updated = await wixData.update('DriverProfiles', driver);
+        const updated = await updateInSource('drivers', driver);
 
         // Log admin action
         await logAdminAction('verifyDriver', driverId, {});
@@ -334,33 +758,34 @@ export async function bulkUpdateDrivers(driverIds, action) {
  * @returns {Promise<Object>} - Stats object
  */
 export async function getDriverStats() {
+    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
         // Total drivers
-        const totalResult = await wixData.query('DriverProfiles').count();
+        const totalResult = await countFromSource('drivers', {});
 
         // Active drivers
-        const activeResult = await wixData.query('DriverProfiles')
-            .eq('status', 'active')
-            .count();
+        const activeResult = await countFromSource('drivers', {
+            eq: { status: 'active' }
+        });
 
         // Pending verification
-        const pendingResult = await wixData.query('DriverProfiles')
-            .eq('verificationStatus', 'in_review')
-            .count();
+        const pendingResult = await countFromSource('drivers', {
+            eq: { verificationStatus: 'in_review' }
+        });
 
         // Expired documents (simplified - would need actual doc expiry tracking)
-        const expiredResult = await wixData.query('DriverProfiles')
-            .eq('verificationStatus', 'expired')
-            .count();
+        const expiredResult = await countFromSource('drivers', {
+            eq: { verificationStatus: 'expired' }
+        });
 
         // New this week
         const weekAgo = new Date();
         weekAgo.setDate(weekAgo.getDate() - 7);
-        const newThisWeek = await wixData.query('DriverProfiles')
-            .ge('_createdDate', weekAgo)
-            .count();
+        const newThisWeek = await countFromSource('drivers', {
+            ge: { _createdDate: weekAgo }
+        });
 
         return {
             total: totalResult,
@@ -383,6 +808,7 @@ export async function getDriverStats() {
  * @returns {Promise<Object>} - Analytics data
  */
 export async function getDriverAnalytics(period = 'month') {
+    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
@@ -401,9 +827,9 @@ export async function getDriverAnalytics(period = 'month') {
         }
 
         // Get registrations in period
-        const registrations = await wixData.query('DriverProfiles')
-            .ge('_createdDate', startDate)
-            .find();
+        const registrations = await queryFromSource('drivers', {
+            ge: { _createdDate: startDate }
+        });
 
         // Group by day
         const dailyRegistrations = {};
@@ -434,19 +860,20 @@ export async function getDriverAnalytics(period = 'month') {
  * @returns {Promise<string>} - CSV string
  */
 export async function exportDriversCSV(filters = {}) {
+    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
-        let query = wixData.query('DriverProfiles');
+        const queryOptions = { limit: 1000 };
 
         if (filters.status && filters.status !== 'all') {
-            query = query.eq('status', filters.status);
+            queryOptions.eq = { ...queryOptions.eq, status: filters.status };
         }
         if (filters.verification && filters.verification !== 'all') {
-            query = query.eq('verificationStatus', filters.verification);
+            queryOptions.eq = { ...queryOptions.eq, verificationStatus: filters.verification };
         }
 
-        const result = await query.limit(1000).find();
+        const result = await queryFromSource('drivers', queryOptions);
 
         // Generate CSV
         const headers = ['ID', 'First Name', 'Last Name', 'Email', 'Status', 'Verification', 'Location', 'Joined Date'];
@@ -486,10 +913,11 @@ export async function exportDriversCSV(filters = {}) {
  * @returns {Promise<void>}
  */
 export async function sendDriverEmail(driverId, templateId, variables = {}) {
+    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
-        const driver = await wixData.get('DriverProfiles', driverId);
+        const driver = await getFromSource('drivers', driverId);
         if (!driver || !driver.email) {
             throw new Error('Driver not found or no email');
         }
@@ -521,10 +949,11 @@ export async function sendDriverEmail(driverId, templateId, variables = {}) {
  * @param {Object} details - Action details
  */
 async function logAdminAction(action, targetId, details = {}) {
+    // Collection: AdminAuditLog (auditLog)
     try {
         const member = await currentMember.getMember();
 
-        await wixData.insert('AdminAuditLog', {
+        await insertInSource('auditLog', {
             action,
             targetType: 'driver',
             targetId,
@@ -586,6 +1015,7 @@ function formatLocation(driver) {
  * @returns {Promise<Object>} - Carriers list with pagination info
  */
 export async function getCarriersList(options = {}) {
+    // Collections: Carriers (carriers), CarrierEnrichments (enrichments)
     await requireAdmin();
 
     const {
@@ -597,12 +1027,56 @@ export async function getCarriersList(options = {}) {
     } = options;
 
     try {
-        let query = wixData.query('Carriers');
+        // Build query options
+        const queryOptions = {};
 
-        // Apply search filter (DOT, Legal Name, MC)
-        if (filters.search) {
-            const searchTerm = filters.search; // Keep original case for some checks if needed, but contains is case-insensitive usually
-            // Note: DOT is Number type, so we try to parse it if looks like number
+        // Apply status filter
+        if (filters.status && filters.status !== 'all') {
+            queryOptions.eq = { ...queryOptions.eq, admin_status: filters.status };
+        }
+
+        // Apply safety rating filter
+        if (filters.safetyRating && filters.safetyRating !== 'all') {
+            queryOptions.eq = { ...queryOptions.eq, safety_rating: filters.safetyRating };
+        }
+
+        // Apply sorting
+        const sortFieldMap = {
+            name: 'legal_name',
+            fleetSize: 'nbr_power_unit',
+            lastUpdated: '_updatedDate',
+            safetyRating: 'safety_rating'
+        };
+        const dbSortField = sortFieldMap[sortField] || '_updatedDate';
+        queryOptions.sortField = dbSortField;
+        queryOptions.sortDirection = sortDirection;
+
+        // Apply pagination
+        const skip = (page - 1) * pageSize;
+        queryOptions.skip = skip;
+        queryOptions.limit = pageSize;
+
+        // Handle fleet size filter (requires range queries)
+        if (filters.fleetSize && filters.fleetSize !== 'all') {
+            switch (filters.fleetSize) {
+                case 'small':
+                    queryOptions.lt = { ...queryOptions.lt, nbr_power_unit: 50 };
+                    break;
+                case 'medium':
+                    queryOptions.ge = { ...queryOptions.ge, nbr_power_unit: 50 };
+                    queryOptions.lt = { ...queryOptions.lt, nbr_power_unit: 200 };
+                    break;
+                case 'large':
+                    queryOptions.ge = { ...queryOptions.ge, nbr_power_unit: 200 };
+                    break;
+            }
+        }
+
+        // Handle search - needs special handling for OR queries
+        let result;
+        if (filters.search && getSource('carriers') === 'wix') {
+            // Wix-specific: use OR queries for search
+            const searchTerm = filters.search;
             const asNumber = parseInt(searchTerm, 10);
 
             let searchQuery = wixData.query('Carriers').contains('legal_name', searchTerm)
@@ -614,63 +1088,38 @@ export async function getCarriersList(options = {}) {
                 searchQuery = searchQuery.or(wixData.query('Carriers').eq('mc_number', asNumber));
             }
 
-            query = searchQuery;
-        }
-
-        // Apply status filter
-        if (filters.status && filters.status !== 'all') {
-            query = query.eq('admin_status', filters.status);
-        }
-
-        // Apply fleet size filter
-        if (filters.fleetSize && filters.fleetSize !== 'all') {
-            switch (filters.fleetSize) {
-                case 'small':
-                    query = query.lt('nbr_power_unit', 50);
-                    break;
-                case 'medium':
-                    query = query.ge('nbr_power_unit', 50).lt('nbr_power_unit', 200);
-                    break;
-                case 'large':
-                    query = query.ge('nbr_power_unit', 200);
-                    break;
+            if (filters.status && filters.status !== 'all') {
+                searchQuery = searchQuery.eq('admin_status', filters.status);
             }
-        }
+            if (filters.safetyRating && filters.safetyRating !== 'all') {
+                searchQuery = searchQuery.eq('safety_rating', filters.safetyRating);
+            }
 
-        // Apply safety rating filter
-        if (filters.safetyRating && filters.safetyRating !== 'all') {
-            query = query.eq('safety_rating', filters.safetyRating);
-        }
+            if (sortDirection === 'asc') {
+                searchQuery = searchQuery.ascending(dbSortField);
+            } else {
+                searchQuery = searchQuery.descending(dbSortField);
+            }
 
-        // Apply sorting
-        const sortFieldMap = {
-            name: 'legal_name',
-            fleetSize: 'nbr_power_unit',
-            lastUpdated: '_updatedDate',
-            safetyRating: 'safety_rating'
-        };
-        const dbSortField = sortFieldMap[sortField] || '_updatedDate';
-
-        if (sortDirection === 'asc') {
-            query = query.ascending(dbSortField);
+            searchQuery = searchQuery.skip(skip).limit(pageSize);
+            result = await searchQuery.find();
+        } else if (filters.search && getSource('carriers') === 'airtable') {
+            // Airtable: use FIND for text search on legal_name
+            queryOptions.contains = { legal_name: filters.search };
+            result = await queryFromSource('carriers', queryOptions);
         } else {
-            query = query.descending(dbSortField);
+            result = await queryFromSource('carriers', queryOptions);
         }
-
-        // Apply pagination
-        const skip = (page - 1) * pageSize;
-        query = query.skip(skip).limit(pageSize);
-
-        // Execute query
-        const result = await query.find();
 
         // Get total count
-        // Note: For complex search queries (OR), count() might need the same query construction
-        // For simplicity/performance, we might skip precise count on complex search or do a simpler count
-        let countQuery = wixData.query('Carriers');
-        if (filters.status && filters.status !== 'all') countQuery = countQuery.eq('admin_status', filters.status);
-        if (filters.safetyRating && filters.safetyRating !== 'all') countQuery = countQuery.eq('safety_rating', filters.safetyRating);
-        const countResult = await countQuery.count();
+        const countOptions = {};
+        if (filters.status && filters.status !== 'all') {
+            countOptions.eq = { ...countOptions.eq, admin_status: filters.status };
+        }
+        if (filters.safetyRating && filters.safetyRating !== 'all') {
+            countOptions.eq = { ...countOptions.eq, safety_rating: filters.safetyRating };
+        }
+        const countResult = await countFromSource('carriers', countOptions);
 
         // Fetch Enrichment Status for these carriers
         const dotNumbers = result.items.map(c => String(c.dot_number));
@@ -712,11 +1161,12 @@ export async function getCarriersList(options = {}) {
  * Helper to get enrichment status
  */
 async function getCarrierEnrichments(dotNumbers) {
+    // Collection: CarrierEnrichments (enrichments)
     if (!dotNumbers.length) return {};
     try {
-        const result = await wixData.query('CarrierEnrichments')
-            .hasSome('dot_number', dotNumbers)
-            .find();
+        const result = await queryFromSource('enrichments', {
+            hasSome: { dot_number: dotNumbers }
+        });
 
         const map = {};
         result.items.forEach(item => {
@@ -733,12 +1183,13 @@ async function getCarrierEnrichments(dotNumbers) {
  * Get carrier dashboard stats
  */
 export async function getCarrierStats() {
+    // Collections: Carriers (carriers), CarrierEnrichments (enrichments)
     await requireAdmin();
     try {
-        const total = await wixData.query('Carriers').count();
-        const flagged = await wixData.query('Carriers').eq('is_flagged', true).count();
-        const enriched = await wixData.query('CarrierEnrichments').count(); // Approx, or query distinct if possible
-        const active = await wixData.query('Carriers').ne('admin_status', 'inactive').count();
+        const total = await countFromSource('carriers', {});
+        const flagged = await countFromSource('carriers', { eq: { is_flagged: true } });
+        const enriched = await countFromSource('enrichments', {});
+        const active = await countFromSource('carriers', { ne: { admin_status: 'inactive' } });
 
         return {
             total,
@@ -759,17 +1210,18 @@ export async function getCarrierStats() {
  * Get detailed carrier info
  */
 export async function getCarrierDetail(carrierId) {
+    // Collections: Carriers (carriers), CarrierEnrichments (enrichments)
     await requireAdmin();
     try {
-        const carrier = await wixData.get('Carriers', carrierId);
+        const carrier = await getFromSource('carriers', carrierId);
         if (!carrier) throw new Error('Carrier not found');
 
         // Get enrichment
         let enrichment = null;
         if (carrier.dot_number) {
-            const enrichResult = await wixData.query('CarrierEnrichments')
-                .eq('dot_number', String(carrier.dot_number))
-                .find();
+            const enrichResult = await queryFromSource('enrichments', {
+                eq: { dot_number: String(carrier.dot_number) }
+            });
             if (enrichResult.items.length > 0) enrichment = enrichResult.items[0];
         }
 
@@ -789,9 +1241,10 @@ export async function getCarrierDetail(carrierId) {
  * Update carrier status/flag
  */
 export async function updateCarrierStatus(carrierId, updates) {
+    // Collection: Carriers (carriers)
     await requireAdmin();
     try {
-        const carrier = await wixData.get('Carriers', carrierId);
+        const carrier = await getFromSource('carriers', carrierId);
         if (!carrier) throw new Error('Carrier not found');
 
         let changed = false;
@@ -805,7 +1258,7 @@ export async function updateCarrierStatus(carrierId, updates) {
         }
 
         if (changed) {
-            await wixData.update('Carriers', carrier);
+            await updateInSource('carriers', carrier);
             await logAdminAction('updateCarrier', carrierId, updates);
         }
 

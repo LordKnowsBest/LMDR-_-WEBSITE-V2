@@ -5,31 +5,110 @@ import { getCarrierSafetyData } from 'backend/fmcsaService';
 import { log, logAIOperation, logExternalAPI, startTrace, endTrace } from 'backend/observabilityService';
 
 // ============================================================================
+// Data Source Configuration
+// ============================================================================
+import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// ============================================================================
 // CONFIGURATION - PRODUCTION-HARDENED 2025 STACK
 // ============================================================================
 const CONFIG = {
+  // Collection keys (camelCase, matching config.jsw)
+  enrichmentsKey: 'carrierEnrichments',
+
+  // Legacy collection name for wixData
   enrichmentsCollection: 'CarrierEnrichments',
-  
+
   // Claude Configuration
-  claudeModel: 'claude-sonnet-4-20250514',  
+  claudeModel: 'claude-sonnet-4-20250514',
   claudeSecret: 'CLAUDE_API_KEY',
   claudeEndpoint: 'https://api.anthropic.com/v1/messages',
-  
+
   // Perplexity Configuration - USE FAST MODEL
-  perplexityModel: 'sonar-pro', 
+  perplexityModel: 'sonar-pro',
   perplexitySecret: 'PERPLEXITY_API_KEY',
   perplexityEndpoint: 'https://api.perplexity.ai/chat/completions',
-  
+
   // Timeouts & Limits
-  perplexityTimeoutMs: 25000,  
-  claudeTimeoutMs: 30000,      
+  perplexityTimeoutMs: 25000,
+  claudeTimeoutMs: 30000,
   maxTokens: 1200,
   cacheExpiryDays: 14,
-  
+
   // Feature Flags
-  enablePerplexity: true,      
-  fallbackToClaudeOnly: true   
+  enablePerplexity: true,
+  fallbackToClaudeOnly: true
 };
+
+// ============================================================================
+// Data Abstraction Layer Helpers
+// ============================================================================
+
+/**
+ * Query records from the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Function} wixQueryBuilder - Function that builds and executes wixData query
+ * @param {Object} airtableOptions - Options for Airtable query
+ * @returns {Promise<Object>} Query result with items array
+ */
+async function queryData(collectionKey, wixQueryBuilder, airtableOptions = {}) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      const result = await airtable.queryRecords(tableName, airtableOptions);
+      return { items: result.records || [], totalCount: (result.records || []).length };
+    } catch (error) {
+      console.error(`[AIEnrichment] Airtable query error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  return await wixQueryBuilder();
+}
+
+/**
+ * Insert a record into the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Object} record - Record to insert
+ * @returns {Promise<Object>} Inserted record
+ */
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      return await airtable.createRecord(tableName, record);
+    } catch (error) {
+      console.error(`[AIEnrichment] Airtable insert error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  const wixCollection = getWixCollectionName(collectionKey);
+  return await wixData.insert(wixCollection, record, { suppressAuth: true });
+}
+
+/**
+ * Update a record in the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Object} record - Record with _id to update
+ * @returns {Promise<Object>} Updated record
+ */
+async function updateData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      const { _id, ...fields } = record;
+      return await airtable.updateRecord(tableName, _id, fields);
+    } catch (error) {
+      console.error(`[AIEnrichment] Airtable update error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  const wixCollection = getWixCollectionName(collectionKey);
+  return await wixData.update(wixCollection, record, { suppressAuth: true });
+}
 
 // ============================================================================
 // MAIN ENRICHMENT PIPELINE - FAULT TOLERANT
@@ -47,16 +126,16 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
   });
   const traceId = trace.traceId;
 
-  console.log(`🚀 Starting enrichment for DOT ${dot}`);
+  console.log(`Starting enrichment for DOT ${dot}`);
   await log({ level: 'INFO', source: 'ai-enrichment', message: `Starting enrichment for DOT ${dot}`, traceId });
 
   // STEP 1: Always fetch Federal Truth (FMCSA) first
   let fmcsaData;
   try {
     fmcsaData = await getCarrierSafetyData(dot);
-    console.log(`✅ FMCSA data retrieved for DOT ${dot}`);
+    console.log(`FMCSA data retrieved for DOT ${dot}`);
   } catch (err) {
-    console.error(`⚠️ FMCSA Service failed for ${dot}:`, err.message);
+    console.error(`FMCSA Service failed for ${dot}:`, err.message);
     await log({ level: 'WARN', source: 'ai-enrichment', message: `FMCSA service failed for DOT ${dot}`, traceId, details: { error: err.message } });
     fmcsaData = { error: true, error_message: "FMCSA Service Unavailable" };
   }
@@ -68,7 +147,7 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
     // Check for fresh cache first - skip expensive API calls
     const cached = await getCachedSentiment(dot);
     if (cached && !isSentimentStale(cached.enriched_date)) {
-      console.log(`📦 Using cached enrichment for DOT ${dot} (${cached.cache_age_days} days old)`);
+      console.log(`Using cached enrichment for DOT ${dot} (${cached.cache_age_days} days old)`);
       await log({ level: 'INFO', source: 'ai-enrichment', message: `Cache hit for DOT ${dot}`, traceId, details: { cacheAgeDays: cached.cache_age_days } });
       await endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime });
       return { ...cached, fmcsa: fmcsaForFrontend, fromCache: true };
@@ -77,29 +156,29 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
     // STEP 2: Attempt Perplexity research (with timeout protection)
     const carrierName = fmcsaData?.legal_name || carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
     const carrierLocation = `${fmcsaData?.phy_city || carrierData.PHY_CITY || ''}, ${fmcsaData?.phy_state || carrierData.PHY_STATE || ''}`;
-    
+
     let rawResearch = '';
-    
+
     // We run standard Perplexity research (Job/Pay data) unless specifically disabled
     // socialIntel (Reddit gossip) is separate and additive
     if (CONFIG.enablePerplexity) {
       rawResearch = await fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId);
     }
-    
+
     // STEP 3: Synthesis via Claude (always runs)
     // Pass socialIntel into the prompt builder
     const { systemPrompt, userPrompt } = buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel);
-    
+
     // Combine standard research + social intel for Claude's context
     const combinedResearch = (rawResearch + "\n\n" + (socialIntel || "")).trim();
 
     const enrichedData = await callClaudeSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
-    
+
     // STEP 4: Persist and Return
     await cacheSentimentEnrichment(enrichedData);
 
     const elapsed = Date.now() - startTime;
-    console.log(`✅ Enrichment complete for DOT ${dot} in ${elapsed}ms`);
+    console.log(`Enrichment complete for DOT ${dot} in ${elapsed}ms`);
 
     await log({ level: 'INFO', source: 'ai-enrichment', message: `Enrichment complete for DOT ${dot}`, traceId, duration: elapsed, details: { confidence: enrichedData.data_confidence } });
     await endTrace(traceId, 'completed', { fromCache: false, elapsed, confidence: enrichedData.data_confidence });
@@ -107,7 +186,7 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
     return { ...enrichedData, fmcsa: fmcsaForFrontend, fromCache: false };
 
   } catch (error) {
-    console.error(`❌ Enrichment Pipeline Error for DOT ${dot}:`, error.message);
+    console.error(`Enrichment Pipeline Error for DOT ${dot}:`, error.message);
     await log({ level: 'ERROR', source: 'ai-enrichment', message: `Enrichment failed for DOT ${dot}`, traceId, details: { error: error.message } });
     await endTrace(traceId, 'error', { error: error.message });
     return generateFallbackEnrichment(dot, carrierData, driverPrefs, error.message, fmcsaForFrontend);
@@ -124,11 +203,11 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
   try {
     const apiKey = await getSecret(CONFIG.perplexitySecret);
     if (!apiKey) {
-      console.warn('⚠️ Perplexity API key not configured');
+      console.warn('Perplexity API key not configured');
       return generateInternalResearchFallback(carrierName);
     }
 
-    console.log(`🔍 Perplexity: Researching "${carrierName}"`);
+    console.log(`Perplexity: Researching "${carrierName}"`);
 
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error('Perplexity timeout')), CONFIG.perplexityTimeoutMs);
@@ -161,7 +240,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
     const latencyMs = Date.now() - apiStartTime;
 
     if (!response.ok) {
-      console.warn(`⚠️ Perplexity API Error: ${response.status}`);
+      console.warn(`Perplexity API Error: ${response.status}`);
       await logAIOperation({
         source: 'ai-enrichment',
         operation: 'research',
@@ -179,7 +258,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
     const content = result.choices?.[0]?.message?.content || '';
     const usage = result.usage || {};
 
-    console.log(`✅ Perplexity returned ${content.length} chars`);
+    console.log(`Perplexity returned ${content.length} chars`);
 
     // Log successful AI operation
     await logAIOperation({
@@ -200,9 +279,9 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
   } catch (e) {
     const latencyMs = Date.now() - apiStartTime;
     if (e.message === 'Perplexity timeout') {
-      console.warn(`⏱️ Perplexity timed out after ${CONFIG.perplexityTimeoutMs}ms - using fallback`);
+      console.warn(`Perplexity timed out after ${CONFIG.perplexityTimeoutMs}ms - using fallback`);
     } else {
-      console.error("⚠️ Perplexity fetch failed:", e.message);
+      console.error("Perplexity fetch failed:", e.message);
     }
     await logAIOperation({
       source: 'ai-enrichment',
@@ -231,7 +310,7 @@ function buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel) {
   const safetyRating = fmcsaData?.safety_rating || 'NOT RATED';
   const fleetSize = fmcsaData?.total_power_units || carrierData?.NBR_POWER_UNIT || 0;
   const driverCount = fmcsaData?.total_drivers || carrierData?.DRIVER_TOTAL || 0;
-  
+
   // Determine fleet category
   let fleetCategory = 'small';
   if (fleetSize >= 500) fleetCategory = 'large';
@@ -251,7 +330,7 @@ function buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel) {
   let socialContext = "";
   if (socialIntel && socialIntel.length > 10) {
     socialContext = `
-    🔥 SOCIAL MEDIA INTEL (Reddit/Twitter/Forums):
+    SOCIAL MEDIA INTEL (Reddit/Twitter/Forums):
     "${socialIntel}"
     (Use this strictly for sentiment, pros/cons, and culture analysis. It is raw and unfiltered.)
     `;
@@ -303,7 +382,7 @@ async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber,
     throw new Error('Claude API key not configured');
   }
 
-  console.log(`🤖 Claude: Synthesizing enrichment for DOT ${dotNumber}`);
+  console.log(`Claude: Synthesizing enrichment for DOT ${dotNumber}`);
 
   const researchContext = research && research.length > 50
     ? `\n\nWEB RESEARCH & SOCIAL FINDINGS:\n${research}`
@@ -354,7 +433,7 @@ async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber,
     const responseText = extractTextFromResponse(data);
     const usage = data.usage || {};
 
-    console.log(`✅ Claude returned ${responseText.length} chars`);
+    console.log(`Claude returned ${responseText.length} chars`);
 
     // Log successful AI operation
     await logAIOperation({
@@ -410,7 +489,7 @@ function transformFMCSAForFrontend(fmcsaData) {
     safety_rating_date: fmcsaData.safety_rating_date,
     total_drivers: fmcsaData.total_drivers,
     total_power_units: fmcsaData.total_power_units,
-    
+
     inspections_24mo: {
       total: (inspections.driver_inspections || 0) + (inspections.vehicle_inspections || 0),
       driver_inspections: inspections.driver_inspections || 0,
@@ -420,14 +499,14 @@ function transformFMCSAForFrontend(fmcsaData) {
       national_avg_driver_oos: inspections.national_avg_driver_oos || 5.51,
       national_avg_vehicle_oos: inspections.national_avg_vehicle_oos || 20.72
     },
-    
+
     crashes_24mo: {
       total: crashes.total || 0,
       fatal: crashes.fatal || 0,
       injury: crashes.injury || 0,
       tow: crashes.tow || 0
     },
-    
+
     basics: basics,
     has_basic_alerts: fmcsaData.has_basic_alerts || false,
     fetched_date: fmcsaData.fetched_date,
@@ -464,13 +543,13 @@ function parseSentimentResponse(responseText, dotNumber) {
     // Strip markdown code blocks if present
     const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
     if (jsonMatch) jsonStr = jsonMatch[1].trim();
-    
+
     // Find JSON object
     const jsonObjectMatch = jsonStr.match(/\{[\s\S]*\}/);
     if (jsonObjectMatch) jsonStr = jsonObjectMatch[0];
-    
+
     const parsed = JSON.parse(jsonStr);
-    
+
     return {
       dot_number: String(dotNumber),
       freight_types: parsed.freight_types || 'General Freight',
@@ -491,7 +570,7 @@ function parseSentimentResponse(responseText, dotNumber) {
       source: 'claude-perplexity-hybrid-v3'
     };
   } catch (parseError) {
-    console.error('❌ Failed to parse Claude response:', parseError.message);
+    console.error('Failed to parse Claude response:', parseError.message);
     return {
       dot_number: String(dotNumber),
       ai_summary: "AI analysis incomplete. Please check FMCSA records and contact carrier directly.",
@@ -510,18 +589,32 @@ function parseSentimentResponse(responseText, dotNumber) {
 
 async function getCachedSentiment(dotNumber) {
   try {
-    const result = await wixData.query(CONFIG.enrichmentsCollection)
-      .eq('dot_number', String(dotNumber))
-      .find();
-      
-    if (result.items.length === 0) return null;
-    
-    const cached = result.items[0];
+    let items = [];
+
+    if (usesAirtable(CONFIG.enrichmentsKey)) {
+      // Airtable query
+      const filter = `{DOT Number} = '${String(dotNumber)}'`;
+      const result = await airtable.queryRecords(getAirtableTableName(CONFIG.enrichmentsKey), {
+        filterByFormula: filter,
+        maxRecords: 1
+      });
+      items = result.records || [];
+    } else {
+      // Wix query
+      const result = await wixData.query(CONFIG.enrichmentsCollection)
+        .eq('dot_number', String(dotNumber))
+        .find();
+      items = result.items;
+    }
+
+    if (items.length === 0) return null;
+
+    const cached = items[0];
     const enrichedDate = cached.enriched_date ? new Date(cached.enriched_date) : null;
-    const ageInDays = enrichedDate 
-      ? (Date.now() - enrichedDate.getTime()) / (1000 * 60 * 60 * 24) 
+    const ageInDays = enrichedDate
+      ? (Date.now() - enrichedDate.getTime()) / (1000 * 60 * 60 * 24)
       : 999;
-      
+
     return { ...cached, cache_age_days: Math.round(ageInDays * 10) / 10 };
   } catch (error) {
     console.error('Cache lookup error:', error.message);
@@ -537,27 +630,26 @@ function isSentimentStale(enrichedDate) {
 
 async function cacheSentimentEnrichment(sentimentData) {
   try {
-    const options = { suppressAuth: true };
     const dataToCache = { ...sentimentData };
     delete dataToCache.fmcsa; // FMCSA is cached separately
-    
+
     const existing = await getCachedSentiment(sentimentData.dot_number);
-    
+
     if (existing && existing._id) {
-      await wixData.update(CONFIG.enrichmentsCollection, {
+      await updateData(CONFIG.enrichmentsKey, {
         ...dataToCache,
         _id: existing._id,
         match_count: (existing.match_count || 0) + 1,
         last_matched_date: new Date()
-      }, options);
-      console.log(`📝 Updated cached enrichment for DOT ${sentimentData.dot_number}`);
+      });
+      console.log(`Updated cached enrichment for DOT ${sentimentData.dot_number}`);
     } else {
-      await wixData.insert(CONFIG.enrichmentsCollection, {
+      await insertData(CONFIG.enrichmentsKey, {
         ...dataToCache,
         match_count: 1,
         last_matched_date: new Date()
-      }, options);
-      console.log(`📝 Created new cached enrichment for DOT ${sentimentData.dot_number}`);
+      });
+      console.log(`Created new cached enrichment for DOT ${sentimentData.dot_number}`);
     }
   } catch (error) {
     console.error('Failed to cache enrichment:', error.message);
@@ -573,7 +665,7 @@ function generateFallbackEnrichment(dotNumber, carrierData, driverPrefs, errorMe
   const city = carrierData?.PHY_CITY || fmcsaData?.phy_city || 'their location';
   const state = carrierData?.PHY_STATE || fmcsaData?.phy_state || '';
   const fleetSize = carrierData?.NBR_POWER_UNIT || fmcsaData?.total_power_units || 0;
-  
+
   let inferredRouteType = 'Regional/OTR';
   if (fleetSize < 20) inferredRouteType = 'Regional/Local';
   else if (fleetSize > 200) inferredRouteType = 'OTR/Dedicated';

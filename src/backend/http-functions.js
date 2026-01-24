@@ -18,6 +18,10 @@ import {
   markCheckoutRecovered
 } from 'backend/abandonmentEmailService';
 
+// Data source configuration imports
+// Note: http-functions.js uses standard imports (not .jsw)
+// The stripeService and abandonmentEmailService handle data source routing internally
+
 // ============================================================================
 // STRIPE WEBHOOK ENDPOINT
 // POST https://www.lastmiledeliveryrecruiting.com/_functions/stripe_webhook

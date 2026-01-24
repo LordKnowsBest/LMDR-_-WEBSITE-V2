@@ -1,6 +1,12 @@
 import wixData from 'wix-data';
 import { log } from 'backend/observabilityService';
 
+// ============================================================================
+// Data Source Configuration
+// ============================================================================
+import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
 // ===========================================
 // CONFIGURATION & CONSTANTS
 // ===========================================
@@ -25,6 +31,35 @@ const ROI_CONSTANTS = {
 
 // Mock data generator for initial rollout/demo
 const MOCK_DATA = true;
+
+// Collection keys (camelCase, matching config.jsw)
+const DRIVER_PERFORMANCE_KEY = 'driverPerformance'; // Note: May not exist yet, but prepared for future
+
+// ===========================================
+// Data Abstraction Layer Helpers
+// ===========================================
+
+/**
+ * Query records from the appropriate data source
+ * @param {string} collectionKey - camelCase collection key
+ * @param {Function} wixQueryBuilder - Function that builds and executes wixData query
+ * @param {Object} airtableOptions - Options for Airtable query
+ * @returns {Promise<Object>} Query result with items array
+ */
+async function queryData(collectionKey, wixQueryBuilder, airtableOptions = {}) {
+  if (usesAirtable(collectionKey)) {
+    try {
+      const tableName = getAirtableTableName(collectionKey);
+      const result = await airtable.queryRecords(tableName, airtableOptions);
+      return { items: result.records || [], totalCount: (result.records || []).length };
+    } catch (error) {
+      console.error(`[RetentionService] Airtable query error for ${collectionKey}:`, error.message);
+      throw error;
+    }
+  }
+  // Use Wix
+  return await wixQueryBuilder();
+}
 
 // ===========================================
 // CORE LOGIC
@@ -131,10 +166,33 @@ export async function getCarrierRetentionDashboard(carrierDot) {
     try {
         let drivers = [];
 
-        // In production, fetch from Wix Data
-        // const performanceResult = await wixData.query('DriverPerformance')...
-
-        if (MOCK_DATA) {
+        // In production, fetch from appropriate data source
+        if (!MOCK_DATA) {
+            // Check if using Airtable for driver performance data
+            if (usesAirtable(DRIVER_PERFORMANCE_KEY)) {
+                try {
+                    const filter = `{Carrier DOT} = '${carrierDot}'`;
+                    const result = await airtable.queryRecords(getAirtableTableName(DRIVER_PERFORMANCE_KEY), {
+                        filterByFormula: filter
+                    });
+                    drivers = result.records || [];
+                } catch (error) {
+                    console.error('[RetentionService] Airtable query failed, using mock data:', error.message);
+                    drivers = generateMockDrivers();
+                }
+            } else {
+                // Wix query
+                try {
+                    const result = await wixData.query('DriverPerformance')
+                        .eq('carrier_dot', carrierDot)
+                        .find({ suppressAuth: true });
+                    drivers = result.items;
+                } catch (error) {
+                    console.error('[RetentionService] Wix query failed, using mock data:', error.message);
+                    drivers = generateMockDrivers();
+                }
+            }
+        } else {
             drivers = generateMockDrivers();
         }
 
