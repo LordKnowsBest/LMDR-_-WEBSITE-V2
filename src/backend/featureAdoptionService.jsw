@@ -1921,38 +1921,71 @@ export async function aggregateDailyMetrics() {
         yesterday.setDate(yesterday.getDate() - 1);
         const dateStr = yesterday.toISOString().split('T')[0];
 
-        // Check if already aggregated
-        const existing = await wixData.query(CONFIG.collections.metricsDaily)
-            .eq('date', dateStr)
-            .find({ suppressAuth: true })
-            .catch(() => ({ items: [] }));
+        // Check if already aggregated using dual-source routing
+        let existingItems = [];
+        if (usesAirtable(COLLECTION_KEYS.featureMetricsDaily)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.featureMetricsDaily);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Date} = '${dateStr}'`,
+                maxRecords: 100
+            }).catch(() => ({ records: [] }));
+            existingItems = result.records || [];
+        } else {
+            const existing = await wixData.query(CONFIG.collections.metricsDaily)
+                .eq('date', dateStr)
+                .find({ suppressAuth: true })
+                .catch(() => ({ items: [] }));
+            existingItems = existing.items;
+        }
 
-        if (existing.items.length > 0) {
+        if (existingItems.length > 0) {
             return {
                 success: true,
                 message: 'Already aggregated',
                 date: dateStr,
-                featuresProcessed: existing.items.length,
+                featuresProcessed: existingItems.length,
                 recordsCreated: 0,
                 processingTimeMs: Date.now() - startTime
             };
         }
 
-        // Get yesterday's logs
+        // Get yesterday's logs using dual-source routing
         const dayStart = new Date(dateStr);
         const dayEnd = new Date(dateStr);
         dayEnd.setDate(dayEnd.getDate() + 1);
 
-        const logs = await wixData.query(CONFIG.collections.logs)
-            .ge('timestamp', dayStart)
-            .lt('timestamp', dayEnd)
-            .limit(10000)
-            .find({ suppressAuth: true });
+        let logItems = [];
+        if (usesAirtable(COLLECTION_KEYS.featureAdoptionLogs)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.featureAdoptionLogs);
+            const dayStartStr = dayStart.toISOString();
+            const dayEndStr = dayEnd.toISOString();
+            const filter = `AND(IS_AFTER({Timestamp}, '${dayStartStr}'), IS_BEFORE({Timestamp}, '${dayEndStr}'))`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 10000 });
+            logItems = (result.records || []).map(r => ({
+                featureId: r['Feature Id'] || r.featureId,
+                userId: r['User Id'] || r.userId,
+                sessionId: r['Session Id'] || r.sessionId,
+                action: r.Action || r.action,
+                durationMs: r['Duration Ms'] || r.durationMs,
+                duration: r.Duration || r.duration,
+                userRole: r['User Role'] || r.userRole,
+                deviceType: r['Device Type'] || r.deviceType,
+                conversionValue: r['Conversion Value'] || r.conversionValue,
+                metadata: r.Metadata || r.metadata
+            }));
+        } else {
+            const logs = await wixData.query(CONFIG.collections.logs)
+                .ge('timestamp', dayStart)
+                .lt('timestamp', dayEnd)
+                .limit(10000)
+                .find({ suppressAuth: true });
+            logItems = logs.items;
+        }
 
         // Aggregate by feature with full metrics per spec schema (Section 2.4)
         const byFeature = {};
 
-        logs.items.forEach(log => {
+        logItems.forEach(log => {
             const fid = log.featureId;
             if (!byFeature[fid]) {
                 byFeature[fid] = {
@@ -2065,11 +2098,11 @@ export async function aggregateDailyMetrics() {
             });
         }
 
-        // Batch insert
+        // Batch insert using dual-source routing
         let recordsCreated = 0;
         for (const metric of metricsToInsert) {
             try {
-                await wixData.insert(CONFIG.collections.metricsDaily, metric, { suppressAuth: true });
+                await insertData(COLLECTION_KEYS.featureMetricsDaily, CONFIG.collections.metricsDaily, metric);
                 recordsCreated++;
             } catch (e) {
                 console.error(`[FeatureAdoption] Failed to insert metric for ${metric.featureId}:`, e.message);
@@ -2178,22 +2211,38 @@ export async function registerFeature(featureData) {
     };
 
     try {
-        // Check if feature already exists
-        const existing = await wixData.query(CONFIG.collections.registry)
-            .eq('featureId', normalizedFeatureId)
-            .find({ suppressAuth: true })
-            .catch(() => ({ items: [] }));
+        // Check if feature already exists using dual-source routing
+        let existingItems = [];
+        if (usesAirtable(COLLECTION_KEYS.featureRegistry)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.featureRegistry);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Feature Id} = '${normalizedFeatureId}'`,
+                maxRecords: 1
+            }).catch(() => ({ records: [] }));
+            existingItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                featureId: r['Feature Id'] || r.featureId,
+                ...r
+            }));
+        } else {
+            const existing = await wixData.query(CONFIG.collections.registry)
+                .eq('featureId', normalizedFeatureId)
+                .find({ suppressAuth: true })
+                .catch(() => ({ items: [] }));
+            existingItems = existing.items;
+        }
 
-        if (existing.items.length > 0) {
+        if (existingItems.length > 0) {
             return {
                 success: false,
                 error: 'Feature already registered with this featureId',
                 errorCode: 'FAL_003',
-                existing: existing.items[0]
+                existing: existingItems[0]
             };
         }
 
-        const result = await wixData.insert(CONFIG.collections.registry, record, { suppressAuth: true });
+        // Insert using dual-source routing
+        const result = await insertData(COLLECTION_KEYS.featureRegistry, CONFIG.collections.registry, record);
 
         return {
             success: true,
@@ -2250,11 +2299,29 @@ export async function updateFeatureStatus(featureId, status, reason = '') {
     const normalizedFeatureId = featureId.toLowerCase().trim();
 
     try {
-        const result = await wixData.query(CONFIG.collections.registry)
-            .eq('featureId', normalizedFeatureId)
-            .find({ suppressAuth: true });
+        // Use dual-source routing for registry lookup
+        let featureItems = [];
+        if (usesAirtable(COLLECTION_KEYS.featureRegistry)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.featureRegistry);
+            const queryResult = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Feature Id} = '${normalizedFeatureId}'`,
+                maxRecords: 1
+            });
+            featureItems = (queryResult.records || []).map(r => ({
+                _id: r.id || r._id,
+                featureId: r['Feature Id'] || r.featureId,
+                status: r.Status || r.status,
+                statusHistory: r['Status History'] || r.statusHistory || [],
+                ...r
+            }));
+        } else {
+            const result = await wixData.query(CONFIG.collections.registry)
+                .eq('featureId', normalizedFeatureId)
+                .find({ suppressAuth: true });
+            featureItems = result.items;
+        }
 
-        if (result.items.length === 0) {
+        if (featureItems.length === 0) {
             return {
                 success: false,
                 error: 'Feature not found in registry',
@@ -2262,7 +2329,7 @@ export async function updateFeatureStatus(featureId, status, reason = '') {
             };
         }
 
-        const feature = result.items[0];
+        const feature = featureItems[0];
         const previousStatus = feature.status;
 
         // Validate status transition per spec lifecycle: beta -> active -> deprecated -> sunset
@@ -2304,7 +2371,8 @@ export async function updateFeatureStatus(featureId, status, reason = '') {
             changedAt: now.toISOString()
         });
 
-        const updated = await wixData.update(CONFIG.collections.registry, feature, { suppressAuth: true });
+        // Use dual-source routing for update
+        const updated = await updateData(COLLECTION_KEYS.featureRegistry, CONFIG.collections.registry, feature);
 
         return {
             success: true,
@@ -2412,29 +2480,48 @@ export async function defineFunnel(funnelData) {
     };
 
     try {
-        // Check if funnel already exists
-        const existing = await wixData.query(CONFIG.collections.funnels)
-            .eq('funnelId', normalizedFunnelId)
-            .find({ suppressAuth: true })
-            .catch(() => ({ items: [] }));
+        // Check if funnel already exists using dual-source routing
+        let existingItems = [];
+        if (usesAirtable(COLLECTION_KEYS.featureFunnels)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.featureFunnels);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Funnel Id} = '${normalizedFunnelId}'`,
+                maxRecords: 1
+            }).catch(() => ({ records: [] }));
+            existingItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                funnelId: r['Funnel Id'] || r.funnelId,
+                displayName: r['Display Name'] || r.displayName,
+                description: r.Description || r.description,
+                steps: r.Steps || r.steps,
+                isActive: r['Is Active'] !== undefined ? r['Is Active'] : r.isActive,
+                ...r
+            }));
+        } else {
+            const existing = await wixData.query(CONFIG.collections.funnels)
+                .eq('funnelId', normalizedFunnelId)
+                .find({ suppressAuth: true })
+                .catch(() => ({ items: [] }));
+            existingItems = existing.items;
+        }
 
         let isNew = true;
 
-        if (existing.items.length > 0) {
-            // Update existing funnel
+        if (existingItems.length > 0) {
+            // Update existing funnel using dual-source routing
             isNew = false;
             const updated = {
-                ...existing.items[0],
+                ...existingItems[0],
                 displayName: record.displayName,
                 description: record.description,
                 steps: record.steps,
                 isActive: record.isActive,
                 updatedAt: new Date()
             };
-            await wixData.update(CONFIG.collections.funnels, updated, { suppressAuth: true });
+            await updateData(COLLECTION_KEYS.featureFunnels, CONFIG.collections.funnels, updated);
         } else {
-            // Create new funnel
-            await wixData.insert(CONFIG.collections.funnels, record, { suppressAuth: true });
+            // Create new funnel using dual-source routing
+            await insertData(COLLECTION_KEYS.featureFunnels, CONFIG.collections.funnels, record);
         }
 
         return {
@@ -2459,6 +2546,21 @@ export async function defineFunnel(funnelData) {
  */
 export async function getFunnels() {
     try {
+        // Use dual-source routing for funnels query
+        if (usesAirtable(COLLECTION_KEYS.featureFunnels)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.featureFunnels);
+            const result = await airtable.queryRecords(tableName, { maxRecords: 100 });
+            return (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                funnelId: r['Funnel Id'] || r.funnelId,
+                displayName: r['Display Name'] || r.displayName,
+                description: r.Description || r.description,
+                steps: r.Steps || r.steps,
+                isActive: r['Is Active'] !== undefined ? r['Is Active'] : r.isActive,
+                createdAt: r['Created At'] || r.createdAt,
+                updatedAt: r['Updated At'] || r.updatedAt
+            }));
+        }
         const result = await wixData.query(CONFIG.collections.funnels)
             .find({ suppressAuth: true });
         return result.items;
