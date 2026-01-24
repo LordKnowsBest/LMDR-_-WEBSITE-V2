@@ -1523,15 +1523,28 @@ export async function getFeatureHealthScore(featureId) {
         const stats = await getFeatureStats(featureId, { timeRange: 30 });
         if (stats.error) return stats;
 
-        // Get registry data for expected users
+        // Get registry data for expected users using dual-source routing
         let expectedUsers = 50; // Default expectation
         let regData = {};
         try {
-            const regResult = await wixData.query(CONFIG.collections.registry)
-                .eq('featureId', featureId.toLowerCase())
-                .find({ suppressAuth: true });
-            if (regResult.items.length > 0) {
-                regData = regResult.items[0];
+            let regItems = [];
+            if (usesAirtable(COLLECTION_KEYS.featureRegistry)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.featureRegistry);
+                const result = await airtable.queryRecords(tableName, {
+                    filterByFormula: `{Feature Id} = '${featureId.toLowerCase()}'`,
+                    maxRecords: 1
+                });
+                regItems = (result.records || []).map(r => ({
+                    expectedUsers: r['Expected Users'] || r.expectedUsers
+                }));
+            } else {
+                const regResult = await wixData.query(CONFIG.collections.registry)
+                    .eq('featureId', featureId.toLowerCase())
+                    .find({ suppressAuth: true });
+                regItems = regResult.items;
+            }
+            if (regItems.length > 0) {
+                regData = regItems[0];
                 if (regData.expectedUsers) {
                     expectedUsers = regData.expectedUsers;
                 }
@@ -1562,15 +1575,30 @@ export async function getFeatureHealthScore(featureId) {
             const thirtyDaysAgo = new Date();
             thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-            const allLogs = await wixData.query(CONFIG.collections.logs)
-                .eq('featureId', featureId.toLowerCase())
-                .ge('timestamp', thirtyDaysAgo)
-                .limit(5000)
-                .find({ suppressAuth: true });
+            // Use dual-source routing for allLogs
+            let allLogItems = [];
+            if (usesAirtable(COLLECTION_KEYS.featureAdoptionLogs)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.featureAdoptionLogs);
+                const thirtyDaysAgoStr = thirtyDaysAgo.toISOString();
+                const filter = `AND({Feature Id} = '${featureId.toLowerCase()}', IS_AFTER({Timestamp}, '${thirtyDaysAgoStr}'))`;
+                const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 5000 });
+                allLogItems = (result.records || []).map(r => ({
+                    userId: r['User Id'] || r.userId,
+                    date: r.Date || r.date,
+                    timestamp: r.Timestamp || r.timestamp
+                }));
+            } else {
+                const allLogs = await wixData.query(CONFIG.collections.logs)
+                    .eq('featureId', featureId.toLowerCase())
+                    .ge('timestamp', thirtyDaysAgo)
+                    .limit(5000)
+                    .find({ suppressAuth: true });
+                allLogItems = allLogs.items;
+            }
 
             // Count users with repeat visits
             const userVisitCounts = {};
-            allLogs.items.forEach(log => {
+            allLogItems.forEach(log => {
                 const date = log.date || log.timestamp?.toISOString().split('T')[0];
                 if (!userVisitCounts[log.userId]) {
                     userVisitCounts[log.userId] = new Set();
@@ -1588,14 +1616,26 @@ export async function getFeatureHealthScore(featureId) {
         // 5. Engagement Depth (10%): Avg interactions per session
         let engagementDepthScore = 50; // Default
         try {
-            const sessionsResult = await wixData.query(CONFIG.collections.logs)
-                .eq('featureId', featureId.toLowerCase())
-                .isNotEmpty('sessionId')
-                .limit(1000)
-                .find({ suppressAuth: true });
+            // Use dual-source routing for sessions query
+            let sessionItems = [];
+            if (usesAirtable(COLLECTION_KEYS.featureAdoptionLogs)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.featureAdoptionLogs);
+                const filter = `AND({Feature Id} = '${featureId.toLowerCase()}', NOT({Session Id} = ''))`;
+                const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1000 });
+                sessionItems = (result.records || []).map(r => ({
+                    sessionId: r['Session Id'] || r.sessionId
+                }));
+            } else {
+                const sessionsResult = await wixData.query(CONFIG.collections.logs)
+                    .eq('featureId', featureId.toLowerCase())
+                    .isNotEmpty('sessionId')
+                    .limit(1000)
+                    .find({ suppressAuth: true });
+                sessionItems = sessionsResult.items;
+            }
 
             const sessionCounts = {};
-            sessionsResult.items.forEach(log => {
+            sessionItems.forEach(log => {
                 sessionCounts[log.sessionId] = (sessionCounts[log.sessionId] || 0) + 1;
             });
 
@@ -1703,13 +1743,24 @@ export async function getAtRiskFeatures() {
         const report = await getFeatureLifecycleReport();
         if (report.error) return report;
 
-        // Get registry data for retirement thresholds
-        const registryResult = await wixData.query(CONFIG.collections.registry)
-            .find({ suppressAuth: true })
-            .catch(() => ({ items: [] }));
+        // Get registry data for retirement thresholds using dual-source routing
+        let registryItems = [];
+        if (usesAirtable(COLLECTION_KEYS.featureRegistry)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.featureRegistry);
+            const result = await airtable.queryRecords(tableName, { maxRecords: 500 }).catch(() => ({ records: [] }));
+            registryItems = (result.records || []).map(r => ({
+                featureId: r['Feature Id'] || r.featureId,
+                retirementThreshold: r['Retirement Threshold'] || r.retirementThreshold
+            }));
+        } else {
+            const registryResult = await wixData.query(CONFIG.collections.registry)
+                .find({ suppressAuth: true })
+                .catch(() => ({ items: [] }));
+            registryItems = registryResult.items;
+        }
 
         const registry = {};
-        registryResult.items.forEach(f => {
+        registryItems.forEach(f => {
             registry[f.featureId] = f;
         });
 
@@ -1723,17 +1774,34 @@ export async function getAtRiskFeatures() {
             // Calculate days since significant use (>5 users)
             let daysSinceSignificantUse = null;
             if (feature.last7DaysUsers < 5 && feature.last30DaysUsers < 10) {
-                // Query for last significant use date
+                // Query for last significant use date using dual-source routing
                 try {
-                    const recentLogs = await wixData.query(CONFIG.collections.logs)
-                        .eq('featureId', feature.featureId)
-                        .descending('timestamp')
-                        .limit(100)
-                        .find({ suppressAuth: true });
+                    let recentLogItems = [];
+                    if (usesAirtable(COLLECTION_KEYS.featureAdoptionLogs)) {
+                        const tableName = getAirtableTableName(COLLECTION_KEYS.featureAdoptionLogs);
+                        const filter = `{Feature Id} = '${feature.featureId}'`;
+                        const result = await airtable.queryRecords(tableName, {
+                            filterByFormula: filter,
+                            sort: [{ field: 'Timestamp', direction: 'desc' }],
+                            maxRecords: 100
+                        });
+                        recentLogItems = (result.records || []).map(r => ({
+                            userId: r['User Id'] || r.userId,
+                            date: r.Date || r.date,
+                            timestamp: r.Timestamp || r.timestamp
+                        }));
+                    } else {
+                        const recentLogs = await wixData.query(CONFIG.collections.logs)
+                            .eq('featureId', feature.featureId)
+                            .descending('timestamp')
+                            .limit(100)
+                            .find({ suppressAuth: true });
+                        recentLogItems = recentLogs.items;
+                    }
 
                     // Group by day and find last day with 5+ users
                     const byDay = {};
-                    recentLogs.items.forEach(log => {
+                    recentLogItems.forEach(log => {
                         const day = log.date || log.timestamp?.toISOString().split('T')[0];
                         if (!byDay[day]) byDay[day] = new Set();
                         byDay[day].add(log.userId);
