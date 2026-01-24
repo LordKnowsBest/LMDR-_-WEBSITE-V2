@@ -591,9 +591,23 @@ async function handleLogInterest(data) {
         method: result.method,
         isNew: result.isNew
       });
+    } else {
+      // Always respond even on failure so HTML doesn't hang
+      console.log('⚠️ Interest logging failed:', result.error);
+      sendToHtml('interestLogged', {
+        success: false,
+        carrierDOT: data.carrierDOT,
+        error: result.error || 'Failed to save interest'
+      });
     }
   } catch (error) {
     console.error('Error logging interest:', error);
+    // Send error response so HTML doesn't hang on "SAVING..."
+    sendToHtml('interestLogged', {
+      success: false,
+      carrierDOT: data.carrierDOT,
+      error: error.message || 'Unexpected error'
+    });
   }
 }
 
