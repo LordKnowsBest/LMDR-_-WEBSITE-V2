@@ -338,45 +338,77 @@ export async function getMatchDetail(matchId) {
     await requireAdmin();
 
     try {
-        const match = await wixData.get(CONFIG.collections.matches, matchId);
+        // Use dual-source routing for match lookup
+        const match = await getRecord(COLLECTION_KEYS.matches, CONFIG.collections.matches, matchId);
         if (!match) {
             throw new Error('Match not found');
         }
 
-        // Get related driver info if available
+        // Get related driver info if available using dual-source routing
         let driverInfo = null;
         if (match.driver_name && match.driver_name !== 'Anonymous') {
-            const drivers = await wixData.query(CONFIG.collections.drivers)
-                .contains('firstName', match.driver_name.split(' ')[0])
-                .limit(1)
-                .find();
-            driverInfo = drivers.items[0] || null;
+            const driverName = match.driver_name.split(' ')[0];
+            if (usesAirtable(COLLECTION_KEYS.drivers)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.drivers);
+                const result = await airtable.queryRecords(tableName, {
+                    filterByFormula: `SEARCH("${driverName}", {First Name})`,
+                    maxRecords: 1
+                });
+                driverInfo = (result.records || [])[0] || null;
+            } else {
+                const drivers = await wixData.query(CONFIG.collections.drivers)
+                    .contains('firstName', driverName)
+                    .limit(1)
+                    .find();
+                driverInfo = drivers.items[0] || null;
+            }
         }
 
-        // Get carrier info
+        // Get carrier info using dual-source routing
         let carrierInfo = null;
         if (match.carrier_dot) {
-            const carriers = await wixData.query(CONFIG.collections.carriers)
-                .eq('dot_number', String(match.carrier_dot))
-                .limit(1)
-                .find();
-            carrierInfo = carriers.items[0] || null;
+            if (usesAirtable(COLLECTION_KEYS.carriers)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
+                const result = await airtable.queryRecords(tableName, {
+                    filterByFormula: `{Dot Number} = '${match.carrier_dot}'`,
+                    maxRecords: 1
+                });
+                carrierInfo = (result.records || [])[0] || null;
+            } else {
+                const carriers = await wixData.query(CONFIG.collections.carriers)
+                    .eq('dot_number', String(match.carrier_dot))
+                    .limit(1)
+                    .find();
+                carrierInfo = carriers.items[0] || null;
+            }
         }
 
-        // Get related matches (same driver or same carrier)
-        const relatedMatches = await wixData.query(CONFIG.collections.matches)
-            .eq('carrier_dot', match.carrier_dot)
-            .ne('_id', matchId)
-            .descending('timestamp')
-            .limit(10)
-            .find();
+        // Get related matches using dual-source routing
+        let relatedMatchItems = [];
+        if (usesAirtable(COLLECTION_KEYS.matches)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.matches);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `AND({Carrier Dot} = '${match.carrier_dot}', RECORD_ID() != '${matchId}')`,
+                sort: [{ field: 'Timestamp', direction: 'desc' }],
+                maxRecords: 10
+            });
+            relatedMatchItems = result.records || [];
+        } else {
+            const relatedMatches = await wixData.query(CONFIG.collections.matches)
+                .eq('carrier_dot', match.carrier_dot)
+                .ne('_id', matchId)
+                .descending('timestamp')
+                .limit(10)
+                .find();
+            relatedMatchItems = relatedMatches.items;
+        }
 
         return {
             ...match,
             scoreCategory: getScoreCategory(match.match_score),
             driverInfo,
             carrierInfo,
-            relatedMatches: relatedMatches.items
+            relatedMatches: relatedMatchItems
         };
 
     } catch (error) {
@@ -406,41 +438,84 @@ export async function getInterestsList(options = {}) {
     } = options;
 
     try {
-        let query = wixData.query(CONFIG.collections.interests);
+        let resultItems = [];
+        let totalCount = 0;
 
-        // Apply status filter
-        if (filters.status && filters.status !== 'all') {
-            query = query.eq('status', filters.status);
-        }
+        // Use dual-source routing for interests query
+        if (usesAirtable(COLLECTION_KEYS.interests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
+            const filterParts = [];
 
-        // Apply date range
-        if (filters.dateFrom) {
-            query = query.ge('_createdDate', new Date(filters.dateFrom));
-        }
-        if (filters.dateTo) {
-            const endDate = new Date(filters.dateTo);
-            endDate.setHours(23, 59, 59, 999);
-            query = query.le('_createdDate', endDate);
-        }
+            if (filters.status && filters.status !== 'all') {
+                filterParts.push(`{Status} = '${filters.status}'`);
+            }
+            if (filters.dateFrom) {
+                filterParts.push(`IS_AFTER({Created Date}, '${new Date(filters.dateFrom).toISOString()}')`);
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                filterParts.push(`IS_BEFORE({Created Date}, '${endDate.toISOString()}')`);
+            }
 
-        // Apply sorting
-        if (sortDirection === 'asc') {
-            query = query.ascending(sortField);
+            const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : (filterParts[0] || '');
+            const sortFieldMap = { '_createdDate': 'Created Date', 'status': 'Status' };
+            const airtableSortField = sortFieldMap[sortField] || 'Created Date';
+
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: airtableSortField, direction: sortDirection }],
+                maxRecords: pageSize
+            });
+            resultItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                driver_id: r['Driver Id'] || r.driver_id,
+                carrier_dot: r['Carrier Dot'] || r.carrier_dot,
+                status: r.Status || r.status,
+                _createdDate: r['Created Date'] || r._createdDate
+            }));
+
+            // Get total count
+            const countResult = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1000 });
+            totalCount = (countResult.records || []).length;
         } else {
-            query = query.descending(sortField);
+            let query = wixData.query(CONFIG.collections.interests);
+
+            // Apply status filter
+            if (filters.status && filters.status !== 'all') {
+                query = query.eq('status', filters.status);
+            }
+
+            // Apply date range
+            if (filters.dateFrom) {
+                query = query.ge('_createdDate', new Date(filters.dateFrom));
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                query = query.le('_createdDate', endDate);
+            }
+
+            // Apply sorting
+            if (sortDirection === 'asc') {
+                query = query.ascending(sortField);
+            } else {
+                query = query.descending(sortField);
+            }
+
+            // Apply pagination
+            const skip = (page - 1) * pageSize;
+            query = query.skip(skip).limit(pageSize);
+
+            const result = await query.find();
+            resultItems = result.items;
+
+            // Get total count
+            totalCount = await wixData.query(CONFIG.collections.interests).count();
         }
-
-        // Apply pagination
-        const skip = (page - 1) * pageSize;
-        query = query.skip(skip).limit(pageSize);
-
-        const result = await query.find();
-
-        // Get total count
-        const totalCount = await wixData.query(CONFIG.collections.interests).count();
 
         // Enrich with driver and carrier details
-        const enrichedInterests = await enrichInterests(result.items);
+        const enrichedInterests = await enrichInterests(resultItems);
 
         return {
             interests: enrichedInterests,
@@ -464,25 +539,52 @@ async function enrichInterests(interests) {
     const driverIds = [...new Set(interests.map(i => i.driver_id).filter(Boolean))];
     const carrierDOTs = [...new Set(interests.map(i => i.carrier_dot).filter(Boolean))];
 
-    // Fetch drivers
+    // Fetch drivers using dual-source routing
     let driverMap = {};
     if (driverIds.length > 0) {
-        const drivers = await wixData.query(CONFIG.collections.drivers)
-            .hasSome('_id', driverIds)
-            .find();
-        for (const driver of drivers.items) {
-            driverMap[driver._id] = driver;
+        if (usesAirtable(COLLECTION_KEYS.drivers)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.drivers);
+            // Fetch drivers in batches if needed
+            const filter = `OR(${driverIds.map(id => `RECORD_ID() = '${id}'`).join(', ')})`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                maxRecords: driverIds.length
+            });
+            for (const driver of (result.records || [])) {
+                const id = driver.id || driver._id;
+                driverMap[id] = driver;
+            }
+        } else {
+            const drivers = await wixData.query(CONFIG.collections.drivers)
+                .hasSome('_id', driverIds)
+                .find();
+            for (const driver of drivers.items) {
+                driverMap[driver._id] = driver;
+            }
         }
     }
 
-    // Fetch carriers
+    // Fetch carriers using dual-source routing
     let carrierMap = {};
     if (carrierDOTs.length > 0) {
-        const carriers = await wixData.query(CONFIG.collections.carriers)
-            .hasSome('dot_number', carrierDOTs)
-            .find();
-        for (const carrier of carriers.items) {
-            carrierMap[carrier.dot_number] = carrier;
+        if (usesAirtable(COLLECTION_KEYS.carriers)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
+            const filter = `OR(${carrierDOTs.map(dot => `{Dot Number} = '${dot}'`).join(', ')})`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                maxRecords: carrierDOTs.length
+            });
+            for (const carrier of (result.records || [])) {
+                const dotNum = carrier['Dot Number'] || carrier.dot_number;
+                carrierMap[dotNum] = carrier;
+            }
+        } else {
+            const carriers = await wixData.query(CONFIG.collections.carriers)
+                .hasSome('dot_number', carrierDOTs)
+                .find();
+            for (const carrier of carriers.items) {
+                carrierMap[carrier.dot_number] = carrier;
+            }
         }
     }
 
@@ -524,34 +626,86 @@ export async function getMatchStats() {
         const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
         const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-        // Get match counts
-        const [total, todayCount, weekCount, monthCount] = await Promise.all([
-            wixData.query(CONFIG.collections.matches).count(),
-            wixData.query(CONFIG.collections.matches).ge('timestamp', today).count(),
-            wixData.query(CONFIG.collections.matches).ge('timestamp', weekAgo).count(),
-            wixData.query(CONFIG.collections.matches).ge('timestamp', monthAgo).count()
-        ]);
+        let total = 0, todayCount = 0, weekCount = 0, monthCount = 0;
+        let totalInterests = 0, weekInterests = 0, appliedCount = 0;
+        let recentMatchItems = [];
 
-        // Get interest counts
-        const [totalInterests, weekInterests, appliedCount] = await Promise.all([
-            wixData.query(CONFIG.collections.interests).count(),
-            wixData.query(CONFIG.collections.interests).ge('_createdDate', weekAgo).count(),
-            wixData.query(CONFIG.collections.interests).eq('status', 'applied').count()
-        ]);
+        // Use dual-source routing for match stats
+        if (usesAirtable(COLLECTION_KEYS.matches)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.matches);
+            const todayStr = today.toISOString();
+            const weekAgoStr = weekAgo.toISOString();
+            const monthAgoStr = monthAgo.toISOString();
+
+            // Get all matches for counting (Airtable doesn't have direct count)
+            const [allMatches, todayMatches, weekMatches, monthMatches] = await Promise.all([
+                airtable.queryRecords(tableName, { maxRecords: 5000 }),
+                airtable.queryRecords(tableName, { filterByFormula: `IS_AFTER({Timestamp}, '${todayStr}')`, maxRecords: 1000 }),
+                airtable.queryRecords(tableName, { filterByFormula: `IS_AFTER({Timestamp}, '${weekAgoStr}')`, maxRecords: 1000 }),
+                airtable.queryRecords(tableName, { filterByFormula: `IS_AFTER({Timestamp}, '${monthAgoStr}')`, maxRecords: 2000 })
+            ]);
+
+            total = (allMatches.records || []).length;
+            todayCount = (todayMatches.records || []).length;
+            weekCount = (weekMatches.records || []).length;
+            monthCount = (monthMatches.records || []).length;
+
+            // Get recent matches for distribution
+            const recentResult = await airtable.queryRecords(tableName, {
+                sort: [{ field: 'Timestamp', direction: 'desc' }],
+                maxRecords: 1000
+            });
+            recentMatchItems = (recentResult.records || []).map(r => ({
+                match_score: r['Match Score'] || r.match_score || 0,
+                carrier_name: r['Carrier Name'] || r.carrier_name,
+                action: r.Action || r.action
+            }));
+        } else {
+            // Get match counts
+            [total, todayCount, weekCount, monthCount] = await Promise.all([
+                wixData.query(CONFIG.collections.matches).count(),
+                wixData.query(CONFIG.collections.matches).ge('timestamp', today).count(),
+                wixData.query(CONFIG.collections.matches).ge('timestamp', weekAgo).count(),
+                wixData.query(CONFIG.collections.matches).ge('timestamp', monthAgo).count()
+            ]);
+
+            // Get score distribution (sample last 1000 matches)
+            const recentMatches = await wixData.query(CONFIG.collections.matches)
+                .descending('timestamp')
+                .limit(1000)
+                .find();
+            recentMatchItems = recentMatches.items;
+        }
+
+        // Use dual-source routing for interest stats
+        if (usesAirtable(COLLECTION_KEYS.interests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
+            const weekAgoStr = weekAgo.toISOString();
+
+            const [allInterests, weekInterestsResult, appliedInterests] = await Promise.all([
+                airtable.queryRecords(tableName, { maxRecords: 5000 }),
+                airtable.queryRecords(tableName, { filterByFormula: `IS_AFTER({Created Date}, '${weekAgoStr}')`, maxRecords: 1000 }),
+                airtable.queryRecords(tableName, { filterByFormula: `{Status} = 'applied'`, maxRecords: 1000 })
+            ]);
+
+            totalInterests = (allInterests.records || []).length;
+            weekInterests = (weekInterestsResult.records || []).length;
+            appliedCount = (appliedInterests.records || []).length;
+        } else {
+            [totalInterests, weekInterests, appliedCount] = await Promise.all([
+                wixData.query(CONFIG.collections.interests).count(),
+                wixData.query(CONFIG.collections.interests).ge('_createdDate', weekAgo).count(),
+                wixData.query(CONFIG.collections.interests).eq('status', 'applied').count()
+            ]);
+        }
 
         // Calculate averages
         const dailyAverage = Math.round(weekCount / 7);
 
-        // Get score distribution (sample last 1000 matches)
-        const recentMatches = await wixData.query(CONFIG.collections.matches)
-            .descending('timestamp')
-            .limit(1000)
-            .find();
-
         const scoreDistribution = { excellent: 0, good: 0, fair: 0, low: 0 };
         let totalScore = 0;
 
-        for (const match of recentMatches.items) {
+        for (const match of recentMatchItems) {
             const score = match.match_score || 0;
             totalScore += score;
 
@@ -561,13 +715,13 @@ export async function getMatchStats() {
             else scoreDistribution.low++;
         }
 
-        const averageScore = recentMatches.items.length > 0
-            ? Math.round(totalScore / recentMatches.items.length)
+        const averageScore = recentMatchItems.length > 0
+            ? Math.round(totalScore / recentMatchItems.length)
             : 0;
 
         // Get top carriers by match count
         const carrierCounts = {};
-        for (const match of recentMatches.items) {
+        for (const match of recentMatchItems) {
             const name = match.carrier_name || 'Unknown';
             carrierCounts[name] = (carrierCounts[name] || 0) + 1;
         }
@@ -579,7 +733,7 @@ export async function getMatchStats() {
 
         // Get action distribution
         const actionCounts = {};
-        for (const match of recentMatches.items) {
+        for (const match of recentMatchItems) {
             const action = match.action || 'match';
             actionCounts[action] = (actionCounts[action] || 0) + 1;
         }
@@ -627,19 +781,51 @@ export async function getMatchTrends(period = 'week') {
         const days = period === 'month' ? 30 : 7;
         const startDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 
-        // Get matches in period
-        const matches = await wixData.query(CONFIG.collections.matches)
-            .ge('timestamp', startDate)
-            .ascending('timestamp')
-            .limit(1000)
-            .find();
+        let matchItems = [];
+        let interestItems = [];
 
-        // Get interests in period
-        const interests = await wixData.query(CONFIG.collections.interests)
-            .ge('_createdDate', startDate)
-            .ascending('_createdDate')
-            .limit(1000)
-            .find();
+        // Use dual-source routing for matches
+        if (usesAirtable(COLLECTION_KEYS.matches)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.matches);
+            const startDateStr = startDate.toISOString();
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `IS_AFTER({Timestamp}, '${startDateStr}')`,
+                sort: [{ field: 'Timestamp', direction: 'asc' }],
+                maxRecords: 1000
+            });
+            matchItems = (result.records || []).map(r => ({
+                timestamp: r.Timestamp || r.timestamp,
+                match_score: r['Match Score'] || r.match_score || 0
+            }));
+        } else {
+            const matches = await wixData.query(CONFIG.collections.matches)
+                .ge('timestamp', startDate)
+                .ascending('timestamp')
+                .limit(1000)
+                .find();
+            matchItems = matches.items;
+        }
+
+        // Use dual-source routing for interests
+        if (usesAirtable(COLLECTION_KEYS.interests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
+            const startDateStr = startDate.toISOString();
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `IS_AFTER({Created Date}, '${startDateStr}')`,
+                sort: [{ field: 'Created Date', direction: 'asc' }],
+                maxRecords: 1000
+            });
+            interestItems = (result.records || []).map(r => ({
+                _createdDate: r['Created Date'] || r._createdDate
+            }));
+        } else {
+            const interests = await wixData.query(CONFIG.collections.interests)
+                .ge('_createdDate', startDate)
+                .ascending('_createdDate')
+                .limit(1000)
+                .find();
+            interestItems = interests.items;
+        }
 
         // Group by day
         const matchesByDay = {};
@@ -654,7 +840,7 @@ export async function getMatchTrends(period = 'week') {
             scoresByDay[key] = { total: 0, count: 0 };
         }
 
-        for (const match of matches.items) {
+        for (const match of matchItems) {
             const key = new Date(match.timestamp).toISOString().split('T')[0];
             if (matchesByDay[key] !== undefined) {
                 matchesByDay[key]++;
@@ -663,7 +849,7 @@ export async function getMatchTrends(period = 'week') {
             }
         }
 
-        for (const interest of interests.items) {
+        for (const interest of interestItems) {
             const key = new Date(interest._createdDate).toISOString().split('T')[0];
             if (interestsByDay[key] !== undefined) {
                 interestsByDay[key]++;
@@ -703,14 +889,35 @@ export async function getTopMatches(limit = 10) {
 
     try {
         const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        let matchItems = [];
 
-        const matches = await wixData.query(CONFIG.collections.matches)
-            .ge('timestamp', weekAgo)
-            .descending('match_score')
-            .limit(limit)
-            .find();
+        // Use dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.matches)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.matches);
+            const weekAgoStr = weekAgo.toISOString();
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `IS_AFTER({Timestamp}, '${weekAgoStr}')`,
+                sort: [{ field: 'Match Score', direction: 'desc' }],
+                maxRecords: limit
+            });
+            matchItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                timestamp: r.Timestamp || r.timestamp,
+                match_score: r['Match Score'] || r.match_score,
+                carrier_name: r['Carrier Name'] || r.carrier_name,
+                driver_name: r['Driver Name'] || r.driver_name,
+                action: r.Action || r.action
+            }));
+        } else {
+            const matches = await wixData.query(CONFIG.collections.matches)
+                .ge('timestamp', weekAgo)
+                .descending('match_score')
+                .limit(limit)
+                .find();
+            matchItems = matches.items;
+        }
 
-        return matches.items.map(match => ({
+        return matchItems.map(match => ({
             ...match,
             scoreCategory: getScoreCategory(match.match_score),
             relativeTime: getRelativeTime(match.timestamp)
@@ -735,39 +942,79 @@ export async function getCarrierMatchSummary(carrierDOT) {
     await requireAdmin();
 
     try {
-        const [matches, interests] = await Promise.all([
-            wixData.query(CONFIG.collections.matches)
+        let matchItems = [];
+        let interestItems = [];
+        let totalMatchCount = 0;
+        let totalInterestCount = 0;
+
+        // Use dual-source routing for matches
+        if (usesAirtable(COLLECTION_KEYS.matches)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.matches);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Carrier Dot} = '${carrierDOT}'`,
+                sort: [{ field: 'Timestamp', direction: 'desc' }],
+                maxRecords: 100
+            });
+            matchItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                match_score: r['Match Score'] || r.match_score || 0,
+                timestamp: r.Timestamp || r.timestamp,
+                carrier_name: r['Carrier Name'] || r.carrier_name,
+                driver_name: r['Driver Name'] || r.driver_name
+            }));
+            totalMatchCount = matchItems.length;
+        } else {
+            const matches = await wixData.query(CONFIG.collections.matches)
                 .eq('carrier_dot', String(carrierDOT))
                 .descending('timestamp')
                 .limit(100)
-                .find(),
-            wixData.query(CONFIG.collections.interests)
+                .find();
+            matchItems = matches.items;
+            totalMatchCount = matches.totalCount;
+        }
+
+        // Use dual-source routing for interests
+        if (usesAirtable(COLLECTION_KEYS.interests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Carrier Dot} = '${carrierDOT}'`,
+                maxRecords: 500
+            });
+            interestItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                status: r.Status || r.status || 'interested'
+            }));
+            totalInterestCount = interestItems.length;
+        } else {
+            const interests = await wixData.query(CONFIG.collections.interests)
                 .eq('carrier_dot', String(carrierDOT))
-                .find()
-        ]);
+                .find();
+            interestItems = interests.items;
+            totalInterestCount = interests.totalCount;
+        }
 
         // Calculate stats
         let totalScore = 0;
-        for (const match of matches.items) {
+        for (const match of matchItems) {
             totalScore += match.match_score || 0;
         }
-        const averageScore = matches.items.length > 0
-            ? Math.round(totalScore / matches.items.length)
+        const averageScore = matchItems.length > 0
+            ? Math.round(totalScore / matchItems.length)
             : 0;
 
         // Interest breakdown
         const interestBreakdown = {};
-        for (const interest of interests.items) {
+        for (const interest of interestItems) {
             const status = interest.status || 'interested';
             interestBreakdown[status] = (interestBreakdown[status] || 0) + 1;
         }
 
         return {
             carrierDOT,
-            totalMatches: matches.totalCount,
+            totalMatches: totalMatchCount,
             averageScore,
-            recentMatches: matches.items.slice(0, 10),
-            totalInterests: interests.totalCount,
+            recentMatches: matchItems.slice(0, 10),
+            totalInterests: totalInterestCount,
             interestBreakdown
         };
 
@@ -795,26 +1042,63 @@ export async function exportMatchesCSV(filters = {}) {
     }
 
     try {
-        let query = wixData.query(CONFIG.collections.matches);
+        let matchItems = [];
 
-        if (filters.dateFrom) {
-            query = query.ge('timestamp', new Date(filters.dateFrom));
-        }
-        if (filters.dateTo) {
-            const endDate = new Date(filters.dateTo);
-            endDate.setHours(23, 59, 59, 999);
-            query = query.le('timestamp', endDate);
-        }
-        if (filters.minScore) {
-            query = query.ge('match_score', parseInt(filters.minScore));
-        }
+        // Use dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.matches)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.matches);
+            const filterParts = [];
 
-        query = query.descending('timestamp').limit(5000);
-        const result = await query.find();
+            if (filters.dateFrom) {
+                filterParts.push(`IS_AFTER({Timestamp}, '${new Date(filters.dateFrom).toISOString()}')`);
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                filterParts.push(`IS_BEFORE({Timestamp}, '${endDate.toISOString()}')`);
+            }
+            if (filters.minScore) {
+                filterParts.push(`{Match Score} >= ${parseInt(filters.minScore)}`);
+            }
+
+            const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : (filterParts[0] || '');
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: 'Timestamp', direction: 'desc' }],
+                maxRecords: 5000
+            });
+            matchItems = (result.records || []).map(r => ({
+                timestamp: r.Timestamp || r.timestamp,
+                driver_name: r['Driver Name'] || r.driver_name,
+                driver_zip: r['Driver Zip'] || r.driver_zip,
+                carrier_dot: r['Carrier Dot'] || r.carrier_dot,
+                carrier_name: r['Carrier Name'] || r.carrier_name,
+                match_score: r['Match Score'] || r.match_score,
+                action: r.Action || r.action
+            }));
+        } else {
+            let query = wixData.query(CONFIG.collections.matches);
+
+            if (filters.dateFrom) {
+                query = query.ge('timestamp', new Date(filters.dateFrom));
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                query = query.le('timestamp', endDate);
+            }
+            if (filters.minScore) {
+                query = query.ge('match_score', parseInt(filters.minScore));
+            }
+
+            query = query.descending('timestamp').limit(5000);
+            const result = await query.find();
+            matchItems = result.items;
+        }
 
         // Generate CSV
         const headers = ['Timestamp', 'Driver Name', 'Driver ZIP', 'Carrier DOT', 'Carrier Name', 'Match Score', 'Action'];
-        const rows = result.items.map(match => [
+        const rows = matchItems.map(match => [
             match.timestamp ? new Date(match.timestamp).toISOString() : '',
             match.driver_name || 'Anonymous',
             match.driver_zip || '',
@@ -830,7 +1114,7 @@ export async function exportMatchesCSV(filters = {}) {
         ].join('\n');
 
         // Log the export action
-        await logExportAction('matches', filters, result.items.length);
+        await logExportAction('matches', filters, matchItems.length);
 
         return csv;
 
@@ -847,7 +1131,7 @@ async function logExportAction(exportType, filters, count) {
     try {
         const member = await currentMember.getMember();
 
-        await wixData.insert(CONFIG.collections.auditLog, {
+        const auditRecord = {
             action: 'exportData',
             targetType: exportType,
             targetId: null,
@@ -855,7 +1139,10 @@ async function logExportAction(exportType, filters, count) {
             adminId: member?._id || 'system',
             adminEmail: member?.loginEmail || 'system',
             timestamp: new Date()
-        }, { suppressAuth: true });
+        };
+
+        // Use dual-source routing for audit log insert
+        await insertData(COLLECTION_KEYS.auditLog, CONFIG.collections.auditLog, auditRecord);
     } catch (error) {
         console.error('Failed to log export action:', error);
     }
@@ -873,12 +1160,24 @@ export async function getActionList() {
     await requireAdmin();
 
     try {
-        const matches = await wixData.query(CONFIG.collections.matches)
-            .limit(1000)
-            .find();
+        let matchItems = [];
+
+        // Use dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.matches)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.matches);
+            const result = await airtable.queryRecords(tableName, { maxRecords: 1000 });
+            matchItems = (result.records || []).map(r => ({
+                action: r.Action || r.action
+            }));
+        } else {
+            const matches = await wixData.query(CONFIG.collections.matches)
+                .limit(1000)
+                .find();
+            matchItems = matches.items;
+        }
 
         const actions = new Set();
-        for (const match of matches.items) {
+        for (const match of matchItems) {
             if (match.action) {
                 actions.add(match.action);
             }
