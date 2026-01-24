@@ -134,89 +134,171 @@ export async function getAuditLog(options = {}) {
     } = options;
 
     try {
-        let query = wixData.query(CONFIG.auditLogCollection);
+        let resultItems = [];
+        let totalCount = 0;
 
-        // Apply action filter
-        if (filters.action && filters.action !== 'all') {
-            query = query.eq('action', filters.action);
-        }
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.auditLog)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.auditLog);
 
-        // Apply category filter
-        if (filters.category && filters.category !== 'all') {
-            const categoryActions = ACTION_CATEGORIES[filters.category] || [];
-            if (categoryActions.length > 0) {
-                query = query.hasSome('action', categoryActions);
+            // Build Airtable filterByFormula
+            const filterParts = [];
+
+            if (filters.action && filters.action !== 'all') {
+                filterParts.push(`{Action} = "${filters.action}"`);
             }
-        }
 
-        // Apply target type filter
-        if (filters.targetType && filters.targetType !== 'all') {
-            query = query.eq('targetType', filters.targetType);
-        }
+            if (filters.category && filters.category !== 'all') {
+                const categoryActions = ACTION_CATEGORIES[filters.category] || [];
+                if (categoryActions.length > 0) {
+                    const actionFilters = categoryActions.map(a => `{Action} = "${a}"`).join(', ');
+                    filterParts.push(`OR(${actionFilters})`);
+                }
+            }
 
-        // Apply admin filter
-        if (filters.adminId && filters.adminId !== 'all') {
-            query = query.eq('adminId', filters.adminId);
-        }
+            if (filters.targetType && filters.targetType !== 'all') {
+                filterParts.push(`{Target Type} = "${filters.targetType}"`);
+            }
 
-        // Apply date range filter
-        if (filters.dateFrom) {
-            query = query.ge('timestamp', new Date(filters.dateFrom));
-        }
-        if (filters.dateTo) {
-            const endDate = new Date(filters.dateTo);
-            endDate.setHours(23, 59, 59, 999);
-            query = query.le('timestamp', endDate);
-        }
+            if (filters.adminId && filters.adminId !== 'all') {
+                filterParts.push(`{Admin Id} = "${filters.adminId}"`);
+            }
 
-        // Apply search filter
-        if (filters.search) {
-            const searchTerm = filters.search.toLowerCase();
-            query = query.contains('adminEmail', searchTerm)
-                .or(wixData.query(CONFIG.auditLogCollection).contains('targetId', searchTerm));
-        }
+            if (filters.dateFrom) {
+                filterParts.push(`{Timestamp} >= "${new Date(filters.dateFrom).toISOString()}"`);
+            }
 
-        // Apply sorting
-        if (sortDirection === 'asc') {
-            query = query.ascending(sortField);
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                filterParts.push(`{Timestamp} <= "${endDate.toISOString()}"`);
+            }
+
+            if (filters.search) {
+                const searchTerm = filters.search.toLowerCase();
+                filterParts.push(`OR(SEARCH("${searchTerm}", LOWER({Admin Email})), SEARCH("${searchTerm}", LOWER({Target Id})))`);
+            }
+
+            const filter = filterParts.length > 0 ? `AND(${filterParts.join(', ')})` : '';
+            const sortFieldMap = { timestamp: 'Timestamp', action: 'Action', adminEmail: 'Admin Email' };
+            const airtableSortField = sortFieldMap[sortField] || 'Timestamp';
+
+            // Query all records for counting (Airtable doesn't have native count)
+            const allResult = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                maxRecords: 5000
+            });
+            totalCount = (allResult.records || []).length;
+
+            // Get paginated results with sorting
+            const skip = (page - 1) * pageSize;
+            const sortedRecords = (allResult.records || []).sort((a, b) => {
+                const aVal = a[airtableSortField] || '';
+                const bVal = b[airtableSortField] || '';
+                return sortDirection === 'asc'
+                    ? (aVal > bVal ? 1 : -1)
+                    : (aVal < bVal ? 1 : -1);
+            });
+            resultItems = sortedRecords.slice(skip, skip + pageSize);
+
+            // Normalize Airtable field names to camelCase
+            resultItems = resultItems.map(r => ({
+                _id: r.id || r._id,
+                action: r.Action || r.action,
+                targetType: r['Target Type'] || r.targetType,
+                targetId: r['Target Id'] || r.targetId,
+                adminId: r['Admin Id'] || r.adminId,
+                adminEmail: r['Admin Email'] || r.adminEmail,
+                details: r.Details || r.details,
+                timestamp: r.Timestamp || r.timestamp
+            }));
         } else {
-            query = query.descending(sortField);
-        }
+            // Wix Data path
+            let query = wixData.query(CONFIG.auditLogCollection);
 
-        // Apply pagination
-        const skip = (page - 1) * pageSize;
-        query = query.skip(skip).limit(pageSize);
+            // Apply action filter
+            if (filters.action && filters.action !== 'all') {
+                query = query.eq('action', filters.action);
+            }
 
-        // Execute query
-        const result = await query.find({ suppressAuth: true });
+            // Apply category filter
+            if (filters.category && filters.category !== 'all') {
+                const categoryActions = ACTION_CATEGORIES[filters.category] || [];
+                if (categoryActions.length > 0) {
+                    query = query.hasSome('action', categoryActions);
+                }
+            }
 
-        // Get total count for pagination
-        let countQuery = wixData.query(CONFIG.auditLogCollection);
-        if (filters.action && filters.action !== 'all') {
-            countQuery = countQuery.eq('action', filters.action);
+            // Apply target type filter
+            if (filters.targetType && filters.targetType !== 'all') {
+                query = query.eq('targetType', filters.targetType);
+            }
+
+            // Apply admin filter
+            if (filters.adminId && filters.adminId !== 'all') {
+                query = query.eq('adminId', filters.adminId);
+            }
+
+            // Apply date range filter
+            if (filters.dateFrom) {
+                query = query.ge('timestamp', new Date(filters.dateFrom));
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                query = query.le('timestamp', endDate);
+            }
+
+            // Apply search filter
+            if (filters.search) {
+                const searchTerm = filters.search.toLowerCase();
+                query = query.contains('adminEmail', searchTerm)
+                    .or(wixData.query(CONFIG.auditLogCollection).contains('targetId', searchTerm));
+            }
+
+            // Apply sorting
+            if (sortDirection === 'asc') {
+                query = query.ascending(sortField);
+            } else {
+                query = query.descending(sortField);
+            }
+
+            // Apply pagination
+            const skip = (page - 1) * pageSize;
+            query = query.skip(skip).limit(pageSize);
+
+            // Execute query
+            const result = await query.find({ suppressAuth: true });
+            resultItems = result.items;
+
+            // Get total count for pagination
+            let countQuery = wixData.query(CONFIG.auditLogCollection);
+            if (filters.action && filters.action !== 'all') {
+                countQuery = countQuery.eq('action', filters.action);
+            }
+            if (filters.targetType && filters.targetType !== 'all') {
+                countQuery = countQuery.eq('targetType', filters.targetType);
+            }
+            if (filters.dateFrom) {
+                countQuery = countQuery.ge('timestamp', new Date(filters.dateFrom));
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                countQuery = countQuery.le('timestamp', endDate);
+            }
+            totalCount = await countQuery.count({ suppressAuth: true });
         }
-        if (filters.targetType && filters.targetType !== 'all') {
-            countQuery = countQuery.eq('targetType', filters.targetType);
-        }
-        if (filters.dateFrom) {
-            countQuery = countQuery.ge('timestamp', new Date(filters.dateFrom));
-        }
-        if (filters.dateTo) {
-            const endDate = new Date(filters.dateTo);
-            endDate.setHours(23, 59, 59, 999);
-            countQuery = countQuery.le('timestamp', endDate);
-        }
-        const countResult = await countQuery.count({ suppressAuth: true });
 
         // Enrich entries with additional context
-        const enrichedEntries = await enrichAuditEntries(result.items);
+        const enrichedEntries = await enrichAuditEntries(resultItems);
 
         return {
             entries: enrichedEntries,
-            totalCount: countResult,
+            totalCount,
             currentPage: page,
             pageSize,
-            totalPages: Math.ceil(countResult / pageSize)
+            totalPages: Math.ceil(totalCount / pageSize)
         };
 
     } catch (error) {
@@ -234,39 +316,72 @@ export async function getAuditEntryDetail(entryId) {
     await requireAdmin();
 
     try {
-        const entry = await wixData.get(CONFIG.auditLogCollection, entryId, { suppressAuth: true });
+        // Use dual-source routing to get the audit entry
+        const entry = await getRecord(COLLECTION_KEYS.auditLog, CONFIG.auditLogCollection, entryId);
         if (!entry) {
             throw new Error('Audit entry not found');
         }
 
-        // Get target entity details
+        // Normalize field names (Airtable uses Title Case)
+        const normalizedEntry = {
+            _id: entry._id || entry.id,
+            action: entry.action || entry.Action,
+            targetType: entry.targetType || entry['Target Type'],
+            targetId: entry.targetId || entry['Target Id'],
+            adminId: entry.adminId || entry['Admin Id'],
+            adminEmail: entry.adminEmail || entry['Admin Email'],
+            details: entry.details || entry.Details,
+            timestamp: entry.timestamp || entry.Timestamp
+        };
+
+        // Get target entity details using dual-source routing
         let targetDetails = null;
-        if (entry.targetType === 'driver' && entry.targetId) {
+        if (normalizedEntry.targetType === 'driver' && normalizedEntry.targetId) {
             try {
-                targetDetails = await wixData.get(CONFIG.driversCollection, entry.targetId);
+                targetDetails = await getRecord(COLLECTION_KEYS.drivers, CONFIG.driversCollection, normalizedEntry.targetId);
             } catch (e) {
                 targetDetails = { error: 'Target not found' };
             }
-        } else if (entry.targetType === 'carrier' && entry.targetId) {
+        } else if (normalizedEntry.targetType === 'carrier' && normalizedEntry.targetId) {
             try {
-                targetDetails = await wixData.get(CONFIG.carriersCollection, entry.targetId);
+                targetDetails = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, normalizedEntry.targetId);
             } catch (e) {
                 targetDetails = { error: 'Target not found' };
             }
         }
 
-        // Get related entries (same target)
-        const relatedEntries = await wixData.query(CONFIG.auditLogCollection)
-            .eq('targetId', entry.targetId)
-            .ne('_id', entryId)
-            .descending('timestamp')
-            .limit(10)
-            .find({ suppressAuth: true });
+        // Get related entries (same target) using dual-source routing
+        let relatedItems = [];
+        if (usesAirtable(COLLECTION_KEYS.auditLog)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.auditLog);
+            const filter = `AND({Target Id} = "${normalizedEntry.targetId}", RECORD_ID() != "${entryId}")`;
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: 'Timestamp', direction: 'desc' }],
+                maxRecords: 10
+            });
+            relatedItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                action: r.Action || r.action,
+                targetType: r['Target Type'] || r.targetType,
+                targetId: r['Target Id'] || r.targetId,
+                adminEmail: r['Admin Email'] || r.adminEmail,
+                timestamp: r.Timestamp || r.timestamp
+            }));
+        } else {
+            const relatedResult = await wixData.query(CONFIG.auditLogCollection)
+                .eq('targetId', normalizedEntry.targetId)
+                .ne('_id', entryId)
+                .descending('timestamp')
+                .limit(10)
+                .find({ suppressAuth: true });
+            relatedItems = relatedResult.items;
+        }
 
         return {
-            ...entry,
+            ...normalizedEntry,
             targetDetails,
-            relatedEntries: relatedEntries.items
+            relatedEntries: relatedItems
         };
 
     } catch (error) {
@@ -288,27 +403,71 @@ export async function getAuditStats() {
         const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
         const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-        const [total, todayCount, weekCount, monthCount] = await Promise.all([
-            wixData.query(CONFIG.auditLogCollection).count({ suppressAuth: true }),
-            wixData.query(CONFIG.auditLogCollection).ge('timestamp', today).count({ suppressAuth: true }),
-            wixData.query(CONFIG.auditLogCollection).ge('timestamp', weekAgo).count({ suppressAuth: true }),
-            wixData.query(CONFIG.auditLogCollection).ge('timestamp', monthAgo).count({ suppressAuth: true })
-        ]);
+        let total = 0;
+        let todayCount = 0;
+        let weekCount = 0;
+        let monthCount = 0;
+        let weekEntries = [];
 
-        // Get actions by type (this week)
-        const weekEntries = await wixData.query(CONFIG.auditLogCollection)
-            .ge('timestamp', weekAgo)
-            .limit(1000)
-            .find({ suppressAuth: true });
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.auditLog)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.auditLog);
 
+            // Get all records for counting (Airtable doesn't have native count)
+            const allResult = await airtable.queryRecords(tableName, { maxRecords: 5000 });
+            const allRecords = allResult.records || [];
+            total = allRecords.length;
+
+            // Filter for time-based counts
+            for (const record of allRecords) {
+                const ts = new Date(record.Timestamp || record.timestamp);
+                if (ts >= today) todayCount++;
+                if (ts >= weekAgo) weekCount++;
+                if (ts >= monthAgo) monthCount++;
+            }
+
+            // Get week entries for aggregation
+            weekEntries = allRecords
+                .filter(r => new Date(r.Timestamp || r.timestamp) >= weekAgo)
+                .map(r => ({
+                    action: r.Action || r.action,
+                    adminEmail: r['Admin Email'] || r.adminEmail,
+                    targetType: r['Target Type'] || r.targetType
+                }));
+        } else {
+            // Wix Data path
+            const [totalRes, todayRes, weekRes, monthRes] = await Promise.all([
+                wixData.query(CONFIG.auditLogCollection).count({ suppressAuth: true }),
+                wixData.query(CONFIG.auditLogCollection).ge('timestamp', today).count({ suppressAuth: true }),
+                wixData.query(CONFIG.auditLogCollection).ge('timestamp', weekAgo).count({ suppressAuth: true }),
+                wixData.query(CONFIG.auditLogCollection).ge('timestamp', monthAgo).count({ suppressAuth: true })
+            ]);
+            total = totalRes;
+            todayCount = todayRes;
+            weekCount = weekRes;
+            monthCount = monthRes;
+
+            // Get actions by type (this week)
+            const weekResult = await wixData.query(CONFIG.auditLogCollection)
+                .ge('timestamp', weekAgo)
+                .limit(1000)
+                .find({ suppressAuth: true });
+            weekEntries = weekResult.items;
+        }
+
+        // Aggregate stats from week entries
         const actionCounts = {};
         const adminCounts = {};
         const targetTypeCounts = {};
 
-        for (const entry of weekEntries.items) {
-            actionCounts[entry.action] = (actionCounts[entry.action] || 0) + 1;
-            adminCounts[entry.adminEmail] = (adminCounts[entry.adminEmail] || 0) + 1;
-            targetTypeCounts[entry.targetType] = (targetTypeCounts[entry.targetType] || 0) + 1;
+        for (const entry of weekEntries) {
+            const action = entry.action || entry.Action;
+            const adminEmail = entry.adminEmail || entry['Admin Email'];
+            const targetType = entry.targetType || entry['Target Type'];
+
+            if (action) actionCounts[action] = (actionCounts[action] || 0) + 1;
+            if (adminEmail) adminCounts[adminEmail] = (adminCounts[adminEmail] || 0) + 1;
+            if (targetType) targetTypeCounts[targetType] = (targetTypeCounts[targetType] || 0) + 1;
         }
 
         // Get top admins
@@ -348,14 +507,14 @@ export async function getAdminList() {
     await requireAdmin();
 
     try {
-        const entries = await wixData.query(CONFIG.auditLogCollection)
-            .limit(1000)
-            .find({ suppressAuth: true });
+        // Use dual-source routing
+        const entries = await queryData(COLLECTION_KEYS.auditLog, CONFIG.auditLogCollection, { limit: 1000 });
 
         const admins = new Set();
-        for (const entry of entries.items) {
-            if (entry.adminEmail && entry.adminEmail !== 'system') {
-                admins.add(entry.adminEmail);
+        for (const entry of entries) {
+            const adminEmail = entry.adminEmail || entry['Admin Email'];
+            if (adminEmail && adminEmail !== 'system') {
+                admins.add(adminEmail);
             }
         }
 
@@ -375,14 +534,14 @@ export async function getActionList() {
     await requireAdmin();
 
     try {
-        const entries = await wixData.query(CONFIG.auditLogCollection)
-            .limit(1000)
-            .find({ suppressAuth: true });
+        // Use dual-source routing
+        const entries = await queryData(COLLECTION_KEYS.auditLog, CONFIG.auditLogCollection, { limit: 1000 });
 
         const actions = new Set();
-        for (const entry of entries.items) {
-            if (entry.action) {
-                actions.add(entry.action);
+        for (const entry of entries) {
+            const action = entry.action || entry['Action'];
+            if (action) {
+                actions.add(action);
             }
         }
 
@@ -409,26 +568,67 @@ export async function exportAuditLogCSV(filters = {}) {
     }
 
     try {
-        let query = wixData.query(CONFIG.auditLogCollection);
+        let resultItems = [];
 
-        if (filters.dateFrom) {
-            query = query.ge('timestamp', new Date(filters.dateFrom));
-        }
-        if (filters.dateTo) {
-            const endDate = new Date(filters.dateTo);
-            endDate.setHours(23, 59, 59, 999);
-            query = query.le('timestamp', endDate);
-        }
-        if (filters.action && filters.action !== 'all') {
-            query = query.eq('action', filters.action);
-        }
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.auditLog)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.auditLog);
 
-        query = query.descending('timestamp').limit(5000);
-        const result = await query.find({ suppressAuth: true });
+            // Build Airtable filterByFormula
+            const filterParts = [];
+            if (filters.dateFrom) {
+                filterParts.push(`{Timestamp} >= "${new Date(filters.dateFrom).toISOString()}"`);
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                filterParts.push(`{Timestamp} <= "${endDate.toISOString()}"`);
+            }
+            if (filters.action && filters.action !== 'all') {
+                filterParts.push(`{Action} = "${filters.action}"`);
+            }
+
+            const filter = filterParts.length > 0 ? `AND(${filterParts.join(', ')})` : '';
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: 'Timestamp', direction: 'desc' }],
+                maxRecords: 5000
+            });
+
+            // Normalize Airtable records
+            resultItems = (result.records || []).map(r => ({
+                timestamp: r.Timestamp || r.timestamp,
+                action: r.Action || r.action,
+                targetType: r['Target Type'] || r.targetType,
+                targetId: r['Target Id'] || r.targetId,
+                adminEmail: r['Admin Email'] || r.adminEmail,
+                adminId: r['Admin Id'] || r.adminId,
+                details: r.Details || r.details
+            }));
+        } else {
+            // Wix Data path
+            let query = wixData.query(CONFIG.auditLogCollection);
+
+            if (filters.dateFrom) {
+                query = query.ge('timestamp', new Date(filters.dateFrom));
+            }
+            if (filters.dateTo) {
+                const endDate = new Date(filters.dateTo);
+                endDate.setHours(23, 59, 59, 999);
+                query = query.le('timestamp', endDate);
+            }
+            if (filters.action && filters.action !== 'all') {
+                query = query.eq('action', filters.action);
+            }
+
+            query = query.descending('timestamp').limit(5000);
+            const result = await query.find({ suppressAuth: true });
+            resultItems = result.items;
+        }
 
         // Generate CSV
         const headers = ['Timestamp', 'Action', 'Target Type', 'Target ID', 'Admin Email', 'Admin ID', 'Details'];
-        const rows = result.items.map(entry => [
+        const rows = resultItems.map(entry => [
             entry.timestamp ? new Date(entry.timestamp).toISOString() : '',
             entry.action || '',
             entry.targetType || '',
@@ -444,7 +644,7 @@ export async function exportAuditLogCSV(filters = {}) {
         ].join('\n');
 
         // Log the export action
-        await logAuditExport(filters, result.items.length);
+        await logAuditExport(filters, resultItems.length);
 
         return csv;
 
@@ -536,7 +736,7 @@ async function logAuditExport(filters, count) {
     try {
         const member = await currentMember.getMember();
 
-        await wixData.insert(CONFIG.auditLogCollection, {
+        const auditRecord = {
             action: 'exportAuditLog',
             targetType: 'system',
             targetId: null,
@@ -544,7 +744,10 @@ async function logAuditExport(filters, count) {
             adminId: member?._id || 'system',
             adminEmail: member?.loginEmail || 'system',
             timestamp: new Date()
-        }, { suppressAuth: true });
+        };
+
+        // Use dual-source routing
+        await insertData(COLLECTION_KEYS.auditLog, CONFIG.auditLogCollection, auditRecord);
     } catch (error) {
         console.error('Failed to log audit export:', error);
     }

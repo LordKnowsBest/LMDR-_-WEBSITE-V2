@@ -61,6 +61,22 @@ async function updateData(collectionKey, wixCollectionName, data) {
     return await wixData.update(wixCollectionName, data, { suppressAuth: true });
 }
 
+async function getRecord(collectionKey, wixCollectionName, recordId) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.getRecord(tableName, recordId);
+    }
+    return await wixData.get(wixCollectionName, recordId, { suppressAuth: true });
+}
+
+async function removeData(collectionKey, wixCollectionName, recordId) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.deleteRecord(tableName, recordId);
+    }
+    return await wixData.remove(wixCollectionName, recordId, { suppressAuth: true });
+}
+
 const CONFIG = {
     collections: {
         prompts: 'PromptLibrary',
@@ -220,28 +236,77 @@ export async function getPrompts(options = {}) {
     await requireAdmin();
 
     try {
-        let query = wixData.query(CONFIG.collections.prompts);
+        let resultItems = [];
+        let totalCount = 0;
 
-        if (options.category) {
-            query = query.eq('category', options.category);
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.prompts)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+
+            // Build Airtable filter
+            const filterParts = [];
+            if (options.category) {
+                filterParts.push(`{Category} = "${options.category}"`);
+            }
+            if (options.isActive !== undefined) {
+                filterParts.push(`{Is Active} = ${options.isActive ? 'TRUE()' : 'FALSE()'}`);
+            }
+            if (options.search) {
+                filterParts.push(`SEARCH("${options.search.toLowerCase()}", LOWER({Name}))`);
+            }
+
+            const filter = filterParts.length > 0 ? `AND(${filterParts.join(', ')})` : '';
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: filter,
+                sort: [{ field: 'Category', direction: 'asc' }, { field: 'Name', direction: 'asc' }],
+                maxRecords: 1000
+            });
+
+            resultItems = (result.records || []).map(r => ({
+                _id: r.id || r._id,
+                promptId: r['Prompt Id'] || r.promptId,
+                name: r.Name || r.name,
+                category: r.Category || r.category,
+                description: r.Description || r.description,
+                systemPrompt: r['System Prompt'] || r.systemPrompt,
+                userPromptTemplate: r['User Prompt Template'] || r.userPromptTemplate,
+                variables: r.Variables || r.variables,
+                provider: r.Provider || r.provider,
+                model: r.Model || r.model,
+                isActive: r['Is Active'] !== undefined ? r['Is Active'] : r.isActive,
+                version: r.Version || r.version,
+                createdAt: r['Created At'] || r.createdAt,
+                updatedAt: r['Updated At'] || r.updatedAt
+            }));
+            totalCount = resultItems.length;
+        } else {
+            // Wix Data path
+            let query = wixData.query(CONFIG.collections.prompts);
+
+            if (options.category) {
+                query = query.eq('category', options.category);
+            }
+
+            if (options.isActive !== undefined) {
+                query = query.eq('isActive', options.isActive);
+            }
+
+            if (options.search) {
+                query = query.contains('name', options.search);
+            }
+
+            const result = await query
+                .ascending('category')
+                .ascending('name')
+                .find({ suppressAuth: true });
+
+            resultItems = result.items;
+            totalCount = result.totalCount;
         }
-
-        if (options.isActive !== undefined) {
-            query = query.eq('isActive', options.isActive);
-        }
-
-        if (options.search) {
-            query = query.contains('name', options.search);
-        }
-
-        const result = await query
-            .ascending('category')
-            .ascending('name')
-            .find({ suppressAuth: true });
 
         return {
-            items: result.items,
-            totalCount: result.totalCount,
+            items: resultItems,
+            totalCount,
             categories: CONFIG.categories
         };
 
@@ -260,24 +325,78 @@ export async function getPrompt(promptId) {
     await requireAdmin();
 
     try {
-        const prompt = await wixData.query(CONFIG.collections.prompts)
-            .eq('promptId', promptId)
-            .find({ suppressAuth: true });
+        let promptData = null;
+        let versionItems = [];
 
-        if (prompt.items.length === 0) {
+        // Dual-source routing for prompts
+        if (usesAirtable(COLLECTION_KEYS.prompts)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Prompt Id} = "${promptId}"`,
+                maxRecords: 1
+            });
+            if (result.records && result.records.length > 0) {
+                const r = result.records[0];
+                promptData = {
+                    _id: r.id || r._id,
+                    promptId: r['Prompt Id'] || r.promptId,
+                    name: r.Name || r.name,
+                    category: r.Category || r.category,
+                    description: r.Description || r.description,
+                    systemPrompt: r['System Prompt'] || r.systemPrompt,
+                    userPromptTemplate: r['User Prompt Template'] || r.userPromptTemplate,
+                    variables: r.Variables || r.variables,
+                    provider: r.Provider || r.provider,
+                    model: r.Model || r.model,
+                    isActive: r['Is Active'] !== undefined ? r['Is Active'] : r.isActive,
+                    version: r.Version || r.version,
+                    createdAt: r['Created At'] || r.createdAt,
+                    updatedAt: r['Updated At'] || r.updatedAt
+                };
+            }
+        } else {
+            const result = await wixData.query(CONFIG.collections.prompts)
+                .eq('promptId', promptId)
+                .find({ suppressAuth: true });
+            if (result.items.length > 0) {
+                promptData = result.items[0];
+            }
+        }
+
+        if (!promptData) {
             throw new Error('Prompt not found');
         }
 
-        // Get version history
-        const versions = await wixData.query(CONFIG.collections.versions)
-            .eq('promptId', promptId)
-            .descending('version')
-            .limit(10)
-            .find({ suppressAuth: true });
+        // Dual-source routing for versions
+        if (usesAirtable(COLLECTION_KEYS.versions)) {
+            const versionsTable = getAirtableTableName(COLLECTION_KEYS.versions);
+            const versionsResult = await airtable.queryRecords(versionsTable, {
+                filterByFormula: `{Prompt Id} = "${promptId}"`,
+                sort: [{ field: 'Version', direction: 'desc' }],
+                maxRecords: 10
+            });
+            versionItems = (versionsResult.records || []).map(v => ({
+                _id: v.id || v._id,
+                promptId: v['Prompt Id'] || v.promptId,
+                version: v.Version || v.version,
+                systemPrompt: v['System Prompt'] || v.systemPrompt,
+                userPromptTemplate: v['User Prompt Template'] || v.userPromptTemplate,
+                changeNote: v['Change Note'] || v.changeNote,
+                createdAt: v['Created At'] || v.createdAt,
+                createdBy: v['Created By'] || v.createdBy
+            }));
+        } else {
+            const versions = await wixData.query(CONFIG.collections.versions)
+                .eq('promptId', promptId)
+                .descending('version')
+                .limit(10)
+                .find({ suppressAuth: true });
+            versionItems = versions.items;
+        }
 
         return {
-            prompt: prompt.items[0],
-            versions: versions.items
+            prompt: promptData,
+            versions: versionItems
         };
 
     } catch (error) {
@@ -302,12 +421,23 @@ export async function createPrompt(promptData) {
             throw new Error('Missing required fields: promptId, name, systemPrompt');
         }
 
-        // Check for duplicate promptId
-        const existing = await wixData.query(CONFIG.collections.prompts)
-            .eq('promptId', promptData.promptId)
-            .find({ suppressAuth: true });
+        // Check for duplicate promptId using dual-source routing
+        let existingCount = 0;
+        if (usesAirtable(COLLECTION_KEYS.prompts)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+            const existingResult = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Prompt Id} = "${promptData.promptId}"`,
+                maxRecords: 1
+            });
+            existingCount = (existingResult.records || []).length;
+        } else {
+            const existing = await wixData.query(CONFIG.collections.prompts)
+                .eq('promptId', promptData.promptId)
+                .find({ suppressAuth: true });
+            existingCount = existing.items.length;
+        }
 
-        if (existing.items.length > 0) {
+        if (existingCount > 0) {
             throw new Error('Prompt ID already exists');
         }
 
@@ -329,15 +459,18 @@ export async function createPrompt(promptData) {
             updatedBy: admin.email
         };
 
-        const created = await wixData.insert(CONFIG.collections.prompts, newPrompt, { suppressAuth: true });
+        // Use dual-source routing for insert
+        const created = await insertData(COLLECTION_KEYS.prompts, CONFIG.collections.prompts, newPrompt);
+        const createdId = created._id || created.id;
+        const createdPromptId = created.promptId || created['Prompt Id'] || newPrompt.promptId;
 
         // Create initial version
-        await createVersion(created.promptId, created, admin.email, 'Initial creation');
+        await createVersion(createdPromptId, { ...newPrompt, version: 1 }, admin.email, 'Initial creation');
 
         // Log action
-        await logAction('createPrompt', 'prompt', created._id, {
-            promptId: created.promptId,
-            name: created.name
+        await logAction('createPrompt', 'prompt', createdId, {
+            promptId: createdPromptId,
+            name: newPrompt.name
         }, admin);
 
         return created;
@@ -361,16 +494,43 @@ export async function updatePrompt(promptId, updates, changeNote = '') {
     try {
         const admin = await getCurrentAdmin();
 
-        // Get existing prompt
-        const existing = await wixData.query(CONFIG.collections.prompts)
-            .eq('promptId', promptId)
-            .find({ suppressAuth: true });
-
-        if (existing.items.length === 0) {
-            throw new Error('Prompt not found');
+        // Get existing prompt using dual-source routing
+        let prompt = null;
+        if (usesAirtable(COLLECTION_KEYS.prompts)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Prompt Id} = "${promptId}"`,
+                maxRecords: 1
+            });
+            if (result.records && result.records.length > 0) {
+                const r = result.records[0];
+                prompt = {
+                    _id: r.id || r._id,
+                    promptId: r['Prompt Id'] || r.promptId,
+                    name: r.Name || r.name,
+                    category: r.Category || r.category,
+                    description: r.Description || r.description,
+                    systemPrompt: r['System Prompt'] || r.systemPrompt,
+                    userPromptTemplate: r['User Prompt Template'] || r.userPromptTemplate,
+                    variables: r.Variables || r.variables,
+                    provider: r.Provider || r.provider,
+                    model: r.Model || r.model,
+                    isActive: r['Is Active'] !== undefined ? r['Is Active'] : r.isActive,
+                    version: r.Version || r.version || 0
+                };
+            }
+        } else {
+            const existing = await wixData.query(CONFIG.collections.prompts)
+                .eq('promptId', promptId)
+                .find({ suppressAuth: true });
+            if (existing.items.length > 0) {
+                prompt = existing.items[0];
+            }
         }
 
-        const prompt = existing.items[0];
+        if (!prompt) {
+            throw new Error('Prompt not found');
+        }
 
         // Apply updates
         const updatedPrompt = {
@@ -384,21 +544,22 @@ export async function updatePrompt(promptId, updates, changeNote = '') {
             provider: updates.provider || prompt.provider,
             model: updates.model || prompt.model,
             isActive: updates.isActive !== undefined ? updates.isActive : prompt.isActive,
-            version: prompt.version + 1,
+            version: (prompt.version || 0) + 1,
             updatedAt: new Date(),
             updatedBy: admin.email
         };
 
-        const updated = await wixData.update(CONFIG.collections.prompts, updatedPrompt, { suppressAuth: true });
+        // Use dual-source routing for update
+        const updated = await updateData(COLLECTION_KEYS.prompts, CONFIG.collections.prompts, updatedPrompt);
 
         // Create version snapshot
-        await createVersion(promptId, updated, admin.email, changeNote);
+        await createVersion(promptId, updatedPrompt, admin.email, changeNote);
 
         // Log action
-        await logAction('updatePrompt', 'prompt', updated._id, {
-            promptId: updated.promptId,
-            name: updated.name,
-            version: updated.version,
+        await logAction('updatePrompt', 'prompt', prompt._id, {
+            promptId: promptId,
+            name: updatedPrompt.name,
+            version: updatedPrompt.version,
             changeNote
         }, admin);
 
@@ -421,26 +582,48 @@ export async function deletePrompt(promptId) {
     try {
         const admin = await getCurrentAdmin();
 
-        const existing = await wixData.query(CONFIG.collections.prompts)
-            .eq('promptId', promptId)
-            .find({ suppressAuth: true });
+        // Get existing prompt using dual-source routing
+        let prompt = null;
+        if (usesAirtable(COLLECTION_KEYS.prompts)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Prompt Id} = "${promptId}"`,
+                maxRecords: 1
+            });
+            if (result.records && result.records.length > 0) {
+                const r = result.records[0];
+                prompt = {
+                    _id: r.id || r._id,
+                    promptId: r['Prompt Id'] || r.promptId,
+                    name: r.Name || r.name
+                };
+            }
+        } else {
+            const existing = await wixData.query(CONFIG.collections.prompts)
+                .eq('promptId', promptId)
+                .find({ suppressAuth: true });
+            if (existing.items.length > 0) {
+                prompt = existing.items[0];
+            }
+        }
 
-        if (existing.items.length === 0) {
+        if (!prompt) {
             throw new Error('Prompt not found');
         }
 
-        const prompt = existing.items[0];
-
         // Soft delete - mark as inactive instead of removing
-        prompt.isActive = false;
-        prompt.deletedAt = new Date();
-        prompt.deletedBy = admin.email;
+        const softDeleteUpdate = {
+            _id: prompt._id,
+            isActive: false,
+            deletedAt: new Date(),
+            deletedBy: admin.email
+        };
 
-        await wixData.update(CONFIG.collections.prompts, prompt, { suppressAuth: true });
+        await updateData(COLLECTION_KEYS.prompts, CONFIG.collections.prompts, softDeleteUpdate);
 
         // Log action
         await logAction('deletePrompt', 'prompt', prompt._id, {
-            promptId: prompt.promptId,
+            promptId: prompt.promptId || promptId,
             name: prompt.name
         }, admin);
 
@@ -463,25 +646,49 @@ export async function restorePrompt(promptId) {
     try {
         const admin = await getCurrentAdmin();
 
-        const existing = await wixData.query(CONFIG.collections.prompts)
-            .eq('promptId', promptId)
-            .find({ suppressAuth: true });
+        // Get existing prompt using dual-source routing
+        let prompt = null;
+        if (usesAirtable(COLLECTION_KEYS.prompts)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Prompt Id} = "${promptId}"`,
+                maxRecords: 1
+            });
+            if (result.records && result.records.length > 0) {
+                const r = result.records[0];
+                prompt = {
+                    _id: r.id || r._id,
+                    promptId: r['Prompt Id'] || r.promptId,
+                    name: r.Name || r.name
+                };
+            }
+        } else {
+            const existing = await wixData.query(CONFIG.collections.prompts)
+                .eq('promptId', promptId)
+                .find({ suppressAuth: true });
+            if (existing.items.length > 0) {
+                prompt = existing.items[0];
+            }
+        }
 
-        if (existing.items.length === 0) {
+        if (!prompt) {
             throw new Error('Prompt not found');
         }
 
-        const prompt = existing.items[0];
-        prompt.isActive = true;
-        delete prompt.deletedAt;
-        delete prompt.deletedBy;
-        prompt.updatedAt = new Date();
-        prompt.updatedBy = admin.email;
+        // Restore prompt
+        const restoreUpdate = {
+            _id: prompt._id,
+            isActive: true,
+            deletedAt: null,
+            deletedBy: null,
+            updatedAt: new Date(),
+            updatedBy: admin.email
+        };
 
-        const restored = await wixData.update(CONFIG.collections.prompts, prompt, { suppressAuth: true });
+        const restored = await updateData(COLLECTION_KEYS.prompts, CONFIG.collections.prompts, restoreUpdate);
 
         await logAction('restorePrompt', 'prompt', prompt._id, {
-            promptId: prompt.promptId,
+            promptId: prompt.promptId || promptId,
             name: prompt.name
         }, admin);
 
@@ -511,7 +718,8 @@ async function createVersion(promptId, promptData, author, changeNote) {
         createdBy: author
     };
 
-    await wixData.insert(CONFIG.collections.versions, version, { suppressAuth: true });
+    // Use dual-source routing
+    await insertData(COLLECTION_KEYS.versions, CONFIG.collections.versions, version);
 }
 
 /**
@@ -526,28 +734,70 @@ export async function rollbackPrompt(promptId, targetVersion) {
     try {
         const admin = await getCurrentAdmin();
 
-        // Get the target version
-        const versions = await wixData.query(CONFIG.collections.versions)
-            .eq('promptId', promptId)
-            .eq('version', targetVersion)
-            .find({ suppressAuth: true });
+        // Get the target version using dual-source routing
+        let targetVersionData = null;
+        if (usesAirtable(COLLECTION_KEYS.versions)) {
+            const versionsTable = getAirtableTableName(COLLECTION_KEYS.versions);
+            const versionsResult = await airtable.queryRecords(versionsTable, {
+                filterByFormula: `AND({Prompt Id} = "${promptId}", {Version} = ${targetVersion})`,
+                maxRecords: 1
+            });
+            if (versionsResult.records && versionsResult.records.length > 0) {
+                const v = versionsResult.records[0];
+                targetVersionData = {
+                    systemPrompt: v['System Prompt'] || v.systemPrompt,
+                    userPromptTemplate: v['User Prompt Template'] || v.userPromptTemplate,
+                    variables: v.Variables || v.variables,
+                    provider: v.Provider || v.provider,
+                    model: v.Model || v.model
+                };
+            }
+        } else {
+            const versions = await wixData.query(CONFIG.collections.versions)
+                .eq('promptId', promptId)
+                .eq('version', targetVersion)
+                .find({ suppressAuth: true });
+            if (versions.items.length > 0) {
+                targetVersionData = versions.items[0];
+            }
+        }
 
-        if (versions.items.length === 0) {
+        if (!targetVersionData) {
             throw new Error('Version not found');
         }
 
-        const targetVersionData = versions.items[0];
-
-        // Get current prompt
-        const existing = await wixData.query(CONFIG.collections.prompts)
-            .eq('promptId', promptId)
-            .find({ suppressAuth: true });
-
-        if (existing.items.length === 0) {
-            throw new Error('Prompt not found');
+        // Get current prompt using dual-source routing
+        let prompt = null;
+        if (usesAirtable(COLLECTION_KEYS.prompts)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Prompt Id} = "${promptId}"`,
+                maxRecords: 1
+            });
+            if (result.records && result.records.length > 0) {
+                const r = result.records[0];
+                prompt = {
+                    _id: r.id || r._id,
+                    promptId: r['Prompt Id'] || r.promptId,
+                    name: r.Name || r.name,
+                    category: r.Category || r.category,
+                    description: r.Description || r.description,
+                    isActive: r['Is Active'] !== undefined ? r['Is Active'] : r.isActive,
+                    version: r.Version || r.version || 0
+                };
+            }
+        } else {
+            const existing = await wixData.query(CONFIG.collections.prompts)
+                .eq('promptId', promptId)
+                .find({ suppressAuth: true });
+            if (existing.items.length > 0) {
+                prompt = existing.items[0];
+            }
         }
 
-        const prompt = existing.items[0];
+        if (!prompt) {
+            throw new Error('Prompt not found');
+        }
 
         // Apply rollback
         const rolledBack = {
@@ -557,18 +807,18 @@ export async function rollbackPrompt(promptId, targetVersion) {
             variables: targetVersionData.variables,
             provider: targetVersionData.provider,
             model: targetVersionData.model,
-            version: prompt.version + 1,
+            version: (prompt.version || 0) + 1,
             updatedAt: new Date(),
             updatedBy: admin.email
         };
 
-        const updated = await wixData.update(CONFIG.collections.prompts, rolledBack, { suppressAuth: true });
+        const updated = await updateData(COLLECTION_KEYS.prompts, CONFIG.collections.prompts, rolledBack);
 
         // Create version snapshot for rollback
-        await createVersion(promptId, updated, admin.email, `Rolled back to version ${targetVersion}`);
+        await createVersion(promptId, rolledBack, admin.email, `Rolled back to version ${targetVersion}`);
 
         await logAction('rollbackPrompt', 'prompt', prompt._id, {
-            promptId: prompt.promptId,
+            promptId: prompt.promptId || promptId,
             fromVersion: prompt.version,
             toVersion: targetVersion
         }, admin);
@@ -593,6 +843,34 @@ export async function rollbackPrompt(promptId, targetVersion) {
  */
 export async function getActivePrompt(promptId) {
     try {
+        // Dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.prompts)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `AND({Prompt Id} = "${promptId}", {Is Active} = TRUE())`,
+                maxRecords: 1
+            });
+            if (result.records && result.records.length > 0) {
+                const r = result.records[0];
+                return {
+                    _id: r.id || r._id,
+                    promptId: r['Prompt Id'] || r.promptId,
+                    name: r.Name || r.name,
+                    category: r.Category || r.category,
+                    description: r.Description || r.description,
+                    systemPrompt: r['System Prompt'] || r.systemPrompt,
+                    userPromptTemplate: r['User Prompt Template'] || r.userPromptTemplate,
+                    variables: r.Variables || r.variables,
+                    provider: r.Provider || r.provider,
+                    model: r.Model || r.model,
+                    isActive: true,
+                    version: r.Version || r.version
+                };
+            }
+            return null;
+        }
+
+        // Wix Data path
         const result = await wixData.query(CONFIG.collections.prompts)
             .eq('promptId', promptId)
             .eq('isActive', true)
@@ -645,11 +923,23 @@ export async function seedDefaultPrompts() {
         let skipped = 0;
 
         for (const promptData of CONFIG.defaultPrompts) {
-            const existing = await wixData.query(CONFIG.collections.prompts)
-                .eq('promptId', promptData.promptId)
-                .find({ suppressAuth: true });
+            // Check for existing prompt using dual-source routing
+            let existingCount = 0;
+            if (usesAirtable(COLLECTION_KEYS.prompts)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.prompts);
+                const result = await airtable.queryRecords(tableName, {
+                    filterByFormula: `{Prompt Id} = "${promptData.promptId}"`,
+                    maxRecords: 1
+                });
+                existingCount = (result.records || []).length;
+            } else {
+                const existing = await wixData.query(CONFIG.collections.prompts)
+                    .eq('promptId', promptData.promptId)
+                    .find({ suppressAuth: true });
+                existingCount = existing.items.length;
+            }
 
-            if (existing.items.length === 0) {
+            if (existingCount === 0) {
                 const newPrompt = {
                     ...promptData,
                     version: 1,
@@ -659,7 +949,8 @@ export async function seedDefaultPrompts() {
                     updatedBy: admin.email
                 };
 
-                await wixData.insert(CONFIG.collections.prompts, newPrompt, { suppressAuth: true });
+                // Use dual-source routing for insert
+                await insertData(COLLECTION_KEYS.prompts, CONFIG.collections.prompts, newPrompt);
                 created++;
             } else {
                 skipped++;
@@ -685,7 +976,7 @@ export async function seedDefaultPrompts() {
 
 async function logAction(action, targetType, targetId, details, admin) {
     try {
-        await wixData.insert(CONFIG.collections.auditLog, {
+        const auditRecord = {
             action,
             targetType,
             targetId,
@@ -693,7 +984,10 @@ async function logAction(action, targetType, targetId, details, admin) {
             adminId: admin.id,
             adminEmail: admin.email,
             timestamp: new Date()
-        }, { suppressAuth: true });
+        };
+
+        // Use dual-source routing
+        await insertData(COLLECTION_KEYS.auditLog, CONFIG.collections.auditLog, auditRecord);
     } catch (error) {
         console.error('[PromptLibrary] Failed to log action:', error);
     }
