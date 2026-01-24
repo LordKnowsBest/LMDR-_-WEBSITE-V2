@@ -98,7 +98,8 @@ async function logModerationAction(action, targetType, targetId, details) {
             details: JSON.stringify(details),
             ip_address: '0.0.0.0' // Not available in Velo backend context reliably
         };
-        await wixData.insert('AdminAuditLog', auditEntry, { suppressAuth: true });
+        // Use dual-source routing
+        await insertData(COLLECTION_KEYS.auditLog, 'AdminAuditLog', auditEntry);
     } catch (error) {
         console.error('Failed to log audit entry:', error);
         // Don't block the actual action if logging fails
@@ -120,14 +121,31 @@ export async function getModerationQueue(filters = {}) {
     const type = filters.type || 'all';
 
     try {
-        // 1. REVIEWS
+        // 1. REVIEWS using dual-source routing
         if (type === 'all' || type === 'reviews') {
-            const reviews = await wixData.query('CarrierReviews')
-                .eq('status', 'pending')
-                .limit(50)
-                .find({ suppressAuth: true });
+            let reviewItems = [];
+            if (usesAirtable(COLLECTION_KEYS.reviews)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.reviews);
+                const result = await airtable.queryRecords(tableName, {
+                    filterByFormula: `{Status} = "pending"`,
+                    maxRecords: 50
+                });
+                reviewItems = (result.records || []).map(r => ({
+                    _id: r.id || r._id,
+                    carrier_name: r['Carrier Name'] || r.carrier_name,
+                    reviewer_name: r['Reviewer Name'] || r.reviewer_name,
+                    status: r.Status || r.status,
+                    _createdDate: r['Created Date'] || r._createdDate
+                }));
+            } else {
+                const reviews = await wixData.query('CarrierReviews')
+                    .eq('status', 'pending')
+                    .limit(50)
+                    .find({ suppressAuth: true });
+                reviewItems = reviews.items;
+            }
 
-            queue.push(...reviews.items.map(item => ({
+            queue.push(...reviewItems.map(item => ({
                 id: item._id,
                 type: 'review',
                 title: `Review for ${item.carrier_name || 'Carrier'}`,
@@ -138,14 +156,31 @@ export async function getModerationQueue(filters = {}) {
             })));
         }
 
-        // 2. JOB POSTINGS
+        // 2. JOB POSTINGS using dual-source routing
         if (type === 'all' || type === 'jobs') {
-            const jobs = await wixData.query('JobPostings')
-                .eq('status', 'pending')
-                .limit(50)
-                .find({ suppressAuth: true });
+            let jobItems = [];
+            if (usesAirtable(COLLECTION_KEYS.jobs)) {
+                const tableName = getAirtableTableName(COLLECTION_KEYS.jobs);
+                const result = await airtable.queryRecords(tableName, {
+                    filterByFormula: `{Status} = "pending"`,
+                    maxRecords: 50
+                });
+                jobItems = (result.records || []).map(r => ({
+                    _id: r.id || r._id,
+                    title: r.Title || r.title,
+                    carrier_name: r['Carrier Name'] || r.carrier_name,
+                    status: r.Status || r.status,
+                    _createdDate: r['Created Date'] || r._createdDate
+                }));
+            } else {
+                const jobs = await wixData.query('JobPostings')
+                    .eq('status', 'pending')
+                    .limit(50)
+                    .find({ suppressAuth: true });
+                jobItems = jobs.items;
+            }
 
-            queue.push(...jobs.items.map(item => ({
+            queue.push(...jobItems.map(item => ({
                 id: item._id,
                 type: 'job',
                 title: item.title,
@@ -156,7 +191,7 @@ export async function getModerationQueue(filters = {}) {
             })));
         }
 
-        // 3. DOCUMENTS (From DriverProfiles)
+        // 3. DOCUMENTS (From DriverProfiles) using dual-source routing
         // This is trickier as documents are fields on a profile, not separate rows.
         // We simulate a queue item for each unverified document.
         if (type === 'all' || type === 'documents') {
@@ -166,19 +201,42 @@ export async function getModerationQueue(filters = {}) {
             // Using a loose query for now or assuming fields exist.
 
             // To make this robust without schema guarantees, we'll try a generic query or skip if complex.
-            // Implementation: We'll query for profiles updated recently and check status fields in memory 
+            // Implementation: We'll query for profiles updated recently and check status fields in memory
             // if we can't index them all.
             // Ideally: .eq('cdl_verification_status', 'pending')
 
             // Fallback for demo: Return empty for documents if specific fields aren't set up
             try {
-                const profiles = await wixData.query('DriverProfiles')
-                    .eq('profile_status', 'active') // Only check active profiles
-                    .descending('updated_date')
-                    .limit(50)
-                    .find({ suppressAuth: true });
+                let profileItems = [];
+                if (usesAirtable(COLLECTION_KEYS.driverProfiles)) {
+                    const tableName = getAirtableTableName(COLLECTION_KEYS.driverProfiles);
+                    const result = await airtable.queryRecords(tableName, {
+                        filterByFormula: `{Profile Status} = "active"`,
+                        sort: [{ field: 'Updated Date', direction: 'desc' }],
+                        maxRecords: 50
+                    });
+                    profileItems = (result.records || []).map(r => ({
+                        _id: r.id || r._id,
+                        display_name: r['Display Name'] || r.display_name,
+                        profile_status: r['Profile Status'] || r.profile_status,
+                        cdl_front_image: r['Cdl Front Image'] || r.cdl_front_image,
+                        cdl_front_status: r['Cdl Front Status'] || r.cdl_front_status,
+                        cdl_back_image: r['Cdl Back Image'] || r.cdl_back_image,
+                        cdl_back_status: r['Cdl Back Status'] || r.cdl_back_status,
+                        med_card_image: r['Med Card Image'] || r.med_card_image,
+                        med_card_status: r['Med Card Status'] || r.med_card_status,
+                        updated_date: r['Updated Date'] || r.updated_date
+                    }));
+                } else {
+                    const profiles = await wixData.query('DriverProfiles')
+                        .eq('profile_status', 'active') // Only check active profiles
+                        .descending('updated_date')
+                        .limit(50)
+                        .find({ suppressAuth: true });
+                    profileItems = profiles.items;
+                }
 
-                profiles.items.forEach(profile => {
+                profileItems.forEach(profile => {
                     // Check CDL Front
                     if (profile.cdl_front_image && (!profile.cdl_front_status || profile.cdl_front_status === 'pending')) {
                         queue.push({
@@ -247,14 +305,19 @@ export async function updateReviewStatus(reviewId, status, reason = '') {
     // Validate status: 'approved', 'rejected'
 
     try {
-        const review = await wixData.get('CarrierReviews', reviewId, { suppressAuth: true });
+        // Use dual-source routing
+        const review = await getRecord(COLLECTION_KEYS.reviews, 'CarrierReviews', reviewId);
         if (!review) throw new Error('Review not found');
 
-        review.status = status;
-        review.moderation_reason = reason;
-        review.moderated_at = new Date();
+        const updatedReview = {
+            ...review,
+            _id: review._id || review.id,
+            status: status,
+            moderation_reason: reason,
+            moderated_at: new Date()
+        };
 
-        await wixData.update('CarrierReviews', review, { suppressAuth: true });
+        await updateData(COLLECTION_KEYS.reviews, 'CarrierReviews', updatedReview);
         await logModerationAction('updateReview', 'review', reviewId, { status, reason });
 
         return { success: true };
@@ -267,13 +330,18 @@ export async function updateReviewStatus(reviewId, status, reason = '') {
 export async function updateJobStatus(jobId, status) {
     await requireAdmin();
     try {
-        const job = await wixData.get('JobPostings', jobId, { suppressAuth: true });
+        // Use dual-source routing
+        const job = await getRecord(COLLECTION_KEYS.jobs, 'JobPostings', jobId);
         if (!job) throw new Error('Job not found');
 
-        job.status = status;
-        job.moderated_at = new Date();
+        const updatedJob = {
+            ...job,
+            _id: job._id || job.id,
+            status: status,
+            moderated_at: new Date()
+        };
 
-        await wixData.update('JobPostings', job, { suppressAuth: true });
+        await updateData(COLLECTION_KEYS.jobs, 'JobPostings', updatedJob);
         await logModerationAction('updateJob', 'job', jobId, { status });
 
         return { success: true };
@@ -288,24 +356,29 @@ export async function updateDocumentStatus(driverId, docType, status, reason = '
     // docType: 'cdl_front', 'cdl_back', 'med_card'
 
     try {
-        const profile = await wixData.get('DriverProfiles', driverId, { suppressAuth: true });
+        // Use dual-source routing
+        const profile = await getRecord(COLLECTION_KEYS.driverProfiles, 'DriverProfiles', driverId);
         if (!profile) throw new Error('Driver profile not found');
 
         // Construct field name dynamically
         const statusField = `${docType}_status`;
         const reasonField = `${docType}_rejection_reason`;
 
-        profile[statusField] = status;
+        const updatedProfile = {
+            ...profile,
+            _id: profile._id || profile.id
+        };
+        updatedProfile[statusField] = status;
         if (status === 'rejected') {
-            profile[reasonField] = reason;
+            updatedProfile[reasonField] = reason;
         } else {
-            profile[reasonField] = null; // Clear reason if approved
+            updatedProfile[reasonField] = null; // Clear reason if approved
         }
 
         // If all Critical docs are verified, maybe upgrade profile status?
         // keeping it simple for now.
 
-        await wixData.update('DriverProfiles', profile, { suppressAuth: true });
+        await updateData(COLLECTION_KEYS.driverProfiles, 'DriverProfiles', updatedProfile);
         await logModerationAction('updateDocument', 'driver_document', driverId, { docType, status, reason });
 
         return { success: true };
@@ -319,9 +392,32 @@ export async function getModerationStats() {
     await requireAdmin();
 
     try {
-        // Approximate counts for dashboard
-        const pendingReviews = await wixData.query('CarrierReviews').eq('status', 'pending').count({ suppressAuth: true });
-        const pendingJobs = await wixData.query('JobPostings').eq('status', 'pending').count({ suppressAuth: true });
+        let pendingReviews = 0;
+        let pendingJobs = 0;
+
+        // Count pending reviews using dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.reviews)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.reviews);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Status} = "pending"`,
+                maxRecords: 1000
+            });
+            pendingReviews = (result.records || []).length;
+        } else {
+            pendingReviews = await wixData.query('CarrierReviews').eq('status', 'pending').count({ suppressAuth: true });
+        }
+
+        // Count pending jobs using dual-source routing
+        if (usesAirtable(COLLECTION_KEYS.jobs)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.jobs);
+            const result = await airtable.queryRecords(tableName, {
+                filterByFormula: `{Status} = "pending"`,
+                maxRecords: 1000
+            });
+            pendingJobs = (result.records || []).length;
+        } else {
+            pendingJobs = await wixData.query('JobPostings').eq('status', 'pending').count({ suppressAuth: true });
+        }
 
         // Documents is hard to count efficiently without specific index, returning sum of others for now
         // or 0 if we assume they are handled ad-hoc
