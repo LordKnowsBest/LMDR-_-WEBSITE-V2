@@ -90,26 +90,41 @@ if ($hasWixData -and -not $hasDualSource) {
     exit 0
 }
 
-# Check 2: If this is config.jsw, ensure no 'wix' values are being added
+# Check 2: If this is config.jsw, ensure no unauthorized 'wix' values are being added
 if ($fileName -eq "config.jsw") {
-    # Check for any 'wix' values in DATA_SOURCE
-    if ($content -match ":\s*'wix'") {
-        Write-Host ""
-        Write-Host "================================================================"
-        Write-Host "  AIRTABLE ENFORCEMENT ERROR"
-        Write-Host "================================================================"
-        Write-Host ""
-        Write-Host "  File: config.jsw"
-        Write-Host ""
-        Write-Host "  New collections MUST default to 'airtable', not 'wix'."
-        Write-Host "  Wix is no longer the default data source."
-        Write-Host ""
-        Write-Host "  Change:  collectionName: 'wix'"
-        Write-Host "  To:      collectionName: 'airtable'"
-        Write-Host ""
-        Write-Host "================================================================"
-        Write-Host ""
-        exit 1
+    # These 2 collections MUST remain in Wix (require Wix auth context)
+    $allowedWixCollections = @(
+        "adminUsers",           # Wix Members integration for authentication
+        "memberNotifications"   # Requires Wix auth context
+    )
+
+    # Find all 'wix' entries
+    $wixMatches = [regex]::Matches($content, "(\w+):\s*'wix'")
+
+    foreach ($match in $wixMatches) {
+        $collectionName = $match.Groups[1].Value
+        if ($allowedWixCollections -notcontains $collectionName) {
+            Write-Host ""
+            Write-Host "================================================================"
+            Write-Host "  AIRTABLE ENFORCEMENT ERROR"
+            Write-Host "================================================================"
+            Write-Host ""
+            Write-Host "  File: config.jsw"
+            Write-Host ""
+            Write-Host "  Collection '$collectionName' is set to 'wix' but is not in the"
+            Write-Host "  approved list of Wix-only collections."
+            Write-Host ""
+            Write-Host "  Allowed Wix collections (2 total):"
+            Write-Host "    - adminUsers"
+            Write-Host "    - memberNotifications"
+            Write-Host ""
+            Write-Host "  Change:  $collectionName`: 'wix'"
+            Write-Host "  To:      $collectionName`: 'airtable'"
+            Write-Host ""
+            Write-Host "================================================================"
+            Write-Host ""
+            exit 1
+        }
     }
 }
 
