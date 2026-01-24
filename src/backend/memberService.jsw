@@ -110,11 +110,21 @@ export async function getMemberDashboard() {
  */
 async function getProfileSummary(userId) {
   try {
-    const result = await wixData.query('DriverProfiles')
-      .eq('user_id', userId)
-      .find();
+    // Query driver profile (dual-source)
+    let profileItems = [];
+    if (usesAirtable(COLLECTION_KEYS.driverProfiles)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.driverProfiles);
+      const filter = `{User ID} = '${userId}'`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+      profileItems = result.records || [];
+    } else {
+      const result = await wixData.query('DriverProfiles')
+        .eq('user_id', userId)
+        .find();
+      profileItems = result.items;
+    }
 
-    if (result.items.length === 0) {
+    if (profileItems.length === 0) {
       return {
         exists: false,
         completeness: 0,
@@ -123,7 +133,7 @@ async function getProfileSummary(userId) {
       };
     }
 
-    const profile = result.items[0];
+    const profile = profileItems[0];
 
     return {
       exists: true,
@@ -152,12 +162,24 @@ async function getProfileSummary(userId) {
  */
 async function getApplicationsSummary(userId) {
   try {
-    const result = await wixData.query('DriverCarrierInterests')
-      .eq('driver_id', userId)
-      .descending('_createdDate')
-      .find();
-
-    const applications = result.items;
+    // Query applications (dual-source)
+    let applications = [];
+    if (usesAirtable(COLLECTION_KEYS.driverCarrierInterests)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.driverCarrierInterests);
+      const filter = `{Driver ID} = '${userId}'`;
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        sort: [{ field: 'Created Date', direction: 'desc' }],
+        maxRecords: 100
+      });
+      applications = result.records || [];
+    } else {
+      const result = await wixData.query('DriverCarrierInterests')
+        .eq('driver_id', userId)
+        .descending('_createdDate')
+        .find();
+      applications = result.items;
+    }
 
     // Group by status
     const byStatus = applications.reduce((acc, app) => {
@@ -199,16 +221,29 @@ async function getApplicationsSummary(userId) {
  */
 async function getActivitySummary(userId) {
   try {
-    // Try to get from MemberActivity collection if it exists
-    const activityResult = await wixData.query('MemberActivity')
-      .eq('member_id', userId)
-      .descending('_createdDate')
-      .limit(1)
-      .find()
-      .catch(() => ({ items: [] }));
+    // Try to get from MemberActivity collection (dual-source)
+    let activityItems = [];
+    if (usesAirtable(COLLECTION_KEYS.memberActivity)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.memberActivity);
+      const filter = `{Member ID} = '${userId}'`;
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        sort: [{ field: 'Created Date', direction: 'desc' }],
+        maxRecords: 1
+      }).catch(() => ({ records: [] }));
+      activityItems = result.records || [];
+    } else {
+      const activityResult = await wixData.query('MemberActivity')
+        .eq('member_id', userId)
+        .descending('_createdDate')
+        .limit(1)
+        .find()
+        .catch(() => ({ items: [] }));
+      activityItems = activityResult.items;
+    }
 
-    if (activityResult.items.length > 0) {
-      const activity = activityResult.items[0];
+    if (activityItems.length > 0) {
+      const activity = activityItems[0];
       return {
         profileViews: activity.profile_views || 0,
         profileViewsTrend: activity.profile_views_trend || 'stable',
@@ -415,17 +450,26 @@ export async function getMemberActivityStats() {
       return { success: false, error: 'Not authenticated' };
     }
 
-    // Get applications over time
+    // Get applications over time (dual-source)
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    const applicationsResult = await wixData.query('DriverCarrierInterests')
-      .eq('driver_id', userId)
-      .ge('_createdDate', thirtyDaysAgo)
-      .find();
+    let applicationItems = [];
+    if (usesAirtable(COLLECTION_KEYS.driverCarrierInterests)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.driverCarrierInterests);
+      const filter = `AND({Driver ID} = '${userId}', {Created Date} >= '${thirtyDaysAgo.toISOString()}')`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 100 });
+      applicationItems = result.records || [];
+    } else {
+      const applicationsResult = await wixData.query('DriverCarrierInterests')
+        .eq('driver_id', userId)
+        .ge('_createdDate', thirtyDaysAgo)
+        .find();
+      applicationItems = applicationsResult.items;
+    }
 
     // Group by week
-    const weeklyActivity = applicationsResult.items.reduce((acc, app) => {
+    const weeklyActivity = applicationItems.reduce((acc, app) => {
       const date = new Date(app._createdDate);
       const weekStart = getWeekStart(date);
       const key = weekStart.toISOString().split('T')[0];
@@ -434,7 +478,7 @@ export async function getMemberActivityStats() {
     }, {});
 
     // Calculate match score trend
-    const scores = applicationsResult.items
+    const scores = applicationItems
       .map(a => a.match_score)
       .filter(Boolean);
     const avgScore = scores.length > 0
@@ -444,10 +488,10 @@ export async function getMemberActivityStats() {
     return {
       success: true,
       stats: {
-        applicationsLast30Days: applicationsResult.items.length,
+        applicationsLast30Days: applicationItems.length,
         weeklyActivity,
         avgMatchScore: avgScore,
-        topCarrierTypes: getTopCarrierTypes(applicationsResult.items)
+        topCarrierTypes: getTopCarrierTypes(applicationItems)
       }
     };
   } catch (err) {
@@ -488,18 +532,28 @@ export async function updateLastActive() {
     const userId = await getCurrentUserId();
     if (!userId) return { success: false };
 
-    // Try to update or create MemberActivity record
-    const result = await wixData.query('MemberActivity')
-      .eq('member_id', userId)
-      .find()
-      .catch(() => ({ items: [] }));
-
-    if (result.items.length > 0) {
-      const activity = result.items[0];
-      activity.last_active = new Date();
-      await wixData.update('MemberActivity', activity);
+    // Try to update or create MemberActivity record (dual-source)
+    let activityItems = [];
+    if (usesAirtable(COLLECTION_KEYS.memberActivity)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.memberActivity);
+      const filter = `{Member ID} = '${userId}'`;
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 })
+        .catch(() => ({ records: [] }));
+      activityItems = result.records || [];
     } else {
-      await wixData.insert('MemberActivity', {
+      const result = await wixData.query('MemberActivity')
+        .eq('member_id', userId)
+        .find()
+        .catch(() => ({ items: [] }));
+      activityItems = result.items;
+    }
+
+    if (activityItems.length > 0) {
+      const activity = activityItems[0];
+      activity.last_active = new Date();
+      await updateData(COLLECTION_KEYS.memberActivity, 'MemberActivity', activity);
+    } else {
+      await insertData(COLLECTION_KEYS.memberActivity, 'MemberActivity', {
         member_id: userId,
         last_active: new Date(),
         profile_views: 0,

@@ -245,13 +245,23 @@ export function validatePreferencesData(data, isUpdate = false) {
 async function checkCarrierAccess(carrierDot) {
   const userId = currentUser.id;
 
-  const result = await wixData.query(RECRUITER_ACCESS_COLLECTION)
-    .eq('recruiter_id', userId)
-    .eq('carrier_dot', carrierDot)
-    .eq('is_active', true)
-    .find({ suppressAuth: true });
+  // Dual-source query for recruiter access
+  let accessItems = [];
+  if (usesAirtable(COLLECTION_KEYS.recruiterAccess)) {
+    const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterAccess);
+    const filter = `AND({Recruiter ID} = '${userId}', {Carrier DOT} = '${carrierDot}', {Is Active} = TRUE())`;
+    const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+    accessItems = result.records || [];
+  } else {
+    const result = await wixData.query(RECRUITER_ACCESS_COLLECTION)
+      .eq('recruiter_id', userId)
+      .eq('carrier_dot', carrierDot)
+      .eq('is_active', true)
+      .find({ suppressAuth: true });
+    accessItems = result.items;
+  }
 
-  return result.items.length > 0;
+  return accessItems.length > 0;
 }
 
 /**
@@ -298,8 +308,8 @@ export async function createHiringPreferences(data) {
       is_active: true
     };
 
-    // Insert into collection
-    const result = await wixData.insert(COLLECTION_NAME, preferenceData, { suppressAuth: true });
+    // Insert into collection (dual-source)
+    const result = await insertData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, preferenceData);
 
     return { success: true, preferences: result };
   } catch (error) {
@@ -326,8 +336,8 @@ export async function updateHiringPreferences(preferenceId, data) {
       return { success: false, error: validation.errors[0] };
     }
 
-    // Get the existing preference
-    const existingPref = await wixData.get(COLLECTION_NAME, preferenceId);
+    // Get the existing preference (dual-source)
+    const existingPref = await getRecord(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, preferenceId);
     if (!existingPref) {
       return { success: false, error: 'Preference not found' };
     }
@@ -348,8 +358,8 @@ export async function updateHiringPreferences(preferenceId, data) {
       _updatedDate: new Date()
     };
 
-    // Update in collection
-    const result = await wixData.update(COLLECTION_NAME, updatedPref, { suppressAuth: true });
+    // Update in collection (dual-source)
+    const result = await updateData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, updatedPref);
 
     return { success: true, preferences: result };
   } catch (error) {
@@ -364,26 +374,38 @@ export async function updateHiringPreferences(preferenceId, data) {
  */
 export async function getHiringPreferences(carrierDot) {
   try {
-    // Build query for active preferences for this carrier
-    let query = wixData.query(COLLECTION_NAME)
-      .eq('carrier_dot', carrierDot)
-      .eq('is_active', true);
+    // Query for active preferences for this carrier (dual-source)
+    let prefItems = [];
+    if (usesAirtable(COLLECTION_KEYS.hiringPreferences)) {
+      const tableName = getAirtableTableName(COLLECTION_KEYS.hiringPreferences);
+      const filter = `AND({Carrier DOT} = '${carrierDot}', {Is Active} = TRUE())`;
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: filter,
+        sort: [{ field: 'Created Date', direction: 'desc' }],
+        maxRecords: 1
+      });
+      prefItems = result.records || [];
+    } else {
+      let query = wixData.query(COLLECTION_NAME)
+        .eq('carrier_dot', carrierDot)
+        .eq('is_active', true);
 
-    // Add sorting and limit (methods may not exist in some test mocks)
-    if (typeof query.descending === 'function') {
-      query = query.descending('_createdDate');
+      if (typeof query.descending === 'function') {
+        query = query.descending('_createdDate');
+      }
+      if (typeof query.limit === 'function') {
+        query = query.limit(1);
+      }
+
+      const result = await query.find({ suppressAuth: true });
+      prefItems = result.items;
     }
-    if (typeof query.limit === 'function') {
-      query = query.limit(1);
-    }
 
-    const result = await query.find({ suppressAuth: true });
-
-    if (result.items.length === 0) {
+    if (prefItems.length === 0) {
       return { success: true, preferences: null };
     }
 
-    return { success: true, preferences: result.items[0] };
+    return { success: true, preferences: prefItems[0] };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -401,8 +423,8 @@ export async function getHiringPreferenceById(preferenceId) {
       return { success: false, error: 'Invalid preference ID' };
     }
 
-    // Get the preference
-    const result = await wixData.get(COLLECTION_NAME, preferenceId);
+    // Get the preference (dual-source)
+    const result = await getRecord(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, preferenceId);
 
     if (!result) {
       return { success: true, preferences: null };
@@ -496,7 +518,7 @@ export async function saveWeightPreferences(carrierDot, weights) {
         _updatedDate: new Date()
       };
 
-      const result = await wixData.update(COLLECTION_NAME, updatedPref, { suppressAuth: true });
+      const result = await updateData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, updatedPref);
       console.log('[carrierPreferences] Updated weight preferences for carrier:', carrierDot);
 
       return {
@@ -526,7 +548,7 @@ export async function saveWeightPreferences(carrierDot, weights) {
         is_active: true
       };
 
-      const result = await wixData.insert(COLLECTION_NAME, newPref, { suppressAuth: true });
+      const result = await insertData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, newPref);
       console.log('[carrierPreferences] Created new preferences with weights for carrier:', carrierDot);
 
       return {
@@ -596,8 +618,8 @@ export async function deactivateHiringPreferences(preferenceId) {
       return { success: false, error: 'User not logged in' };
     }
 
-    // Get the existing preference
-    const existingPref = await wixData.get(COLLECTION_NAME, preferenceId);
+    // Get the existing preference (dual-source)
+    const existingPref = await getRecord(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, preferenceId);
     if (!existingPref) {
       return { success: false, error: 'Preference not found' };
     }
@@ -615,8 +637,8 @@ export async function deactivateHiringPreferences(preferenceId) {
       _updatedDate: new Date()
     };
 
-    // Update in collection
-    const result = await wixData.update(COLLECTION_NAME, updatedPref, { suppressAuth: true });
+    // Update in collection (dual-source)
+    const result = await updateData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, updatedPref);
 
     return { success: true, preferences: result };
   } catch (error) {
