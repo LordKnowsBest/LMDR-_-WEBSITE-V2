@@ -9,22 +9,56 @@ import wixData from 'wix-data';
 import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/config';
 import * as airtable from 'backend/airtableClient';
 
+// Collection keys for config.jsw
+const COLLECTION_KEYS = {
+  driverProfiles: 'driverProfiles',
+  carriers: 'carriers',
+  driverCarrierInterests: 'driverCarrierInterests'
+};
+
 /**
  * Get public platform stats for drivers and general audience
  * Used on: Home page, About page
  */
 export async function getPublicStats() {
   try {
-    const [driversResult, carriersResult, hiresResult, interestsResult] = await Promise.all([
-      wixData.query('DriverProfiles').count(),
-      wixData.query('Carriers').eq('is_active', true).count(),
-      wixData.query('DriverCarrierInterests').eq('status', 'hired').count(),
-      wixData.query('DriverCarrierInterests').find({ limit: 1000 })
-    ]);
+    let driversCount, carriersCount, hiresCount, interestsItems;
+
+    if (usesAirtable(COLLECTION_KEYS.driverProfiles)) {
+      // Airtable path
+      const driversTable = getAirtableTableName(COLLECTION_KEYS.driverProfiles);
+      const carriersTable = getAirtableTableName(COLLECTION_KEYS.carriers);
+      const interestsTable = getAirtableTableName(COLLECTION_KEYS.driverCarrierInterests);
+
+      const [driversRes, carriersRes, hiresRes, interestsRes] = await Promise.all([
+        airtable.countRecords(driversTable),
+        airtable.countRecords(carriersTable, "{Is Active} = TRUE()"),
+        airtable.countRecords(interestsTable, "{Status} = 'hired'"),
+        airtable.queryRecords(interestsTable, { maxRecords: 1000 })
+      ]);
+
+      driversCount = driversRes.count || 0;
+      carriersCount = carriersRes.count || 0;
+      hiresCount = hiresRes.count || 0;
+      interestsItems = interestsRes.records || [];
+    } else {
+      // Wix Data path (original)
+      const [driversResult, carriersResult, hiresResult, interestsResult] = await Promise.all([
+        wixData.query('DriverProfiles').count(),
+        wixData.query('Carriers').eq('is_active', true).count(),
+        wixData.query('DriverCarrierInterests').eq('status', 'hired').count(),
+        wixData.query('DriverCarrierInterests').find({ limit: 1000 })
+      ]);
+
+      driversCount = driversResult;
+      carriersCount = carriersResult;
+      hiresCount = hiresResult;
+      interestsItems = interestsResult.items;
+    }
 
     // Calculate average match score
-    const scores = interestsResult.items
-      .map(i => i.match_score)
+    const scores = interestsItems
+      .map(i => i.match_score || i['Match Score'])
       .filter(Boolean);
 
     const avgScore = scores.length > 0
@@ -32,11 +66,11 @@ export async function getPublicStats() {
       : 85;
 
     return {
-      driversPlaced: hiresResult.count || 0,
-      activeCarriers: carriersResult.count || 0,
+      driversPlaced: hiresCount || 0,
+      activeCarriers: carriersCount || 0,
       avgMatchScore: avgScore,
-      openPositions: (carriersResult.count || 0) * 3, // Estimate 3 positions per carrier
-      registeredDrivers: driversResult.count || 0
+      openPositions: (carriersCount || 0) * 3, // Estimate 3 positions per carrier
+      registeredDrivers: driversCount || 0
     };
   } catch (err) {
     console.error('getPublicStats error:', err);
