@@ -1,0 +1,828 @@
+/**
+ * Leaderboard Service
+ *
+ * Manages competitive leaderboards for recruiters including:
+ * - Multiple leaderboard types (hires, response time, retention, overall)
+ * - Period-based rankings (weekly, monthly, all-time)
+ * - Snapshot generation for historical tracking
+ * - Position tracking and change notifications
+ *
+ * This service uses Airtable-only collections (no Wix fallback).
+ */
+
+import { getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import { createNotification } from 'backend/memberService';
+import { logGamificationEvent } from 'backend/gamificationService';
+import { sendBatchLeaderboardAnnouncements } from 'backend/emailService';
+
+// =============================================================================
+// COLLECTION KEYS (Airtable-only)
+// =============================================================================
+
+const COLLECTION_KEYS = {
+  leaderboardSnapshots: 'leaderboardSnapshots',
+  recruiterProgression: 'recruiterProgression',
+  recruiterBadges: 'recruiterBadges',
+  gamificationEvents: 'gamificationEvents'
+};
+
+// =============================================================================
+// LEADERBOARD CONFIGURATION
+// =============================================================================
+
+/**
+ * Leaderboard types and their scoring configurations
+ */
+const LEADERBOARD_TYPES = {
+  hires: {
+    name: 'Top Hirers',
+    description: 'Most successful hires',
+    field: 'Total Hires',
+    sortDirection: 'desc',
+    icon: '🏆',
+    color: '#f59e0b'
+  },
+  response_time: {
+    name: 'Fastest Responders',
+    description: 'Quickest average response time',
+    field: 'Avg Response Hours',
+    sortDirection: 'asc', // Lower is better
+    icon: '⚡',
+    color: '#10b981'
+  },
+  retention: {
+    name: 'Retention Leaders',
+    description: 'Best 90-day retention rate',
+    field: 'Retention 90 Day Rate',
+    sortDirection: 'desc',
+    icon: '🔒',
+    color: '#8b5cf6'
+  },
+  overall: {
+    name: 'Top Recruiters',
+    description: 'Weighted composite score',
+    field: 'composite_score', // Calculated field
+    sortDirection: 'desc',
+    icon: '⭐',
+    color: '#3b82f6'
+  }
+};
+
+/**
+ * Weights for overall composite score
+ */
+const OVERALL_WEIGHTS = {
+  hires: 0.35,           // 35% weight on total hires
+  response_time: 0.25,   // 25% weight on response time
+  retention: 0.25,       // 25% weight on retention rate
+  acceptance_rate: 0.15  // 15% weight on offer acceptance rate
+};
+
+/**
+ * Period configurations
+ */
+const PERIODS = {
+  weekly: {
+    name: 'This Week',
+    days: 7
+  },
+  monthly: {
+    name: 'This Month',
+    days: 30
+  },
+  quarterly: {
+    name: 'This Quarter',
+    days: 90
+  },
+  alltime: {
+    name: 'All Time',
+    days: null
+  }
+};
+
+// =============================================================================
+// AIRTABLE-ONLY HELPER FUNCTIONS
+// =============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  const tableName = getAirtableTableName(collectionKey);
+  const result = await airtable.queryRecords(tableName, {
+    filterByFormula: options.filter || '',
+    sort: options.sort,
+    maxRecords: options.limit || 100
+  });
+  return result.records || [];
+}
+
+async function insertData(collectionKey, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.createRecord(tableName, data);
+}
+
+async function updateData(collectionKey, recordId, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.updateRecord(tableName, recordId, data);
+}
+
+// =============================================================================
+// GET LEADERBOARD
+// =============================================================================
+
+/**
+ * Get leaderboard rankings
+ * @param {string} type - Leaderboard type: 'hires', 'response_time', 'retention', 'overall'
+ * @param {string} period - Time period: 'weekly', 'monthly', 'quarterly', 'alltime'
+ * @param {object} options - { limit, offset, includeStats }
+ * @returns {object} { rankings, total, period, type, generatedAt }
+ */
+export async function getLeaderboard(type = 'overall', period = 'monthly', options = {}) {
+  try {
+    const limit = options.limit || 50;
+    const offset = options.offset || 0;
+    const includeStats = options.includeStats !== false;
+
+    const typeConfig = LEADERBOARD_TYPES[type];
+    if (!typeConfig) {
+      return { error: 'invalid_type', validTypes: Object.keys(LEADERBOARD_TYPES) };
+    }
+
+    // Get all recruiter progressions
+    const recruiters = await queryData(COLLECTION_KEYS.recruiterProgression, {
+      limit: 1000
+    });
+
+    if (recruiters.length === 0) {
+      return {
+        rankings: [],
+        total: 0,
+        period,
+        type,
+        typeConfig,
+        generatedAt: new Date().toISOString()
+      };
+    }
+
+    // Calculate scores and sort
+    let rankedRecruiters;
+
+    if (type === 'overall') {
+      rankedRecruiters = calculateOverallRankings(recruiters);
+    } else {
+      rankedRecruiters = calculateTypeRankings(recruiters, type, typeConfig);
+    }
+
+    // Apply pagination
+    const total = rankedRecruiters.length;
+    const paginatedRankings = rankedRecruiters.slice(offset, offset + limit);
+
+    // Add rank numbers
+    const rankings = paginatedRankings.map((recruiter, index) => ({
+      rank: offset + index + 1,
+      recruiterId: recruiter.recruiterId,
+      recruiterName: recruiter.recruiterName || 'Recruiter',
+      carrierId: recruiter.carrierId,
+      carrierName: recruiter.carrierName || '',
+      score: recruiter.score,
+      displayValue: formatDisplayValue(type, recruiter.score),
+      ...(includeStats ? {
+        stats: {
+          totalHires: recruiter.totalHires,
+          avgResponseHours: recruiter.avgResponseHours,
+          retentionRate: recruiter.retentionRate,
+          acceptanceRate: recruiter.acceptanceRate,
+          currentPoints: recruiter.currentPoints,
+          rank: recruiter.rank
+        }
+      } : {})
+    }));
+
+    return {
+      rankings,
+      total,
+      period,
+      periodName: PERIODS[period]?.name || period,
+      type,
+      typeName: typeConfig.name,
+      typeDescription: typeConfig.description,
+      typeIcon: typeConfig.icon,
+      typeColor: typeConfig.color,
+      hasMore: offset + limit < total,
+      generatedAt: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('getLeaderboard error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Calculate rankings for a specific type
+ */
+function calculateTypeRankings(recruiters, type, typeConfig) {
+  const scored = recruiters.map(r => {
+    const recruiter = normalizeRecruiterProgression(r);
+    let score;
+
+    switch (type) {
+      case 'hires':
+        score = recruiter.totalHires || 0;
+        break;
+      case 'response_time':
+        // For response time, we need to handle null/zero values
+        // Null means no data, should be ranked lower
+        score = recruiter.avgResponseHours;
+        if (score === null || score === undefined || score === 0) {
+          score = 9999; // Push to bottom
+        }
+        break;
+      case 'retention':
+        score = recruiter.retentionRate || 0;
+        break;
+      default:
+        score = 0;
+    }
+
+    return {
+      ...recruiter,
+      score
+    };
+  });
+
+  // Sort based on type config
+  scored.sort((a, b) => {
+    if (typeConfig.sortDirection === 'asc') {
+      return a.score - b.score;
+    }
+    return b.score - a.score;
+  });
+
+  // Filter out recruiters with no meaningful data for response_time
+  if (type === 'response_time') {
+    return scored.filter(r => r.score < 9999);
+  }
+
+  return scored;
+}
+
+/**
+ * Calculate overall composite rankings
+ */
+function calculateOverallRankings(recruiters) {
+  // First, get min/max for normalization
+  const stats = {
+    hires: { min: Infinity, max: -Infinity },
+    response: { min: Infinity, max: -Infinity },
+    retention: { min: Infinity, max: -Infinity },
+    acceptance: { min: Infinity, max: -Infinity }
+  };
+
+  const normalized = recruiters.map(r => normalizeRecruiterProgression(r));
+
+  for (const r of normalized) {
+    if (r.totalHires !== null) {
+      stats.hires.min = Math.min(stats.hires.min, r.totalHires);
+      stats.hires.max = Math.max(stats.hires.max, r.totalHires);
+    }
+    if (r.avgResponseHours !== null && r.avgResponseHours > 0) {
+      stats.response.min = Math.min(stats.response.min, r.avgResponseHours);
+      stats.response.max = Math.max(stats.response.max, r.avgResponseHours);
+    }
+    if (r.retentionRate !== null) {
+      stats.retention.min = Math.min(stats.retention.min, r.retentionRate);
+      stats.retention.max = Math.max(stats.retention.max, r.retentionRate);
+    }
+    if (r.acceptanceRate !== null) {
+      stats.acceptance.min = Math.min(stats.acceptance.min, r.acceptanceRate);
+      stats.acceptance.max = Math.max(stats.acceptance.max, r.acceptanceRate);
+    }
+  }
+
+  // Calculate composite scores
+  const scored = normalized.map(r => {
+    // Normalize each metric to 0-100 scale
+    const hiresScore = normalizeValue(r.totalHires, stats.hires.min, stats.hires.max);
+
+    // Response time: lower is better, so invert
+    const responseScore = r.avgResponseHours > 0
+      ? 100 - normalizeValue(r.avgResponseHours, stats.response.min, stats.response.max)
+      : 0;
+
+    const retentionScore = normalizeValue(r.retentionRate * 100, stats.retention.min * 100, stats.retention.max * 100);
+    const acceptanceScore = normalizeValue(r.acceptanceRate * 100, stats.acceptance.min * 100, stats.acceptance.max * 100);
+
+    // Calculate weighted composite
+    const compositeScore =
+      (hiresScore * OVERALL_WEIGHTS.hires) +
+      (responseScore * OVERALL_WEIGHTS.response_time) +
+      (retentionScore * OVERALL_WEIGHTS.retention) +
+      (acceptanceScore * OVERALL_WEIGHTS.acceptance_rate);
+
+    return {
+      ...r,
+      score: Math.round(compositeScore * 10) / 10,
+      breakdown: {
+        hires: hiresScore,
+        response: responseScore,
+        retention: retentionScore,
+        acceptance: acceptanceScore
+      }
+    };
+  });
+
+  // Sort by composite score (descending)
+  scored.sort((a, b) => b.score - a.score);
+
+  return scored;
+}
+
+/**
+ * Normalize a value to 0-100 scale
+ */
+function normalizeValue(value, min, max) {
+  if (value === null || value === undefined) return 0;
+  if (max === min) return 50; // All same value
+  if (!isFinite(min) || !isFinite(max)) return 0;
+  return Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+}
+
+/**
+ * Format display value based on leaderboard type
+ */
+function formatDisplayValue(type, score) {
+  switch (type) {
+    case 'hires':
+      return `${score} hires`;
+    case 'response_time':
+      if (score < 1) {
+        return `${Math.round(score * 60)} min`;
+      }
+      return `${Math.round(score * 10) / 10} hrs`;
+    case 'retention':
+      return `${Math.round(score * 100)}%`;
+    case 'overall':
+      return `${score} pts`;
+    default:
+      return String(score);
+  }
+}
+
+// =============================================================================
+// USER POSITION
+// =============================================================================
+
+/**
+ * Get a specific recruiter's position on the leaderboard
+ * @param {string} recruiterId - Recruiter ID
+ * @param {string} type - Leaderboard type
+ * @param {string} period - Time period
+ * @returns {object} { position, total, score, percentile, neighbors }
+ */
+export async function getUserLeaderboardPosition(recruiterId, type = 'overall', period = 'monthly') {
+  try {
+    // Get full leaderboard
+    const leaderboard = await getLeaderboard(type, period, { limit: 1000, includeStats: true });
+
+    if (leaderboard.error) {
+      return { error: leaderboard.error };
+    }
+
+    // Find user's position
+    const userIndex = leaderboard.rankings.findIndex(r => r.recruiterId === recruiterId);
+
+    if (userIndex === -1) {
+      return {
+        recruiterId,
+        position: null,
+        total: leaderboard.total,
+        onLeaderboard: false,
+        message: 'Not enough activity to rank on leaderboard'
+      };
+    }
+
+    const userRanking = leaderboard.rankings[userIndex];
+    const position = userIndex + 1;
+    const percentile = Math.round(((leaderboard.total - position) / leaderboard.total) * 100);
+
+    // Get neighbors (2 above, 2 below)
+    const neighbors = [];
+    for (let i = Math.max(0, userIndex - 2); i <= Math.min(leaderboard.rankings.length - 1, userIndex + 2); i++) {
+      neighbors.push({
+        ...leaderboard.rankings[i],
+        isCurrentUser: i === userIndex
+      });
+    }
+
+    return {
+      recruiterId,
+      position,
+      total: leaderboard.total,
+      score: userRanking.score,
+      displayValue: userRanking.displayValue,
+      percentile,
+      percentileLabel: getPercentileLabel(percentile),
+      neighbors,
+      stats: userRanking.stats,
+      type,
+      typeName: leaderboard.typeName,
+      period,
+      periodName: leaderboard.periodName
+    };
+  } catch (error) {
+    console.error('getUserLeaderboardPosition error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get percentile label
+ */
+function getPercentileLabel(percentile) {
+  if (percentile >= 99) return 'Top 1%';
+  if (percentile >= 95) return 'Top 5%';
+  if (percentile >= 90) return 'Top 10%';
+  if (percentile >= 75) return 'Top 25%';
+  if (percentile >= 50) return 'Top 50%';
+  return `Top ${100 - percentile}%`;
+}
+
+// =============================================================================
+// LEADERBOARD SNAPSHOTS
+// =============================================================================
+
+/**
+ * Generate a leaderboard snapshot for historical tracking
+ * @param {string} period - Period type: 'weekly', 'monthly'
+ * @returns {object} Snapshot result
+ */
+export async function generateLeaderboardSnapshot(period = 'weekly') {
+  try {
+    const now = new Date();
+    const periodStart = new Date(now);
+    const periodEnd = new Date(now);
+
+    // Calculate period boundaries
+    if (period === 'weekly') {
+      // Start of current week (Monday)
+      const dayOfWeek = periodStart.getDay();
+      const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+      periodStart.setDate(periodStart.getDate() - daysToMonday);
+      periodStart.setHours(0, 0, 0, 0);
+
+      // End of week (Sunday)
+      periodEnd.setDate(periodStart.getDate() + 6);
+      periodEnd.setHours(23, 59, 59, 999);
+    } else if (period === 'monthly') {
+      // Start of current month
+      periodStart.setDate(1);
+      periodStart.setHours(0, 0, 0, 0);
+
+      // End of month
+      periodEnd.setMonth(periodEnd.getMonth() + 1);
+      periodEnd.setDate(0);
+      periodEnd.setHours(23, 59, 59, 999);
+    }
+
+    const snapshots = [];
+
+    // Generate snapshot for each leaderboard type
+    for (const type of Object.keys(LEADERBOARD_TYPES)) {
+      const leaderboard = await getLeaderboard(type, period, { limit: 100 });
+
+      if (leaderboard.error) {
+        console.error(`Failed to generate ${type} leaderboard:`, leaderboard.error);
+        continue;
+      }
+
+      const snapshotId = `${period}_${type}_${periodStart.toISOString().split('T')[0]}`;
+
+      // Check if snapshot already exists
+      const existing = await queryData(COLLECTION_KEYS.leaderboardSnapshots, {
+        filter: `{Snapshot ID} = "${snapshotId}"`,
+        limit: 1
+      });
+
+      const snapshotData = {
+        'Snapshot ID': snapshotId,
+        'Period Type': period,
+        'Period Start': periodStart.toISOString(),
+        'Period End': periodEnd.toISOString(),
+        'Leaderboard Type': type,
+        'Rankings JSON': JSON.stringify(leaderboard.rankings.slice(0, 100)),
+        'Total Participants': leaderboard.total,
+        'Created At': now.toISOString()
+      };
+
+      if (existing.length > 0) {
+        // Update existing snapshot
+        await updateData(COLLECTION_KEYS.leaderboardSnapshots, existing[0].id, snapshotData);
+      } else {
+        // Create new snapshot
+        await insertData(COLLECTION_KEYS.leaderboardSnapshots, snapshotData);
+      }
+
+      snapshots.push({
+        snapshotId,
+        type,
+        participants: leaderboard.total,
+        topRecruiter: leaderboard.rankings[0] || null
+      });
+    }
+
+    // Send notifications to top 10 for each leaderboard
+    await sendLeaderboardNotifications(period, periodStart.toISOString(), periodEnd.toISOString());
+
+    console.log(`✅ Generated ${snapshots.length} leaderboard snapshots for ${period}`);
+
+    return {
+      success: true,
+      period,
+      periodStart: periodStart.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+      snapshots,
+      generatedAt: now.toISOString()
+    };
+  } catch (error) {
+    console.error('generateLeaderboardSnapshot error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Send notifications to top 10 recruiters
+ * Sends both in-app notifications and email announcements for weekly leaderboards
+ */
+async function sendLeaderboardNotifications(period, periodStart, periodEnd) {
+  try {
+    // Get overall leaderboard top 10
+    const leaderboard = await getLeaderboard('overall', period, { limit: 10 });
+
+    if (leaderboard.error || !leaderboard.rankings) {
+      return;
+    }
+
+    const periodName = PERIODS[period]?.name || period;
+
+    // Send in-app notifications
+    for (const ranking of leaderboard.rankings) {
+      const message = ranking.rank === 1
+        ? `🏆 Congratulations! You're #1 on the ${periodName} leaderboard!`
+        : `🎉 You're ranked #${ranking.rank} on the ${periodName} leaderboard!`;
+
+      await createNotification(
+        ranking.recruiterId,
+        'leaderboard_ranking',
+        `Leaderboard Update: #${ranking.rank}`,
+        message,
+        '/recruiter/leaderboard'
+      );
+
+      await logGamificationEvent(ranking.recruiterId, 'recruiter', {
+        eventType: 'leaderboard_ranking',
+        action: 'top_10_ranking',
+        metadata: {
+          rank: ranking.rank,
+          period,
+          score: ranking.score
+        }
+      });
+    }
+
+    // Send email announcements for weekly leaderboards
+    if (period === 'weekly' && leaderboard.rankings.length > 0) {
+      const emailResult = await sendBatchLeaderboardAnnouncements(
+        leaderboard.rankings,
+        period,
+        'overall',
+        periodStart || new Date().toISOString(),
+        periodEnd || new Date().toISOString()
+      );
+      console.log(`📧 Weekly leaderboard emails: ${emailResult.sent} sent, ${emailResult.failed} failed`);
+    }
+  } catch (error) {
+    console.error('sendLeaderboardNotifications error:', error);
+  }
+}
+
+// =============================================================================
+// LEADERBOARD HISTORY
+// =============================================================================
+
+/**
+ * Get historical leaderboard positions for a recruiter
+ * @param {string} recruiterId - Recruiter ID
+ * @param {number} periods - Number of past periods to retrieve
+ * @param {string} periodType - 'weekly' or 'monthly'
+ * @returns {array} Historical positions
+ */
+export async function getLeaderboardHistory(recruiterId, periods = 12, periodType = 'weekly') {
+  try {
+    // Get snapshots for the specified period type
+    const snapshots = await queryData(COLLECTION_KEYS.leaderboardSnapshots, {
+      filter: `AND({Period Type} = "${periodType}", {Leaderboard Type} = "overall")`,
+      sort: [{ field: 'Period Start', direction: 'desc' }],
+      limit: periods
+    });
+
+    const history = [];
+
+    for (const snapshot of snapshots) {
+      try {
+        const rankings = JSON.parse(snapshot['Rankings JSON'] || '[]');
+        const userRanking = rankings.find(r => r.recruiterId === recruiterId);
+
+        history.push({
+          periodStart: snapshot['Period Start'],
+          periodEnd: snapshot['Period End'],
+          periodType: snapshot['Period Type'],
+          position: userRanking?.rank || null,
+          score: userRanking?.score || null,
+          totalParticipants: snapshot['Total Participants'] || rankings.length,
+          onLeaderboard: !!userRanking
+        });
+      } catch (parseError) {
+        console.error('Error parsing snapshot:', parseError);
+      }
+    }
+
+    // Calculate trends
+    const trends = calculateTrends(history);
+
+    return {
+      recruiterId,
+      periodType,
+      history,
+      trends,
+      periodsAnalyzed: history.length
+    };
+  } catch (error) {
+    console.error('getLeaderboardHistory error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Calculate trends from history
+ */
+function calculateTrends(history) {
+  if (history.length < 2) {
+    return { trend: 'stable', change: 0 };
+  }
+
+  const recent = history.slice(0, 3).filter(h => h.position !== null);
+  const older = history.slice(3, 6).filter(h => h.position !== null);
+
+  if (recent.length === 0 || older.length === 0) {
+    return { trend: 'new', change: 0 };
+  }
+
+  const recentAvg = recent.reduce((sum, h) => sum + h.position, 0) / recent.length;
+  const olderAvg = older.reduce((sum, h) => sum + h.position, 0) / older.length;
+
+  const change = olderAvg - recentAvg; // Positive means improvement (lower rank number)
+
+  let trend;
+  if (change > 2) {
+    trend = 'improving';
+  } else if (change < -2) {
+    trend = 'declining';
+  } else {
+    trend = 'stable';
+  }
+
+  return {
+    trend,
+    change: Math.round(change * 10) / 10,
+    recentAvgPosition: Math.round(recentAvg),
+    previousAvgPosition: Math.round(olderAvg)
+  };
+}
+
+// =============================================================================
+// LEADERBOARD METADATA
+// =============================================================================
+
+/**
+ * Get leaderboard types and configuration
+ * @returns {object} Leaderboard types configuration
+ */
+export function getLeaderboardTypes() {
+  return Object.entries(LEADERBOARD_TYPES).map(([key, config]) => ({
+    type: key,
+    ...config
+  }));
+}
+
+/**
+ * Get available periods
+ * @returns {object} Period configurations
+ */
+export function getLeaderboardPeriods() {
+  return Object.entries(PERIODS).map(([key, config]) => ({
+    period: key,
+    ...config
+  }));
+}
+
+/**
+ * Get leaderboard summary for dashboard
+ * @param {string} recruiterId - Optional recruiter ID to include their position
+ * @returns {object} Summary of all leaderboards
+ */
+export async function getLeaderboardSummary(recruiterId = null) {
+  try {
+    const summary = {
+      leaderboards: [],
+      userPositions: null,
+      generatedAt: new Date().toISOString()
+    };
+
+    // Get top 3 from each leaderboard type
+    for (const type of Object.keys(LEADERBOARD_TYPES)) {
+      const leaderboard = await getLeaderboard(type, 'monthly', { limit: 3 });
+
+      if (!leaderboard.error) {
+        summary.leaderboards.push({
+          type,
+          typeName: leaderboard.typeName,
+          typeIcon: LEADERBOARD_TYPES[type].icon,
+          typeColor: LEADERBOARD_TYPES[type].color,
+          topThree: leaderboard.rankings,
+          totalParticipants: leaderboard.total
+        });
+      }
+    }
+
+    // Get user's positions if recruiterId provided
+    if (recruiterId) {
+      summary.userPositions = {};
+      for (const type of Object.keys(LEADERBOARD_TYPES)) {
+        const position = await getUserLeaderboardPosition(recruiterId, type, 'monthly');
+        if (!position.error) {
+          summary.userPositions[type] = {
+            position: position.position,
+            total: position.total,
+            percentile: position.percentile,
+            score: position.score
+          };
+        }
+      }
+    }
+
+    return summary;
+  } catch (error) {
+    console.error('getLeaderboardSummary error:', error);
+    return { error: error.message };
+  }
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+/**
+ * Normalize Airtable recruiter progression record
+ */
+function normalizeRecruiterProgression(record) {
+  return {
+    _id: record.id,
+    recruiterId: record['Recruiter ID'],
+    recruiterName: record['Recruiter Name'],
+    carrierId: record['Carrier ID'],
+    carrierName: record['Carrier Name'],
+    currentPoints: record['Current Points'] || 0,
+    rank: record['Rank'] || 1,
+    rankTitle: record['Rank Title'] || 'Scout',
+    totalHires: record['Total Hires'] || 0,
+    totalOutreach: record['Total Outreach'] || 0,
+    avgResponseHours: record['Avg Response Hours'] || null,
+    acceptanceRate: record['Hire Acceptance Rate'] || 0,
+    retentionRate: record['Retention 90 Day Rate'] || 0,
+    driverSatisfactionAvg: record['Driver Satisfaction Avg'] || 0,
+    createdAt: record['Created At'],
+    updatedAt: record['Updated At']
+  };
+}
+
+// =============================================================================
+// BATCH OPERATIONS
+// =============================================================================
+
+/**
+ * Generate all leaderboard snapshots (for scheduled job)
+ * @returns {object} Results
+ */
+export async function generateAllLeaderboardSnapshots() {
+  try {
+    const results = {
+      weekly: await generateLeaderboardSnapshot('weekly'),
+      monthly: await generateLeaderboardSnapshot('monthly')
+    };
+
+    console.log('✅ All leaderboard snapshots generated');
+    return results;
+  } catch (error) {
+    console.error('generateAllLeaderboardSnapshots error:', error);
+    return { error: error.message };
+  }
+}

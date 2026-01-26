@@ -110,7 +110,12 @@ export const RECRUITER_POINT_ACTIONS = {
   complete_carrier_profile: { points: 100, oneTime: true, description: 'Complete carrier profile' },
   add_job_posting: { points: 25, description: 'Add job posting' },
   update_job_posting: { points: 10, description: 'Update job posting' },
-  maintain_high_rating: { points: 100, monthlyLimit: 1, description: 'Maintain 4+ rating (monthly)' }
+  maintain_high_rating: { points: 100, monthlyLimit: 1, description: 'Maintain 4+ rating (monthly)' },
+
+  // Badge & Achievement Actions
+  badge_earned: { points: 50, description: 'Earn a new badge' },
+  badge_tier_upgrade: { points: 100, description: 'Upgrade badge tier' },
+  achievement_earned: { points: 25, description: 'Earn an achievement' }
 };
 
 // =============================================================================
