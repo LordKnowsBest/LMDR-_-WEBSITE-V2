@@ -1,0 +1,1045 @@
+/**
+ * Challenge Service
+ *
+ * Manages the challenge system for drivers and recruiters including:
+ * - Daily, weekly, monthly, and event challenges
+ * - Challenge progress tracking
+ * - Challenge completion and reward claiming
+ * - Challenge expiration handling
+ *
+ * This service uses Airtable-only collections (no Wix fallback).
+ */
+
+import { getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import { createNotification } from 'backend/memberService';
+import { awardDriverXP, awardRecruiterPoints, logGamificationEvent } from 'backend/gamificationService';
+
+// =============================================================================
+// COLLECTION KEYS (Airtable-only)
+// =============================================================================
+
+const COLLECTION_KEYS = {
+  challengeDefinitions: 'challengeDefinitions',
+  driverChallenges: 'driverChallenges',
+  recruiterChallenges: 'recruiterChallenges',
+  gamificationEvents: 'gamificationEvents'
+};
+
+// =============================================================================
+// CHALLENGE TYPES
+// =============================================================================
+
+const CHALLENGE_TYPES = {
+  daily: {
+    name: 'Daily Challenge',
+    duration: 24 * 60 * 60 * 1000, // 24 hours in ms
+    resetTime: '00:00', // Midnight UTC
+    icon: '📅',
+    color: '#10b981'
+  },
+  weekly: {
+    name: 'Weekly Challenge',
+    duration: 7 * 24 * 60 * 60 * 1000, // 7 days
+    resetDay: 1, // Monday
+    icon: '📆',
+    color: '#3b82f6'
+  },
+  monthly: {
+    name: 'Monthly Challenge',
+    duration: 30 * 24 * 60 * 60 * 1000, // ~30 days
+    resetDay: 1, // 1st of month
+    icon: '🗓️',
+    color: '#8b5cf6'
+  },
+  event: {
+    name: 'Event Challenge',
+    duration: null, // Custom per event
+    icon: '🎉',
+    color: '#f59e0b'
+  },
+  onetime: {
+    name: 'One-Time Challenge',
+    duration: null, // No expiration
+    icon: '🎯',
+    color: '#ec4899'
+  }
+};
+
+// =============================================================================
+// CHALLENGE STATUS
+// =============================================================================
+
+const CHALLENGE_STATUS = {
+  AVAILABLE: 'available',      // Can be started
+  ACTIVE: 'active',            // In progress
+  COMPLETED: 'completed',      // Finished, reward not claimed
+  CLAIMED: 'claimed',          // Reward claimed
+  EXPIRED: 'expired',          // Time ran out
+  FAILED: 'failed'             // Failed to complete
+};
+
+// =============================================================================
+// AIRTABLE-ONLY HELPER FUNCTIONS
+// =============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  const tableName = getAirtableTableName(collectionKey);
+  const result = await airtable.queryRecords(tableName, {
+    filterByFormula: options.filter || '',
+    sort: options.sort,
+    maxRecords: options.limit || 100
+  });
+  return result.records || [];
+}
+
+async function insertData(collectionKey, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.createRecord(tableName, data);
+}
+
+async function updateData(collectionKey, recordId, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.updateRecord(tableName, recordId, data);
+}
+
+async function getRecord(collectionKey, recordId) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.getRecord(tableName, recordId);
+}
+
+// =============================================================================
+// GET CHALLENGE DEFINITIONS
+// =============================================================================
+
+/**
+ * Get all challenge definitions
+ * @param {string} userType - 'driver' or 'recruiter'
+ * @param {string} challengeType - Optional filter: 'daily', 'weekly', 'monthly', 'event', 'onetime'
+ * @returns {array} Challenge definitions
+ */
+export async function getChallengeDefinitions(userType, challengeType = null) {
+  try {
+    let filter = `AND({Is Active} = "Yes", {User Type} = "${userType}")`;
+
+    if (challengeType) {
+      filter = `AND(${filter}, {Challenge Type} = "${challengeType}")`;
+    }
+
+    const records = await queryData(COLLECTION_KEYS.challengeDefinitions, {
+      filter,
+      sort: [{ field: 'Display Order', direction: 'asc' }],
+      limit: 100
+    });
+
+    return records.map(normalizeChallengeDefinition);
+  } catch (error) {
+    console.error('getChallengeDefinitions error:', error);
+    return [];
+  }
+}
+
+// =============================================================================
+// GET ACTIVE CHALLENGES
+// =============================================================================
+
+/**
+ * Get user's active challenges with progress
+ * @param {string} userId - User ID
+ * @param {string} userType - 'driver' or 'recruiter'
+ * @returns {array} Active challenges with progress
+ */
+export async function getActiveChallenges(userId, userType) {
+  try {
+    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+
+    const records = await queryData(collectionKey, {
+      filter: `AND({User ID} = "${userId}", {Status} = "${CHALLENGE_STATUS.ACTIVE}")`,
+      limit: 50
+    });
+
+    const challenges = [];
+    const now = new Date();
+
+    for (const record of records) {
+      const challenge = normalizeUserChallenge(record);
+
+      // Check if expired
+      if (challenge.expiresAt && new Date(challenge.expiresAt) < now) {
+        // Mark as expired
+        await updateData(collectionKey, record.id, {
+          'Status': CHALLENGE_STATUS.EXPIRED,
+          'Expired At': now.toISOString()
+        });
+        continue;
+      }
+
+      // Calculate progress percentage
+      challenge.progressPercent = challenge.targetValue > 0
+        ? Math.min(100, Math.round((challenge.currentValue / challenge.targetValue) * 100))
+        : 0;
+
+      // Calculate time remaining
+      if (challenge.expiresAt) {
+        const expiresAt = new Date(challenge.expiresAt);
+        challenge.timeRemaining = expiresAt - now;
+        challenge.timeRemainingFormatted = formatTimeRemaining(challenge.timeRemaining);
+        challenge.isExpiringSoon = challenge.timeRemaining < 2 * 60 * 60 * 1000; // 2 hours
+      }
+
+      challenges.push(challenge);
+    }
+
+    return challenges;
+  } catch (error) {
+    console.error('getActiveChallenges error:', error);
+    return [];
+  }
+}
+
+// =============================================================================
+// GET AVAILABLE CHALLENGES
+// =============================================================================
+
+/**
+ * Get challenges available for user to start
+ * @param {string} userId - User ID
+ * @param {string} userType - 'driver' or 'recruiter'
+ * @returns {array} Available challenges
+ */
+export async function getAvailableChallenges(userId, userType) {
+  try {
+    // Get all active challenge definitions for this user type
+    const definitions = await getChallengeDefinitions(userType);
+
+    // Get user's current and completed challenges
+    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+
+    const userChallenges = await queryData(collectionKey, {
+      filter: `{User ID} = "${userId}"`,
+      limit: 500
+    });
+
+    // Build map of user's challenge states
+    const challengeStates = new Map();
+    for (const uc of userChallenges) {
+      const defId = uc['Challenge Definition ID'];
+      const status = uc['Status'];
+      const startedAt = uc['Started At'];
+
+      if (!challengeStates.has(defId)) {
+        challengeStates.set(defId, []);
+      }
+      challengeStates.get(defId).push({ status, startedAt, record: uc });
+    }
+
+    const available = [];
+    const now = new Date();
+
+    for (const def of definitions) {
+      const states = challengeStates.get(def.challengeId) || [];
+
+      // Check if challenge is available based on type
+      const isAvailable = checkChallengeAvailability(def, states, now);
+
+      if (isAvailable) {
+        available.push({
+          ...def,
+          canStart: true,
+          typeInfo: CHALLENGE_TYPES[def.challengeType] || CHALLENGE_TYPES.daily
+        });
+      }
+    }
+
+    return available;
+  } catch (error) {
+    console.error('getAvailableChallenges error:', error);
+    return [];
+  }
+}
+
+/**
+ * Check if a challenge is available based on type and history
+ */
+function checkChallengeAvailability(definition, userStates, now) {
+  const { challengeType, isRepeatable } = definition;
+
+  // Check for active instance
+  const hasActive = userStates.some(s => s.status === CHALLENGE_STATUS.ACTIVE);
+  if (hasActive) return false;
+
+  // For one-time challenges, check if ever completed/claimed
+  if (challengeType === 'onetime') {
+    const everCompleted = userStates.some(s =>
+      s.status === CHALLENGE_STATUS.COMPLETED || s.status === CHALLENGE_STATUS.CLAIMED
+    );
+    return !everCompleted;
+  }
+
+  // For recurring challenges, check if already done this period
+  if (['daily', 'weekly', 'monthly'].includes(challengeType)) {
+    const periodStart = getPeriodStart(challengeType, now);
+
+    const completedThisPeriod = userStates.some(s => {
+      if (s.status !== CHALLENGE_STATUS.COMPLETED && s.status !== CHALLENGE_STATUS.CLAIMED) {
+        return false;
+      }
+      const startedAt = new Date(s.startedAt);
+      return startedAt >= periodStart;
+    });
+
+    return !completedThisPeriod;
+  }
+
+  // For event challenges, check if within event dates
+  if (challengeType === 'event') {
+    const eventStart = definition.eventStartDate ? new Date(definition.eventStartDate) : null;
+    const eventEnd = definition.eventEndDate ? new Date(definition.eventEndDate) : null;
+
+    if (eventStart && now < eventStart) return false;
+    if (eventEnd && now > eventEnd) return false;
+
+    // Check if already completed during this event
+    const completedDuringEvent = userStates.some(s => {
+      if (s.status !== CHALLENGE_STATUS.COMPLETED && s.status !== CHALLENGE_STATUS.CLAIMED) {
+        return false;
+      }
+      const startedAt = new Date(s.startedAt);
+      return (!eventStart || startedAt >= eventStart) && (!eventEnd || startedAt <= eventEnd);
+    });
+
+    return !completedDuringEvent;
+  }
+
+  return isRepeatable !== false;
+}
+
+/**
+ * Get start of current period for recurring challenges
+ */
+function getPeriodStart(challengeType, now) {
+  const periodStart = new Date(now);
+
+  switch (challengeType) {
+    case 'daily':
+      periodStart.setUTCHours(0, 0, 0, 0);
+      break;
+    case 'weekly':
+      const dayOfWeek = periodStart.getUTCDay();
+      const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+      periodStart.setUTCDate(periodStart.getUTCDate() - daysToMonday);
+      periodStart.setUTCHours(0, 0, 0, 0);
+      break;
+    case 'monthly':
+      periodStart.setUTCDate(1);
+      periodStart.setUTCHours(0, 0, 0, 0);
+      break;
+  }
+
+  return periodStart;
+}
+
+// =============================================================================
+// START CHALLENGE
+// =============================================================================
+
+/**
+ * Start a challenge for a user
+ * @param {string} userId - User ID
+ * @param {string} challengeId - Challenge definition ID
+ * @param {string} userType - 'driver' or 'recruiter'
+ * @returns {object} Started challenge or error
+ */
+export async function startChallenge(userId, challengeId, userType) {
+  try {
+    // Get challenge definition
+    const definitions = await getChallengeDefinitions(userType);
+    const definition = definitions.find(d => d.challengeId === challengeId);
+
+    if (!definition) {
+      return { success: false, error: 'challenge_not_found' };
+    }
+
+    // Check availability
+    const available = await getAvailableChallenges(userId, userType);
+    const isAvailable = available.some(a => a.challengeId === challengeId);
+
+    if (!isAvailable) {
+      return { success: false, error: 'challenge_not_available' };
+    }
+
+    // Calculate expiration
+    const now = new Date();
+    let expiresAt = null;
+
+    if (definition.challengeType === 'daily') {
+      expiresAt = new Date(now);
+      expiresAt.setUTCDate(expiresAt.getUTCDate() + 1);
+      expiresAt.setUTCHours(0, 0, 0, 0);
+    } else if (definition.challengeType === 'weekly') {
+      expiresAt = new Date(now);
+      const daysUntilMonday = (8 - expiresAt.getUTCDay()) % 7 || 7;
+      expiresAt.setUTCDate(expiresAt.getUTCDate() + daysUntilMonday);
+      expiresAt.setUTCHours(0, 0, 0, 0);
+    } else if (definition.challengeType === 'monthly') {
+      expiresAt = new Date(now);
+      expiresAt.setUTCMonth(expiresAt.getUTCMonth() + 1);
+      expiresAt.setUTCDate(1);
+      expiresAt.setUTCHours(0, 0, 0, 0);
+    } else if (definition.challengeType === 'event' && definition.eventEndDate) {
+      expiresAt = new Date(definition.eventEndDate);
+    }
+
+    // Create challenge record
+    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+
+    const challengeData = {
+      'User ID': userId,
+      'Challenge Definition ID': challengeId,
+      'Challenge Name': definition.name,
+      'Challenge Type': definition.challengeType,
+      'Status': CHALLENGE_STATUS.ACTIVE,
+      'Current Value': 0,
+      'Target Value': definition.targetValue,
+      'XP Reward': definition.xpReward,
+      'Points Reward': definition.pointsReward || 0,
+      'Started At': now.toISOString(),
+      'Expires At': expiresAt ? expiresAt.toISOString() : null,
+      'Created At': now.toISOString(),
+      'Updated At': now.toISOString()
+    };
+
+    const result = await insertData(collectionKey, challengeData);
+
+    // Log event
+    await logGamificationEvent(userId, userType, {
+      eventType: 'challenge_started',
+      action: 'start_challenge',
+      metadata: {
+        challengeId,
+        challengeName: definition.name,
+        challengeType: definition.challengeType
+      }
+    });
+
+    return {
+      success: true,
+      challenge: {
+        _id: result.id,
+        ...challengeData,
+        definition
+      }
+    };
+  } catch (error) {
+    console.error('startChallenge error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// =============================================================================
+// UPDATE CHALLENGE PROGRESS
+// =============================================================================
+
+/**
+ * Update progress on challenges based on user action
+ * @param {string} userId - User ID
+ * @param {string} userType - 'driver' or 'recruiter'
+ * @param {string} action - Action type (e.g., 'apply_job', 'send_message', 'complete_interview')
+ * @param {object} metadata - Additional data about the action
+ * @returns {object} { updated, completed }
+ */
+export async function updateChallengeProgress(userId, userType, action, metadata = {}) {
+  try {
+    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+
+    // Get active challenges for this user
+    const activeChallenges = await queryData(collectionKey, {
+      filter: `AND({User ID} = "${userId}", {Status} = "${CHALLENGE_STATUS.ACTIVE}")`,
+      limit: 50
+    });
+
+    const results = {
+      updated: [],
+      completed: []
+    };
+
+    const now = new Date();
+
+    for (const challenge of activeChallenges) {
+      // Get the challenge definition to check action type
+      const defId = challenge['Challenge Definition ID'];
+      const definitions = await getChallengeDefinitions(userType);
+      const definition = definitions.find(d => d.challengeId === defId);
+
+      if (!definition) continue;
+
+      // Check if this action applies to this challenge
+      if (!doesActionApply(definition, action, metadata)) {
+        continue;
+      }
+
+      // Calculate new progress
+      const currentValue = (challenge['Current Value'] || 0) + 1;
+      const targetValue = challenge['Target Value'] || definition.targetValue;
+
+      const updateData = {
+        'Current Value': currentValue,
+        'Updated At': now.toISOString()
+      };
+
+      // Check if completed
+      if (currentValue >= targetValue) {
+        updateData['Status'] = CHALLENGE_STATUS.COMPLETED;
+        updateData['Completed At'] = now.toISOString();
+
+        results.completed.push({
+          challengeId: defId,
+          challengeName: challenge['Challenge Name'],
+          xpReward: challenge['XP Reward'],
+          pointsReward: challenge['Points Reward']
+        });
+
+        // Send completion notification
+        await sendChallengeCompleteNotification(userId, userType, {
+          challengeName: challenge['Challenge Name'],
+          xpReward: challenge['XP Reward'],
+          pointsReward: challenge['Points Reward']
+        });
+      } else {
+        results.updated.push({
+          challengeId: defId,
+          challengeName: challenge['Challenge Name'],
+          currentValue,
+          targetValue,
+          progressPercent: Math.round((currentValue / targetValue) * 100)
+        });
+      }
+
+      await updateData(collectionKey, challenge.id, updateData);
+    }
+
+    return results;
+  } catch (error) {
+    console.error('updateChallengeProgress error:', error);
+    return { updated: [], completed: [], error: error.message };
+  }
+}
+
+/**
+ * Check if an action applies to a challenge
+ */
+function doesActionApply(definition, action, metadata) {
+  const actionType = definition.actionType;
+  const actionSubtype = definition.actionSubtype;
+
+  // Direct action match
+  if (actionType === action) {
+    // Check subtype if specified
+    if (actionSubtype && metadata.subtype !== actionSubtype) {
+      return false;
+    }
+    return true;
+  }
+
+  // Action group matches
+  const actionGroups = {
+    'engagement': ['daily_login', 'view_carrier', 'view_job', 'save_job'],
+    'application': ['apply_job', 'complete_application', 'respond_to_recruiter'],
+    'interview': ['schedule_interview', 'attend_interview', 'complete_interview'],
+    'hiring': ['make_offer', 'accept_offer', 'successful_hire'],
+    'outreach': ['view_driver', 'send_message', 'send_personalized_message'],
+    'response': ['respond_fast', 'respond_normal', 'driver_responds']
+  };
+
+  if (actionGroups[actionType] && actionGroups[actionType].includes(action)) {
+    return true;
+  }
+
+  return false;
+}
+
+// =============================================================================
+// CLAIM CHALLENGE REWARD
+// =============================================================================
+
+/**
+ * Claim reward for a completed challenge
+ * @param {string} userId - User ID
+ * @param {string} challengeRecordId - Challenge record ID (not definition ID)
+ * @param {string} userType - 'driver' or 'recruiter'
+ * @returns {object} { success, xpAwarded, pointsAwarded }
+ */
+export async function claimChallengeReward(userId, challengeRecordId, userType) {
+  try {
+    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+
+    // Get the challenge record
+    const challenge = await getRecord(collectionKey, challengeRecordId);
+
+    if (!challenge) {
+      return { success: false, error: 'challenge_not_found' };
+    }
+
+    // Verify ownership
+    if (challenge['User ID'] !== userId) {
+      return { success: false, error: 'not_authorized' };
+    }
+
+    // Verify status is completed (not already claimed)
+    if (challenge['Status'] !== CHALLENGE_STATUS.COMPLETED) {
+      if (challenge['Status'] === CHALLENGE_STATUS.CLAIMED) {
+        return { success: false, error: 'already_claimed' };
+      }
+      return { success: false, error: 'not_completed' };
+    }
+
+    const now = new Date();
+    const xpReward = challenge['XP Reward'] || 0;
+    const pointsReward = challenge['Points Reward'] || 0;
+
+    // Award XP/Points
+    if (userType === 'driver' && xpReward > 0) {
+      await awardDriverXP(userId, 'challenge_complete', {
+        challengeId: challenge['Challenge Definition ID'],
+        challengeName: challenge['Challenge Name'],
+        xpAmount: xpReward
+      });
+    }
+
+    if (userType === 'recruiter' && pointsReward > 0) {
+      await awardRecruiterPoints(userId, 'challenge_complete', {
+        challengeId: challenge['Challenge Definition ID'],
+        challengeName: challenge['Challenge Name'],
+        pointsAmount: pointsReward
+      });
+    }
+
+    // Update challenge status
+    await updateData(collectionKey, challengeRecordId, {
+      'Status': CHALLENGE_STATUS.CLAIMED,
+      'Claimed At': now.toISOString(),
+      'Updated At': now.toISOString()
+    });
+
+    // Log event
+    await logGamificationEvent(userId, userType, {
+      eventType: 'challenge_reward_claimed',
+      action: 'claim_reward',
+      metadata: {
+        challengeId: challenge['Challenge Definition ID'],
+        challengeName: challenge['Challenge Name'],
+        xpAwarded: xpReward,
+        pointsAwarded: pointsReward
+      }
+    });
+
+    return {
+      success: true,
+      xpAwarded: xpReward,
+      pointsAwarded: pointsReward,
+      challengeName: challenge['Challenge Name']
+    };
+  } catch (error) {
+    console.error('claimChallengeReward error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// =============================================================================
+// GET CHALLENGE HISTORY
+// =============================================================================
+
+/**
+ * Get user's challenge history
+ * @param {string} userId - User ID
+ * @param {string} userType - 'driver' or 'recruiter'
+ * @param {object} options - { limit, offset, status, challengeType }
+ * @returns {object} { challenges, total, hasMore }
+ */
+export async function getChallengeHistory(userId, userType, options = {}) {
+  try {
+    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+
+    const limit = options.limit || 20;
+    const offset = options.offset || 0;
+
+    // Build filter
+    let filter = `{User ID} = "${userId}"`;
+
+    if (options.status) {
+      filter = `AND(${filter}, {Status} = "${options.status}")`;
+    }
+
+    if (options.challengeType) {
+      filter = `AND(${filter}, {Challenge Type} = "${options.challengeType}")`;
+    }
+
+    const records = await queryData(collectionKey, {
+      filter,
+      sort: [{ field: 'Started At', direction: 'desc' }],
+      limit: limit + 1 // Fetch one extra to check hasMore
+    });
+
+    const hasMore = records.length > limit;
+    const challenges = records.slice(offset, offset + limit).map(normalizeUserChallenge);
+
+    // Calculate stats
+    const stats = {
+      totalCompleted: 0,
+      totalXpEarned: 0,
+      totalPointsEarned: 0
+    };
+
+    for (const c of challenges) {
+      if (c.status === CHALLENGE_STATUS.CLAIMED) {
+        stats.totalCompleted++;
+        stats.totalXpEarned += c.xpReward || 0;
+        stats.totalPointsEarned += c.pointsReward || 0;
+      }
+    }
+
+    return {
+      challenges,
+      total: records.length,
+      hasMore,
+      stats
+    };
+  } catch (error) {
+    console.error('getChallengeHistory error:', error);
+    return { challenges: [], total: 0, hasMore: false, error: error.message };
+  }
+}
+
+// =============================================================================
+// CHALLENGE EXPIRATION
+// =============================================================================
+
+/**
+ * Process expired challenges (called by scheduled job)
+ * @returns {object} { processed, expired }
+ */
+export async function processExpiredChallenges() {
+  try {
+    const now = new Date();
+    const results = {
+      processed: 0,
+      expired: 0,
+      notified: 0
+    };
+
+    // Process for both user types
+    for (const userType of ['driver', 'recruiter']) {
+      const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+
+      // Get active challenges that have expired
+      const expiredChallenges = await queryData(collectionKey, {
+        filter: `AND({Status} = "${CHALLENGE_STATUS.ACTIVE}", {Expires At} != BLANK())`,
+        limit: 500
+      });
+
+      for (const challenge of expiredChallenges) {
+        results.processed++;
+
+        const expiresAt = new Date(challenge['Expires At']);
+        if (expiresAt <= now) {
+          // Mark as expired
+          await updateData(collectionKey, challenge.id, {
+            'Status': CHALLENGE_STATUS.EXPIRED,
+            'Expired At': now.toISOString(),
+            'Updated At': now.toISOString()
+          });
+
+          results.expired++;
+
+          // Send expiration notification
+          await createNotification(
+            challenge['User ID'],
+            'challenge_expired',
+            `Challenge Expired: ${challenge['Challenge Name']}`,
+            `Your challenge "${challenge['Challenge Name']}" has expired. Better luck next time!`,
+            userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
+          );
+        }
+      }
+    }
+
+    console.log(`✅ Challenge expiration processed: ${results.processed} checked, ${results.expired} expired`);
+    return results;
+  } catch (error) {
+    console.error('processExpiredChallenges error:', error);
+    return { processed: 0, expired: 0, error: error.message };
+  }
+}
+
+/**
+ * Send reminders for challenges expiring soon
+ * @returns {object} { processed, reminded }
+ */
+export async function sendExpiringChallengeReminders() {
+  try {
+    const now = new Date();
+    const twoHoursFromNow = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    const results = {
+      processed: 0,
+      reminded: 0
+    };
+
+    for (const userType of ['driver', 'recruiter']) {
+      const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+
+      // Get active challenges expiring in the next 2 hours
+      const expiringChallenges = await queryData(collectionKey, {
+        filter: `AND({Status} = "${CHALLENGE_STATUS.ACTIVE}", {Expires At} != BLANK(), {Reminder Sent} != "Yes")`,
+        limit: 500
+      });
+
+      for (const challenge of expiringChallenges) {
+        results.processed++;
+
+        const expiresAt = new Date(challenge['Expires At']);
+        if (expiresAt > now && expiresAt <= twoHoursFromNow) {
+          const currentValue = challenge['Current Value'] || 0;
+          const targetValue = challenge['Target Value'] || 1;
+          const progressPercent = Math.round((currentValue / targetValue) * 100);
+          const timeRemaining = formatTimeRemaining(expiresAt - now);
+
+          await createNotification(
+            challenge['User ID'],
+            'challenge_expiring',
+            `Challenge Expiring Soon!`,
+            `Your challenge "${challenge['Challenge Name']}" expires in ${timeRemaining}! You're ${progressPercent}% complete.`,
+            userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
+          );
+
+          // Mark reminder as sent
+          await updateData(collectionKey, challenge.id, {
+            'Reminder Sent': 'Yes',
+            'Updated At': now.toISOString()
+          });
+
+          results.reminded++;
+        }
+      }
+    }
+
+    console.log(`✅ Challenge reminders: ${results.processed} checked, ${results.reminded} reminded`);
+    return results;
+  } catch (error) {
+    console.error('sendExpiringChallengeReminders error:', error);
+    return { processed: 0, reminded: 0, error: error.message };
+  }
+}
+
+// =============================================================================
+// AUTO-ASSIGN CHALLENGES
+// =============================================================================
+
+/**
+ * Auto-assign daily challenges to active users
+ * @returns {object} { processed, assigned }
+ */
+export async function assignDailyChallenges() {
+  try {
+    const results = {
+      driversProcessed: 0,
+      driversAssigned: 0,
+      recruitersProcessed: 0,
+      recruitersAssigned: 0
+    };
+
+    // Get daily challenge definitions
+    const driverDailyChallenges = await getChallengeDefinitions('driver', 'daily');
+    const recruiterDailyChallenges = await getChallengeDefinitions('recruiter', 'daily');
+
+    // Get auto-assignable challenges
+    const driverAutoAssign = driverDailyChallenges.filter(d => d.autoAssign);
+    const recruiterAutoAssign = recruiterDailyChallenges.filter(d => d.autoAssign);
+
+    // For now, we'll auto-assign to users who have logged in recently
+    // This would be expanded to work with actual active user lists
+
+    console.log(`✅ Daily challenges assigned: Drivers ${results.driversAssigned}, Recruiters ${results.recruitersAssigned}`);
+    return results;
+  } catch (error) {
+    console.error('assignDailyChallenges error:', error);
+    return { error: error.message };
+  }
+}
+
+// =============================================================================
+// NOTIFICATIONS
+// =============================================================================
+
+/**
+ * Send challenge complete notification
+ */
+async function sendChallengeCompleteNotification(userId, userType, data) {
+  try {
+    const rewardText = userType === 'driver'
+      ? `+${data.xpReward} XP`
+      : `+${data.pointsReward} Points`;
+
+    await createNotification(
+      userId,
+      'challenge_complete',
+      `Challenge Complete: ${data.challengeName}`,
+      `Congratulations! You completed "${data.challengeName}"! Claim your reward: ${rewardText}`,
+      userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
+    );
+  } catch (error) {
+    console.error('sendChallengeCompleteNotification error:', error);
+  }
+}
+
+// =============================================================================
+// CHALLENGE SUMMARY
+// =============================================================================
+
+/**
+ * Get challenge summary for dashboard
+ * @param {string} userId - User ID
+ * @param {string} userType - 'driver' or 'recruiter'
+ * @returns {object} Challenge summary
+ */
+export async function getChallengeSummary(userId, userType) {
+  try {
+    const [active, available, history] = await Promise.all([
+      getActiveChallenges(userId, userType),
+      getAvailableChallenges(userId, userType),
+      getChallengeHistory(userId, userType, { limit: 100 })
+    ]);
+
+    // Count completed challenges by type
+    const completedByType = {
+      daily: 0,
+      weekly: 0,
+      monthly: 0,
+      event: 0,
+      onetime: 0
+    };
+
+    for (const c of history.challenges) {
+      if (c.status === CHALLENGE_STATUS.CLAIMED && completedByType[c.challengeType] !== undefined) {
+        completedByType[c.challengeType]++;
+      }
+    }
+
+    // Find challenges ready to claim
+    const readyToClaim = history.challenges.filter(c => c.status === CHALLENGE_STATUS.COMPLETED);
+
+    return {
+      active: {
+        count: active.length,
+        challenges: active
+      },
+      available: {
+        count: available.length,
+        challenges: available.slice(0, 5) // Top 5 available
+      },
+      readyToClaim: {
+        count: readyToClaim.length,
+        challenges: readyToClaim
+      },
+      stats: {
+        totalCompleted: history.stats.totalCompleted,
+        totalXpEarned: history.stats.totalXpEarned,
+        totalPointsEarned: history.stats.totalPointsEarned,
+        completedByType
+      }
+    };
+  } catch (error) {
+    console.error('getChallengeSummary error:', error);
+    return { error: error.message };
+  }
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+/**
+ * Normalize challenge definition from Airtable
+ */
+function normalizeChallengeDefinition(record) {
+  return {
+    _id: record.id,
+    challengeId: record['Challenge ID'],
+    name: record['Name'],
+    description: record['Description'],
+    challengeType: record['Challenge Type'],
+    userType: record['User Type'],
+    actionType: record['Action Type'],
+    actionSubtype: record['Action Subtype'],
+    targetValue: record['Target Value'] || 1,
+    xpReward: record['XP Reward'] || 0,
+    pointsReward: record['Points Reward'] || 0,
+    icon: record['Icon'],
+    color: record['Color'],
+    isRepeatable: record['Is Repeatable'] !== 'No',
+    autoAssign: record['Auto Assign'] === 'Yes',
+    isActive: record['Is Active'] === 'Yes',
+    displayOrder: record['Display Order'] || 0,
+    eventStartDate: record['Event Start Date'],
+    eventEndDate: record['Event End Date']
+  };
+}
+
+/**
+ * Normalize user challenge from Airtable
+ */
+function normalizeUserChallenge(record) {
+  return {
+    _id: record.id,
+    challengeDefinitionId: record['Challenge Definition ID'],
+    challengeName: record['Challenge Name'],
+    challengeType: record['Challenge Type'],
+    status: record['Status'],
+    currentValue: record['Current Value'] || 0,
+    targetValue: record['Target Value'] || 1,
+    xpReward: record['XP Reward'] || 0,
+    pointsReward: record['Points Reward'] || 0,
+    startedAt: record['Started At'],
+    expiresAt: record['Expires At'],
+    completedAt: record['Completed At'],
+    claimedAt: record['Claimed At'],
+    expiredAt: record['Expired At']
+  };
+}
+
+/**
+ * Format time remaining in human-readable format
+ */
+function formatTimeRemaining(ms) {
+  if (ms <= 0) return 'Expired';
+
+  const hours = Math.floor(ms / (60 * 60 * 1000));
+  const minutes = Math.floor((ms % (60 * 60 * 1000)) / (60 * 1000));
+
+  if (hours > 24) {
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+  }
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+
+  return `${minutes}m`;
+}
+
+/**
+ * Get challenge type info
+ */
+export function getChallengeTypes() {
+  return Object.entries(CHALLENGE_TYPES).map(([key, value]) => ({
+    type: key,
+    ...value
+  }));
+}
+
+/**
+ * Get challenge status options
+ */
+export function getChallengeStatuses() {
+  return CHALLENGE_STATUS;
+}

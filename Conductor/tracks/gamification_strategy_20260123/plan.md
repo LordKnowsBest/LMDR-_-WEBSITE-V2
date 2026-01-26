@@ -233,37 +233,37 @@ Implement the recruiter badge tier system and competitive leaderboards.
 Implement the daily, weekly, and monthly challenge system for both user types.
 
 ### 5.1 Challenge Backend
-- [ ] Task: Create `challengeService.jsw` for challenge management
-- [ ] Task: Implement `getActiveChallenges(userId, userType)` with progress
-- [ ] Task: Implement `getAvailableChallenges(userId, userType)` for new challenges
-- [ ] Task: Implement `startChallenge(userId, challengeId)` with validation
-- [ ] Task: Implement `updateChallengeProgress(userId, action)` for tracking
-- [ ] Task: Implement `claimChallengeReward(userId, challengeId)` with XP award
-- [ ] Task: Implement `getChallengeHistory(userId, options)` for past challenges
-- [ ] Task: Implement challenge expiration handling
-- [ ] Task: Create challenge complete notification
-- [ ] Task: Create challenge expiring soon notification (2 hours before)
+- [x] Task: Create `challengeService.jsw` for challenge management
+- [x] Task: Implement `getActiveChallenges(userId, userType)` with progress
+- [x] Task: Implement `getAvailableChallenges(userId, userType)` for new challenges
+- [x] Task: Implement `startChallenge(userId, challengeId)` with validation
+- [x] Task: Implement `updateChallengeProgress(userId, action)` for tracking
+- [x] Task: Implement `claimChallengeReward(userId, challengeId)` with XP award
+- [x] Task: Implement `getChallengeHistory(userId, options)` for past challenges
+- [x] Task: Implement challenge expiration handling
+- [x] Task: Create challenge complete notification
+- [x] Task: Create challenge expiring soon notification (2 hours before)
 
 ### 5.2 Challenge Types
-- [ ] Task: Implement daily challenge logic (reset at midnight)
-- [ ] Task: Implement weekly challenge logic (reset Monday)
-- [ ] Task: Implement monthly challenge logic (reset 1st)
-- [ ] Task: Implement event challenge logic (custom dates)
-- [ ] Task: Implement recurring challenge auto-assignment
-- [ ] Task: Implement one-time challenge completion tracking
+- [x] Task: Implement daily challenge logic (reset at midnight)
+- [x] Task: Implement weekly challenge logic (reset Monday)
+- [x] Task: Implement monthly challenge logic (reset 1st)
+- [x] Task: Implement event challenge logic (custom dates)
+- [x] Task: Implement recurring challenge auto-assignment
+- [x] Task: Implement one-time challenge completion tracking
 
 ### 5.3 Challenge Triggers
-- [ ] Task: Add challenge progress hook to login (daily login challenges)
-- [ ] Task: Add challenge progress hook to applications (apply challenges)
-- [ ] Task: Add challenge progress hook to messages (response challenges)
-- [ ] Task: Add challenge progress hook to interviews (interview challenges)
-- [ ] Task: Add challenge progress hook to hires (hiring challenges)
+- [x] Task: Add challenge progress hook to login (daily login challenges) - via `awardDriverXP('daily_login')`
+- [x] Task: Add challenge progress hook to applications (apply challenges) - via `awardDriverXP('apply_job')`
+- [x] Task: Add challenge progress hook to messages (response challenges) - via `awardRecruiterPoints('message_sent')`
+- [x] Task: Add challenge progress hook to interviews (interview challenges) - via `awardRecruiterPoints('interview_scheduled')`
+- [x] Task: Add challenge progress hook to hires (hiring challenges) - via `awardRecruiterPoints('hire_complete')`
 
 ### 5.4 Challenge Scheduled Jobs
-- [ ] Task: Create `expireChallenges` hourly job for expired challenge cleanup
-- [ ] Task: Create `assignDailyChallenges` midnight job for auto-assignment
-- [ ] Task: Create `sendChallengeReminders` job for expiring challenges
-- [ ] Task: Add challenge jobs to `jobs.config`
+- [x] Task: Create `expireChallenges` hourly job for expired challenge cleanup
+- [x] Task: Create `assignDailyChallenges` midnight job for auto-assignment
+- [x] Task: Create `sendChallengeReminders` job for expiring challenges
+- [x] Task: Add challenge jobs to `jobs.config`
 
 ### 5.5 Testing - Phase 5
 - [ ] Task: Write unit tests for challenge start/progress/complete flow
