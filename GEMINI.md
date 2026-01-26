@@ -124,6 +124,17 @@ The platform consists of 35+ backend web modules organized by functional area:
 |---------|-------------|
 | `migrations/backfillSearchableDrivers.jsw` | Backfills `is_searchable` field for legacy driver profiles |
 
+### Gamification Services
+| Service | Description |
+|---------|-------------|
+| `gamificationService.jsw` | Core gamification engine: XP/points, levels/ranks, event logging |
+| `streakService.jsw` | Driver daily login streak management, freezes, and multipliers |
+| `achievementService.jsw` | Achievement checking and awarding engine for drivers/recruiters |
+| `streakNotifications.jsw` | Notification logic for streak risks, breaks, and milestones |
+| `gamificationJobs.jsw` | Scheduled job handlers for daily streak processing and monthly grants |
+| `achievementCheckers.js` | Logic definitions for specific achievement criteria |
+| `gamificationConfig.js` | Static configuration for levels, ranks, actions, and XP values |
+
 ## Scheduled Jobs (`src/backend/jobs.config`)
 
 Three automated jobs run on cron schedules:
@@ -361,6 +372,7 @@ Located in `Conductor/tracks/`:
 | `retention_dashboard/` | [ ] Pending | - | Driver retention analytics |
 | `form_ux_refactor_20260119/` | [ ] Pending | - | Form UX improvements |
 | `ui_standardization_20260120/` | [ ] Pending | High | UI/UX consistency & Tailwind unification |
+| `gamification_strategy_20260123/` | [~] Active | High | Driver & Recruiter progression system |
 | `mobilization_20251225.md` | - | - | Mobile optimization planning |
 
 ### Code Style Guides

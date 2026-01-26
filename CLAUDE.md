@@ -324,6 +324,15 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **applicationService.jsw** - Handles driver applications to carriers with full application status lifecycle management
 - **memberService.jsw** - Member dashboard data including profile summaries, application stats, notifications, and activity tracking
 
+**Gamification Services:**
+- **gamificationService.jsw** - Core gamification engine handling XP/points awards, level/rank progression, and event logging with audit trail
+- **streakService.jsw** - Manages driver daily login streaks, streak freezes, and multiplier calculations
+- **achievementService.jsw** - Achievement engine for checking and awarding badges to drivers and recruiters based on criteria
+- **streakNotifications.jsw** - Handles notifications for streak risks, breaks, and milestones
+- **gamificationJobs.jsw** - Scheduled job handlers for daily streak processing and monthly freeze grants
+- **gamificationConfig.js** - Static configuration for levels, ranks, XP values, and action definitions
+- **achievementCheckers.js** - Logic definitions for specific achievement criteria (profile, community, recruiter stats)
+
 **Public Services:**
 - **publicStatsService.jsw** - Public-facing platform statistics for homepage and landing pages (driver count, active carriers, hires)
 
