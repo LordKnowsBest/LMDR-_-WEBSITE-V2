@@ -1,0 +1,618 @@
+/**
+ * Streak Service
+ *
+ * Manages daily login streaks for drivers including:
+ * - Recording daily logins
+ * - Streak continuation/break detection
+ * - Streak freeze management
+ * - Streak multiplier calculation
+ *
+ * This service uses Airtable-only collections (no Wix fallback).
+ */
+
+import { getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import { getStreakMultiplier, DRIVER_XP_ACTIONS } from 'backend/gamificationConfig';
+import { awardDriverXP, logGamificationEvent } from 'backend/gamificationService';
+import { checkStreakAchievements } from 'backend/achievementService';
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const COLLECTION_KEYS = {
+  driverProgression: 'driverProgression',
+  gamificationEvents: 'gamificationEvents'
+};
+
+// Streak milestone days for bonus XP
+const STREAK_MILESTONES = [7, 30, 60, 90];
+
+// =============================================================================
+// AIRTABLE HELPERS
+// =============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  const tableName = getAirtableTableName(collectionKey);
+  const result = await airtable.queryRecords(tableName, {
+    filterByFormula: options.filter || '',
+    sort: options.sort,
+    maxRecords: options.limit || 100
+  });
+  return result.records || [];
+}
+
+async function updateData(collectionKey, recordId, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.updateRecord(tableName, recordId, data);
+}
+
+// =============================================================================
+// DATE HELPERS
+// =============================================================================
+
+/**
+ * Get the start of day in UTC for a given date
+ * @param {Date} date
+ * @returns {Date}
+ */
+function getStartOfDayUTC(date) {
+  const d = new Date(date);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
+/**
+ * Get the start of today in UTC
+ * @returns {Date}
+ */
+function getTodayUTC() {
+  return getStartOfDayUTC(new Date());
+}
+
+/**
+ * Get the start of yesterday in UTC
+ * @returns {Date}
+ */
+function getYesterdayUTC() {
+  const today = getTodayUTC();
+  today.setUTCDate(today.getUTCDate() - 1);
+  return today;
+}
+
+/**
+ * Check if two dates are the same day (UTC)
+ * @param {Date|string} date1
+ * @param {Date|string} date2
+ * @returns {boolean}
+ */
+function isSameDayUTC(date1, date2) {
+  const d1 = getStartOfDayUTC(new Date(date1));
+  const d2 = getStartOfDayUTC(new Date(date2));
+  return d1.getTime() === d2.getTime();
+}
+
+/**
+ * Check if date1 is exactly one day before date2 (UTC)
+ * @param {Date|string} date1 - Earlier date
+ * @param {Date|string} date2 - Later date
+ * @returns {boolean}
+ */
+function isConsecutiveDayUTC(date1, date2) {
+  const d1 = getStartOfDayUTC(new Date(date1));
+  const d2 = getStartOfDayUTC(new Date(date2));
+  const diffMs = d2.getTime() - d1.getTime();
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  return diffMs === oneDayMs;
+}
+
+/**
+ * Get days since a date (UTC)
+ * @param {Date|string} date
+ * @returns {number}
+ */
+function getDaysSinceUTC(date) {
+  const then = getStartOfDayUTC(new Date(date));
+  const now = getTodayUTC();
+  const diffMs = now.getTime() - then.getTime();
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  return Math.floor(diffMs / oneDayMs);
+}
+
+// =============================================================================
+// CORE STREAK FUNCTIONS
+// =============================================================================
+
+/**
+ * Record a daily login and update streak
+ * @param {string} driverId
+ * @returns {object} { streak_days, streak_bonus, streak_milestone, xp_earned, streak_frozen }
+ */
+export async function recordDailyLogin(driverId) {
+  try {
+    // Get current progression
+    const records = await queryData(COLLECTION_KEYS.driverProgression, {
+      filter: `{Driver ID} = "${driverId}"`,
+      limit: 1
+    });
+
+    if (records.length === 0) {
+      // No progression record - this shouldn't happen, but handle gracefully
+      return { success: false, reason: 'no_progression_record' };
+    }
+
+    const progression = records[0];
+    const recordId = progression.id;
+    const lastLoginDate = progression['Last Login Date'];
+    const currentStreak = progression['Streak Days'] || 0;
+    const longestStreak = progression['Longest Streak'] || 0;
+    const freezesAvailable = progression['Streak Freeze Available'] || 0;
+
+    const now = new Date();
+    const today = getTodayUTC();
+
+    // Scenario 1: Already logged in today
+    if (lastLoginDate && isSameDayUTC(lastLoginDate, today)) {
+      return {
+        success: true,
+        already_logged_today: true,
+        streak_days: currentStreak,
+        streak_multiplier: getStreakMultiplier(currentStreak, 'driver'),
+        xp_earned: 0
+      };
+    }
+
+    let newStreak = 1;
+    let streakContinued = false;
+    let streakBroken = false;
+    let streakFrozen = false;
+
+    // Scenario 2: First login ever or continuing streak
+    if (lastLoginDate) {
+      const daysSinceLogin = getDaysSinceUTC(lastLoginDate);
+
+      if (daysSinceLogin === 1) {
+        // Consecutive day - continue streak
+        newStreak = currentStreak + 1;
+        streakContinued = true;
+      } else if (daysSinceLogin === 2 && freezesAvailable > 0) {
+        // Missed one day but have a freeze
+        // This case is handled by the scheduled job, but handle here too
+        newStreak = currentStreak + 1;
+        streakFrozen = true;
+      } else if (daysSinceLogin > 1) {
+        // Streak broken
+        newStreak = 1;
+        streakBroken = true;
+      }
+    }
+
+    // Update longest streak if needed
+    const newLongestStreak = Math.max(longestStreak, newStreak);
+
+    // Check for streak milestone
+    let streakMilestone = null;
+    let milestoneXP = 0;
+    if (STREAK_MILESTONES.includes(newStreak)) {
+      streakMilestone = newStreak;
+      // Get milestone XP reward
+      const milestoneAction = `streak_${newStreak}_day`;
+      const config = DRIVER_XP_ACTIONS[milestoneAction];
+      if (config) {
+        milestoneXP = config.xp;
+      }
+    }
+
+    // Calculate streak multiplier
+    const streakMultiplier = getStreakMultiplier(newStreak, 'driver');
+
+    // Update progression record
+    const updateData = {
+      'Last Login Date': now.toISOString(),
+      'Streak Days': newStreak,
+      'Longest Streak': newLongestStreak,
+      'Updated At': now.toISOString()
+    };
+
+    if (streakFrozen) {
+      updateData['Streak Freeze Available'] = freezesAvailable - 1;
+    }
+
+    await airtable.updateRecord(
+      getAirtableTableName(COLLECTION_KEYS.driverProgression),
+      recordId,
+      updateData
+    );
+
+    // Award daily login XP
+    const loginResult = await awardDriverXP(driverId, 'daily_login', {
+      sourceType: 'streak',
+      streakDays: newStreak
+    });
+
+    // Award milestone bonus if applicable
+    if (milestoneXP > 0) {
+      await awardDriverXP(driverId, `streak_${newStreak}_day`, {
+        sourceType: 'streak_milestone',
+        streakDays: newStreak
+      });
+    }
+
+    // Log streak event
+    await logGamificationEvent(driverId, 'driver', {
+      eventType: streakContinued ? 'streak_continued' : (streakBroken ? 'streak_broken' : 'streak_started'),
+      action: 'daily_login',
+      xpEarned: loginResult.xp_earned || 0,
+      streakBonus: streakMultiplier,
+      metadata: {
+        newStreak,
+        previousStreak: currentStreak,
+        streakFrozen,
+        milestone: streakMilestone
+      }
+    });
+
+    // Check for streak-related achievements (non-blocking)
+    checkStreakAchievements(driverId, newStreak)
+      .catch(err => console.warn('Streak achievement check failed:', err.message));
+
+    return {
+      success: true,
+      streak_days: newStreak,
+      previous_streak: currentStreak,
+      streak_continued: streakContinued,
+      streak_broken: streakBroken,
+      streak_frozen: streakFrozen,
+      streak_multiplier: streakMultiplier,
+      streak_milestone: streakMilestone,
+      milestone_xp: milestoneXP,
+      xp_earned: (loginResult.xp_earned || 0) + milestoneXP,
+      longest_streak: newLongestStreak,
+      freezes_remaining: streakFrozen ? freezesAvailable - 1 : freezesAvailable
+    };
+  } catch (error) {
+    console.error('recordDailyLogin error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get streak status without recording login
+ * @param {string} driverId
+ * @returns {object} { streak_days, will_break_if_no_login, freezes_available, multiplier, next_milestone }
+ */
+export async function getStreakStatus(driverId) {
+  try {
+    const records = await queryData(COLLECTION_KEYS.driverProgression, {
+      filter: `{Driver ID} = "${driverId}"`,
+      limit: 1
+    });
+
+    if (records.length === 0) {
+      return {
+        streak_days: 0,
+        longest_streak: 0,
+        will_break_if_no_login: false,
+        freezes_available: 0,
+        multiplier: 1.0,
+        next_milestone: 7,
+        days_to_milestone: 7,
+        logged_in_today: false
+      };
+    }
+
+    const progression = records[0];
+    const lastLoginDate = progression['Last Login Date'];
+    const currentStreak = progression['Streak Days'] || 0;
+    const longestStreak = progression['Longest Streak'] || 0;
+    const freezesAvailable = progression['Streak Freeze Available'] || 0;
+
+    const today = getTodayUTC();
+    let loggedInToday = false;
+    let willBreakIfNoLogin = false;
+    let effectiveStreak = currentStreak;
+
+    if (lastLoginDate) {
+      loggedInToday = isSameDayUTC(lastLoginDate, today);
+      const daysSinceLogin = getDaysSinceUTC(lastLoginDate);
+
+      // If they haven't logged in today and it's been more than a day, streak will break
+      if (!loggedInToday && daysSinceLogin >= 1) {
+        willBreakIfNoLogin = daysSinceLogin === 1;
+        // If more than 1 day, streak is already broken
+        if (daysSinceLogin > 1) {
+          effectiveStreak = 0;
+        }
+      }
+    }
+
+    // Find next milestone
+    let nextMilestone = null;
+    for (const milestone of STREAK_MILESTONES) {
+      if (effectiveStreak < milestone) {
+        nextMilestone = milestone;
+        break;
+      }
+    }
+
+    const multiplier = getStreakMultiplier(effectiveStreak, 'driver');
+    const daysToMilestone = nextMilestone ? nextMilestone - effectiveStreak : 0;
+
+    return {
+      streak_days: effectiveStreak,
+      longest_streak: longestStreak,
+      will_break_if_no_login: willBreakIfNoLogin,
+      freezes_available: freezesAvailable,
+      multiplier,
+      next_milestone: nextMilestone,
+      days_to_milestone: daysToMilestone,
+      logged_in_today: loggedInToday,
+      last_login_date: lastLoginDate
+    };
+  } catch (error) {
+    console.error('getStreakStatus error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Use a streak freeze to preserve streak
+ * @param {string} driverId
+ * @returns {object} { success, freezes_remaining, streak_preserved }
+ */
+export async function useStreakFreeze(driverId) {
+  try {
+    const records = await queryData(COLLECTION_KEYS.driverProgression, {
+      filter: `{Driver ID} = "${driverId}"`,
+      limit: 1
+    });
+
+    if (records.length === 0) {
+      return { success: false, reason: 'no_progression_record' };
+    }
+
+    const progression = records[0];
+    const freezesAvailable = progression['Streak Freeze Available'] || 0;
+    const currentStreak = progression['Streak Days'] || 0;
+
+    if (freezesAvailable <= 0) {
+      return { success: false, reason: 'no_freezes_available', freezes_remaining: 0 };
+    }
+
+    // Deduct freeze
+    await airtable.updateRecord(
+      getAirtableTableName(COLLECTION_KEYS.driverProgression),
+      progression.id,
+      {
+        'Streak Freeze Available': freezesAvailable - 1,
+        'Updated At': new Date().toISOString()
+      }
+    );
+
+    // Log the event
+    await logGamificationEvent(driverId, 'driver', {
+      eventType: 'streak_freeze_used',
+      action: 'use_streak_freeze',
+      metadata: {
+        streakPreserved: currentStreak,
+        freezesRemaining: freezesAvailable - 1
+      }
+    });
+
+    return {
+      success: true,
+      freezes_remaining: freezesAvailable - 1,
+      streak_preserved: currentStreak
+    };
+  } catch (error) {
+    console.error('useStreakFreeze error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Grant a streak freeze to a driver (called monthly)
+ * @param {string} driverId
+ * @param {number} amount - Number of freezes to grant (default 1)
+ * @returns {object} { success, new_total }
+ */
+export async function grantStreakFreeze(driverId, amount = 1) {
+  try {
+    const records = await queryData(COLLECTION_KEYS.driverProgression, {
+      filter: `{Driver ID} = "${driverId}"`,
+      limit: 1
+    });
+
+    if (records.length === 0) {
+      return { success: false, reason: 'no_progression_record' };
+    }
+
+    const progression = records[0];
+    const currentFreezes = progression['Streak Freeze Available'] || 0;
+    const maxFreezes = 3; // Cap at 3 freezes
+    const newTotal = Math.min(currentFreezes + amount, maxFreezes);
+
+    await airtable.updateRecord(
+      getAirtableTableName(COLLECTION_KEYS.driverProgression),
+      progression.id,
+      {
+        'Streak Freeze Available': newTotal,
+        'Updated At': new Date().toISOString()
+      }
+    );
+
+    // Log the event
+    await logGamificationEvent(driverId, 'driver', {
+      eventType: 'streak_freeze_granted',
+      action: 'grant_streak_freeze',
+      metadata: {
+        amountGranted: amount,
+        newTotal,
+        wasCapped: newTotal === maxFreezes && currentFreezes + amount > maxFreezes
+      }
+    });
+
+    return {
+      success: true,
+      new_total: newTotal,
+      amount_granted: newTotal - currentFreezes
+    };
+  } catch (error) {
+    console.error('grantStreakFreeze error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get all drivers with streaks at risk (haven't logged in today)
+ * Used by scheduled job for notifications
+ * @returns {array} Drivers with streak > 0 who haven't logged in today
+ */
+export async function getStreaksAtRisk() {
+  try {
+    const today = getTodayUTC();
+    const todayStr = today.toISOString().split('T')[0];
+
+    // Get all drivers with active streaks who haven't logged in today
+    const records = await queryData(COLLECTION_KEYS.driverProgression, {
+      filter: `AND({Streak Days} > 0, NOT(DATESTR({Last Login Date}) = "${todayStr}"))`,
+      limit: 1000
+    });
+
+    return records.map(r => ({
+      driverId: r['Driver ID'],
+      streakDays: r['Streak Days'],
+      lastLoginDate: r['Last Login Date'],
+      freezesAvailable: r['Streak Freeze Available'] || 0
+    }));
+  } catch (error) {
+    console.error('getStreaksAtRisk error:', error);
+    return [];
+  }
+}
+
+/**
+ * Process daily streak updates (called by scheduled job at midnight)
+ * Breaks streaks for users who didn't log in yesterday
+ * @returns {object} { processed, streaks_broken, freezes_used }
+ */
+export async function processExpiredStreaks() {
+  try {
+    const yesterday = getYesterdayUTC();
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    const twoDaysAgo = new Date(yesterday);
+    twoDaysAgo.setUTCDate(twoDaysAgo.getUTCDate() - 1);
+    const twoDaysAgoStr = twoDaysAgo.toISOString().split('T')[0];
+
+    // Get drivers with streaks who last logged in 2+ days ago
+    const records = await queryData(COLLECTION_KEYS.driverProgression, {
+      filter: `AND({Streak Days} > 0, DATESTR({Last Login Date}) <= "${twoDaysAgoStr}")`,
+      limit: 1000
+    });
+
+    let streaksBroken = 0;
+    let freezesUsed = 0;
+
+    for (const record of records) {
+      const freezesAvailable = record['Streak Freeze Available'] || 0;
+      const daysSinceLogin = getDaysSinceUTC(record['Last Login Date']);
+
+      if (daysSinceLogin === 2 && freezesAvailable > 0) {
+        // Auto-use freeze
+        await airtable.updateRecord(
+          getAirtableTableName(COLLECTION_KEYS.driverProgression),
+          record.id,
+          {
+            'Streak Freeze Available': freezesAvailable - 1,
+            'Updated At': new Date().toISOString()
+          }
+        );
+        freezesUsed++;
+
+        await logGamificationEvent(record['Driver ID'], 'driver', {
+          eventType: 'streak_freeze_auto_used',
+          action: 'auto_streak_freeze',
+          metadata: {
+            streakPreserved: record['Streak Days'],
+            freezesRemaining: freezesAvailable - 1
+          }
+        });
+      } else if (daysSinceLogin > 2 || (daysSinceLogin === 2 && freezesAvailable === 0)) {
+        // Break the streak
+        await airtable.updateRecord(
+          getAirtableTableName(COLLECTION_KEYS.driverProgression),
+          record.id,
+          {
+            'Streak Days': 0,
+            'Updated At': new Date().toISOString()
+          }
+        );
+        streaksBroken++;
+
+        await logGamificationEvent(record['Driver ID'], 'driver', {
+          eventType: 'streak_broken',
+          action: 'streak_expired',
+          metadata: {
+            previousStreak: record['Streak Days'],
+            daysSinceLogin
+          }
+        });
+      }
+    }
+
+    return {
+      processed: records.length,
+      streaks_broken: streaksBroken,
+      freezes_used: freezesUsed
+    };
+  } catch (error) {
+    console.error('processExpiredStreaks error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Grant monthly streak freezes to all active drivers
+ * Called on the 1st of each month
+ * @returns {object} { processed, freezes_granted }
+ */
+export async function grantMonthlyFreezes() {
+  try {
+    // Get all drivers
+    const records = await queryData(COLLECTION_KEYS.driverProgression, {
+      limit: 5000
+    });
+
+    let freezesGranted = 0;
+    const maxFreezes = 3;
+
+    for (const record of records) {
+      const currentFreezes = record['Streak Freeze Available'] || 0;
+
+      if (currentFreezes < maxFreezes) {
+        const newTotal = Math.min(currentFreezes + 1, maxFreezes);
+
+        await airtable.updateRecord(
+          getAirtableTableName(COLLECTION_KEYS.driverProgression),
+          record.id,
+          {
+            'Streak Freeze Available': newTotal,
+            'Updated At': new Date().toISOString()
+          }
+        );
+
+        if (newTotal > currentFreezes) {
+          freezesGranted++;
+        }
+      }
+    }
+
+    return {
+      processed: records.length,
+      freezes_granted: freezesGranted
+    };
+  } catch (error) {
+    console.error('grantMonthlyFreezes error:', error);
+    throw error;
+  }
+}

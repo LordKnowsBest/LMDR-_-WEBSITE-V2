@@ -1,0 +1,717 @@
+/**
+ * Achievement Service
+ *
+ * Manages achievements for both drivers and recruiters including:
+ * - Checking and awarding achievements based on user actions
+ * - Tracking achievement progress
+ * - Retrieving earned and available achievements
+ *
+ * This service uses Airtable-only collections (no Wix fallback).
+ */
+
+import { getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import { createNotification } from 'backend/memberService';
+import { awardDriverXP, awardRecruiterPoints, logGamificationEvent } from 'backend/gamificationService';
+import { runAchievementChecker, DRIVER_ACHIEVEMENT_CHECKERS, RECRUITER_ACHIEVEMENT_CHECKERS } from 'backend/achievementCheckers';
+
+// =============================================================================
+// COLLECTION KEYS
+// =============================================================================
+
+const COLLECTION_KEYS = {
+  achievementDefinitions: 'achievementDefinitions',
+  driverAchievements: 'driverAchievements',
+  driverProgression: 'driverProgression',
+  recruiterProgression: 'recruiterProgression',
+  gamificationEvents: 'gamificationEvents'
+};
+
+// =============================================================================
+// AIRTABLE HELPERS
+// =============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  const tableName = getAirtableTableName(collectionKey);
+  const result = await airtable.queryRecords(tableName, {
+    filterByFormula: options.filter || '',
+    sort: options.sort,
+    maxRecords: options.limit || 100
+  });
+  return result.records || [];
+}
+
+async function insertData(collectionKey, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.createRecord(tableName, data);
+}
+
+async function updateData(collectionKey, recordId, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.updateRecord(tableName, recordId, data);
+}
+
+// =============================================================================
+// GET ACHIEVEMENTS
+// =============================================================================
+
+/**
+ * Get all achievement definitions
+ * @param {string} userType - "driver", "recruiter", or "all"
+ * @param {string} category - Optional category filter
+ * @returns {array} Achievement definitions
+ */
+export async function getAchievementDefinitions(userType = 'all', category = null) {
+  try {
+    let filter = '{Is Active} = "Yes"';
+
+    if (userType !== 'all') {
+      filter = `AND(${filter}, {User Type} = "${userType}")`;
+    }
+
+    if (category) {
+      filter = `AND(${filter}, {Category} = "${category}")`;
+    }
+
+    const records = await queryData(COLLECTION_KEYS.achievementDefinitions, {
+      filter,
+      sort: [{ field: 'Display Order', direction: 'asc' }],
+      limit: 100
+    });
+
+    return records.map(normalizeAchievementDefinition);
+  } catch (error) {
+    console.error('getAchievementDefinitions error:', error);
+    return [];
+  }
+}
+
+/**
+ * Get user's achievements (earned and in-progress)
+ * @param {string} userId - Driver or recruiter ID
+ * @param {string} userType - "driver" or "recruiter"
+ * @param {object} options - { include_locked, category }
+ * @returns {array} Achievement objects with progress
+ */
+export async function getAchievements(userId, userType, options = {}) {
+  try {
+    // Get all achievement definitions for this user type
+    const definitions = await getAchievementDefinitions(userType, options.category);
+
+    // Get user's earned achievements
+    const earnedRecords = await queryData(COLLECTION_KEYS.driverAchievements, {
+      filter: `AND({User ID} = "${userId}", {User Type} = "${userType}")`,
+      limit: 100
+    });
+
+    const earnedMap = new Map();
+    for (const record of earnedRecords) {
+      earnedMap.set(record['Achievement ID'], {
+        earnedAt: record['Earned At'],
+        progress: record['Progress'] || 100,
+        isComplete: record['Is Complete'] === 'Yes',
+        notified: record['Notified'] === 'Yes'
+      });
+    }
+
+    // Combine definitions with earned status
+    const achievements = definitions.map(def => {
+      const earned = earnedMap.get(def.achievementId);
+      return {
+        ...def,
+        earned: !!earned?.isComplete,
+        earnedAt: earned?.earnedAt || null,
+        progress: earned?.progress || 0,
+        isComplete: earned?.isComplete || false
+      };
+    });
+
+    // Filter out locked if not requested
+    if (!options.include_locked) {
+      return achievements.filter(a => !a.isHidden || a.earned);
+    }
+
+    return achievements;
+  } catch (error) {
+    console.error('getAchievements error:', error);
+    return [];
+  }
+}
+
+/**
+ * Get progress toward a specific achievement
+ * @param {string} userId
+ * @param {string} achievementId
+ * @returns {object} { current, target, percentage, is_complete }
+ */
+export async function getAchievementProgress(userId, achievementId) {
+  try {
+    // Get achievement definition
+    const definitions = await queryData(COLLECTION_KEYS.achievementDefinitions, {
+      filter: `{Achievement ID} = "${achievementId}"`,
+      limit: 1
+    });
+
+    if (definitions.length === 0) {
+      return { current: 0, target: 0, percentage: 0, is_complete: false, error: 'not_found' };
+    }
+
+    const def = normalizeAchievementDefinition(definitions[0]);
+
+    // Check if already earned
+    const earned = await queryData(COLLECTION_KEYS.driverAchievements, {
+      filter: `AND({User ID} = "${userId}", {Achievement ID} = "${achievementId}", {Is Complete} = "Yes")`,
+      limit: 1
+    });
+
+    if (earned.length > 0) {
+      return {
+        current: def.requirementValue,
+        target: def.requirementValue,
+        percentage: 100,
+        is_complete: true,
+        earned_at: earned[0]['Earned At']
+      };
+    }
+
+    // Try specific checker first (more accurate)
+    const checkerResult = await runAchievementChecker(def.achievementId, userId, def.userType, {});
+    if (!checkerResult.error || checkerResult.error !== 'no_checker') {
+      const percentage = Math.min(100, Math.round((checkerResult.current / checkerResult.target) * 100));
+      return {
+        current: checkerResult.current,
+        target: checkerResult.target,
+        percentage,
+        is_complete: checkerResult.qualifies
+      };
+    }
+
+    // Fallback to generic progress calculation
+    const current = await calculateCurrentProgress(userId, def);
+    const percentage = Math.min(100, Math.round((current / def.requirementValue) * 100));
+
+    return {
+      current,
+      target: def.requirementValue,
+      percentage,
+      is_complete: current >= def.requirementValue
+    };
+  } catch (error) {
+    console.error('getAchievementProgress error:', error);
+    return { current: 0, target: 0, percentage: 0, is_complete: false, error: error.message };
+  }
+}
+
+// =============================================================================
+// CHECK AND AWARD ACHIEVEMENTS
+// =============================================================================
+
+/**
+ * Check all achievements for a user and award any newly earned
+ * @param {string} userId
+ * @param {string} userType - "driver" or "recruiter"
+ * @param {object} context - Additional context (e.g., { action: 'profile_complete' })
+ * @returns {array} Newly earned achievements
+ */
+export async function checkAndAwardAchievements(userId, userType, context = {}) {
+  try {
+    const newlyEarned = [];
+
+    // Get all active achievements for this user type
+    const definitions = await getAchievementDefinitions(userType);
+
+    // Get already earned achievements
+    const earnedRecords = await queryData(COLLECTION_KEYS.driverAchievements, {
+      filter: `AND({User ID} = "${userId}", {User Type} = "${userType}", {Is Complete} = "Yes")`,
+      limit: 200
+    });
+
+    const earnedIds = new Set(earnedRecords.map(r => r['Achievement ID']));
+
+    // Check each unearned achievement
+    for (const def of definitions) {
+      if (earnedIds.has(def.achievementId)) {
+        continue; // Already earned
+      }
+
+      // Check if user now qualifies
+      const qualifies = await checkAchievementQualification(userId, userType, def, context);
+
+      if (qualifies) {
+        // Award the achievement
+        const awarded = await awardAchievement(userId, userType, def);
+        if (awarded) {
+          newlyEarned.push({
+            ...def,
+            earnedAt: new Date().toISOString()
+          });
+        }
+      }
+    }
+
+    return newlyEarned;
+  } catch (error) {
+    console.error('checkAndAwardAchievements error:', error);
+    return [];
+  }
+}
+
+/**
+ * Check a single achievement for qualification
+ * @param {string} userId
+ * @param {string} userType
+ * @param {object} achievementDef
+ * @param {object} context
+ * @returns {boolean}
+ */
+async function checkAchievementQualification(userId, userType, def, context = {}) {
+  try {
+    // Try specific checker first (more accurate)
+    const checkerResult = await runAchievementChecker(def.achievementId, userId, userType, context);
+    if (!checkerResult.error || checkerResult.error !== 'no_checker') {
+      return checkerResult.qualifies;
+    }
+
+    // Fallback to generic progress calculation
+    const current = await calculateCurrentProgress(userId, def);
+    return current >= def.requirementValue;
+  } catch (error) {
+    console.error('checkAchievementQualification error:', error);
+    return false;
+  }
+}
+
+/**
+ * Calculate current progress for an achievement
+ * @param {string} userId
+ * @param {object} def - Achievement definition
+ * @returns {number} Current progress value
+ */
+async function calculateCurrentProgress(userId, def) {
+  const { requirementType, requirementField, userType } = def;
+
+  try {
+    // Get user progression data
+    const progressionKey = userType === 'driver' ? 'driverProgression' : 'recruiterProgression';
+    const idField = userType === 'driver' ? 'Driver ID' : 'Recruiter ID';
+
+    const progressionRecords = await queryData(progressionKey, {
+      filter: `{${idField}} = "${userId}"`,
+      limit: 1
+    });
+
+    const progression = progressionRecords.length > 0 ? progressionRecords[0] : {};
+
+    switch (requirementType) {
+      case 'count':
+        return await getCountProgress(userId, def, progression);
+
+      case 'streak':
+        return progression['Streak Days'] || 0;
+
+      case 'threshold':
+        return getFieldValue(progression, requirementField) || 0;
+
+      case 'boolean':
+        return getFieldValue(progression, requirementField) ? 1 : 0;
+
+      default:
+        return 0;
+    }
+  } catch (error) {
+    console.error('calculateCurrentProgress error:', error);
+    return 0;
+  }
+}
+
+/**
+ * Get count-based progress from gamification events
+ */
+async function getCountProgress(userId, def, progression) {
+  const { requirementField } = def;
+
+  // Check if it's a progression field first
+  const progressionValue = getFieldValue(progression, requirementField);
+  if (progressionValue !== undefined && progressionValue !== null) {
+    return progressionValue;
+  }
+
+  // Otherwise count from events
+  const events = await queryData(COLLECTION_KEYS.gamificationEvents, {
+    filter: `AND({User ID} = "${userId}", {Action} = "${requirementField}")`,
+    limit: 1000
+  });
+
+  return events.length;
+}
+
+/**
+ * Get field value with flexible field name matching
+ */
+function getFieldValue(record, fieldName) {
+  // Try exact match
+  if (record[fieldName] !== undefined) {
+    return record[fieldName];
+  }
+
+  // Try common transformations
+  const variations = [
+    fieldName,
+    fieldName.replace(/_/g, ' '), // snake_case to spaces
+    fieldName.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '), // Title Case
+    fieldName.charAt(0).toUpperCase() + fieldName.slice(1) // Capitalize first
+  ];
+
+  for (const variant of variations) {
+    if (record[variant] !== undefined) {
+      return record[variant];
+    }
+  }
+
+  return undefined;
+}
+
+// =============================================================================
+// AWARD ACHIEVEMENT
+// =============================================================================
+
+/**
+ * Award an achievement to a user
+ * @param {string} userId
+ * @param {string} userType
+ * @param {object} def - Achievement definition
+ * @returns {boolean} Success
+ */
+async function awardAchievement(userId, userType, def) {
+  try {
+    const now = new Date().toISOString();
+
+    // Create achievement record
+    await insertData(COLLECTION_KEYS.driverAchievements, {
+      'User ID': userId,
+      'User Type': userType,
+      'Achievement ID': def.achievementId,
+      'Achievement Name': def.name,
+      'Earned At': now,
+      'Progress': 100,
+      'Is Complete': 'Yes',
+      'Notified': 'No',
+      'Display Order': def.displayOrder || 0
+    });
+
+    // Award XP/points
+    if (def.xpReward > 0) {
+      if (userType === 'driver') {
+        await awardDriverXP(userId, 'achievement_earned', {
+          achievementId: def.achievementId,
+          xpOverride: def.xpReward
+        });
+      } else {
+        await awardRecruiterPoints(userId, 'achievement_earned', {
+          achievementId: def.achievementId,
+          pointsOverride: def.xpReward
+        });
+      }
+    }
+
+    // Create notification
+    await createNotification(
+      userId,
+      'achievement_earned',
+      `Achievement Unlocked: ${def.name}!`,
+      def.description + (def.xpReward > 0 ? ` +${def.xpReward} XP` : ''),
+      '/dashboard'
+    );
+
+    // Log event
+    await logGamificationEvent(userId, userType, {
+      eventType: 'achievement_earned',
+      action: 'achievement_earned',
+      xpEarned: def.xpReward || 0,
+      metadata: {
+        achievementId: def.achievementId,
+        achievementName: def.name,
+        category: def.category
+      }
+    });
+
+    return true;
+  } catch (error) {
+    console.error('awardAchievement error:', error);
+    return false;
+  }
+}
+
+/**
+ * Manually award an achievement (admin function)
+ * @param {string} userId
+ * @param {string} achievementId
+ * @returns {object} Awarded achievement or error
+ */
+export async function manuallyAwardAchievement(userId, achievementId) {
+  try {
+    // Get achievement definition
+    const definitions = await queryData(COLLECTION_KEYS.achievementDefinitions, {
+      filter: `{Achievement ID} = "${achievementId}"`,
+      limit: 1
+    });
+
+    if (definitions.length === 0) {
+      return { success: false, reason: 'achievement_not_found' };
+    }
+
+    const def = normalizeAchievementDefinition(definitions[0]);
+
+    // Check if already earned
+    const existing = await queryData(COLLECTION_KEYS.driverAchievements, {
+      filter: `AND({User ID} = "${userId}", {Achievement ID} = "${achievementId}", {Is Complete} = "Yes")`,
+      limit: 1
+    });
+
+    if (existing.length > 0) {
+      return { success: false, reason: 'already_earned' };
+    }
+
+    // Award it
+    const awarded = await awardAchievement(userId, def.userType, def);
+
+    if (awarded) {
+      return {
+        success: true,
+        achievement: {
+          ...def,
+          earnedAt: new Date().toISOString()
+        }
+      };
+    }
+
+    return { success: false, reason: 'award_failed' };
+  } catch (error) {
+    console.error('manuallyAwardAchievement error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// =============================================================================
+// SPECIFIC ACHIEVEMENT CHECKERS
+// =============================================================================
+
+/**
+ * Check profile-related achievements
+ * Called when driver profile is updated
+ * @param {string} driverId
+ * @param {object} profileData - Updated profile data
+ * @returns {array} Newly earned achievements
+ */
+export async function checkProfileAchievements(driverId, profileData = {}) {
+  const context = {
+    action: 'profile_update',
+    profileCompletion: profileData.profileCompletion || 0,
+    hasPhoto: !!profileData.photoUrl,
+    hasCDL: !!profileData.cdlNumber,
+    cdlVerified: !!profileData.cdlVerified,
+    bioLength: (profileData.bio || '').length
+  };
+
+  return await checkAndAwardAchievements(driverId, 'driver', context);
+}
+
+/**
+ * Check application-related achievements
+ * Called when driver submits an application
+ * @param {string} driverId
+ * @param {number} totalApplications - Total applications count
+ * @returns {array} Newly earned achievements
+ */
+export async function checkApplicationAchievements(driverId, totalApplications) {
+  const context = {
+    action: 'submit_application',
+    totalApplications
+  };
+
+  return await checkAndAwardAchievements(driverId, 'driver', context);
+}
+
+/**
+ * Check response time achievements
+ * Called when driver responds to a message
+ * @param {string} driverId
+ * @param {number} responseTimeHours - Response time in hours
+ * @returns {array} Newly earned achievements
+ */
+export async function checkResponseAchievements(driverId, responseTimeHours) {
+  const context = {
+    action: 'message_response',
+    responseTimeHours
+  };
+
+  return await checkAndAwardAchievements(driverId, 'driver', context);
+}
+
+/**
+ * Check level-up achievements
+ * Called when driver levels up
+ * @param {string} driverId
+ * @param {number} newLevel
+ * @returns {array} Newly earned achievements
+ */
+export async function checkLevelAchievements(driverId, newLevel) {
+  const context = {
+    action: 'level_up',
+    level: newLevel
+  };
+
+  return await checkAndAwardAchievements(driverId, 'driver', context);
+}
+
+/**
+ * Check hire-related achievements for recruiters
+ * Called when a hire is completed
+ * @param {string} recruiterId
+ * @param {number} totalHires
+ * @returns {array} Newly earned achievements
+ */
+export async function checkHireAchievements(recruiterId, totalHires) {
+  const context = {
+    action: 'successful_hire',
+    totalHires
+  };
+
+  return await checkAndAwardAchievements(recruiterId, 'recruiter', context);
+}
+
+/**
+ * Check streak achievements
+ * Called when streak is updated
+ * @param {string} driverId
+ * @param {number} streakDays
+ * @returns {array} Newly earned achievements
+ */
+export async function checkStreakAchievements(driverId, streakDays) {
+  const context = {
+    action: 'streak_update',
+    streakDays
+  };
+
+  return await checkAndAwardAchievements(driverId, 'driver', context);
+}
+
+// =============================================================================
+// BATCH PROCESSING
+// =============================================================================
+
+/**
+ * Batch check achievements for all users (scheduled job)
+ * @param {string} userType - "driver" or "recruiter"
+ * @returns {object} { processed, achievements_awarded }
+ */
+export async function batchCheckAchievements(userType) {
+  try {
+    const progressionKey = userType === 'driver' ? 'driverProgression' : 'recruiterProgression';
+    const idField = userType === 'driver' ? 'Driver ID' : 'Recruiter ID';
+
+    const users = await queryData(progressionKey, { limit: 1000 });
+
+    let processed = 0;
+    let achievementsAwarded = 0;
+
+    for (const user of users) {
+      const userId = user[idField];
+      if (!userId) continue;
+
+      const newAchievements = await checkAndAwardAchievements(userId, userType);
+      achievementsAwarded += newAchievements.length;
+      processed++;
+    }
+
+    return { processed, achievements_awarded: achievementsAwarded };
+  } catch (error) {
+    console.error('batchCheckAchievements error:', error);
+    return { processed: 0, achievements_awarded: 0, error: error.message };
+  }
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+/**
+ * Normalize Airtable achievement definition record
+ */
+function normalizeAchievementDefinition(record) {
+  return {
+    _id: record.id,
+    achievementId: record['Achievement ID'],
+    name: record['Name'],
+    description: record['Description'],
+    category: record['Category'],
+    icon: record['Icon'],
+    color: record['Color'],
+    userType: record['User Type'],
+    requirementType: record['Requirement Type'],
+    requirementField: record['Requirement Field'],
+    requirementValue: record['Requirement Value'] || 1,
+    xpReward: record['XP Reward'] || 0,
+    isHidden: record['Is Hidden'] === 'Yes',
+    isActive: record['Is Active'] === 'Yes',
+    displayOrder: record['Display Order'] || 0
+  };
+}
+
+// =============================================================================
+// CHECKER UTILITIES
+// =============================================================================
+
+/**
+ * Check if a specific achievement checker exists
+ * @param {string} achievementId
+ * @param {string} userType - "driver" or "recruiter"
+ * @returns {boolean}
+ */
+export function hasAchievementChecker(achievementId, userType) {
+  const checkers = userType === 'driver' ? DRIVER_ACHIEVEMENT_CHECKERS : RECRUITER_ACHIEVEMENT_CHECKERS;
+  return !!checkers[achievementId];
+}
+
+/**
+ * Get list of all available achievement checkers
+ * @returns {object} { driver: string[], recruiter: string[] }
+ */
+export function listAchievementCheckers() {
+  return {
+    driver: Object.keys(DRIVER_ACHIEVEMENT_CHECKERS),
+    recruiter: Object.keys(RECRUITER_ACHIEVEMENT_CHECKERS)
+  };
+}
+
+/**
+ * Get detailed progress for multiple achievements at once
+ * @param {string} userId
+ * @param {string} userType
+ * @param {string[]} achievementIds - Optional list to check (all if empty)
+ * @returns {object} Map of achievementId -> progress
+ */
+export async function getBulkAchievementProgress(userId, userType, achievementIds = []) {
+  try {
+    const definitions = await getAchievementDefinitions(userType);
+    const results = {};
+
+    for (const def of definitions) {
+      if (achievementIds.length > 0 && !achievementIds.includes(def.achievementId)) {
+        continue;
+      }
+
+      const progress = await getAchievementProgress(userId, def.achievementId);
+      results[def.achievementId] = {
+        name: def.name,
+        category: def.category,
+        ...progress
+      };
+    }
+
+    return results;
+  } catch (error) {
+    console.error('getBulkAchievementProgress error:', error);
+    return {};
+  }
+}

@@ -1,0 +1,680 @@
+/**
+ * Gamification Service
+ *
+ * Core service for the gamification system handling XP/points awards,
+ * level/rank progression, and event logging.
+ *
+ * This service uses Airtable-only collections (no Wix fallback).
+ */
+
+import { getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import {
+  DRIVER_LEVELS,
+  RECRUITER_RANKS,
+  DRIVER_XP_ACTIONS,
+  RECRUITER_POINT_ACTIONS,
+  getLevelForXP,
+  getRankForPoints,
+  getStreakMultiplier,
+  getDriverXPConfig,
+  getRecruiterPointsConfig,
+  isRateLimited
+} from 'backend/gamificationConfig';
+
+// Achievement hooks (lazy import to avoid circular deps)
+let achievementServiceLoaded = false;
+let checkLevelAchievements = null;
+let checkHireAchievements = null;
+
+async function loadAchievementService() {
+  if (!achievementServiceLoaded) {
+    try {
+      const achievementService = await import('backend/achievementService');
+      checkLevelAchievements = achievementService.checkLevelAchievements;
+      checkHireAchievements = achievementService.checkHireAchievements;
+      achievementServiceLoaded = true;
+    } catch (err) {
+      console.warn('Achievement service not available:', err.message);
+    }
+  }
+}
+
+// =============================================================================
+// COLLECTION KEYS (Airtable-only)
+// =============================================================================
+
+const COLLECTION_KEYS = {
+  driverProgression: 'driverProgression',
+  driverAchievements: 'driverAchievements',
+  driverChallenges: 'driverChallenges',
+  recruiterProgression: 'recruiterProgression',
+  recruiterBadges: 'recruiterBadges',
+  gamificationEvents: 'gamificationEvents',
+  seasonalEvents: 'seasonalEvents'
+};
+
+// =============================================================================
+// AIRTABLE-ONLY HELPER FUNCTIONS
+// =============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  const tableName = getAirtableTableName(collectionKey);
+  const result = await airtable.queryRecords(tableName, {
+    filterByFormula: options.filter || '',
+    sort: options.sort,
+    maxRecords: options.limit || 100
+  });
+  return result.records || [];
+}
+
+async function insertData(collectionKey, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.createRecord(tableName, data);
+}
+
+async function updateData(collectionKey, recordId, data) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.updateRecord(tableName, recordId, data);
+}
+
+async function getRecord(collectionKey, recordId) {
+  const tableName = getAirtableTableName(collectionKey);
+  return await airtable.getRecord(tableName, recordId);
+}
+
+// =============================================================================
+// INITIALIZATION
+// =============================================================================
+
+/**
+ * Initialize progression for a new user
+ * @param {string} userId - Driver or Recruiter ID
+ * @param {'driver' | 'recruiter'} userType
+ * @returns {object} New progression record
+ */
+export async function initializeProgression(userId, userType) {
+  try {
+    const now = new Date().toISOString();
+
+    if (userType === 'driver') {
+      // Check if already exists
+      const existing = await queryData(COLLECTION_KEYS.driverProgression, {
+        filter: `{Driver ID} = "${userId}"`,
+        limit: 1
+      });
+
+      if (existing.length > 0) {
+        return normalizeDriverProgression(existing[0]);
+      }
+
+      // Create new driver progression
+      const newProgression = {
+        'Driver ID': userId,
+        'Current XP': 0,
+        'Level': 1,
+        'Level Title': DRIVER_LEVELS[0].title,
+        'XP To Next Level': DRIVER_LEVELS[1].xpRequired,
+        'Streak Days': 0,
+        'Longest Streak': 0,
+        'Streak Freeze Available': 1, // Start with 1 freeze
+        'Total Applications': 0,
+        'Total Responses': 0,
+        'Avg Response Hours': 0,
+        'Profile Completion': 0,
+        'Created At': now,
+        'Updated At': now
+      };
+
+      const result = await insertData(COLLECTION_KEYS.driverProgression, newProgression);
+      return normalizeDriverProgression(result);
+
+    } else if (userType === 'recruiter') {
+      // Check if already exists
+      const existing = await queryData(COLLECTION_KEYS.recruiterProgression, {
+        filter: `{Recruiter ID} = "${userId}"`,
+        limit: 1
+      });
+
+      if (existing.length > 0) {
+        return normalizeRecruiterProgression(existing[0]);
+      }
+
+      // Create new recruiter progression
+      const newProgression = {
+        'Recruiter ID': userId,
+        'Current Points': 0,
+        'Rank': 1,
+        'Rank Title': RECRUITER_RANKS[0].title,
+        'Points To Next Rank': RECRUITER_RANKS[1].pointsRequired,
+        'Total Hires': 0,
+        'Total Outreach': 0,
+        'Avg Response Hours': 0,
+        'Hire Acceptance Rate': 0,
+        'Retention 90 Day Rate': 0,
+        'Driver Satisfaction Avg': 0,
+        'Created At': now,
+        'Updated At': now
+      };
+
+      const result = await insertData(COLLECTION_KEYS.recruiterProgression, newProgression);
+      return normalizeRecruiterProgression(result);
+    }
+
+    throw new Error(`Invalid user type: ${userType}`);
+  } catch (error) {
+    console.error('initializeProgression error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// GET PROGRESSION
+// =============================================================================
+
+/**
+ * Get driver's current progression status
+ * @param {string} driverId
+ * @returns {object} Full progression object with level, XP, streaks, etc.
+ */
+export async function getDriverProgression(driverId) {
+  try {
+    const records = await queryData(COLLECTION_KEYS.driverProgression, {
+      filter: `{Driver ID} = "${driverId}"`,
+      limit: 1
+    });
+
+    if (records.length === 0) {
+      // Initialize if not found
+      return await initializeProgression(driverId, 'driver');
+    }
+
+    const progression = normalizeDriverProgression(records[0]);
+
+    // Calculate additional stats
+    const levelInfo = getLevelForXP(progression.currentXP);
+    const streakMultiplier = getStreakMultiplier(progression.streakDays, 'driver');
+
+    return {
+      ...progression,
+      levelInfo,
+      streakMultiplier,
+      nextLevelUnlock: DRIVER_LEVELS[progression.level]?.unlock || null
+    };
+  } catch (error) {
+    console.error('getDriverProgression error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get recruiter's current progression status
+ * @param {string} recruiterId
+ * @returns {object} Full progression object with rank, points, stats
+ */
+export async function getRecruiterProgression(recruiterId) {
+  try {
+    const records = await queryData(COLLECTION_KEYS.recruiterProgression, {
+      filter: `{Recruiter ID} = "${recruiterId}"`,
+      limit: 1
+    });
+
+    if (records.length === 0) {
+      // Initialize if not found
+      return await initializeProgression(recruiterId, 'recruiter');
+    }
+
+    const progression = normalizeRecruiterProgression(records[0]);
+
+    // Calculate additional stats
+    const rankInfo = getRankForPoints(progression.currentPoints);
+
+    return {
+      ...progression,
+      rankInfo,
+      nextRankUnlock: RECRUITER_RANKS[progression.rank]?.unlock || null
+    };
+  } catch (error) {
+    console.error('getRecruiterProgression error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// AWARD XP / POINTS
+// =============================================================================
+
+/**
+ * Award XP to a driver for an action
+ * @param {string} driverId - Driver profile ID
+ * @param {string} action - Action type (e.g., "apply_job", "profile_complete")
+ * @param {object} metadata - Additional context (sourceId, etc.)
+ * @returns {object} { xp_earned, total_xp, level, level_up, streak_bonus }
+ */
+export async function awardDriverXP(driverId, action, metadata = {}) {
+  try {
+    // Get XP config for this action
+    const xpConfig = getDriverXPConfig(action);
+    if (!xpConfig) {
+      console.warn(`Unknown action type: ${action}`);
+      return { success: false, reason: 'unknown_action' };
+    }
+
+    // Get current progression
+    const progression = await getDriverProgression(driverId);
+
+    // Check rate limits
+    if (xpConfig.dailyLimit || xpConfig.weeklyLimit) {
+      const todayCount = await getTodayActionCount(driverId, 'driver', action);
+      if (isRateLimited(action, todayCount, 'daily')) {
+        return { success: false, reason: 'rate_limited', xp_earned: 0 };
+      }
+    }
+
+    // Check one-time actions
+    if (xpConfig.oneTime) {
+      const alreadyEarned = await hasEarnedOneTimeXP(driverId, action);
+      if (alreadyEarned) {
+        return { success: false, reason: 'already_earned', xp_earned: 0 };
+      }
+    }
+
+    // Calculate XP with multipliers
+    let baseXP = xpConfig.xp;
+    const streakMultiplier = getStreakMultiplier(progression.streakDays, 'driver');
+    const eventMultiplier = await getActiveEventMultiplier('driver');
+    const totalMultiplier = streakMultiplier * eventMultiplier;
+    const xpEarned = Math.round(baseXP * totalMultiplier);
+
+    // Update progression
+    const newTotalXP = progression.currentXP + xpEarned;
+    const newLevelInfo = getLevelForXP(newTotalXP);
+    const leveledUp = newLevelInfo.level > progression.level;
+
+    await updateData(COLLECTION_KEYS.driverProgression, progression._id, {
+      'Current XP': newTotalXP,
+      'Level': newLevelInfo.level,
+      'Level Title': newLevelInfo.title,
+      'XP To Next Level': newLevelInfo.xpToNext,
+      'Updated At': new Date().toISOString()
+    });
+
+    // Log the event
+    await logGamificationEvent(driverId, 'driver', {
+      eventType: leveledUp ? 'level_up' : 'xp_earned',
+      action,
+      xpEarned,
+      streakBonus: streakMultiplier,
+      sourceId: metadata.sourceId,
+      sourceType: metadata.sourceType,
+      metadata
+    });
+
+    // Check for level-related achievements if leveled up (non-blocking)
+    if (leveledUp) {
+      loadAchievementService().then(() => {
+        if (checkLevelAchievements) {
+          checkLevelAchievements(driverId, newLevelInfo.level)
+            .catch(err => console.warn('Level achievement check failed:', err.message));
+        }
+      });
+    }
+
+    return {
+      success: true,
+      xp_earned: xpEarned,
+      total_xp: newTotalXP,
+      level: newLevelInfo.level,
+      level_title: newLevelInfo.title,
+      level_up: leveledUp,
+      streak_multiplier: streakMultiplier,
+      event_multiplier: eventMultiplier,
+      new_unlock: leveledUp ? newLevelInfo.unlock : null
+    };
+  } catch (error) {
+    console.error('awardDriverXP error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Award points to a recruiter for an action
+ * @param {string} recruiterId - Recruiter member ID
+ * @param {string} action - Action type (e.g., "hire_complete", "interview")
+ * @param {object} metadata - Additional context
+ * @returns {object} { points_earned, total_points, rank, rank_up }
+ */
+export async function awardRecruiterPoints(recruiterId, action, metadata = {}) {
+  try {
+    // Get points config for this action
+    const pointsConfig = getRecruiterPointsConfig(action);
+    if (!pointsConfig) {
+      console.warn(`Unknown action type: ${action}`);
+      return { success: false, reason: 'unknown_action' };
+    }
+
+    // Get current progression
+    const progression = await getRecruiterProgression(recruiterId);
+
+    // Check rate limits
+    if (pointsConfig.dailyLimit || pointsConfig.monthlyLimit) {
+      const todayCount = await getTodayActionCount(recruiterId, 'recruiter', action);
+      if (isRateLimited(action, todayCount, 'daily')) {
+        return { success: false, reason: 'rate_limited', points_earned: 0 };
+      }
+    }
+
+    // Check one-time actions
+    if (pointsConfig.oneTime) {
+      const alreadyEarned = await hasEarnedOneTimePoints(recruiterId, action);
+      if (alreadyEarned) {
+        return { success: false, reason: 'already_earned', points_earned: 0 };
+      }
+    }
+
+    // Calculate points with event multiplier
+    let basePoints = pointsConfig.points;
+    const eventMultiplier = await getActiveEventMultiplier('recruiter');
+    const pointsEarned = Math.round(basePoints * eventMultiplier);
+
+    // Update progression
+    const newTotalPoints = progression.currentPoints + pointsEarned;
+    const newRankInfo = getRankForPoints(newTotalPoints);
+    const rankedUp = newRankInfo.rank > progression.rank;
+
+    await updateData(COLLECTION_KEYS.recruiterProgression, progression._id, {
+      'Current Points': newTotalPoints,
+      'Rank': newRankInfo.rank,
+      'Rank Title': newRankInfo.title,
+      'Points To Next Rank': newRankInfo.pointsToNext,
+      'Updated At': new Date().toISOString()
+    });
+
+    // Log the event
+    await logGamificationEvent(recruiterId, 'recruiter', {
+      eventType: rankedUp ? 'rank_up' : 'points_earned',
+      action,
+      pointsEarned,
+      sourceId: metadata.sourceId,
+      sourceType: metadata.sourceType,
+      metadata
+    });
+
+    // Check for hire-related achievements if this was a hire action (non-blocking)
+    const hireActions = ['hire_complete', 'successful_hire', 'retention_90_day'];
+    if (hireActions.includes(action)) {
+      loadAchievementService().then(() => {
+        if (checkHireAchievements) {
+          const totalHires = progression.totalHires + (action === 'hire_complete' || action === 'successful_hire' ? 1 : 0);
+          checkHireAchievements(recruiterId, totalHires)
+            .catch(err => console.warn('Hire achievement check failed:', err.message));
+        }
+      });
+    }
+
+    return {
+      success: true,
+      points_earned: pointsEarned,
+      total_points: newTotalPoints,
+      rank: newRankInfo.rank,
+      rank_title: newRankInfo.title,
+      rank_up: rankedUp,
+      event_multiplier: eventMultiplier,
+      new_unlock: rankedUp ? newRankInfo.unlock : null
+    };
+  } catch (error) {
+    console.error('awardRecruiterPoints error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// LEVEL / RANK CHECKS
+// =============================================================================
+
+/**
+ * Check if driver should level up and process if so
+ * @param {string} driverId
+ * @returns {object} { leveled_up, new_level, unlocks, notification }
+ */
+export async function checkDriverLevelUp(driverId) {
+  const progression = await getDriverProgression(driverId);
+  const levelInfo = getLevelForXP(progression.currentXP);
+
+  if (levelInfo.level > progression.level) {
+    // Process level up
+    await updateData(COLLECTION_KEYS.driverProgression, progression._id, {
+      'Level': levelInfo.level,
+      'Level Title': levelInfo.title,
+      'XP To Next Level': levelInfo.xpToNext,
+      'Updated At': new Date().toISOString()
+    });
+
+    await logGamificationEvent(driverId, 'driver', {
+      eventType: 'level_up',
+      action: 'level_up',
+      xpEarned: 0,
+      metadata: { newLevel: levelInfo.level, title: levelInfo.title }
+    });
+
+    return {
+      leveled_up: true,
+      new_level: levelInfo.level,
+      title: levelInfo.title,
+      unlock: levelInfo.unlock
+    };
+  }
+
+  return { leveled_up: false, current_level: progression.level };
+}
+
+/**
+ * Check if recruiter should rank up and process if so
+ * @param {string} recruiterId
+ * @returns {object} { ranked_up, new_rank, unlocks, notification }
+ */
+export async function checkRecruiterRankUp(recruiterId) {
+  const progression = await getRecruiterProgression(recruiterId);
+  const rankInfo = getRankForPoints(progression.currentPoints);
+
+  if (rankInfo.rank > progression.rank) {
+    // Process rank up
+    await updateData(COLLECTION_KEYS.recruiterProgression, progression._id, {
+      'Rank': rankInfo.rank,
+      'Rank Title': rankInfo.title,
+      'Points To Next Rank': rankInfo.pointsToNext,
+      'Updated At': new Date().toISOString()
+    });
+
+    await logGamificationEvent(recruiterId, 'recruiter', {
+      eventType: 'rank_up',
+      action: 'rank_up',
+      pointsEarned: 0,
+      metadata: { newRank: rankInfo.rank, title: rankInfo.title }
+    });
+
+    return {
+      ranked_up: true,
+      new_rank: rankInfo.rank,
+      title: rankInfo.title,
+      unlock: rankInfo.unlock
+    };
+  }
+
+  return { ranked_up: false, current_rank: progression.rank };
+}
+
+/**
+ * Get level/rank definitions for UI display
+ * @param {'driver' | 'recruiter'} userType
+ * @returns {array} Level/rank definitions with requirements
+ */
+export function getLevelDefinitions(userType) {
+  if (userType === 'driver') {
+    return DRIVER_LEVELS;
+  } else if (userType === 'recruiter') {
+    return RECRUITER_RANKS;
+  }
+  return [];
+}
+
+// =============================================================================
+// EVENT LOGGING
+// =============================================================================
+
+/**
+ * Log a gamification event for audit trail
+ * @param {string} userId
+ * @param {'driver' | 'recruiter'} userType
+ * @param {object} eventData
+ */
+export async function logGamificationEvent(userId, userType, eventData) {
+  try {
+    const eventRecord = {
+      'Event ID': `${userType}_${userId}_${Date.now()}`,
+      'User ID': userId,
+      'User Type': userType,
+      'Event Type': eventData.eventType,
+      'Action': eventData.action,
+      'XP Earned': eventData.xpEarned || 0,
+      'Points Earned': eventData.pointsEarned || 0,
+      'Streak Bonus': eventData.streakBonus || 1.0,
+      'Source ID': eventData.sourceId || '',
+      'Source Type': eventData.sourceType || '',
+      'Metadata JSON': JSON.stringify(eventData.metadata || {}),
+      'Created At': new Date().toISOString()
+    };
+
+    await insertData(COLLECTION_KEYS.gamificationEvents, eventRecord);
+  } catch (error) {
+    console.error('logGamificationEvent error:', error);
+    // Don't throw - logging shouldn't break the main flow
+  }
+}
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * Get today's action count for rate limiting
+ */
+async function getTodayActionCount(userId, userType, action) {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStr = today.toISOString().split('T')[0];
+
+    const events = await queryData(COLLECTION_KEYS.gamificationEvents, {
+      filter: `AND({User ID} = "${userId}", {Action} = "${action}", DATESTR({Created At}) = "${todayStr}")`,
+      limit: 100
+    });
+
+    return events.length;
+  } catch (error) {
+    console.error('getTodayActionCount error:', error);
+    return 0;
+  }
+}
+
+/**
+ * Check if user has already earned a one-time XP action
+ */
+async function hasEarnedOneTimeXP(driverId, action) {
+  try {
+    const events = await queryData(COLLECTION_KEYS.gamificationEvents, {
+      filter: `AND({User ID} = "${driverId}", {Action} = "${action}")`,
+      limit: 1
+    });
+    return events.length > 0;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Check if user has already earned a one-time points action
+ */
+async function hasEarnedOneTimePoints(recruiterId, action) {
+  try {
+    const events = await queryData(COLLECTION_KEYS.gamificationEvents, {
+      filter: `AND({User ID} = "${recruiterId}", {Action} = "${action}")`,
+      limit: 1
+    });
+    return events.length > 0;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Get active event multiplier for a user type
+ */
+async function getActiveEventMultiplier(userType) {
+  try {
+    const now = new Date().toISOString();
+    const events = await queryData(COLLECTION_KEYS.seasonalEvents, {
+      filter: `AND({Is Active} = "Yes", {Start Date} <= "${now}", {End Date} >= "${now}")`,
+      limit: 10
+    });
+
+    let maxMultiplier = 1.0;
+    for (const event of events) {
+      const multiplier = userType === 'driver'
+        ? (event['XP Multiplier'] || 1.0)
+        : (event['Points Multiplier'] || 1.0);
+      maxMultiplier = Math.max(maxMultiplier, multiplier);
+    }
+
+    return maxMultiplier;
+  } catch (error) {
+    return 1.0;
+  }
+}
+
+/**
+ * Normalize Airtable driver progression record to standard format
+ */
+function normalizeDriverProgression(record) {
+  return {
+    _id: record.id,
+    driverId: record['Driver ID'],
+    currentXP: record['Current XP'] || 0,
+    level: record['Level'] || 1,
+    levelTitle: record['Level Title'] || 'Rookie Driver',
+    xpToNextLevel: record['XP To Next Level'] || 100,
+    streakDays: record['Streak Days'] || 0,
+    longestStreak: record['Longest Streak'] || 0,
+    lastLoginDate: record['Last Login Date'],
+    streakFreezeAvailable: record['Streak Freeze Available'] || 0,
+    totalApplications: record['Total Applications'] || 0,
+    totalResponses: record['Total Responses'] || 0,
+    avgResponseHours: record['Avg Response Hours'] || 0,
+    profileCompletion: record['Profile Completion'] || 0,
+    createdAt: record['Created At'],
+    updatedAt: record['Updated At']
+  };
+}
+
+/**
+ * Normalize Airtable recruiter progression record to standard format
+ */
+function normalizeRecruiterProgression(record) {
+  return {
+    _id: record.id,
+    recruiterId: record['Recruiter ID'],
+    carrierId: record['Carrier ID'],
+    currentPoints: record['Current Points'] || 0,
+    rank: record['Rank'] || 1,
+    rankTitle: record['Rank Title'] || 'Scout',
+    pointsToNextRank: record['Points To Next Rank'] || 500,
+    totalHires: record['Total Hires'] || 0,
+    totalOutreach: record['Total Outreach'] || 0,
+    avgResponseHours: record['Avg Response Hours'] || 0,
+    hireAcceptanceRate: record['Hire Acceptance Rate'] || 0,
+    retention90DayRate: record['Retention 90 Day Rate'] || 0,
+    driverSatisfactionAvg: record['Driver Satisfaction Avg'] || 0,
+    createdAt: record['Created At'],
+    updatedAt: record['Updated At']
+  };
+}

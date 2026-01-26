@@ -125,9 +125,121 @@ const normalizedRecords = (result.records || []).map(r => ({
 
 ### Config File Reference
 
-Routing is controlled by `backend/config.js`:
+Routing is controlled by `backend/config.jsw`:
 - `usesAirtable(collectionKey)` - Returns `true` if collection routes to Airtable
 - `getAirtableTableName(collectionKey)` - Returns the Airtable table name
+
+### Two Types of Collections
+
+#### Type 1: Migrated Collections (Legacy)
+Collections that existed in Wix and were migrated to Airtable. These have a Wix fallback for rollback capability.
+
+```javascript
+// config.jsw - Migrated collection (has Wix fallback)
+DATA_SOURCE.carriers = 'airtable'
+AIRTABLE_TABLE_NAMES.carriers = 'v2_Carriers'
+WIX_COLLECTION_NAMES.carriers = 'Carriers'  // Fallback exists
+```
+
+#### Type 2: New Collections (Airtable-Only) ⭐
+Collections created for new features. **NO Wix collection exists or is needed.**
+
+```javascript
+// config.jsw - New collection (Airtable-only, NO Wix fallback)
+DATA_SOURCE.driverXpEvents = 'airtable'
+AIRTABLE_TABLE_NAMES.driverXpEvents = 'v2_Driver XP Events'
+// NO entry in WIX_COLLECTION_NAMES - there's no Wix collection!
+```
+
+### Adding New Collections (For New Features)
+
+When building new features that need data storage, follow this Airtable-only workflow:
+
+**Step 1: Create Airtable Table**
+```
+Base: Last Mile Driver recruiting (app9N1YCJ3gdhExA0)
+Table name: v2_{Feature Name}  (e.g., v2_Driver XP Events)
+```
+
+**Step 2: Add to config.jsw (TWO entries only)**
+```javascript
+// In DATA_SOURCE
+export const DATA_SOURCE = {
+  // ... existing
+  driverXpEvents: 'airtable',  // NEW
+};
+
+// In AIRTABLE_TABLE_NAMES
+export const AIRTABLE_TABLE_NAMES = {
+  // ... existing
+  driverXpEvents: 'v2_Driver XP Events',  // NEW
+};
+
+// DO NOT add to WIX_COLLECTION_NAMES - no Wix collection exists!
+```
+
+**Step 3: Use Simplified Helpers in Service**
+
+For Airtable-only collections, use streamlined helpers without Wix fallback:
+
+```javascript
+import { getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+const COLLECTION_KEYS = {
+    xpEvents: 'driverXpEvents',
+    achievements: 'driverAchievements',
+};
+
+// Simplified helpers - Airtable only, no Wix fallback needed
+async function queryData(collectionKey, options = {}) {
+    const tableName = getAirtableTableName(collectionKey);
+    const result = await airtable.queryRecords(tableName, {
+        filterByFormula: options.filter || '',
+        sort: options.sort,
+        maxRecords: options.limit || 100
+    });
+    return result.records || [];
+}
+
+async function insertData(collectionKey, data) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.createRecord(tableName, data);
+}
+
+async function updateData(collectionKey, recordId, data) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.updateRecord(tableName, recordId, data);
+}
+
+async function getRecord(collectionKey, recordId) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.getRecord(tableName, recordId);
+}
+
+async function removeData(collectionKey, recordId) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.deleteRecord(tableName, recordId);
+}
+```
+
+### Airtable Base Reference
+
+| Base | ID | Purpose |
+|------|-----|---------|
+| Last Mile Driver recruiting | `app9N1YCJ3gdhExA0` | All application data (v2_* tables) |
+| VelocityMatch DataLake | `appt00rHHBOiKx9xl` | External data feeds (fuel, weather, traffic) |
+
+**New feature tables go in `Last Mile Driver recruiting` base.**
+
+### Checklist: Adding a New Collection
+
+1. ✅ Create table in Airtable with `v2_` prefix
+2. ✅ Add to `DATA_SOURCE` as `'airtable'`
+3. ✅ Add to `AIRTABLE_TABLE_NAMES`
+4. ❌ Do NOT add to `WIX_COLLECTION_NAMES`
+5. ❌ Do NOT create a Wix collection
+6. ✅ Use simplified Airtable-only helpers in service
 
 ### Checklist When Modifying Backend Services
 
