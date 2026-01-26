@@ -218,11 +218,11 @@ Implement the recruiter badge tier system and competitive leaderboards.
 
 ### 4.4 Testing - Phase 4
 - [x] Task: Write unit tests for badge tier calculations
-- [ ] Task: Write unit tests for leaderboard ranking algorithm
-- [ ] Task: Write unit tests for leaderboard snapshot generation
+- [x] Task: Write unit tests for leaderboard ranking algorithm
+- [x] Task: Write unit tests for leaderboard snapshot generation
 - [x] Task: Test badge recalculation with various recruiter data
-- [ ] Task: Test leaderboard with ties (same score)
-- [ ] Task: Manual test: View leaderboard and verify rankings
+- [x] Task: Test leaderboard with ties (same score)
+- [x] Task: Manual test: View leaderboard and verify rankings
 - [x] Task: Manual test: Verify badge tier upgrade notification
 - [x] Task: Conductor - User Manual Verification 'Phase 4: Badges & Leaderboards' 🚧 (Logic Verified)
 
