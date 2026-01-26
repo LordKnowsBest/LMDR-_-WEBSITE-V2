@@ -249,6 +249,114 @@ async function removeData(collectionKey, recordId) {
 4. **Replace bypasses** - Convert direct `wixData.*` calls to use the helpers
 5. **Handle field name mapping** - Normalize Airtable responses to match expected field names
 
+### Full Airtable Routing Audit Checklist
+
+When auditing a backend service for complete Airtable integration, check ALL of these:
+
+#### Step 1: Backend Service File (*.jsw)
+```
+□ Imports `usesAirtable`, `getAirtableTableName` from 'backend/config'
+□ Imports `* as airtable` from 'backend/airtableClient'
+□ Uses `usesAirtable(collectionKey)` before data operations
+□ Uses `getAirtableTableName(collectionKey)` to get table name
+□ All field names in records use snake_case (backend standard)
+□ Filter formulas use CORRECT Airtable field names (check FIELD_MAPPINGS)
+```
+
+#### Step 2: config.jsw - Data Source Routing
+```
+□ Collection is listed in DATA_SOURCE object
+□ Value is 'airtable' (not 'wix') for collections that should route to Airtable
+□ Collection key in AIRTABLE_TABLE_NAMES matches the table name in Airtable
+□ Collection key in WIX_COLLECTION_NAMES matches for fallback
+```
+
+#### Step 3: airtableClient.jsw - Table Mappings
+```
+□ TABLE_NAMES has entry for the Wix collection name
+□ TABLE_NAMES has entry for the v2_* table name (if config uses that)
+□ Table name points to actual table where data exists
+```
+
+#### Step 4: airtableClient.jsw - Field Mappings
+```
+□ FIELD_MAPPINGS has entry for the collection/table name
+□ ALL fields used by backend are mapped (snake_case → Title Case)
+□ Filter formula field names match what's in FIELD_MAPPINGS values
+□ Date fields mapped correctly (submitted_date, created_date, etc.)
+□ Reference fields mapped (linked_carrier_id, driver_id, etc.)
+```
+
+#### Step 5: Wix Page Code (*.js in src/pages/)
+```
+□ Imports the backend service function
+□ Handles postMessage from HTML component
+□ Calls backend function with correct data shape
+□ Returns response via postMessage to HTML
+```
+
+#### Step 6: HTML Component
+```
+□ Form collects all required fields
+□ postMessage sends correct message type
+□ Listens for response message type
+□ Handles success/error states
+```
+
+### Common Airtable Field Mapping Issues
+
+| Issue | Symptom | Fix |
+|-------|---------|-----|
+| Backend uses `additional_notes` but mapping has `notes` | Data goes to wrong field or gets lost | Add `'additional_notes': 'Notes'` to FIELD_MAPPINGS |
+| Filter uses `{DOT Number}` but table has `DOT_NUMBER` | Query returns empty results | Check actual Airtable field name, update filter formula |
+| Config routes to `v2_Carriers` but TABLE_NAMES has `Carriers` | Table not found error | Add `'v2_Carriers': 'Carriers (Master)'` to TABLE_NAMES |
+| Missing date field mapping | Dates stored as wrong field name | Add `'submitted_date': 'Submitted Date'` etc. |
+| Backend sends camelCase field | Field not mapped, stored as-is | Ensure backend normalizes to snake_case before insert |
+
+### Airtable Field Name Reference
+
+**Carriers (Master) table uses UPPERCASE:**
+- `DOT_NUMBER`, `LEGAL_NAME`, `PHY_STATE`, `PHY_CITY`, etc.
+
+**v2_* tables use Title Case:**
+- `Company Name`, `Contact Name`, `Submitted Date`, `Status`, etc.
+
+**Backend services use snake_case:**
+- `company_name`, `contact_name`, `submitted_date`, `status`, etc.
+
+### How to Add a New Collection to Airtable Routing
+
+1. **Add to config.jsw DATA_SOURCE:**
+   ```javascript
+   myNewCollection: 'airtable',
+   ```
+
+2. **Add to config.jsw AIRTABLE_TABLE_NAMES:**
+   ```javascript
+   myNewCollection: 'v2_My New Collection',
+   ```
+
+3. **Add to config.jsw WIX_COLLECTION_NAMES:**
+   ```javascript
+   myNewCollection: 'MyNewCollection',
+   ```
+
+4. **Add to airtableClient.jsw TABLE_NAMES:**
+   ```javascript
+   'MyNewCollection': 'v2_My New Collection',
+   'v2_My New Collection': 'v2_My New Collection', // Self-reference for direct lookups
+   ```
+
+5. **Add to airtableClient.jsw FIELD_MAPPINGS:**
+   ```javascript
+   'MyNewCollection': {
+     'field_one': 'Field One',
+     'field_two': 'Field Two',
+     'created_date': 'Created Date',
+     // ... all fields the backend uses
+   },
+   ```
+
 ### Allowed Direct Wix Calls
 
 The ONLY acceptable direct `wixData.*` calls are:

@@ -88,3 +88,37 @@ Create a "Feature Adoption Log" in the Admin Dashboard to visualize feature usag
 - [x] Test suite exists with 7 describe blocks
 - [x] Test fixtures exist (720 lines)
 - [x] Comprehensive coverage for all functions
+
+## Implementation Reality Check (2026-01-25)
+
+This section captures a quick reality check of the current code so we can
+resume with full execution tomorrow.
+
+### What Exists (Code-Level)
+- Backend service with core functions and Airtable routing: `src/backend/featureAdoptionService.jsw`
+- Collections setup + seeding utilities: `src/backend/setupCollections.jsw`
+- Scheduled aggregation job wired: `src/backend/jobs.config`
+- Admin dashboard UI section implemented: `src/public/admin/ADMIN_DASHBOARD.html`
+- Client tracker library implemented: `src/public/js/feature-tracker.js`
+
+### Gaps / Integration Issues Found
+- Admin dashboard sends PostMessage with `type` but the message handler only
+  validates `action`, so requests will not route: `src/public/admin/ADMIN_DASHBOARD.html`
+- Admin dashboard expects `getFunnelsList`, but no backend function exists:
+  `src/public/admin/ADMIN_DASHBOARD.html`, `src/backend/featureAdoptionService.jsw`
+- No page code bridges the admin HTML component to backend Feature Adoption
+  actions (no `onMessage` handler found for this feature area).
+- `feature-tracker.js` is not referenced in any page or HTML component
+  (no usage detected under `src/public/` or `src/pages/`).
+- Some usage sites call `logFeatureInteraction` with an outdated signature and/or
+  invalid actions, so events likely get rejected:
+  - `src/backend/driverMatching.jsw` (action parameter is passed as `recruiter`)
+  - `src/pages/Road Utilities.xzvqe.js` uses non-enum actions: `report`,
+    `link_card`, `tab_switch`
+- Tests exist but are not wired into Jest (Jest roots point to
+  `src/public/__tests__`, but tests live under `tests/public`):
+  `jest.config.js`, `tests/public/featureAdoptionService.test.js`
+
+### Practical Completion Level
+- Core code is present, but end-to-end flow (UI -> backend -> storage -> reports)
+  is not wired or validated. Overall status: **partially complete**.

@@ -1,12 +1,12 @@
 # Track: UI/UX Standardization
 
 ## Status
-- [ ] Planning
+- [x] Planning
 - [x] Phase 1: Tailwind Unification
 - [x] Phase 2: Dashboards (Admin/Recruiter)
 - [x] Phase 3: Landing Pages
 - [x] Phase 4: Carrier Pages
-- [ ] Phase 5: Component Refactoring
+- [x] Phase 5: Component Refactoring
 
 ## Context
 Unify the platform's UI/UX by removing inline Tailwind configs, standardizing on Font Awesome, centralizing theme logic, and using consistent design tokens (`lmdr-config.js`).
