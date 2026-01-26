@@ -558,7 +558,8 @@ export async function uploadDocument(token, documentType, fileData) {
             _updatedDate: now
         };
 
-        await wixData.update(CONFIG.collections.documentRequests, updatedDoc, { suppressAuth: true });
+        // Use dual-source routing for update
+        await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, updatedDoc);
 
         console.log(`[DocumentCollection] Document uploaded: ${documentType} for workflow ${docRequest.workflow_id}`);
 
@@ -608,8 +609,8 @@ export async function verifyDocument(documentId, verifierId, status, notes = nul
     }
 
     try {
-        // Get document request
-        const docRequest = await wixData.get(CONFIG.collections.documentRequests, documentId, { suppressAuth: true });
+        // Get document request using dual-source routing
+        const docRequest = await getRecord(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, documentId);
 
         if (!docRequest) {
             return { success: false, error: 'Document not found' };
@@ -631,7 +632,8 @@ export async function verifyDocument(documentId, verifierId, status, notes = nul
             _updatedDate: now
         };
 
-        await wixData.update(CONFIG.collections.documentRequests, updatedDoc, { suppressAuth: true });
+        // Use dual-source routing for update
+        await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, updatedDoc);
 
         // Check if all required documents are now verified
         await updateWorkflowDocumentStatus(docRequest.workflow_id);
@@ -669,8 +671,8 @@ export async function sendDocumentReminder(documentId) {
     }
 
     try {
-        // Get document request
-        const docRequest = await wixData.get(CONFIG.collections.documentRequests, documentId, { suppressAuth: true });
+        // Get document request using dual-source routing
+        const docRequest = await getRecord(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, documentId);
 
         if (!docRequest) {
             return { success: false, error: 'Document not found' };
@@ -701,7 +703,8 @@ export async function sendDocumentReminder(documentId) {
             _updatedDate: now
         };
 
-        await wixData.update(CONFIG.collections.documentRequests, updatedDoc, { suppressAuth: true });
+        // Use dual-source routing for update
+        await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, updatedDoc);
 
         // TODO: Trigger email/SMS notification here
         // In production, call emailService or SMS service
@@ -740,8 +743,8 @@ export async function checkDocumentExpiration(documentId) {
     }
 
     try {
-        // Get document request
-        const docRequest = await wixData.get(CONFIG.collections.documentRequests, documentId, { suppressAuth: true });
+        // Get document request using dual-source routing
+        const docRequest = await getRecord(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, documentId);
 
         if (!docRequest) {
             return { success: false, error: 'Document not found' };
@@ -818,7 +821,8 @@ export async function getDocumentOcrData(documentId) {
     }
 
     try {
-        const docRequest = await wixData.get(CONFIG.collections.documentRequests, documentId, { suppressAuth: true });
+        // Use dual-source routing for get
+        const docRequest = await getRecord(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, documentId);
 
         if (!docRequest) {
             return { success: false, error: 'Document not found' };
@@ -855,14 +859,23 @@ export async function checkDriverDocumentExpirations(driverId) {
     }
 
     try {
-        // Get all documents for this driver with expiration-capable types
-        const result = await wixData.query(CONFIG.collections.documentRequests)
-            .eq('driver_id', driverId)
-            .hasSome('document_type', CONFIG.expiringDocTypes)
-            .eq('status', CONFIG.status.VERIFIED)
-            .find({ suppressAuth: true });
-
-        const documents = result.items || [];
+        // Get all documents for this driver with expiration-capable types using dual-source routing
+        let documents = [];
+        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
+            // Build OR filter for expiring doc types
+            const typeFilters = CONFIG.expiringDocTypes.map(t => `{Document Type} = '${t}'`).join(', ');
+            const filter = `AND({Driver Id} = '${driverId}', {Status} = '${CONFIG.status.VERIFIED}', OR(${typeFilters}))`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 100 });
+            documents = result.records || [];
+        } else {
+            const result = await wixData.query(CONFIG.collections.documentRequests)
+                .eq('driver_id', driverId)
+                .hasSome('document_type', CONFIG.expiringDocTypes)
+                .eq('status', CONFIG.status.VERIFIED)
+                .find({ suppressAuth: true });
+            documents = result.items || [];
+        }
         const now = new Date();
         const expiringDocs = [];
         const expiredDocs = [];
@@ -920,7 +933,8 @@ async function updateWorkflowDocumentStatus(workflowId) {
         const statusResult = await getDocumentStatus(workflowId);
         if (!statusResult.success) return;
 
-        const workflow = await wixData.get(CONFIG.collections.onboardingWorkflows, workflowId, { suppressAuth: true });
+        // Use dual-source routing for get
+        const workflow = await getRecord(COLLECTION_KEYS.onboardingWorkflows, CONFIG.collections.onboardingWorkflows, workflowId);
         if (!workflow) return;
 
         let documentsStatus = 'pending';
@@ -932,14 +946,14 @@ async function updateWorkflowDocumentStatus(workflowId) {
             documentsStatus = 'partial';
         }
 
-        // Update workflow if status changed
+        // Update workflow if status changed using dual-source routing
         if (workflow.documents_status !== documentsStatus) {
-            await wixData.update(CONFIG.collections.onboardingWorkflows, {
+            await updateData(COLLECTION_KEYS.onboardingWorkflows, CONFIG.collections.onboardingWorkflows, {
                 ...workflow,
                 documents_status: documentsStatus,
                 status: documentsStatus === 'complete' ? 'documents_complete' : workflow.status,
                 _updatedDate: new Date()
-            }, { suppressAuth: true });
+            });
 
             console.log(`[DocumentCollection] Workflow ${workflowId} documents_status updated to: ${documentsStatus}`);
         }
@@ -964,13 +978,22 @@ export async function regenerateUploadToken(workflowId) {
     }
 
     try {
-        // Get all pending document requests for this workflow
-        const result = await wixData.query(CONFIG.collections.documentRequests)
-            .eq('workflow_id', workflowId)
-            .hasSome('status', [CONFIG.status.REQUESTED, CONFIG.status.REJECTED])
-            .find({ suppressAuth: true });
+        // Get all pending document requests for this workflow using dual-source routing
+        let pendingDocs = [];
+        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
+            const filter = `AND({Workflow Id} = '${workflowId}', OR({Status} = '${CONFIG.status.REQUESTED}', {Status} = '${CONFIG.status.REJECTED}'))`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 100 });
+            pendingDocs = result.records || [];
+        } else {
+            const result = await wixData.query(CONFIG.collections.documentRequests)
+                .eq('workflow_id', workflowId)
+                .hasSome('status', [CONFIG.status.REQUESTED, CONFIG.status.REJECTED])
+                .find({ suppressAuth: true });
+            pendingDocs = result.items;
+        }
 
-        if (result.items.length === 0) {
+        if (pendingDocs.length === 0) {
             return { success: false, error: 'No pending documents found for this workflow' };
         }
 
@@ -978,26 +1001,26 @@ export async function regenerateUploadToken(workflowId) {
         const { token, expiry } = generateUploadToken();
         const now = new Date();
 
-        // Update all pending documents with new token
-        for (const doc of result.items) {
-            await wixData.update(CONFIG.collections.documentRequests, {
+        // Update all pending documents with new token using dual-source routing
+        for (const doc of pendingDocs) {
+            await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, {
                 ...doc,
                 upload_token: token,
                 upload_token_expiry: expiry,
                 _updatedDate: now
-            }, { suppressAuth: true });
+            });
         }
 
         const uploadPortalUrl = `https://lastmilecdl.com/document-upload?token=${token}`;
 
-        console.log(`[DocumentCollection] Regenerated token for ${result.items.length} documents in workflow ${workflowId}`);
+        console.log(`[DocumentCollection] Regenerated token for ${pendingDocs.length} documents in workflow ${workflowId}`);
 
         return {
             success: true,
             token,
             tokenExpiry: expiry,
             uploadPortalUrl,
-            documentsUpdated: result.items.length
+            documentsUpdated: pendingDocs.length
         };
 
     } catch (error) {
@@ -1022,13 +1045,23 @@ export async function sendAutoReminders() {
         let remindersSent = 0;
         let errors = 0;
 
-        // Get all requested documents
-        const result = await wixData.query(CONFIG.collections.documentRequests)
-            .eq('status', CONFIG.status.REQUESTED)
-            .lt('reminder_sent_count', CONFIG.reminderSequence.length)
-            .find({ suppressAuth: true });
+        // Get all requested documents using dual-source routing
+        let requestedDocs = [];
+        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
+            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
+            const maxReminders = CONFIG.reminderSequence.length;
+            const filter = `AND({Status} = '${CONFIG.status.REQUESTED}', {Reminder Sent Count} < ${maxReminders})`;
+            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 500 });
+            requestedDocs = result.records || [];
+        } else {
+            const result = await wixData.query(CONFIG.collections.documentRequests)
+                .eq('status', CONFIG.status.REQUESTED)
+                .lt('reminder_sent_count', CONFIG.reminderSequence.length)
+                .find({ suppressAuth: true });
+            requestedDocs = result.items;
+        }
 
-        for (const doc of result.items) {
+        for (const doc of requestedDocs) {
             const createdDate = new Date(doc._createdDate);
             const daysSinceCreation = Math.floor((now - createdDate) / (1000 * 60 * 60 * 24));
             const currentReminderIndex = doc.reminder_sent_count || 0;
