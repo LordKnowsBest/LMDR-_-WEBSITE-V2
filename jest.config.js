@@ -31,6 +31,7 @@ module.exports = {
     '^wix-members-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-members-backend.js',
     '^wix-secrets-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-secrets-backend.js',
     '^wix-users-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-users-backend.js',
+    '^wix-fetch$': '<rootDir>/src/public/__tests__/__mocks__/wix-fetch.js',
     // Map backend imports (handle both .js and .jsw)
     '^backend/(.*)$': '<rootDir>/src/backend/$1.jsw'
   },
