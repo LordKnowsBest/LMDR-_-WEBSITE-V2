@@ -24,6 +24,7 @@ import {
 } from 'backend/interviewScheduler.jsw';
 
 import { sendMessage, getConversation, markAsRead } from 'backend/messaging.jsw';
+import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
 
 // Driver Search imports
 import { findMatchingDrivers, getDriverProfile } from 'backend/driverMatching.jsw';
@@ -163,6 +164,18 @@ $w.onReady(async function () {
   htmlComponent.onMessage(async (event) => {
     await handleHtmlMessage(event.data, htmlComponent);
   });
+
+  // Set up gamification widget if present
+  // Add an HTML component with ID #gamificationHtml pointing to public/recruiter/RECRUITER_GAMIFICATION.html
+  try {
+    const gamificationWidget = $w('#gamificationHtml');
+    if (gamificationWidget && typeof gamificationWidget.onMessage === 'function') {
+      setupRecruiterGamification(gamificationWidget);
+      console.log('🎮 Recruiter gamification widget initialized');
+    }
+  } catch (e) {
+    // Gamification widget not present on page, that's OK
+  }
 });
 
 // ============================================================================

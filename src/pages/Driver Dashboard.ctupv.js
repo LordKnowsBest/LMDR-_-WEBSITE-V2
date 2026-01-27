@@ -6,6 +6,7 @@
 import { getDriverApplications, withdrawApplication } from 'backend/applicationService';
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
+import { setupDriverGamification } from 'public/js/gamificationPageHandlers';
 
 // ============================================================================
 // CONFIGURATION
@@ -90,6 +91,18 @@ $w.onReady(async function () {
 
     // Set up HTML component message handlers
     setupHtmlMessageHandlers();
+
+    // Set up gamification widget if present
+    // Add an HTML component with ID #gamificationHtml pointing to public/driver/DRIVER_GAMIFICATION.html
+    try {
+        const gamificationWidget = $w('#gamificationHtml');
+        if (gamificationWidget && typeof gamificationWidget.onMessage === 'function') {
+            setupDriverGamification(gamificationWidget);
+            console.log('🎮 Gamification widget initialized');
+        }
+    } catch (e) {
+        // Gamification widget not present on page, that's OK
+    }
 
     // Load data WITHOUT blocking - keeps message handlers responsive
     // HTML will also send 'dashboardReady' which triggers load if this fails

@@ -340,12 +340,13 @@ Build all frontend components for displaying gamification data.
 - [x] Task: Implement toast queue for multiple notifications
 
 ### 6.8 Wix Page Integration
-- [ ] Task: Add gamification widget to Driver Dashboard page
-- [ ] Task: Add gamification widget to Recruiter Dashboard page
-- [ ] Task: Create standalone Leaderboard page in Wix
-- [ ] Task: Create standalone Challenges page in Wix
-- [ ] Task: Set up all postMessage bridges for backend communication
-- [ ] Task: Configure page permissions appropriately
+- [x] Task: Add gamification widget to Driver Dashboard page
+- [x] Task: Add gamification widget to Recruiter Dashboard page
+- [x] Task: Create standalone Leaderboard page in Wix
+- [x] Task: Create standalone Challenges page in Wix
+- [x] Task: Create standalone Driver Badges page in Wix
+- [x] Task: Set up all postMessage bridges for backend communication
+- [ ] Task: Configure page permissions appropriately (manual in Wix editor)
 
 ### 6.9 Testing - Phase 6
 - [ ] Task: Test driver dashboard widget on desktop and mobile
