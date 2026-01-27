@@ -11,6 +11,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is required because Wix syncs from the GitHub repository. Without pushing, changes won't appear in Wix.
 
+## Production Website URL
+
+**Base URL:** `https://www.lastmiledr.app`
+
+When writing redirects or links in HTML components (especially within Wix iframes), always use the full absolute URL:
+
+```javascript
+// ✅ CORRECT - Full URL required for iframe context
+const baseUrl = 'https://www.lastmiledr.app';
+window.top.location.href = baseUrl + '/pricing';
+
+// ❌ WRONG - Relative paths don't resolve correctly in Wix iframes
+window.top.location.href = '/pricing';
+```
+
 ## Critical Data Routing: Dual-Source Pattern (Wix + Airtable)
 
 **CRITICAL RULE:** This project uses a dual-source data architecture where most data routes to **Airtable** for visibility, while auth-related data stays in **Wix**. You MUST follow this pattern when writing or modifying backend code.
