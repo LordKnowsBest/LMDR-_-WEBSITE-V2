@@ -368,37 +368,37 @@ Connect gamification to existing services and implement seasonal events.
 ### 7.1 Service Integration Hooks
 - [ ] Task: Add XP hook to `driverProfiles.jsw` - profile updates
 - [ ] Task: Add XP hook to `applicationService.jsw` - application lifecycle
-- [ ] Task: Add XP/achievement hook to `messaging.jsw` - response tracking
+- [x] Task: Add XP/achievement hook to `messaging.jsw` - response tracking
 - [ ] Task: Add points hook to `driverMatching.jsw` - profile views
-- [ ] Task: Add points hook to `interviewScheduler.jsw` - interview events
+- [x] Task: Add points hook to `interviewScheduler.jsw` - interview events
 - [ ] Task: Add points/achievement hook to hire completion flow
 - [ ] Task: Add streak recording to `memberService.jsw` login
-- [ ] Task: Add challenge progress updates to all relevant services
+- [x] Task: Add challenge progress updates to messaging and interview services
 - [ ] Task: Document all integration points in CLAUDE.md
 
 ### 7.2 Seasonal Events Backend
-- [ ] Task: Create `gamificationEventService.jsw` for event management
-- [ ] Task: Implement `getActiveEvents()` for current events
-- [ ] Task: Implement `getEventDetails(eventId)` with challenges/badges
-- [ ] Task: Implement `getUserEventParticipation(userId, eventId)`
-- [ ] Task: Implement `getUpcomingEvents()` for preview
-- [ ] Task: Implement event multiplier application to XP/points
-- [ ] Task: Create event start notification
-- [ ] Task: Create event ending soon notification
+- [x] Task: Create `seasonalEventService.jsw` for event management
+- [x] Task: Implement `getActiveEvents()` for current events
+- [x] Task: Implement `getEventById(eventId)` with details
+- [x] Task: Implement `getEventParticipation(userId, eventId)` and `joinEvent()`
+- [x] Task: Implement `getUpcomingEvents()` for preview
+- [x] Task: Implement event multiplier functions (`getCurrentXPMultiplier`, `getCurrentPointsMultiplier`)
+- [x] Task: Implement event leaderboard functions
+- [x] Task: Implement `getEventSummary()` for dashboard display
 
 ### 7.3 Event Content
-- [ ] Task: Create "January Hiring Kickoff" event definition
-- [ ] Task: Create "Spring Hiring Sprint" event definition
-- [ ] Task: Create "Summer Road Trip" event definition
-- [ ] Task: Create "Q4 Quota Crusher" event definition
+- [ ] Task: Create "January Hiring Kickoff" event definition in Airtable
+- [ ] Task: Create "Spring Hiring Sprint" event definition in Airtable
+- [ ] Task: Create "Summer Road Trip" event definition in Airtable
+- [ ] Task: Create "Q4 Quota Crusher" event definition in Airtable
 - [ ] Task: Create event-specific badges for each
 - [ ] Task: Create event-specific challenges for each
 
 ### 7.4 Event Scheduled Jobs
-- [ ] Task: Create `processEventStart` hourly job for event activation
-- [ ] Task: Create `processEventEnd` hourly job for event completion
+- [x] Task: Create `startScheduledEvents` hourly job for event activation
+- [x] Task: Create `endExpiredEvents` hourly job for event completion
 - [ ] Task: Add event announcement to email digest
-- [ ] Task: Add event jobs to `jobs.config`
+- [x] Task: Add event jobs to `jobs.config`
 
 ### 7.5 Cross-Platform Bonuses
 - [ ] Task: Implement Match Quality Bonus (both sides get bonus on hire)

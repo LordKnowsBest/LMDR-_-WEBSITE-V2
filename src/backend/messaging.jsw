@@ -8,6 +8,141 @@ import { sendMessageNotification } from 'backend/emailService';
 import { usesAirtable, getWixCollectionName } from 'backend/config';
 import * as airtable from 'backend/airtableClient';
 
+// ============================================================================
+// Gamification Hooks (Lazy-loaded to avoid circular deps)
+// ============================================================================
+let gamificationLoaded = false;
+let awardDriverXP = null;
+let awardRecruiterPoints = null;
+let updateChallengeProgress = null;
+let checkResponseAchievements = null;
+
+async function loadGamificationServices() {
+    if (gamificationLoaded) return;
+    try {
+        const gamificationService = await import('backend/gamificationService');
+        awardDriverXP = gamificationService.awardDriverXP;
+        awardRecruiterPoints = gamificationService.awardRecruiterPoints;
+
+        const challengeService = await import('backend/challengeService');
+        updateChallengeProgress = challengeService.updateChallengeProgress;
+
+        const achievementService = await import('backend/achievementService');
+        checkResponseAchievements = achievementService.checkResponseAchievements;
+
+        gamificationLoaded = true;
+    } catch (err) {
+        console.warn('Gamification services not available:', err.message);
+    }
+}
+
+/**
+ * Award XP/points for sending a message (non-blocking)
+ */
+async function awardMessageGamification(senderId, senderType, applicationId, isFirstResponse = false) {
+    try {
+        await loadGamificationServices();
+
+        if (senderType === 'driver' && awardDriverXP) {
+            await awardDriverXP(senderId, 'send_message', {
+                sourceType: 'messaging',
+                sourceId: applicationId
+            });
+
+            // Update challenge progress
+            if (updateChallengeProgress) {
+                await updateChallengeProgress(senderId, 'driver', 'send_message', { applicationId });
+            }
+        } else if (senderType === 'recruiter' && awardRecruiterPoints) {
+            await awardRecruiterPoints(senderId, 'send_message', {
+                sourceType: 'messaging',
+                sourceId: applicationId
+            });
+
+            // Update challenge progress
+            if (updateChallengeProgress) {
+                await updateChallengeProgress(senderId, 'recruiter', 'send_message', { applicationId });
+            }
+        }
+    } catch (err) {
+        console.warn('Failed to award message gamification:', err.message);
+    }
+}
+
+/**
+ * Track response time for fast response bonus and achievements
+ */
+async function trackResponseTime(userId, userType, responseTimeMinutes, applicationId) {
+    try {
+        await loadGamificationServices();
+
+        // Award bonus XP/points for fast responses (under 60 minutes)
+        if (responseTimeMinutes < 60) {
+            if (userType === 'driver' && awardDriverXP) {
+                await awardDriverXP(userId, 'fast_response', {
+                    sourceType: 'messaging',
+                    sourceId: applicationId,
+                    responseTimeMinutes
+                });
+            } else if (userType === 'recruiter' && awardRecruiterPoints) {
+                await awardRecruiterPoints(userId, 'fast_response', {
+                    sourceType: 'messaging',
+                    sourceId: applicationId,
+                    responseTimeMinutes
+                });
+            }
+        }
+
+        // Check for response-related achievements
+        if (checkResponseAchievements) {
+            await checkResponseAchievements(userId, userType, responseTimeMinutes);
+        }
+    } catch (err) {
+        console.warn('Failed to track response time:', err.message);
+    }
+}
+
+/**
+ * Check if this message is a response and award fast response bonus
+ */
+async function checkAndAwardResponseBonus(senderId, senderType, applicationId, receiverId) {
+    try {
+        // Get the last message in this conversation from the other party
+        let lastMessageFromOther = null;
+
+        if (usesAirtable(MESSAGES_KEY)) {
+            const filter = `AND({Application ID} = '${applicationId}', {Sender ID} = '${receiverId}')`;
+            const result = await airtable.queryRecords(MESSAGES_KEY, {
+                filterByFormula: filter,
+                sort: [{ field: 'Timestamp', direction: 'desc' }],
+                maxRecords: 1
+            });
+            lastMessageFromOther = (result.records || [])[0];
+        } else {
+            const result = await wixData.query(MESSAGES_COLLECTION)
+                .eq('application_id', applicationId)
+                .eq('sender_id', receiverId)
+                .descending('timestamp')
+                .limit(1)
+                .find({ suppressAuth: true });
+            lastMessageFromOther = result.items[0];
+        }
+
+        // If no previous message from other party, this isn't a response
+        if (!lastMessageFromOther) return;
+
+        // Calculate response time in minutes
+        const lastMessageTime = new Date(lastMessageFromOther.timestamp || lastMessageFromOther.Timestamp);
+        const now = new Date();
+        const responseTimeMinutes = Math.round((now - lastMessageTime) / (1000 * 60));
+
+        // Award fast response bonus if under threshold
+        await trackResponseTime(senderId, senderType, responseTimeMinutes, applicationId);
+    } catch (err) {
+        console.warn('Failed to check response bonus:', err.message);
+    }
+}
+
 // Collection keys (camelCase, matching config.jsw)
 const MESSAGES_KEY = 'messages';
 const DRIVER_CARRIER_INTERESTS_KEY = 'driverCarrierInterests';
@@ -321,6 +456,14 @@ export async function sendMessage(applicationId, content, receiverId, senderType
         // Send email notification (non-blocking)
         triggerMessageNotification(receiverId, userId, senderType, applicationId, sanitizedContent)
             .catch(err => console.warn('Warning: Notification failed (non-critical):', err.message));
+
+        // Award gamification XP/points (non-blocking)
+        awardMessageGamification(userId, senderType, applicationId)
+            .catch(err => console.warn('Warning: Gamification award failed (non-critical):', err.message));
+
+        // Check for response time bonus if this is a reply
+        checkAndAwardResponseBonus(userId, senderType, applicationId, receiverId)
+            .catch(err => console.warn('Warning: Response bonus check failed (non-critical):', err.message));
 
         return { success: true, message: result };
     } catch (error) {

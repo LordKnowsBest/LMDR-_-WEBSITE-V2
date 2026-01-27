@@ -9,6 +9,59 @@ import * as airtable from 'backend/airtableClient';
  * Supports both Wix and Airtable data sources based on config
  */
 
+// ============================================================================
+// Gamification Hooks (Lazy-loaded to avoid circular deps)
+// ============================================================================
+let gamificationLoaded = false;
+let awardDriverXP = null;
+let awardRecruiterPoints = null;
+let updateChallengeProgress = null;
+
+async function loadGamificationServices() {
+    if (gamificationLoaded) return;
+    try {
+        const gamificationService = await import('backend/gamificationService');
+        awardDriverXP = gamificationService.awardDriverXP;
+        awardRecruiterPoints = gamificationService.awardRecruiterPoints;
+
+        const challengeService = await import('backend/challengeService');
+        updateChallengeProgress = challengeService.updateChallengeProgress;
+
+        gamificationLoaded = true;
+    } catch (err) {
+        console.warn('Gamification services not available:', err.message);
+    }
+}
+
+/**
+ * Award gamification XP/points for interview actions (non-blocking)
+ */
+async function awardInterviewGamification(userId, userType, action, applicationId) {
+    try {
+        await loadGamificationServices();
+
+        if (userType === 'driver' && awardDriverXP) {
+            await awardDriverXP(userId, action, {
+                sourceType: 'interview',
+                sourceId: applicationId
+            });
+            if (updateChallengeProgress) {
+                await updateChallengeProgress(userId, 'driver', action, { applicationId });
+            }
+        } else if (userType === 'recruiter' && awardRecruiterPoints) {
+            await awardRecruiterPoints(userId, action, {
+                sourceType: 'interview',
+                sourceId: applicationId
+            });
+            if (updateChallengeProgress) {
+                await updateChallengeProgress(userId, 'recruiter', action, { applicationId });
+            }
+        }
+    } catch (err) {
+        console.warn('Failed to award interview gamification:', err.message);
+    }
+}
+
 const CONFIG = {
     interviewsCollection: 'Interviews',
     interestsCollection: 'DriverCarrierInterests',
@@ -239,6 +292,20 @@ export async function confirmTimeSlot(applicationId, slotIndex) {
             text: `Interview Confirmed: ${new Date(selectedSlot.start).toLocaleString()}`,
             details: selectedSlot
         }, receiverId);
+
+        // Award gamification XP/points for scheduling an interview (non-blocking)
+        // Determine user type based on who confirmed
+        const isDriver = userId === application.driver_id;
+        awardInterviewGamification(userId, isDriver ? 'driver' : 'recruiter', 'schedule_interview', applicationId)
+            .catch(err => console.warn('Gamification award failed:', err.message));
+
+        // Also award to the other party who participated
+        const otherPartyType = isDriver ? 'recruiter' : 'driver';
+        const otherPartyId = isDriver ? application._owner : application.driver_id;
+        if (otherPartyId) {
+            awardInterviewGamification(otherPartyId, otherPartyType, 'schedule_interview', applicationId)
+                .catch(err => console.warn('Gamification award failed:', err.message));
+        }
 
         return { success: true, slot: selectedSlot };
     } catch (error) {
