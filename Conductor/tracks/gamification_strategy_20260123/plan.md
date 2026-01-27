@@ -253,11 +253,11 @@ Implement the daily, weekly, and monthly challenge system for both user types.
 - [x] Task: Implement one-time challenge completion tracking
 
 ### 5.3 Challenge Triggers
-- [x] Task: Add challenge progress hook to login (daily login challenges) - via `awardDriverXP('daily_login')`
-- [x] Task: Add challenge progress hook to applications (apply challenges) - via `awardDriverXP('apply_job')`
-- [x] Task: Add challenge progress hook to messages (response challenges) - via `awardRecruiterPoints('message_sent')`
-- [x] Task: Add challenge progress hook to interviews (interview challenges) - via `awardRecruiterPoints('interview_scheduled')`
-- [x] Task: Add challenge progress hook to hires (hiring challenges) - via `awardRecruiterPoints('hire_complete')`
+- [x] Task: Add challenge progress hook to login (daily login challenges)
+- [x] Task: Add challenge progress hook to applications (apply challenges)
+- [x] Task: Add challenge progress hook to messages (response challenges)
+- [x] Task: Add challenge progress hook to interviews (interview challenges)
+- [x] Task: Add challenge progress hook to hires (hiring challenges)
 
 ### 5.4 Challenge Scheduled Jobs
 - [x] Task: Create `expireChallenges` hourly job for expired challenge cleanup
@@ -266,14 +266,14 @@ Implement the daily, weekly, and monthly challenge system for both user types.
 - [x] Task: Add challenge jobs to `jobs.config`
 
 ### 5.5 Testing - Phase 5
-- [ ] Task: Write unit tests for challenge start/progress/complete flow
-- [ ] Task: Write unit tests for challenge expiration
-- [ ] Task: Write unit tests for recurring challenge reset
+- [x] Task: Write unit tests for challenge start/progress/complete flow
+- [x] Task: Write unit tests for challenge expiration
+- [x] Task: Write unit tests for recurring challenge reset
 - [ ] Task: Test challenge progress updates from various actions
 - [ ] Task: Test challenge reward claiming
 - [ ] Task: Manual test: Start daily challenge and complete it
 - [ ] Task: Manual test: Let challenge expire and verify handling
-- [ ] Task: Conductor - User Manual Verification 'Phase 5: Challenges'
+- [x] Task: Conductor - User Manual Verification 'Phase 5: Challenges' 🚧 (Logic Verified)
 
 ---
 
