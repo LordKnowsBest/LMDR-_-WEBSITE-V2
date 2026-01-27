@@ -366,15 +366,15 @@ Build all frontend components for displaying gamification data.
 Connect gamification to existing services and implement seasonal events.
 
 ### 7.1 Service Integration Hooks
-- [ ] Task: Add XP hook to `driverProfiles.jsw` - profile updates
-- [ ] Task: Add XP hook to `applicationService.jsw` - application lifecycle
+- [x] Task: Add XP hook to `driverProfiles.jsw` - profile updates
+- [x] Task: Add XP hook to `applicationService.jsw` - application lifecycle
 - [x] Task: Add XP/achievement hook to `messaging.jsw` - response tracking
-- [ ] Task: Add points hook to `driverMatching.jsw` - profile views
+- [x] Task: Add points hook to `driverMatching.jsw` - profile views
 - [x] Task: Add points hook to `interviewScheduler.jsw` - interview events
-- [ ] Task: Add points/achievement hook to hire completion flow
-- [ ] Task: Add streak recording to `memberService.jsw` login
+- [x] Task: Add points/achievement hook to hire completion flow (recruiter_service.jsw)
+- [x] Task: Add streak recording to `memberService.jsw` login
 - [x] Task: Add challenge progress updates to messaging and interview services
-- [ ] Task: Document all integration points in CLAUDE.md
+- [x] Task: Document all integration points in CLAUDE.md
 
 ### 7.2 Seasonal Events Backend
 - [x] Task: Create `seasonalEventService.jsw` for event management

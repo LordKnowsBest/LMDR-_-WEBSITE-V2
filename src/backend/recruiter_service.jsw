@@ -11,6 +11,43 @@ import { sendStatusUpdateNotification } from 'backend/emailService';
 import { usesAirtable, getAirtableTableName } from 'backend/config';
 import * as airtable from 'backend/airtableClient';
 
+// Gamification hooks - lazy-loaded to avoid circular dependencies
+async function getGamificationService() {
+  return await import('backend/gamificationService');
+}
+
+async function getChallengeService() {
+  return await import('backend/challengeService');
+}
+
+// Non-blocking gamification award helpers
+async function awardDriverXPNonBlocking(driverId, action, metadata = {}) {
+  try {
+    const gamification = await getGamificationService();
+    await gamification.awardDriverXP(driverId, action, metadata);
+  } catch (err) {
+    console.warn(`Driver XP award failed for ${action}:`, err.message);
+  }
+}
+
+async function awardRecruiterPointsNonBlocking(recruiterId, action, metadata = {}) {
+  try {
+    const gamification = await getGamificationService();
+    await gamification.awardRecruiterPoints(recruiterId, action, metadata);
+  } catch (err) {
+    console.warn(`Recruiter points award failed for ${action}:`, err.message);
+  }
+}
+
+async function updateChallengeProgressNonBlocking(userId, action, count = 1) {
+  try {
+    const challengeService = await getChallengeService();
+    await challengeService.updateChallengeProgress(userId, action, count);
+  } catch (err) {
+    console.warn(`Challenge progress update failed for ${action}:`, err.message);
+  }
+}
+
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
@@ -875,6 +912,35 @@ export async function updateCandidateStatus(interestId, newStatus, notes = '') {
     } catch (emailError) {
       // Don't fail the status update if email fails
       console.error('⚠️ Failed to send status notification email:', emailError.message);
+    }
+
+    // Gamification: Award XP/points for hire completion (non-blocking)
+    if (newStatus === CONFIG.PIPELINE_STAGES.HIRED) {
+      const recruiterId = wixUsersBackend.currentUser?.id;
+
+      // Award XP to the driver who got hired
+      if (interest.driver_id) {
+        awardDriverXPNonBlocking(interest.driver_id, 'get_hired', {
+          carrierDot: interest.carrier_dot,
+          carrierName: interest.carrier_name
+        });
+
+        // Update driver challenge progress for 'get_hired' action
+        updateChallengeProgressNonBlocking(interest.driver_id, 'get_hired', 1);
+      }
+
+      // Award points to the recruiter who made the hire
+      if (recruiterId) {
+        awardRecruiterPointsNonBlocking(recruiterId, 'make_hire', {
+          driverId: interest.driver_id,
+          carrierDot: interest.carrier_dot
+        });
+
+        // Update recruiter challenge progress for 'make_hire' action
+        updateChallengeProgressNonBlocking(recruiterId, 'make_hire', 1);
+      }
+
+      console.log(`🎮 Gamification rewards triggered for hire: driver ${interest.driver_id}, recruiter ${recruiterId}`);
     }
 
     return {
