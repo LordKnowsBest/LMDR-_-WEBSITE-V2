@@ -620,6 +620,16 @@ $w('#html2').src = 'public/driver/AI_MATCHING.html';
 - `src/backend/` - Backend code only
 - `src/pages/` - Wix-managed page code only
 
+### Tailwind Config in Wix Iframes (Critical)
+
+**Do NOT rely on external `lmdr-config.js` in HTML files loaded inside Wix iframes.**  
+The external config does not load reliably in Wix HTML components, which breaks custom color classes
+like `bg-lmdr-canvas`, `text-lmdr-dark`, `bg-lmdr-blue`, and `text-lmdr-yellow`.
+
+**Required pattern: Inline Tailwind config immediately after the Tailwind CDN script.**  
+Use the same inline config as `src/public/landing/Homepage.HTML` and remove:
+`<script src="../lmdr-config.js"></script>`.
+
 ### Test Files
 **All test files MUST be placed in `src/public/__tests__/`**
 - Naming convention: `*.test.js` or `*.spec.js`
