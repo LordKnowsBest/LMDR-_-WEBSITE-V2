@@ -24,6 +24,7 @@ import {
 } from 'backend/interviewScheduler.jsw';
 
 import { sendMessage, getConversation, markAsRead } from 'backend/messaging.jsw';
+import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
 
 // Driver Search imports
@@ -88,7 +89,8 @@ const MESSAGE_REGISTRY = {
     'getQuotaStatus',
     'getWeightPreferences',
     'saveWeightPreferences',
-    'navigateTo'
+    'navigateTo',
+    'logFeatureInteraction' // Feature adoption tracking
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -311,6 +313,12 @@ async function handleHtmlMessage(msg, component) {
         handleNavigateTo(msg.data);
         break;
 
+      case 'logFeatureInteraction':
+        // Non-blocking feature tracking
+        logFeatureInteraction(msg.data.featureId, msg.data.userId, msg.data.action, msg.data)
+          .catch(err => console.warn('Feature tracking failed:', err.message));
+        break;
+
       default:
         console.warn('⚠️ Unhandled action:', action);
     }
@@ -361,7 +369,8 @@ async function handleDashboardReady(component) {
     carriers: cachedCarriers,
     defaultCarrier: result.defaultCarrier,
     currentCarrierDOT: currentCarrierDOT,
-    needsSetup: result.needsSetup
+    needsSetup: result.needsSetup,
+    memberId: wixUsers?.currentUser?.id || null
   });
 }
 

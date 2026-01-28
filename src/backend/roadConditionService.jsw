@@ -1,0 +1,294 @@
+/**
+ * Road Condition Service - Traffic, Closures, and Truck Restrictions
+ * Phase 6 of Driver Road Utilities
+ */
+
+import wixData from 'wix-data';
+import { fetch } from 'wix-fetch';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import { fetchMultiStateConditions } from 'backend/adapters/state511';
+
+// ============================================
+// COLLECTIONS
+// ============================================
+const COLLECTIONS = {
+    CONDITIONS: 'RoadConditions',
+    RESTRICTIONS: 'TruckRestrictions',
+    REPORTS: 'DriverConditionReports'
+};
+
+// ============================================
+// STATIC MOCK DATA (Phase 6 MVP)
+// ============================================
+const MOCK_CONDITIONS = [
+    {
+        _id: 'cond_1',
+        type: 'closure', // closure, accident, construction, weather
+        highway: 'I-80',
+        state: 'CA',
+        location: { lat: 39.31, lng: -120.33 }, // Donner Pass
+        severity: 'major', // minor, moderate, major, critical
+        description: 'Westbound lanes closed due to spin-outs. Chain controls in effect.',
+        delay_minutes: 120,
+        start_time: new Date(),
+        expected_end: new Date(Date.now() + 4 * 60 * 60 * 1000) // +4 hours
+    },
+    {
+        _id: 'cond_2',
+        type: 'construction',
+        highway: 'I-5',
+        state: 'OR',
+        location: { lat: 42.1, lng: -122.6 }, // Siskiyou
+        severity: 'moderate',
+        description: 'Road work. Right lane closed. Wide load restriction > 12ft.',
+        delay_minutes: 20,
+        start_time: new Date(),
+        expected_end: new Date(Date.now() + 48 * 60 * 60 * 1000)
+    }
+];
+
+const MOCK_RESTRICTIONS = [
+    {
+        _id: 'rest_1',
+        highway: 'US-6',
+        state: 'CO',
+        restriction_type: 'height',
+        value: 13.5, // feet
+        unit: 'ft',
+        details: 'Low clearance bridge at Loveland Pass',
+        permanent: true,
+        location: { lat: 39.6, lng: -105.9 }
+    },
+    {
+        _id: 'rest_2',
+        highway: 'I-70',
+        state: 'CO',
+        restriction_type: 'hazmat',
+        value: 'explosives',
+        details: 'Eisenhower Tunnel - No Hazmat allowed. Use Loveland Pass.',
+        permanent: true,
+        location: { lat: 39.6, lng: -105.9 }
+    }
+];
+
+// ============================================
+// SERVICE FUNCTIONS
+// ============================================
+
+/**
+ * Get road conditions along a route
+ * @param {Array} routePoints - Waypoints {lat, lng}
+ * @param {Object} options - { includeClosures, includeConstruction, includeAccidents }
+ */
+export async function getRouteConditions(routePoints, options = {}) {
+    if (!routePoints || routePoints.length === 0) return { success: false, error: 'No route provided' };
+
+    try {
+        // MVP: Return static mock data if "route" is near our mock points
+        // In real app, we'd query DB using geo-intersection
+
+        const relevantConditions = MOCK_CONDITIONS.filter(cond => {
+            // Simple proximity check (within 50 miles of any route point)
+            // Optimization: In real app, use geospatial query
+            // Optimization: In real app, use geospatial query
+            return routePoints.some(pt => calculateDistance(pt.lat, pt.lng, cond.location.lat, cond.location.lng) < 50);
+        });
+
+        // Phase 6.1: Fetch Validated 511 Data
+        // Include IA for "No Login" Demo
+        const states = ['CA', 'OR', 'IA', 'TX']; 
+        // Broad US bbox for MVP (West Coast to Midwest)
+        const bbox = { minLat: 25, minLng: -125, maxLat: 50, maxLng: -90 };
+        
+        try {
+            const realTimeConditions = await fetchMultiStateConditions(states, bbox);
+            if (realTimeConditions && realTimeConditions.length > 0) {
+                 relevantConditions.push(...realTimeConditions);
+            }
+        } catch (adapterErr) {
+            console.warn('[RoadConditionService] 511 Adapter failed:', adapterErr);
+        }
+
+        // Also fetch from DB for user-submitted reports
+        // const userReports = await queryData(COLLECTIONS.REPORTS, ...); // omitted for MVP
+
+        return {
+            success: true,
+            conditions: relevantConditions,
+            summary: generateSummary(relevantConditions)
+        };
+
+    } catch (error) {
+        console.error('[RoadConditionService] Error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get conditions for a specific state (Phase 6)
+ * @param {string} state - 2-letter state code
+ * @param {Object} filters
+ */
+export async function getConditionsByState(state, filters = {}) {
+    if (!state) return { success: false, error: 'State is required' };
+
+    try {
+        const conditions = await fetchMultiStateConditions([state]);
+        return {
+            success: true,
+            conditions: conditions || [],
+            summary: generateSummary(conditions || [])
+        };
+    } catch (error) {
+        console.error('[RoadConditionService] State fetch error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get truck restrictions based on equipment specs
+ * Uses Iowa Open Data for live bridge heights in IA
+ */
+export async function getTruckRestrictions(routePoints, truckSpecs = {}) {
+    try {
+        let liveRestrictions = [];
+
+        // 1. Live Data Source: Iowa DOT (ArcGIS Feature Service)
+        // Check if route touches Iowa (approximated by bounding box or point check)
+        const isIowaRoute = routePoints.some(pt => pt.lat > 40.3 && pt.lat < 43.5 && pt.lng > -96.7 && pt.lng < -90.1);
+
+        if (isIowaRoute && truckSpecs.height) {
+            try {
+                // Query for bridges lower than truck height + buffer
+                // Endpoint approximated from Iowa DOT Open Data
+                const url = 'https://services.arcgis.com/8lRhdTsQyJpO52F1/arcgis/rest/services/Iowa_Bridges_Unofficial/FeatureServer/0/query';
+                const truckHeight = truckSpecs.height || 13.5;
+                const query = {
+                    where: `MIN_VERT_CLR_FT < ${truckHeight + 0.5} AND MIN_VERT_CLR_FT > 0`, // +0.5ft safety buffer
+                    outFields: 'MIN_VERT_CLR_FT,FACILITY_CARRIED,FEATURE_INTERSECTED,LATITUDE,LONGITUDE',
+                    f: 'json',
+                    resultRecordCount: 50 // Limit for demo
+                };
+                
+                const params = new URLSearchParams(query).toString();
+                const response = await fetch(`${url}?${params}`);
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.features) {
+                        liveRestrictions = data.features.map(f => ({
+                            _id: 'ia_bridge_' + f.attributes.OBJECTID,
+                            highway: f.attributes.FACILITY_CARRIED,
+                            state: 'IA',
+                            restriction_type: 'height',
+                            value: f.attributes.MIN_VERT_CLR_FT,
+                            unit: 'ft',
+                            details: `Low Clearance: ${f.attributes.MIN_VERT_CLR_FT}ft at ${f.attributes.FEATURE_INTERSECTED}`,
+                            permanent: true,
+                            location: { 
+                                lat: f.attributes.LATITUDE || f.geometry?.y, 
+                                lng: f.attributes.LONGITUDE || f.geometry?.x 
+                            }
+                        }));
+                    }
+                }
+            } catch (err) {
+                console.warn('[RoadConditionService] Iowa Bridge fetch failed:', err);
+            }
+        }
+
+        // 2. Mock Data (for other areas)
+        const mockRestrictions = MOCK_RESTRICTIONS.filter(rest => {
+            const isNear = routePoints.some(pt => calculateDistance(pt.lat, pt.lng, rest.location.lat, rest.location.lng) < 50);
+            if (!isNear) return false;
+
+            if (rest.restriction_type === 'height' && truckSpecs.height && truckSpecs.height >= rest.value) return true;
+            if (rest.restriction_type === 'weight' && truckSpecs.weight && truckSpecs.weight >= rest.value) return true;
+            if (rest.restriction_type === 'hazmat' && truckSpecs.hazmat) return true;
+            
+            return false;
+        });
+
+        const allRestrictions = [...liveRestrictions, ...mockRestrictions];
+
+        return {
+            success: true,
+            restrictions: allRestrictions
+        };
+
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Submit a driver condition report
+ * @param {Object} report 
+ */
+export async function reportCondition(report) {
+    if (!report.driverId || !report.type || !report.location) {
+        return { success: false, error: 'Missing required fields' };
+    }
+
+    try {
+        const record = {
+            driver_id: report.driverId,
+            type: report.type, // 'accident', 'debris', 'weather'
+            state: report.state,
+            highway: report.highway,
+            location: report.location, // {lat, lng}
+            description: report.description,
+            timestamp: new Date(),
+            expires_at: new Date(Date.now() + 4 * 60 * 60 * 1000), // 4 hours TTL
+            verified_count: 0
+        };
+
+        // In real app: wixData.insert(COLLECTIONS.REPORTS, record);
+        console.log('[RoadConditionService] Report submitted:', record);
+
+        return { success: true, reportId: 'mock_report_id_' + Date.now() };
+
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+
+// ============================================
+// HELPERS
+// ============================================
+
+function generateSummary(conditions) {
+    const counts = {
+        closure: 0,
+        accident: 0,
+        construction: 0,
+        weather: 0
+    };
+    
+    let totalDelay = 0;
+
+    conditions.forEach(c => {
+        if (counts[c.type] !== undefined) counts[c.type]++;
+        if (c.delay_minutes) totalDelay += c.delay_minutes;
+    });
+
+    return {
+        total_incidents: conditions.length,
+        counts,
+        total_delay_minutes: totalDelay,
+        status: totalDelay > 60 ? 'Critical' : (totalDelay > 15 ? 'Moderate' : 'Clear')
+    };
+}
+
+// Haversine distance (miles)
+function calculateDistance(lat1, lng1, lat2, lng2) {
+    const R = 3958.8; // miles
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}

@@ -20,8 +20,16 @@ import {
 } from 'backend/restStopService';
 import {
     getAlertsAtLocation,
-    getChainRequirements
+    getChainRequirements,
+    getRouteWeather
 } from 'backend/weatherAlertService';
+getRouteWeather
+} from 'backend/weatherAlertService';
+import {
+    getRouteConditions,
+    getTruckRestrictions,
+    reportCondition
+} from 'backend/roadConditionService';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
@@ -60,6 +68,11 @@ const MESSAGE_REGISTRY = {
         'voteReview',
         // Phase 5: Weather
         'getWeather',
+        // Phase 6: Road Conditions
+        // Phase 6: Road Conditions
+        'getRoadConditions',
+        'getTruckRestrictions',
+        'reportRoadCondition',
         'ping',
         'ready'
     ],
@@ -279,6 +292,19 @@ async function handleHtmlMessage(msg) {
             // Phase 5: Weather Handlers
             case 'getWeather':
                 await handleGetWeather(msg.data);
+                break;
+
+            // Phase 6: Road Conditions
+            case 'getRoadConditions':
+                await handleGetRoadConditions(msg.data);
+                break;
+
+            case 'getTruckRestrictions':
+                await handleGetTruckRestrictions(msg.data);
+                break;
+
+            case 'reportRoadCondition':
+                await handleReportRoadCondition(msg.data);
                 break;
 
             case 'tabSwitch':
@@ -796,16 +822,75 @@ async function handleGetWeather(data) {
     // 1. Get Chain Laws (mock/static for now)
     const chainLawsResult = await getChainRequirements();
 
-    // 2. Get Alerts (mock location for now if not provided, or passed from frontend)
-    // For MVP, we pass a default location or the user's last known location
-    const lat = 39.31; // Donner Pass area default
-    const lng = -120.33;
-
-    // In real app, data might contain lat/lng from frontend geolocation
-    const alertsResult = await getAlertsAtLocation(lat, lng);
+    // 2. Get Alerts (Use route points from frontend if available)
+    let alerts = [];
+    if (data.routePoints && data.routePoints.length > 0) {
+        const weatherResult = await getRouteWeather(data.routePoints);
+        if (weatherResult.success) alerts = weatherResult.alerts;
+    } else {
+        // Default: Check Donner Pass
+        const alertResult = await getAlertsAtLocation(39.31, -120.33);
+        if (alertResult.success) alerts = alertResult.alerts;
+    }
 
     sendToHtml('weatherResults', {
-        chainLaws: chainLawsResult.success ? chainLawsResult.items : [],
-        alerts: alertsResult.success ? alertsResult.alerts : []
+        alerts: alerts,
+        chainLaws: chainLawsResult.success ? chainLawsResult.requirements : []
+    });
+}
+
+// ============================================================================
+// ROAD CONDITIONS HANDLERS (Phase 6)
+// ============================================================================
+
+async function handleGetRoadConditions(data) {
+    const { routePoints } = data;
+
+    // Call backend service
+    const result = await getRouteConditions(routePoints); // Phase 6 MVP options
+
+    if (result.success) {
+        sendToHtml('conditionsResults', {
+            conditions: result.conditions,
+            summary: result.summary,
+            restrictions: [] // Phase 6.1
+        });
+    } else {
+        console.error('[RoadUtilities] Failed to get road conditions:', result.error);
+        sendToHtml('conditionsResults', { conditions: [], summary: null });
+    }
+}
+
+async function handleGetTruckRestrictions(data) {
+    const { routePoints, truckSpecs } = data;
+    const result = await getTruckRestrictions(routePoints, truckSpecs);
+
+    if (result.success) {
+        sendToHtml('restrictionResults', {
+            restrictions: result.restrictions || []
+        });
+    } else {
+        sendToHtml('restrictionResults', { restrictions: [] });
+    }
+}
+
+async function handleReportRoadCondition(data) {
+    if (!wixUsers.currentUser.loggedIn) {
+        // Allow anonymous reporting for demo? Or restrict
+        // For demo purpose, we might allow it or just flag it
+    }
+
+    const { report } = data;
+    // Add user ID if logged in
+    if (wixUsers.currentUser.loggedIn) {
+        report.driverId = wixUsers.currentUser.id;
+    } else {
+        report.driverId = 'anonymous';
+    }
+
+    const result = await reportCondition(report);
+    sendToHtml('roadConditionReported', {
+        success: result.success,
+        reportId: result.reportId
     });
 }

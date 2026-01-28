@@ -3,6 +3,7 @@ import { enrichCarrier } from 'backend/aiEnrichment.jsw';
 import { getOrCreateDriverProfile, setDiscoverability, getDriverInterests, updateDriverDocuments } from 'backend/driverProfiles.jsw';
 import { submitApplication } from 'backend/applicationService.jsw';
 import { extractDocumentForAutoFill } from 'backend/ocrService.jsw';
+import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixLocation from 'wix-location';
 import wixWindow from 'wix-window';
 
@@ -58,6 +59,7 @@ const MESSAGE_REGISTRY = {
     'submitApplication',
     'saveProfileDocs',
     'extractDocumentOCR', // Real-time OCR for form auto-fill
+    'logFeatureInteraction', // Feature adoption tracking
     'ping' // Health check
   ],
   // Messages TO HTML that page code sends
@@ -284,6 +286,7 @@ async function handleHtmlMessage(msg) {
       console.log('✅ HTML Embed Ready - Sending initial state');
       sendToHtml('pageReady', {
         userStatus: cachedUserStatus,
+        memberId: wixUsers?.currentUser?.id || null,
         driverProfile: cachedDriverProfile ? {
           id: cachedDriverProfile._id,
           displayName: cachedDriverProfile.display_name,
@@ -323,6 +326,12 @@ async function handleHtmlMessage(msg) {
 
     case 'extractDocumentOCR':
       await handleExtractDocumentOCR(msg.data);
+      break;
+
+    case 'logFeatureInteraction':
+      // Non-blocking feature tracking
+      logFeatureInteraction(msg.data.featureId, msg.data.userId, msg.data.action, msg.data)
+        .catch(err => console.warn('Feature tracking failed:', err.message));
       break;
 
     default:

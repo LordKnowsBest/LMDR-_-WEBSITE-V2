@@ -4,6 +4,7 @@
 // ============================================================================
 
 import { getDriverApplications, withdrawApplication } from 'backend/applicationService';
+import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
 import { setupDriverGamification } from 'public/js/gamificationPageHandlers';
@@ -41,6 +42,7 @@ const MESSAGE_REGISTRY = {
         'getNewMessages',    // Smart polling request
         'getUnreadCount',    // Unread badge request
         'markAsRead',
+        'logFeatureInteraction', // Feature adoption tracking
         'ping'
     ],
     // Messages TO HTML that page code sends
@@ -209,6 +211,12 @@ async function handleHtmlMessage(msg) {
                 await handleGetUnreadCount();
                 break;
 
+            case 'logFeatureInteraction':
+                // Non-blocking feature tracking
+                logFeatureInteraction(msg.data.featureId, msg.data.userId, msg.data.action, msg.data)
+                    .catch(err => console.warn('Feature tracking failed:', err.message));
+                break;
+
             default:
                 console.warn('⚠️ Unhandled action:', action);
         }
@@ -251,7 +259,8 @@ async function loadDashboardData(isBackground = false) {
         if (result.success) {
             sendToHtml('dashboardData', {
                 applications: result.applications || [],
-                totalCount: result.totalCount || 0
+                totalCount: result.totalCount || 0,
+                memberId: wixUsers.currentUser.id || null
             });
         } else {
             console.error('❌ Failed to load applications:', result.error);

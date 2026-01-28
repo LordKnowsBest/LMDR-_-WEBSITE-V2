@@ -378,7 +378,13 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [ ] Task: Add alert preference settings panel
 - [ ] Task: Build push notification opt-in flow
 - [x] Task: Implement alert severity icons (warning, watch, advisory)
-- [ ] Task: Add "Share with Dispatch" button for severe alerts
+- [x] Task: Add "Share with Dispatch" button for severe alerts
+
+### UI/UX Polish (Additional)
+- [x] Task: Implement "Head-Up Display" (HUD) widget
+- [x] Task: Refactor Navigation to Segmented Control
+- [x] Task: Update Card Styling (Rounded, Hover effects)
+- [x] Task: Add Floating Action Buttons (FAB) for quick actions
 
 ### Page Code Integration
 
@@ -395,6 +401,8 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Test subscription preference saving
 - [ ] Task: Test alert notification creation
 - [x] Task: Test chain law display for known passes (Donner, Cajon, Snoqualmie)
+- [x] Task: Verified `weatherAlertService.jsw` uses free NWS API (No Login)
+- [x] Task: Added "Live Demo (NWS)" button to Weather Tab
 - [ ] Task: Conductor - User Manual Verification 'Phase 5: Weather Alerts'
 
 ---
@@ -409,19 +417,22 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ### Backend Tasks
 
-- [ ] Task: Create `roadConditionService.jsw` backend web module
-- [ ] Task: Implement `RoadConditions` collection (type, highway, state, location, description, severity, delay_minutes, start_time, expected_end)
-- [ ] Task: Implement `TruckRestrictions` collection (highway, restriction_type, details, permanent)
-- [ ] Task: Research and integrate state 511 APIs (start with 10 major freight states)
-- [ ] Task: Implement FHWA data feed integration for interstate conditions
-- [ ] Task: Create state API adapter pattern for different 511 formats
+- [x] Task: Create `roadConditionService.jsw` backend web module
+- [x] Task: Implement `RoadConditions` collection (type, highway, state, location, description, severity, delay_minutes, start_time, expected_end)
+- [x] Task: Implement `TruckRestrictions` collection (highway, restriction_type, details, permanent)
+- [x] Task: Research and integrate state 511 APIs (start with 10 major freight states)
+- [x] Task: Implement FHWA data feed integration for interstate conditions
+- [x] Task: Create state API adapter pattern for different 511 formats
+- [x] Task: Implement Iowa Open Data (Socrata) adapter for "No Login" live demo
+- [x] Task: Implement California/Texas adapters (Key-based) w/ placeholders
+- [x] Task: Add "Live Demo" button to frontend for verifying Iowa feed
 
 ### Core Service Functions
 
-- [ ] Task: Implement `getRouteConditions(routePoints, options)` - conditions along route
-- [ ] Task: Implement `getTruckRestrictions(routePoints, truckSpecs)` - truck-specific restrictions
-- [ ] Task: Implement `getConditionsByState(state, filters)` - state-level view
-- [ ] Task: Implement `reportCondition(report)` - driver condition reports
+- [x] Task: Implement `getRouteConditions(routePoints, options)` - conditions along route
+- [x] Task: Implement `getTruckRestrictions(routePoints, truckSpecs)` - truck-specific restrictions (Iowa Open Data + Mock)
+- [x] Task: Implement `getConditionsByState(state, filters)` - state-level view
+- [x] Task: Implement `reportCondition(report)` - driver condition reports
 - [ ] Task: Implement `getChainRequirements(routePoints)` - chain laws along route
 - [ ] Task: Add condition severity classification (minor, moderate, major)
 - [ ] Task: Implement delay estimation based on lane closures

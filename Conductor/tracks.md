@@ -51,11 +51,22 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Implemented (observabilityService.jsw)*
 *Goal: Fix tracing and error handling gaps in matching engine.*
 
-## [ ] Track: Feature Adoption Log
+## [x] Track: Feature Adoption Log
 *Link: [./conductor/tracks/feature_adoption_log_20260120/](./conductor/tracks/feature_adoption_log_20260120/)*
 *Priority: High*
 *Goal: Visualize feature adoption and lifecycle to enable rapid shipping/disposal decisions.*
-*Status: In Progress (Backend + Tests Created)*
+*Status: Complete*
+*Completed:*
+- *featureAdoptionService.jsw (2,848 lines - 14/14 functions: logging, stats, funnels, health scores, at-risk detection, daily aggregation)*
+- *feature-tracker.js (986 lines - 30+ methods: view/click/complete/error/abandon tracking, timers, sessions, auto-instrumentation)*
+- *ADMIN_DASHBOARD.html integration (feature adoption section with charts, health grid, at-risk alerts)*
+- *ADMIN_FEATURE_ADOPTION.html (standalone drill-down dashboard with registry, funnels, at-risk, health grid)*
+- *config.jsw + airtableClient.jsw (4 collections routed to Airtable with full field mappings)*
+- *jobs.config (daily aggregation scheduled at 1 AM UTC)*
+- *Live integration: Road Utilities page tracking parking, fuel, weigh station features*
+- *Page instrumentation: Driver Dashboard, Recruiter Dashboard, AI Matching (feature-tracker.js + PostMessage bridge)*
+- *Test suite: featureAdoptionService.test.js (111/111 tests passing)*
+- *Airtable tables verified: v2_Feature Adoption Logs, v2_Feature Registry, v2_Feature Funnels, v2_Feature Metrics Daily*
 
 ## [X] Track: UI/UX Consistency & Standardization
 *Link: [./conductor/tracks/ui_standardization_20260120/](./conductor/tracks/ui_standardization_20260120/)*
@@ -67,8 +78,9 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./conductor/tracks/mobile_optimization_20260122/](./conductor/tracks/mobile_optimization_20260122/)*
 *Priority: High*
 *Goal: Systematic review and optimization of all HTML files for mobile responsiveness (iPhone 12/13 target).*
-*Status: In Progress*
+*Status: Planning Complete, Execution Pending (0 of 56+ files modified)*
 *Standard: docs/MOBILE_OPTIMIZATION_GUIDE.md*
+*Phases: 5 (Pilot Landing Pages → Driver Portal → Recruiter Portal → Carrier & Admin → Verification)*
 
 ## [x] Track: Gamification System - Driver & Recruiter Progression
 *Link: [./tracks/gamification_strategy_20260123/](./tracks/gamification_strategy_20260123/)*
@@ -165,9 +177,18 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./tracks/driver_road_utilities_20260120/](./tracks/driver_road_utilities_20260120/)*
 *Depends on: driver_cockpit_20251221*
 *Priority: Critical*
-*Status: In Progress (Phases 1-3 Complete)*
+*Status: In Progress (Phases 1-5 Complete, Phase 6 Partial)*
 *Goal: Daily-use tools for drivers on the road - Parking Finder, Fuel Optimizer, Weigh Station Status, Rest Stop Ratings, Weather Alerts, Road Conditions.*
 *Business Impact: Transform platform to daily-use operating system.*
+*Completed Services:*
+- *parkingService.jsw (Phase 1 + TPIMS Phase 1.5 - 9 state APIs integrated)*
+- *fuelService.jsw (Phase 2 - fuel card discounts, route optimization)*
+- *weighStationService.jsw (Phase 3 - DriveWyze/PrePass integration)*
+- *restStopService.jsw (Phase 4 - multi-category ratings, duplicate prevention)*
+- *weatherAlertService.jsw (Phase 5 - NWS API, chain law detection)*
+- *roadConditionService.jsw (Phase 6 - partial, core functions pending)*
+*Completed UI: DRIVER_ROAD_UTILITIES.html (unified 6-tab interface)*
+*Remaining: Phase 6 core functions, scheduled jobs config, analytics dashboard*
 
 ### [ ] Track: Driver Compliance Tools
 *Link: [./tracks/driver_compliance_tools_20260120/](./tracks/driver_compliance_tools_20260120/)*
@@ -261,3 +282,24 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Priority: Medium*
 *Status: Planned*
 *Goal: Customer support efficiency - Support Ticket System, Knowledge Base Admin, Chat Support Dashboard, NPS/Satisfaction Tracking.*
+
+---
+
+# Cross-Cutting Tracks
+
+> Tracks that span multiple roles or improve conversion/retention metrics.
+
+## [ ] Track: Carrier Lead Form UX Enhancement
+*Link: [./conductor/tracks/form_ux_refactor_20260119/](./conductor/tracks/form_ux_refactor_20260119/)*
+*Depends on: carrier_conversion_20260103*
+*Priority: Medium*
+*Status: Planned*
+*Goal: Improve carrier lead form conversion rates through progressive disclosure, inline validation, and micro-interactions on Trucking Companies landing page.*
+
+## [ ] Track: Employee Retention & Driver Tracking Dashboard
+*Link: [./conductor/tracks/retention_dashboard/](./conductor/tracks/retention_dashboard/)*
+*Depends on: driver_cockpit_20251221, reverse_matching_20251225*
+*Priority: High*
+*Status: Planned*
+*Goal: Predictive dashboard for recruiters/fleet managers to track driver performance (miles, deliveries, safety), monitor engagement, and predict turnover risk.*
+*Note: Referenced as dependency by Cross-Role Utility track.*
