@@ -217,7 +217,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ---
 
-## Phase 3: Weigh Station Status
+## Phase 3: Weigh Station Status [checkpoint: 511_api_done]
 
 **Goal:** Show real-time weigh station open/closed status and bypass info.
 
@@ -227,48 +227,48 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ### Backend Tasks
 
-- [ ] Task: Create `weighStationService.jsw` backend web module
-- [ ] Task: Implement `WeighStations` collection (external_id, name, state, highway, mile_marker, status, prepass_enabled, drivewyze_enabled, bypass_rate)
-- [ ] Task: Implement `WeighStationReports` collection for driver reports (station_id, driver_id, report_type, wait_minutes)
-- [ ] Task: Research weigh station data sources (DriveWyze API, PrePass, state DOTs)
-- [ ] Task: Implement primary API integration (DriveWyze or state DOT aggregate)
-- [ ] Task: Seed database with known weigh station locations (all 50 states)
+- [x] Task: Create `weighStationService.jsw` backend web module
+- [x] Task: Implement `WeighStations` collection (external_id, name, state, highway, mile_marker, status, prepass_enabled, drivewyze_enabled, bypass_rate)
+- [x] Task: Implement `WeighStationReports` collection for driver reports (station_id, driver_id, report_type, wait_minutes)
+- [x] Task: Research weigh station data sources (DriveWyze API, PrePass, state DOTs)
+- [x] Task: Implement primary API integration (DriveWyze or state DOT aggregate)
+- [x] Task: Seed database with known weigh station locations (all 50 states)
 
 ### Core Service Functions
 
-- [ ] Task: Implement `getWeighStationsAlongRoute(routePoints, options)` - route-based search
-- [ ] Task: Implement `getStationStatus(stationId)` - real-time status check
-- [ ] Task: Implement `reportStationStatus(stationId, report)` - driver reporting
-- [ ] Task: Implement `getStationsByState(state)` - state-level view
-- [ ] Task: Implement status confidence calculation (real-time vs driver-reported vs unknown)
-- [ ] Task: Implement bypass probability calculation based on PrePass data
-- [ ] Task: Add report validation and aggregation logic
+- [x] Task: Implement `getWeighStationsAlongRoute(routePoints, options)` - route-based search
+- [x] Task: Implement `getStationStatus(stationId)` - real-time status check
+- [x] Task: Implement `reportStationStatus(stationId, report)` - driver reporting
+- [x] Task: Implement `getStationsByState(state)` - state-level view
+- [x] Task: Implement status confidence calculation (real-time vs driver-reported vs unknown)
+- [x] Task: Implement bypass probability calculation based on PrePass data
+- [x] Task: Add report validation and aggregation logic
 
 ### Frontend Tasks
 
-- [ ] Task: Add Weigh Station Status tab to DRIVER_ROAD_UTILITIES.html
-- [ ] Task: Design bypass service selector (PrePass/DriveWyze checkboxes)
-- [ ] Task: Build station status cards with open/closed indicator
-- [ ] Task: Show bypass rate percentage and estimated wait time
-- [ ] Task: Display driver reports ("Driver reports: 'Quick today' - 10 min ago")
-- [ ] Task: Add "Report Status" modal for driver submissions
-- [ ] Task: Implement route view showing all stations along trip
-- [ ] Task: Add status legend (Open, Closed, Unknown)
+- [x] Task: Add Weigh Station Status tab to DRIVER_ROAD_UTILITIES.html
+- [x] Task: Design bypass service selector (PrePass/DriveWyze checkboxes)
+- [x] Task: Build station status cards with open/closed indicator
+- [x] Task: Show bypass rate percentage and estimated wait time
+- [x] Task: Display driver reports ("Driver reports: 'Quick today' - 10 min ago")
+- [x] Task: Add "Report Status" modal for driver submissions
+- [x] Task: Implement route view showing all stations along trip
+- [x] Task: Add status legend (Open, Closed, Unknown)
 
 ### Page Code Integration
 
-- [ ] Task: Add weigh station handlers to page code
-- [ ] Task: Implement `getStationsAlongRoute`, `reportStatus` handlers
-- [ ] Task: Store driver's bypass service preferences
-- [ ] Task: Add analytics for station searches and reports
+- [x] Task: Add weigh station handlers to page code
+- [x] Task: Implement `getStationsAlongRoute`, `reportStatus` handlers
+- [x] Task: Store driver's bypass service preferences
+- [x] Task: Add analytics for station searches and reports
 
 ### Testing Tasks
 
-- [ ] Task: Test station search along route
-- [ ] Task: Test driver report submission and validation
-- [ ] Task: Test status aggregation from multiple sources
-- [ ] Task: Test bypass rate display accuracy
-- [ ] Task: Verify all major interstate weigh stations are in database
+- [x] Task: Test station search along route
+- [x] Task: Test driver report submission and validation
+- [x] Task: Test status aggregation from multiple sources
+- [x] Task: Test bypass rate display accuracy
+- [x] Task: Verify all major interstate weigh stations are in database
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Weigh Station Status'
 
 ---
@@ -283,53 +283,53 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ### Backend Tasks
 
-- [ ] Task: Create `restStopService.jsw` backend web module
-- [ ] Task: Implement `RestStopReviews` collection (location_id, driver_id, overall_rating, ratings{}, review_text, photos, helpful_votes, is_verified)
-- [ ] Task: Implement `RestStopConditionReports` collection (location_id, report_type, details, expires_at, confirmations)
-- [ ] Task: Implement review aggregation logic (calculate avg ratings per category)
+- [x] Task: Create `restStopService.jsw` backend web module
+- [x] Task: Implement `RestStopReviews` collection (location_id, driver_id, overall_rating, ratings{}, review_text, photos, helpful_votes, is_verified)
+- [x] Task: Implement `RestStopConditionReports` collection (location_id, report_type, details, expires_at, confirmations)
+- [x] Task: Implement review aggregation logic (calculate avg ratings per category)
 - [ ] Task: Implement review moderation flags (auto-flag profanity, spam detection)
 
 ### Core Service Functions
 
-- [ ] Task: Implement `getLocationReviews(locationId, options)` - fetch reviews with summary
-- [ ] Task: Implement `submitReview(locationId, review)` - submit new review
-- [ ] Task: Implement `submitConditionReport(locationId, report)` - real-time condition reports
-- [ ] Task: Implement `voteReview(reviewId, driverId, helpful)` - helpful vote system
-- [ ] Task: Implement `getTopRatedStops(lat, lng, radius, filters)` - find best stops
+- [x] Task: Implement `getLocationReviews(locationId, options)` - fetch reviews with summary
+- [x] Task: Implement `submitReview(locationId, review)` - submit new review
+- [x] Task: Implement `submitConditionReport(locationId, report)` - real-time condition reports
+- [x] Task: Implement `voteReview(reviewId, driverId, helpful)` - helpful vote system
+- [x] Task: Implement `getTopRatedStops(lat, lng, radius, filters)` - find best stops
 - [ ] Task: Add GPS verification for reviews (driver must be at location)
-- [ ] Task: Implement duplicate review prevention (1 per location per 30 days)
-- [ ] Task: Add condition report expiration (24h TTL)
+- [x] Task: Implement duplicate review prevention (1 per location per 30 days)
+- [x] Task: Add condition report expiration (24h TTL)
 - [ ] Task: Implement photo upload handling (resize, store in Wix Media)
 
 ### Frontend Tasks
 
-- [ ] Task: Add Rest Stop Ratings tab/integration to DRIVER_ROAD_UTILITIES.html
-- [ ] Task: Design review card component with multi-category ratings
-- [ ] Task: Build category rating display (cleanliness, safety, food, showers, parking)
+- [x] Task: Add Rest Stop Ratings tab/integration to DRIVER_ROAD_UTILITIES.html
+- [x] Task: Design review card component with multi-category ratings
+- [x] Task: Build category rating display (cleanliness, safety, food, showers, parking)
 - [ ] Task: Implement star rating selector for review submission
 - [ ] Task: Add photo upload in review form
-- [ ] Task: Build "Recent Conditions" section showing active reports
-- [ ] Task: Implement "Helpful" vote buttons
-- [ ] Task: Add "Write a Review" modal with validation
-- [ ] Task: Build "Report Condition" quick buttons (shower wait, out of service, hazard)
-- [ ] Task: Implement review sorting (most recent, most helpful, highest rated)
+- [x] Task: Build "Recent Conditions" section showing active reports
+- [x] Task: Implement "Helpful" vote buttons
+- [x] Task: Add "Write a Review" modal with validation
+- [x] Task: Build "Report Condition" quick buttons (shower wait, out of service, hazard)
+- [x] Task: Implement review sorting (most recent, most helpful, highest rated)
 
 ### Page Code Integration
 
-- [ ] Task: Add review service handlers to page code
-- [ ] Task: Implement `getReviews`, `submitReview`, `voteReview`, `reportCondition` handlers
+- [x] Task: Add review service handlers to page code
+- [x] Task: Implement `getReviews`, `submitReview`, `voteReview`, `reportCondition` handlers
 - [ ] Task: Implement GPS check before allowing review submission
 - [ ] Task: Add analytics for review engagement
 
 ### Testing Tasks
 
-- [ ] Task: Test review submission flow
+- [x] Task: Test review submission flow
 - [ ] Task: Test GPS verification logic
-- [ ] Task: Test duplicate review prevention
-- [ ] Task: Test helpful vote counting
-- [ ] Task: Test condition report expiration
+- [x] Task: Test duplicate review prevention
+- [x] Task: Test helpful vote counting
+- [x] Task: Test condition report expiration
 - [ ] Task: Test photo upload and display
-- [ ] Task: Test rating aggregation calculation
+- [x] Task: Test rating aggregation calculation
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: Rest Stop Ratings'
 
 ---

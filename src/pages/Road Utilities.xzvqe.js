@@ -12,6 +12,12 @@ import {
     getDriverBypassServices,
     saveDriverBypassServices
 } from 'backend/weighStationService';
+import {
+    getLocationReviews,
+    submitReview,
+    submitConditionReport,
+    voteReview
+} from 'backend/restStopService';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
@@ -41,6 +47,12 @@ const MESSAGE_REGISTRY = {
         'getDriverBypassServices',
         'saveDriverBypassServices',
         'tabSwitch',
+        'tabSwitch',
+        // Phase 4: Rest Stop Ratings
+        'getReviews',
+        'submitReview',
+        'reportCondition',
+        'voteReview',
         'ping',
         'ready'
     ],
@@ -59,6 +71,12 @@ const MESSAGE_REGISTRY = {
         'bypassServicesSaved',
         'error',
         'pong',
+        'pong',
+        // Phase 4: Rest Stop Ratings
+        'reviewsLoaded',
+        'reviewSubmitted',
+        'conditionReported',
+        'voteRegistered',
         'init'
     ]
 };
@@ -229,6 +247,23 @@ async function handleHtmlMessage(msg) {
 
             case 'saveDriverBypassServices':
                 await handleSaveDriverBypassServices(msg.data);
+                break;
+
+            // Phase 4: Rest Stop Ratings Handlers
+            case 'getReviews':
+                await handleGetLocationReviews(msg.data);
+                break;
+
+            case 'submitReview':
+                await handleSubmitReview(msg.data);
+                break;
+
+            case 'reportCondition':
+                await handleReportCondition(msg.data);
+                break;
+
+            case 'voteReview':
+                await handleVoteReview(msg.data);
                 break;
 
             case 'tabSwitch':
@@ -654,4 +689,81 @@ async function handleSaveDriverBypassServices(data) {
         success: result.success,
         message: result.success ? 'Preferences saved' : result.error
     });
+}
+// ============================================================================
+// REST STOP RATING HANDLERS (Phase 4)
+// ============================================================================
+
+/**
+ * Handle request for location reviews
+ */
+async function handleGetLocationReviews(data) {
+    if (!data.locationId) {
+        sendToHtml('error', { message: 'Location ID is required' });
+        return;
+    }
+
+    const result = await getLocationReviews(data.locationId, data.options);
+
+    if (result.success) {
+        sendToHtml('reviewsLoaded', {
+            locationId: data.locationId,
+            reviews: result.reviews,
+            stats: result.stats
+        });
+    } else {
+        console.error('[RoadUtilities] Failed to get reviews:', result.error);
+        sendToHtml('reviewsLoaded', { locationId: data.locationId, reviews: [], stats: null });
+    }
+}
+
+/**
+ * Handle review submission
+ */
+async function handleSubmitReview(data) {
+    if (!wixUsers.currentUser.loggedIn) {
+        sendToHtml('reviewSubmitted', { success: false, message: 'Must be logged in' });
+        return;
+    }
+
+    const { locationId, reviewData } = data;
+    const result = await submitReview(locationId, reviewData);
+
+    sendToHtml('reviewSubmitted', {
+        success: result.success,
+        message: result.success ? 'Review submitted successfully' : result.error,
+        review: result.review
+    });
+}
+
+/**
+ * Handle condition report
+ */
+async function handleReportCondition(data) {
+    if (!wixUsers.currentUser.loggedIn) {
+        sendToHtml('conditionReported', { success: false, message: 'Must be logged in' });
+        return;
+    }
+
+    const { locationId, reportData } = data;
+    const result = await submitConditionReport(locationId, reportData);
+
+    sendToHtml('conditionReported', {
+        success: result.success,
+        message: result.success ? 'Report submitted' : result.error
+    });
+}
+
+/**
+ * Handle review upvote/downvote
+ */
+async function handleVoteReview(data) {
+    if (!wixUsers.currentUser.loggedIn) return;
+
+    const { reviewId, isHelpful } = data;
+    const result = await voteReview(reviewId, isHelpful);
+
+    if (result.success) {
+        sendToHtml('voteRegistered', { reviewId, helpful_votes: result.helpful_votes });
+    }
 }

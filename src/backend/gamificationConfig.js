@@ -77,7 +77,11 @@ export const DRIVER_XP_ACTIONS = {
   refer_driver: { xp: 200, description: 'Refer a driver (on signup)' },
   referral_hired: { xp: 500, description: 'Referred driver gets hired' },
   report_outdated: { xp: 10, description: 'Report outdated job (verified)' },
-  complete_survey: { xp: 25, description: 'Complete survey' }
+  complete_survey: { xp: 25, description: 'Complete survey' },
+
+  // Cross-Platform Bonuses
+  match_quality_bonus: { xp: 0, description: 'Match quality bonus (variable based on score)' },
+  referral_bonus: { xp: 0, description: 'Referral bonus (variable based on type)' }
 };
 
 // =============================================================================
@@ -115,7 +119,10 @@ export const RECRUITER_POINT_ACTIONS = {
   // Badge & Achievement Actions
   badge_earned: { points: 50, description: 'Earn a new badge' },
   badge_tier_upgrade: { points: 100, description: 'Upgrade badge tier' },
-  achievement_earned: { points: 25, description: 'Earn an achievement' }
+  achievement_earned: { points: 25, description: 'Earn an achievement' },
+
+  // Cross-Platform Bonuses
+  match_quality_bonus: { points: 0, description: 'Match quality bonus (variable based on score)' }
 };
 
 // =============================================================================

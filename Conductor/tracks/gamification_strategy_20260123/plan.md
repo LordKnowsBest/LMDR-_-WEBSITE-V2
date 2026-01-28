@@ -401,10 +401,10 @@ Connect gamification to existing services and implement seasonal events.
 - [x] Task: Add event jobs to `jobs.config`
 
 ### 7.5 Cross-Platform Bonuses
-- [ ] Task: Implement Match Quality Bonus (both sides get bonus on hire)
-- [ ] Task: Implement referral network bonus tracking
-- [ ] Task: Create referral link generation for drivers
-- [ ] Task: Track referral conversions through signup
+- [x] Task: Implement Match Quality Bonus (both sides get bonus on hire) - referralService.jsw
+- [x] Task: Implement referral network bonus tracking - referralService.jsw
+- [x] Task: Create referral link generation for drivers - generateReferralCode()
+- [x] Task: Track referral conversions through signup - trackReferralSignup(), trackReferralConversion()
 
 ### 7.6 Testing - Phase 7
 - [ ] Task: Write integration tests for service hooks
