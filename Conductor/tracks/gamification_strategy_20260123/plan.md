@@ -443,6 +443,6 @@ Connect gamification to existing services and implement seasonal events.
 
 ### Documentation
 - [x] Task: Update CLAUDE.md with gamification service documentation (services, collections, integration points)
-- [ ] Task: Update GEMINI.md with gamification overview (optional - lower priority)
-- [ ] Task: Create user-facing help documentation for gamification (in-app help system)
-- [ ] Task: Document admin tools for gamification management (covered in ADMIN_GAMIFICATION_ANALYTICS.html)
+- [x] Task: Update GEMINI.md with gamification overview (comprehensive system overview with levels, ranks, features)
+- [x] Task: Create user-facing help documentation for gamification (GAMIFICATION_HELP.html in utility/)
+- [x] Task: Document admin tools for gamification management (ADMIN_GAMIFICATION_ANALYTICS.html dashboard)

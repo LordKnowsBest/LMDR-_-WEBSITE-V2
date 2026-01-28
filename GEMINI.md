@@ -130,10 +130,59 @@ The platform consists of 35+ backend web modules organized by functional area:
 | `gamificationService.jsw` | Core gamification engine: XP/points, levels/ranks, event logging |
 | `streakService.jsw` | Driver daily login streak management, freezes, and multipliers |
 | `achievementService.jsw` | Achievement checking and awarding engine for drivers/recruiters |
+| `badgeService.jsw` | Recruiter badge management with tiered badges (Lightning, Fast, Quality, Retention) |
+| `challengeService.jsw` | Time-limited challenges (daily, weekly, monthly) with progress tracking |
+| `leaderboardService.jsw` | Competitive leaderboards (hires, response time, retention, overall) |
+| `seasonalEventService.jsw` | Seasonal event lifecycle with XP/points multipliers |
+| `referralService.jsw` | Driver referral program with code generation and match quality bonuses |
+| `gamificationAnalyticsService.jsw` | Admin analytics: economy health, unlock rates, abuse detection |
 | `streakNotifications.jsw` | Notification logic for streak risks, breaks, and milestones |
 | `gamificationJobs.jsw` | Scheduled job handlers for daily streak processing and monthly grants |
+| `gamificationCache.js` | In-memory TTL caching for progression data and leaderboards |
 | `achievementCheckers.js` | Logic definitions for specific achievement criteria |
 | `gamificationConfig.js` | Static configuration for levels, ranks, actions, and XP values |
+
+### Gamification System Overview
+
+**Two-Track Progression System:**
+- **Drivers earn XP** for profile completion, job applications, messaging, interviews, getting hired
+- **Recruiters earn Points** for profile views, outreach, interviews, successful hires
+
+**Driver Levels (10 levels):**
+| Level | Title | XP Required |
+|-------|-------|-------------|
+| 1 | Rookie | 0 |
+| 2 | Road Starter | 100 |
+| 3 | Mile Maker | 300 |
+| 4 | Highway Hero | 600 |
+| 5 | Route Master | 1,000 |
+| 6-10 | ... | Up to 10,000 |
+
+**Recruiter Ranks (10 ranks):**
+| Rank | Title | Points Required |
+|------|-------|-----------------|
+| 1 | Associate | 0 |
+| 2 | Specialist | 250 |
+| 3 | Senior Specialist | 750 |
+| 4-10 | ... | Up to 25,000 |
+
+**Key Features:**
+- **Daily Streaks:** Drivers earn streak multipliers (1.1x-1.5x) for consecutive logins with streak freezes
+- **Achievements:** 25 driver achievements + 15 recruiter achievements across profile, activity, milestone categories
+- **Challenges:** Daily (24hr), Weekly (7 days), Monthly challenges with XP/points rewards
+- **Leaderboards:** Weekly/monthly rankings for hires, response time, retention, overall score
+- **Seasonal Events:** Quarterly events with 1.5x-2x multipliers and event-specific badges
+- **Referrals:** Drivers earn XP for referring other drivers (200 signup, 100 apply, 500 hire)
+- **Match Quality Bonus:** Both parties earn bonus when match quality is 70%+ (excellent: 90%+)
+
+**Airtable Collections (v2_* prefix):**
+- `v2_Driver Progression`, `v2_Recruiter Progression`
+- `v2_Driver Achievements`, `v2_Recruiter Badges`
+- `v2_Driver Challenges`, `v2_Challenge Definitions`
+- `v2_Achievement Definitions`, `v2_Badge Definitions`
+- `v2_Leaderboard Snapshots`, `v2_Gamification Events`
+- `v2_Seasonal Events`, `v2_Event Challenges`, `v2_Event Badges`
+- `v2_Driver Referrals`, `v2_Match Quality Bonuses`
 
 ## Scheduled Jobs (`src/backend/jobs.config`)
 
@@ -199,7 +248,7 @@ src/public/
 └── [root]      # Shared resources (config, styles, sitemap)
 ```
 
-### 🔴 Admin Pages (`src/public/admin/` - 10 files)
+### 🔴 Admin Pages (`src/public/admin/` - 11 files)
 | File | Purpose |
 |------|---------|
 | `ADMIN_DASHBOARD.html` | Main admin dashboard with stats, AI costs |
@@ -211,6 +260,7 @@ src/public/
 | `ADMIN_AI_ROUTER.html` | Multi-provider LLM routing |
 | `ADMIN_PROMPTS.html` | AI prompt library |
 | `ADMIN_CONTENT.html` | Content moderation queue |
+| `ADMIN_GAMIFICATION_ANALYTICS.html` | Gamification metrics, economy health, abuse detection |
 | `Admin_Portal_Dashboard.html` | Alternate admin dashboard |
 
 ### 🟢 Recruiter Pages (`src/public/recruiter/` - 9 files)
@@ -265,7 +315,7 @@ src/public/
 | `Home Nightly - Regional CDL Careers.html` | Regional careers |
 | `CDL Class A Driver Recruitment.html` | Class A recruitment |
 
-### ⚙️ Utility & System Components (`src/public/utility/` - 11 files)
+### ⚙️ Utility & System Components (`src/public/utility/` - 12 files)
 | File | Purpose |
 |------|---------|
 | `Sidebar.html` | Navigation sidebar |
@@ -279,6 +329,7 @@ src/public/
 | `Subscription_Canceled.html` | Cancellation page |
 | `Placement_Success.html` | Success confirmation |
 | `application_confirmation_email.html` | Email template |
+| `GAMIFICATION_HELP.html` | User-facing gamification help & FAQ |
 
 ### 📦 Shared Resources (`src/public/` root)
 | File | Purpose |
