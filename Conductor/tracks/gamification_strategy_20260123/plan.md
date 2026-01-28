@@ -407,10 +407,10 @@ Connect gamification to existing services and implement seasonal events.
 - [x] Task: Track referral conversions through signup - trackReferralSignup(), trackReferralConversion()
 
 ### 7.6 Testing - Phase 7
-- [ ] Task: Write integration tests for service hooks
-- [ ] Task: Test event multiplier application
-- [ ] Task: Test event badge/challenge availability
-- [ ] Task: Test referral tracking and bonus awards
+- [x] Task: Write integration tests for service hooks - gamificationIntegration.test.js
+- [x] Task: Test event multiplier application - seasonalEventService.test.js
+- [x] Task: Test event badge/challenge availability - seasonalEventService.test.js
+- [x] Task: Test referral tracking and bonus awards - referralService.test.js
 - [ ] Task: Manual test: Complete action and verify XP in all integrated services
 - [ ] Task: Manual test: Activate test event and verify multipliers
 - [ ] Task: Conductor - User Manual Verification 'Phase 7: Integration'
