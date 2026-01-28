@@ -387,12 +387,12 @@ Connect gamification to existing services and implement seasonal events.
 - [x] Task: Implement `getEventSummary()` for dashboard display
 
 ### 7.3 Event Content
-- [ ] Task: Create "January Hiring Kickoff" event definition in Airtable
-- [ ] Task: Create "Spring Hiring Sprint" event definition in Airtable
-- [ ] Task: Create "Summer Road Trip" event definition in Airtable
-- [ ] Task: Create "Q4 Quota Crusher" event definition in Airtable
-- [ ] Task: Create event-specific badges for each
-- [ ] Task: Create event-specific challenges for each
+- [x] Task: Create "January Hiring Kickoff" event definition in Airtable (via seedEventContent.jsw)
+- [x] Task: Create "Spring Hiring Sprint" event definition in Airtable (via seedEventContent.jsw)
+- [x] Task: Create "Summer Road Trip" event definition in Airtable (via seedEventContent.jsw)
+- [x] Task: Create "Q4 Quota Crusher" event definition in Airtable (via seedEventContent.jsw)
+- [x] Task: Create event-specific badges for each (16 badges, 4 per event)
+- [x] Task: Create event-specific challenges for each (24 challenges, 6 per event)
 
 ### 7.4 Event Scheduled Jobs
 - [x] Task: Create `startScheduledEvents` hourly job for event activation
