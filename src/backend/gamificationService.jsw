@@ -9,6 +9,7 @@
 
 import { getAirtableTableName } from 'backend/config';
 import * as airtable from 'backend/airtableClient';
+import * as gamificationCache from 'backend/gamificationCache';
 import {
   DRIVER_LEVELS,
   RECRUITER_RANKS,
@@ -209,69 +210,87 @@ export async function initializeProgression(userId, userType) {
 /**
  * Get driver's current progression status
  * @param {string} driverId
+ * @param {object} options - { skipCache: boolean }
  * @returns {object} Full progression object with level, XP, streaks, etc.
  */
-export async function getDriverProgression(driverId) {
-  try {
-    const records = await queryData(COLLECTION_KEYS.driverProgression, {
-      filter: `{Driver ID} = "${driverId}"`,
-      limit: 1
-    });
+export async function getDriverProgression(driverId, options = {}) {
+  const fetchProgression = async () => {
+    try {
+      const records = await queryData(COLLECTION_KEYS.driverProgression, {
+        filter: `{Driver ID} = "${driverId}"`,
+        limit: 1
+      });
 
-    if (records.length === 0) {
-      // Initialize if not found
-      return await initializeProgression(driverId, 'driver');
+      if (records.length === 0) {
+        // Initialize if not found
+        return await initializeProgression(driverId, 'driver');
+      }
+
+      const progression = normalizeDriverProgression(records[0]);
+
+      // Calculate additional stats
+      const levelInfo = getLevelForXP(progression.currentXP);
+      const streakMultiplier = getStreakMultiplier(progression.streakDays, 'driver');
+
+      return {
+        ...progression,
+        levelInfo,
+        streakMultiplier,
+        nextLevelUnlock: DRIVER_LEVELS[progression.level]?.unlock || null
+      };
+    } catch (error) {
+      console.error('getDriverProgression error:', error);
+      throw error;
     }
+  };
 
-    const progression = normalizeDriverProgression(records[0]);
-
-    // Calculate additional stats
-    const levelInfo = getLevelForXP(progression.currentXP);
-    const streakMultiplier = getStreakMultiplier(progression.streakDays, 'driver');
-
-    return {
-      ...progression,
-      levelInfo,
-      streakMultiplier,
-      nextLevelUnlock: DRIVER_LEVELS[progression.level]?.unlock || null
-    };
-  } catch (error) {
-    console.error('getDriverProgression error:', error);
-    throw error;
+  // Use cache for frequently accessed progression data (30 second TTL)
+  if (options.skipCache) {
+    return await fetchProgression();
   }
+  return await gamificationCache.getDriverProgression(driverId, fetchProgression);
 }
 
 /**
  * Get recruiter's current progression status
  * @param {string} recruiterId
+ * @param {object} options - { skipCache: boolean }
  * @returns {object} Full progression object with rank, points, stats
  */
-export async function getRecruiterProgression(recruiterId) {
-  try {
-    const records = await queryData(COLLECTION_KEYS.recruiterProgression, {
-      filter: `{Recruiter ID} = "${recruiterId}"`,
-      limit: 1
-    });
+export async function getRecruiterProgression(recruiterId, options = {}) {
+  const fetchProgression = async () => {
+    try {
+      const records = await queryData(COLLECTION_KEYS.recruiterProgression, {
+        filter: `{Recruiter ID} = "${recruiterId}"`,
+        limit: 1
+      });
 
-    if (records.length === 0) {
-      // Initialize if not found
-      return await initializeProgression(recruiterId, 'recruiter');
+      if (records.length === 0) {
+        // Initialize if not found
+        return await initializeProgression(recruiterId, 'recruiter');
+      }
+
+      const progression = normalizeRecruiterProgression(records[0]);
+
+      // Calculate additional stats
+      const rankInfo = getRankForPoints(progression.currentPoints);
+
+      return {
+        ...progression,
+        rankInfo,
+        nextRankUnlock: RECRUITER_RANKS[progression.rank]?.unlock || null
+      };
+    } catch (error) {
+      console.error('getRecruiterProgression error:', error);
+      throw error;
     }
+  };
 
-    const progression = normalizeRecruiterProgression(records[0]);
-
-    // Calculate additional stats
-    const rankInfo = getRankForPoints(progression.currentPoints);
-
-    return {
-      ...progression,
-      rankInfo,
-      nextRankUnlock: RECRUITER_RANKS[progression.rank]?.unlock || null
-    };
-  } catch (error) {
-    console.error('getRecruiterProgression error:', error);
-    throw error;
+  // Use cache for frequently accessed progression data (30 second TTL)
+  if (options.skipCache) {
+    return await fetchProgression();
   }
+  return await gamificationCache.getRecruiterProgression(recruiterId, fetchProgression);
 }
 
 // =============================================================================
@@ -332,6 +351,9 @@ export async function awardDriverXP(driverId, action, metadata = {}) {
       'XP To Next Level': newLevelInfo.xpToNext,
       'Updated At': new Date().toISOString()
     });
+
+    // Invalidate cache after progression update
+    gamificationCache.invalidateDriverProgression(driverId);
 
     // Log the event
     await logGamificationEvent(driverId, 'driver', {
@@ -427,6 +449,10 @@ export async function awardRecruiterPoints(recruiterId, action, metadata = {}) {
       'Points To Next Rank': newRankInfo.pointsToNext,
       'Updated At': new Date().toISOString()
     });
+
+    // Invalidate cache after progression update
+    gamificationCache.invalidateRecruiterProgression(recruiterId);
+    gamificationCache.invalidateLeaderboards(); // Rankings may change
 
     // Log the event
     await logGamificationEvent(recruiterId, 'recruiter', {

@@ -451,11 +451,16 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **gamificationService.jsw** - Core gamification engine handling XP/points awards, level/rank progression, and event logging with audit trail
 - **streakService.jsw** - Manages driver daily login streaks, streak freezes, and multiplier calculations
 - **achievementService.jsw** - Achievement engine for checking and awarding badges to drivers and recruiters based on criteria
+- **badgeService.jsw** - Recruiter badge management with tiered badges (Lightning, Fast, Active, Quality, Retention)
 - **challengeService.jsw** - Time-limited challenges with progress tracking and rewards
-- **seasonalEventService.jsw** - Seasonal event lifecycle management with XP multipliers
+- **leaderboardService.jsw** - Competitive leaderboards (hires, response time, retention, overall) with period-based rankings
+- **seasonalEventService.jsw** - Seasonal event lifecycle management with XP multipliers and event-specific challenges
+- **referralService.jsw** - Driver referral program with code generation, conversion tracking, and match quality bonuses
+- **gamificationAnalyticsService.jsw** - Analytics dashboard for admin: economy health, unlock rates, abuse detection
 - **streakNotifications.jsw** - Handles notifications for streak risks, breaks, and milestones
 - **gamificationJobs.jsw** - Scheduled job handlers for daily streak processing and monthly freeze grants
 - **gamificationConfig.js** - Static configuration for levels, ranks, XP values, and action definitions
+- **gamificationCache.js** - In-memory TTL caching for progression data, leaderboards, and event multipliers
 - **achievementCheckers.js** - Logic definitions for specific achievement criteria (profile, community, recruiter stats)
 
 **Gamification Integration Points:**
@@ -559,6 +564,23 @@ async function awardXPNonBlocking(userId, action, metadata = {}) {
 - `JobPostings` - Job posting submissions (for moderation)
 - `TeamMembers` - Team member profiles for About page
 - `CompanyMilestones` - Company timeline milestones
+
+**Gamification (Airtable-only):**
+- `v2_Driver Progression` - Driver XP, level, streak data
+- `v2_Driver Achievements` - Unlocked achievements for drivers
+- `v2_Driver Challenges` - Active and completed driver challenges
+- `v2_Recruiter Progression` - Recruiter points, rank, stats
+- `v2_Recruiter Badges` - Earned badges with tier levels
+- `v2_Leaderboard Snapshots` - Historical leaderboard rankings
+- `v2_Achievement Definitions` - Achievement criteria and rewards
+- `v2_Badge Definitions` - Badge tier thresholds and metadata
+- `v2_Challenge Definitions` - Challenge configurations (daily, weekly, monthly)
+- `v2_Gamification Events` - Event audit log for all XP/points awards
+- `v2_Seasonal Events` - Event definitions with dates and multipliers
+- `v2_Event Challenges` - Event-specific challenge definitions
+- `v2_Event Badges` - Event-specific badge awards
+- `v2_Driver Referrals` - Referral tracking with codes and conversions
+- `v2_Match Quality Bonuses` - Match quality bonus awards
 
 ### Key Configuration
 

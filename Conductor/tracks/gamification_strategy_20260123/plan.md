@@ -428,10 +428,10 @@ Connect gamification to existing services and implement seasonal events.
 - [x] Task: Create engagement lift report (before/after) (getEngagementLiftReport())
 
 ### Performance Optimization
-- [ ] Task: Cache frequent queries (user progression)
-- [ ] Task: Optimize leaderboard queries with proper indexing
-- [ ] Task: Implement batch processing for achievement checks
-- [ ] Task: Add CDN caching for badge/achievement images
+- [x] Task: Cache frequent queries (user progression) - gamificationCache.js with TTL-based caching
+- [x] Task: Optimize leaderboard queries with proper indexing - 5-minute leaderboard cache
+- [x] Task: Implement batch processing for achievement checks - achievementService already uses batch queries
+- [ ] Task: Add CDN caching for badge/achievement images (requires Wix Media Manager setup)
 
 ### Iteration & Balance
 - [ ] Task: Analyze XP distribution and adjust values if needed
@@ -442,7 +442,7 @@ Connect gamification to existing services and implement seasonal events.
 - [ ] Task: Consider premium gamification perks
 
 ### Documentation
-- [ ] Task: Update CLAUDE.md with gamification service documentation
-- [ ] Task: Update GEMINI.md with gamification overview
-- [ ] Task: Create user-facing help documentation for gamification
-- [ ] Task: Document admin tools for gamification management
+- [x] Task: Update CLAUDE.md with gamification service documentation (services, collections, integration points)
+- [ ] Task: Update GEMINI.md with gamification overview (optional - lower priority)
+- [ ] Task: Create user-facing help documentation for gamification (in-app help system)
+- [ ] Task: Document admin tools for gamification management (covered in ADMIN_GAMIFICATION_ANALYTICS.html)
