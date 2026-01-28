@@ -835,15 +835,33 @@ function initSubscriptionHandlers() {
       }
     }
 
-    // Handle checkout initiation
+    // Handle checkout initiation (Pro/Enterprise subscriptions - REQUIRES LOGIN)
     if (msg.type === 'startCheckout') {
       try {
         const { plan, billingPeriod } = msg.data;
 
+        // Check if user is logged in BEFORE attempting checkout
+        const currentUser = wixUsers.currentUser;
+        if (!currentUser.loggedIn) {
+          console.log('User not logged in, redirecting to login for subscription checkout');
+
+          // Preserve context through login flow
+          const query = wixLocation.query;
+          const params = new URLSearchParams();
+          if (query.email) params.set('email', query.email);
+          if (query.leadId) params.set('leadId', query.leadId);
+          params.set('plan', plan);  // Remember which plan they wanted
+          if (billingPeriod) params.set('billing', billingPeriod);
+
+          const returnUrl = `${wixLocation.baseUrl}/pricing?${params.toString()}`;
+          wixLocation.to(`/login?returnUrl=${encodeURIComponent(returnUrl)}`);
+          return;
+        }
+
         console.log(`Starting checkout for ${plan} plan (${billingPeriod || 'monthly'})`);
 
         // Start Stripe checkout session
-        // subscriptionService.startCheckout(priceId, billingPeriod) uses getCurrentCarrier() internally
+        // User is logged in, so getCurrentCarrier() will work
         const result = await startCheckout(
           plan,  // 'pro' or 'enterprise'
           billingPeriod || 'monthly'
@@ -911,7 +929,9 @@ function initSubscriptionHandlers() {
     }
 
     // Handle placement deposit checkout (Full Service / VelocityMatch)
-    // NOTE: This flow does NOT require login - uses form data directly
+    // GUEST CHECKOUT: This flow does NOT require login - uses formData.email directly
+    // This allows carriers to pay $100/driver deposit without creating an account first
+    // Contrast with subscription checkout above which DOES require login
     if (msg.type === 'startPlacementCheckout') {
       try {
         const { driverCount, formData } = msg.data;
@@ -927,7 +947,7 @@ function initSubscriptionHandlers() {
         console.log(`Starting placement checkout for ${driverCount} drivers`);
 
         // Start Stripe checkout session for placement deposit
-        // subscriptionService.startPlacementCheckout(driverCount, formData) uses getCurrentCarrier() internally
+        // GUEST CHECKOUT: Uses formData.email directly, no login required
         const result = await startPlacementCheckout(
           driverCount,
           formData || {}
@@ -955,11 +975,26 @@ function initSubscriptionHandlers() {
       }
     }
 
-    // Handle login requirement
+    // Handle login requirement (for subscription checkout - NOT placement deposit)
     if (msg.type === 'requireLogin') {
       console.log('User needs to log in for subscription');
+
+      // Preserve lead context through login flow
+      // Build return URL with existing query params (email, leadId from homepage redirect)
+      const currentUrl = wixLocation.url;
+      const query = wixLocation.query;
+
+      // Build return URL preserving email and leadId if present
+      let returnUrl = currentUrl;
+      if (!returnUrl.includes('?') && (query.email || query.leadId)) {
+        const params = new URLSearchParams();
+        if (query.email) params.set('email', query.email);
+        if (query.leadId) params.set('leadId', query.leadId);
+        returnUrl = `${wixLocation.baseUrl}${wixLocation.path}?${params.toString()}`;
+      }
+
       // Redirect to login page with return URL
-      wixLocation.to(`/login?returnUrl=${encodeURIComponent(wixLocation.url)}`);
+      wixLocation.to(`/login?returnUrl=${encodeURIComponent(returnUrl)}`);
     }
   });
 }
