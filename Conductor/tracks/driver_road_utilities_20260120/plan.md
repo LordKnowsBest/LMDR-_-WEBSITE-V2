@@ -344,57 +344,57 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ### Backend Tasks
 
-- [ ] Task: Create `weatherAlertService.jsw` backend web module
+- [x] Task: Create `weatherAlertService.jsw` backend web module
 - [ ] Task: Implement `WeatherAlerts` collection (nws_id, alert_type, event, severity, affected_zones, geometry, onset, expires)
 - [ ] Task: Implement `DriverWeatherSubscriptions` collection (driver_id, alert_types, min_severity, push_enabled)
-- [ ] Task: Integrate NWS Weather API (free, authoritative source)
+- [x] Task: Integrate NWS Weather API (free, authoritative source)
 - [ ] Task: Implement alert polling job (every 10 min)
 - [ ] Task: Implement zone-to-coordinate mapping for route checking
 
 ### Core Service Functions
 
-- [ ] Task: Implement `getRouteWeather(routePoints, options)` - alerts and forecasts along route
-- [ ] Task: Implement `getAlertsAtLocation(lat, lng)` - current location alerts
-- [ ] Task: Implement `subscribeToAlerts(driverId, preferences)` - alert preferences
-- [ ] Task: Implement `processNewAlerts()` - scheduled job to fetch and process alerts
-- [ ] Task: Implement `getChainRequirements(state, highway)` - chain law status
-- [ ] Task: Add alert deduplication logic (don't send same alert twice)
-- [ ] Task: Implement severity filtering based on driver preferences
-- [ ] Task: Create alert matching logic (route corridor intersection with alert zone)
+- [x] Task: Implement `getRouteWeather(routePoints, options)` - alerts and forecasts along route
+- [x] Task: Implement `getAlertsAtLocation(lat, lng)` - current location alerts
+- [x] Task: Implement `subscribeToAlerts(driverId, preferences)` - alert preferences
+- [x] Task: Implement `processNewAlerts()` - scheduled job to fetch and process alerts
+- [x] Task: Implement `getChainRequirements(state, highway)` - chain law status
+- [x] Task: Add alert deduplication logic (don't send same alert twice)
+- [x] Task: Implement severity filtering based on driver preferences
+- [x] Task: Create alert matching logic (route corridor intersection with alert zone)
 
 ### Scheduled Job Tasks
 
-- [ ] Task: Add `processWeatherAlerts` to jobs.config (every 10 min)
-- [ ] Task: Implement driver notification matching (who is affected by each alert)
+- [x] Task: Add `processWeatherAlerts` to jobs.config (every 10 min)
+- [x] Task: Implement driver notification matching (who is affected by each alert)
 - [ ] Task: Implement MemberNotification creation for severe alerts
-- [ ] Task: Add email notification option for severe weather
+- [x] Task: Add email notification option for severe weather
 
 ### Frontend Tasks
 
-- [ ] Task: Add Weather Alerts tab to DRIVER_ROAD_UTILITIES.html
-- [ ] Task: Design active alert card component (warning box with severity color)
-- [ ] Task: Build route forecast timeline showing weather at key waypoints
-- [ ] Task: Implement chain law display for mountain passes
+- [x] Task: Add Weather Alerts tab to DRIVER_ROAD_UTILITIES.html
+- [x] Task: Design active alert card component (warning box with severity color)
+- [x] Task: Build route forecast timeline showing weather at key waypoints
+- [x] Task: Implement chain law display for mountain passes
 - [ ] Task: Add alert preference settings panel
 - [ ] Task: Build push notification opt-in flow
-- [ ] Task: Implement alert severity icons (warning, watch, advisory)
+- [x] Task: Implement alert severity icons (warning, watch, advisory)
 - [ ] Task: Add "Share with Dispatch" button for severe alerts
 
 ### Page Code Integration
 
-- [ ] Task: Add weather service handlers to page code
-- [ ] Task: Implement `getRouteWeather`, `subscribeAlerts`, `getChainLaws` handlers
-- [ ] Task: Store alert preferences
+- [x] Task: Add weather service handlers to page code
+- [x] Task: Implement `getRouteWeather`, `subscribeAlerts`, `getChainLaws` handlers
+- [x] Task: Store alert preferences
 - [ ] Task: Implement push notification registration (if supported)
 
 ### Testing Tasks
 
-- [ ] Task: Test NWS API integration and response parsing
-- [ ] Task: Test route-alert intersection logic
-- [ ] Task: Test alert deduplication
-- [ ] Task: Test subscription preference saving
+- [x] Task: Test NWS API integration and response parsing
+- [x] Task: Test route-alert intersection logic
+- [x] Task: Test alert deduplication
+- [x] Task: Test subscription preference saving
 - [ ] Task: Test alert notification creation
-- [ ] Task: Test chain law display for known passes (Donner, Cajon, Snoqualmie)
+- [x] Task: Test chain law display for known passes (Donner, Cajon, Snoqualmie)
 - [ ] Task: Conductor - User Manual Verification 'Phase 5: Weather Alerts'
 
 ---

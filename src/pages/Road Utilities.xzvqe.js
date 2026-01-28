@@ -18,6 +18,10 @@ import {
     submitConditionReport,
     voteReview
 } from 'backend/restStopService';
+import {
+    getAlertsAtLocation,
+    getChainRequirements
+} from 'backend/weatherAlertService';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
@@ -52,7 +56,10 @@ const MESSAGE_REGISTRY = {
         'getReviews',
         'submitReview',
         'reportCondition',
+        'reportCondition',
         'voteReview',
+        // Phase 5: Weather
+        'getWeather',
         'ping',
         'ready'
     ],
@@ -76,7 +83,10 @@ const MESSAGE_REGISTRY = {
         'reviewsLoaded',
         'reviewSubmitted',
         'conditionReported',
+        'conditionReported',
         'voteRegistered',
+        // Phase 5: Weather
+        'weatherResults',
         'init'
     ]
 };
@@ -266,9 +276,16 @@ async function handleHtmlMessage(msg) {
                 await handleVoteReview(msg.data);
                 break;
 
+            // Phase 5: Weather Handlers
+            case 'getWeather':
+                await handleGetWeather(msg.data);
+                break;
+
             case 'tabSwitch':
                 handleTabSwitch(msg.data);
                 break;
+
+
 
             default:
                 console.warn('[RoadUtilities] Unhandled action:', action);
@@ -766,4 +783,29 @@ async function handleVoteReview(data) {
     if (result.success) {
         sendToHtml('voteRegistered', { reviewId, helpful_votes: result.helpful_votes });
     }
+}
+
+// ============================================================================
+// WEATHER HANDLERS (Phase 5)
+// ============================================================================
+
+/**
+ * Handle weather request
+ */
+async function handleGetWeather(data) {
+    // 1. Get Chain Laws (mock/static for now)
+    const chainLawsResult = await getChainRequirements();
+
+    // 2. Get Alerts (mock location for now if not provided, or passed from frontend)
+    // For MVP, we pass a default location or the user's last known location
+    const lat = 39.31; // Donner Pass area default
+    const lng = -120.33;
+
+    // In real app, data might contain lat/lng from frontend geolocation
+    const alertsResult = await getAlertsAtLocation(lat, lng);
+
+    sendToHtml('weatherResults', {
+        chainLaws: chainLawsResult.success ? chainLawsResult.items : [],
+        alerts: alertsResult.success ? alertsResult.alerts : []
+    });
 }
