@@ -55,27 +55,28 @@ Stores historical risk assessments to track trends over time.
 ## 4. Implementation Steps
 
 ### Step 1: Backend Foundation
-- [ ] Create `DriverPerformance` and `RetentionRiskLogs` collections (Task: Define Schema).
-- [ ] Implement `src/backend/retentionService.jsw` with mock data generators for performance metrics.
+- [x] Create `DriverPerformance` and `RetentionRiskLogs` collections (Task: Define Schema).
+- [x] Implement `src/backend/retentionService.jsw` with mock data generators for performance metrics.
 
 ### Step 2: Prediction Logic
-- [ ] Implement `calculateRiskScore` algorithm.
+- [x] Implement `calculateRiskScore` algorithm.
 - [ ] Create a scheduled job (optional) or on-demand function to refresh risk scores daily.
 
 ### Step 3: UI Implementation
-- [ ] Create `src/public/Recruiter_Retention_Dashboard.html`.
-- [ ] Implement visualizations (using Chart.js or simple CSS bars) for:
+- [x] Create `src/public/Recruiter_Retention_Dashboard.html`.
+- [x] Implement visualizations (using Chart.js or simple CSS bars) for:
     -   Retention Risk Distribution (Pie Chart).
     -   Top Risk Factors (Bar Chart).
 
 ### Step 4: Verification
 - [ ] **Manual Test**: Log in as detailed recruiter, view dashboard.
-- [ ] **Data Validation**: Ensure high safety incidents trigger "High Risk" alert.
+- [x] **Data Validation**: Ensure high safety incidents trigger "High Risk" alert.
 
 ## 5. Verification Plan
 
 ### Automated Tests
 *   We will rely on manual verification as this is a UI-heavy feature with new data structures.
+*   **Update:** Logic verification tests added in `src/public/__tests__/retentionService.test.js` (5 tests passing).
 
 ### Manual Verification
 1.  **Seed Data**: Run a script to generate 10 drivers with varying performance stats.
