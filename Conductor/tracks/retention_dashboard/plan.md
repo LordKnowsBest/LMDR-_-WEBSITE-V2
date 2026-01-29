@@ -60,7 +60,7 @@ Stores historical risk assessments to track trends over time.
 
 ### Step 2: Prediction Logic
 - [x] Implement `calculateRiskScore` algorithm.
-- [ ] Create a scheduled job (optional) or on-demand function to refresh risk scores daily.
+- [x] Create a scheduled job (optional) or on-demand function to refresh risk scores daily.
 
 ### Step 3: UI Implementation
 - [x] Create `src/public/Recruiter_Retention_Dashboard.html`.
