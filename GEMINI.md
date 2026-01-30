@@ -108,7 +108,8 @@ The platform consists of 35+ backend web modules organized by functional area:
 | `recruiter_service.jsw` | Recruiter-specific operations and carrier assignments |
 | `publicStatsService.jsw` | Public-facing statistics and metrics |
 | `contentService.jsw` | Dynamic content management |
-| `retentionService.jsw` | User retention metrics and engagement analysis |
+| `retentionService.jsw` | Predictive driver retention engine calculating turnover risk scores and fleet health metrics |
+| `retentionJobs.jsw` | Scheduled job handlers for daily risk score refreshes |
 | `memberService.jsw` | Wix member management and role assignments |
 
 ### Infrastructure Services
@@ -183,6 +184,7 @@ The platform consists of 35+ backend web modules organized by functional area:
 - `v2_Leaderboard Snapshots`, `v2_Gamification Events`
 - `v2_Seasonal Events`, `v2_Event Challenges`, `v2_Event Badges`
 - `v2_Driver Referrals`, `v2_Match Quality Bonuses`
+- `v2_Driver Performance`, `v2_Retention Risk Logs`
 
 ## Scheduled Jobs (`src/backend/jobs.config`)
 
