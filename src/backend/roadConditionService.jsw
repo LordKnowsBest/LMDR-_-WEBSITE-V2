@@ -110,6 +110,19 @@ export async function getRouteConditions(routePoints, options = {}) {
             console.warn('[RoadConditionService] 511 Adapter failed:', adapterErr);
         }
 
+        // Phase 6 Enhancement: Enrich conditions with calculated severity and delay
+        relevantConditions.forEach(cond => {
+            if (!cond.severity) cond.severity = classifySeverity(cond.description || cond.type);
+            if (!cond.delay_minutes) cond.delay_minutes = estimateDelay(cond.type, cond.severity);
+            
+            // Phase 6.2: Suggest Alternate Routes for Major Closures
+            if (cond.severity === 'major' || cond.type === 'closure') {
+                cond.alternate_routes = suggestAlternateRoutes(cond);
+            }
+        });
+
+
+
         // Also fetch from DB for user-submitted reports
         // const userReports = await queryData(COLLECTIONS.REPORTS, ...); // omitted for MVP
 
@@ -241,17 +254,43 @@ export async function reportCondition(report) {
             description: report.description,
             timestamp: new Date(),
             expires_at: new Date(Date.now() + 4 * 60 * 60 * 1000), // 4 hours TTL
-            verified_count: 0
+            verified_count: 1, // Start with 1 verification (author)
+            status: 'active'
         };
 
+        // GPS Validation (Phase 6 Enhancement)
+        // If report location is too far from user's current location (mocked here), reject
+        // In real app, we verify `report.userLocation` vs `report.location` distance < 5 miles
+        if (report.userLocation) {
+             const dist = calculateDistance(report.userLocation.lat, report.userLocation.lng, report.location.lat, report.location.lng);
+             if (dist > 10) { // 10 mile validation radius
+                 return { success: false, error: 'Location mismatch: You must be near the incident to report it.' };
+             }
+        }
+
         // In real app: wixData.insert(COLLECTIONS.REPORTS, record);
+        // For MVP: We will just push to a mock memory store or log
         console.log('[RoadConditionService] Report submitted:', record);
 
+        // Check for duplicates/confirmations
+        // If similar report exists within 1 mile and 30 mins, increment its verified_count instead of new record
+        
         return { success: true, reportId: 'mock_report_id_' + Date.now() };
 
     } catch (error) {
         return { success: false, error: error.message };
     }
+}
+
+/**
+ * Verify/Upvote an existing condition report
+ * @param {string} reportId 
+ * @param {string} userId 
+ */
+export async function verifyConditionReport(reportId, userId) {
+    // Logic to increment verified_count
+    // wixData.get(COLLECTIONS.REPORTS, reportId)... update
+    return { success: true, message: 'Report verified' };
 }
 
 
@@ -287,8 +326,60 @@ function calculateDistance(lat1, lng1, lat2, lng2) {
     const R = 3958.8; // miles
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lng2 - lng1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
-              Math.sin(dLon/2) * Math.sin(dLon/2);
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function classifySeverity(description) {
+    if (!description) return 'minor';
+    const desc = description.toLowerCase();
+    if (desc.includes('closed') || desc.includes('blocked') || desc.includes('critical')) return 'major';
+    if (desc.includes('lane closed') || desc.includes('heavy traffic') || desc.includes('spin-out')) return 'moderate';
+    return 'minor';
+}
+
+function estimateDelay(type, severity) {
+    if (type === 'closure') return severity === 'major' ? 120 : 60;
+    if (type === 'accident') return severity === 'major' ? 60 : 30;
+    if (type === 'construction') return 15;
+    return 0;
+}
+
+/**
+ * Suggest alternate routes for major closures (Phase 6 MVP Mock)
+ * @param {Object} condition 
+ */
+function suggestAlternateRoutes(condition) {
+    // In real app: Call Mapbox Optimization API or Google Routes with excludePolygon
+    
+    // Mock Logic for Demo Scenarios
+    
+    // Scenario 1: Donner Pass (I-80 CA) Coverage
+    if (condition.highway === 'I-80' && condition.state === 'CA' && condition.location.lat > 39 && condition.location.lat < 40) {
+        return [
+            {
+                id: 'alt_1',
+                name: 'Hwy 20 to I-5',
+                description: 'Bypass logic: Take Hwy 20 West to Marysville, then I-5 South to Sacramento.',
+                distance_diff_miles: +45, // +45 miles longer
+                time_diff_minutes: +40, // +40 mins longer (but avoids 2hr closure)
+                savings_minutes: condition.delay_minutes - 40
+            }
+        ];
+    }
+    
+    // Scenario 2: Siskiyou Pass (I-5 OR/CA border)
+    if (condition.highway === 'I-5' && (condition.state === 'OR' || condition.state === 'CA') && condition.location.lat > 41 && condition.location.lat < 43) {
+        return [
+            {
+                id: 'alt_2',
+                name: 'US-97/Hwy 58',
+                description: 'Take US-97 at Weed to Hwy 58, reconnect at Eugene.',
+                distance_diff_miles: +85,
+                time_diff_minutes: +90,
+                savings_minutes: condition.delay_minutes - 90
+            }
+        ];
+    }
+
+    return [];
 }

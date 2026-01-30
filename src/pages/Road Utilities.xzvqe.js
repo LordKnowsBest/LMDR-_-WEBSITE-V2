@@ -23,12 +23,11 @@ import {
     getChainRequirements,
     getRouteWeather
 } from 'backend/weatherAlertService';
-getRouteWeather
-} from 'backend/weatherAlertService';
 import {
     getRouteConditions,
     getTruckRestrictions,
-    reportCondition
+    reportCondition,
+    verifyConditionReport
 } from 'backend/roadConditionService';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixUsers from 'wix-users';
@@ -65,6 +64,7 @@ const MESSAGE_REGISTRY = {
         'submitReview',
         'reportCondition',
         'reportCondition',
+        'verifyConditionReport',
         'voteReview',
         // Phase 5: Weather
         'getWeather',
@@ -194,12 +194,15 @@ function sendInitialConfig() {
         isLoggedIn,
         userId,
         defaultLocation: DEFAULT_LOCATION,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        // Default to Dashboard tab unless deep linked
+        initialTab: 'dashboard'
     });
 
-    // Pre-load driver's fuel cards if logged in
+    // Pre-load data for Dashboard Summary
     if (isLoggedIn) {
         handleGetDriverFuelCards();
+        handleGetDriverBypassServices();
     }
 }
 
@@ -305,6 +308,10 @@ async function handleHtmlMessage(msg) {
 
             case 'reportRoadCondition':
                 await handleReportRoadCondition(msg.data);
+                break;
+
+            case 'verifyConditionReport':
+                await handleVerifyConditionReport(msg.data);
                 break;
 
             case 'tabSwitch':
@@ -849,6 +856,12 @@ async function handleGetRoadConditions(data) {
     // Call backend service
     const result = await getRouteConditions(routePoints); // Phase 6 MVP options
 
+    // Analytics
+    const userId = wixUsers.currentUser.loggedIn ? wixUsers.currentUser.id : 'anonymous';
+    logFeatureInteraction('road_utilities', userId, 'view', {
+        metadata: { routePoints_count: routePoints ? routePoints.length : 0 }
+    }).catch(err => console.warn('[RoadUtilities] Analytics error:', err));
+
     if (result.success) {
         sendToHtml('conditionsResults', {
             conditions: result.conditions,
@@ -863,6 +876,13 @@ async function handleGetRoadConditions(data) {
 
 async function handleGetTruckRestrictions(data) {
     const { routePoints, truckSpecs } = data;
+
+    // Analytics
+    const userId = wixUsers.currentUser.loggedIn ? wixUsers.currentUser.id : 'anonymous';
+    logFeatureInteraction('road_restrictions', userId, 'filter', {
+        metadata: { truckSpecs }
+    }).catch(err => console.warn('[RoadUtilities] Analytics error:', err));
+
     const result = await getTruckRestrictions(routePoints, truckSpecs);
 
     if (result.success) {
@@ -888,9 +908,23 @@ async function handleReportRoadCondition(data) {
         report.driverId = 'anonymous';
     }
 
+    // Analytics
+    logFeatureInteraction('road_utilities', report.driverId, 'report', {
+        metadata: { type: report.type, highway: report.highway }
+    }).catch(err => console.warn('[RoadUtilities] Analytics error:', err));
+
     const result = await reportCondition(report);
     sendToHtml('roadConditionReported', {
         success: result.success,
         reportId: result.reportId
     });
+}
+
+async function handleVerifyConditionReport(data) {
+    if (!wixUsers.currentUser.loggedIn) return;
+    const { reportId } = data;
+    const result = await verifyConditionReport(reportId, wixUsers.currentUser.id);
+    if (result.success) {
+        // Optionally send confirmation back
+    }
 }

@@ -51,7 +51,7 @@
 ### 2.3 Scoring Refactor
 - [x] Task: Review and refactor scoring functions for clarity
 - [x] Task: Add JSDoc documentation to all exported functions
-- [ ] Task: Conductor - Verify Phase 2 Scoring Engine
+- [x] Task: Conductor - Verify Phase 2 Scoring Engine
 
 ---
 
@@ -76,7 +76,7 @@
 - [x] Task: Implement validation helpers
 - [x] Task: Verify all tests pass (GREEN phase complete)
 - [x] Task: Verify coverage >90% for carrierPreferences.jsw
-- [ ] Task: Conductor - Verify Phase 3 Preferences Service
+- [x] Task: Conductor - Verify Phase 3 Preferences Service
 
 ---
 
@@ -102,7 +102,7 @@
 - [x] Task: Implement quota reset logic
 - [x] Task: Verify all tests pass (GREEN phase complete)
 - [x] Task: Verify coverage >95% for subscriptionService.jsw
-- [ ] Task: Conductor - Verify Phase 4 Subscription Service
+- [x] Task: Conductor - Verify Phase 4 Subscription Service
 
 ---
 
@@ -133,7 +133,7 @@
 - [x] Task: Verify all tests pass (GREEN phase complete)
 - [x] Task: Update snapshots
 - [x] Task: Verify coverage >90% for driverMatching.jsw
-- [ ] Task: Conductor - Verify Phase 5 Matching Engine
+- [x] Task: Conductor - Verify Phase 5 Matching Engine
 
 ---
 
@@ -158,7 +158,7 @@
 - [x] Task: Implement `getOutreachHistory()` - make tests pass
 - [x] Task: Verify all tests pass (GREEN phase complete)
 - [x] Task: Verify coverage >85% for driverOutreach.jsw
-- [ ] Task: Conductor - Verify Phase 6 Outreach Service
+- [x] Task: Conductor - Verify Phase 6 Outreach Service
 
 ---
 
@@ -178,68 +178,74 @@
 ## Phase 8: Recruiter Console UI (Frontend)
 
 ### 8.1 Search Dashboard
-- [ ] Task: Create `RECRUITER_DRIVER_SEARCH.html` component
-- [ ] Task: Build filter panel (CDL, endorsements, location, experience, availability)
-- [ ] Task: Build search results list with match scores
-- [ ] Task: Add match rationale display
-- [ ] Task: Implement pagination/infinite scroll
-- [ ] Task: Add "View Profile" button with quota indicator
+- [x] Task: Create `RECRUITER_DRIVER_SEARCH.html` component
+- [x] Task: Build filter panel (CDL, endorsements, location, experience, availability)
+- [x] Task: Build search results list with match scores
+- [x] Task: Add match rationale display
+- [x] Task: Implement pagination/infinite scroll
+- [x] Task: Add "View Profile" button with quota indicator
 
 ### 8.2 Driver Profile View
-- [ ] Task: Create driver profile modal/panel
-- [ ] Task: Display qualifications, experience, preferences
-- [ ] Task: Display work history
-- [ ] Task: Display match rationale
-- [ ] Task: Add action buttons (Save, Message, Schedule, Offer)
+- [x] Task: Create driver profile modal/panel
+- [x] Task: Display qualifications, experience, preferences
+- [x] Task: Display work history
+- [x] Task: Display match rationale
+- [x] Task: Add action buttons (Save, Message, Schedule, Offer)
 
 ### 8.3 Quota & Subscription UI
-- [ ] Task: Add quota indicator to search dashboard header
-- [ ] Task: Create subscription management panel
-- [ ] Task: Build upgrade prompts for free users
-- [ ] Task: Add quota exhausted messaging
+- [x] Task: Add quota indicator to search dashboard header
+- [x] Task: Create subscription management panel
+- [x] Task: Build upgrade prompts for free users
+- [x] Task: Add quota exhausted messaging
 
 ### 8.4 Integration with Recruiter Console
-- [ ] Task: Add "Search Drivers" tab to existing Recruiter Console
-- [ ] Task: Wire up postMessage handlers for search actions
-- [ ] Task: Connect to backend services via Velo page code
-- [ ] Task: Conductor - Verify Phase 8 Frontend
+- [x] Task: Add "Search Drivers" tab to existing Recruiter Console
+- [x] Task: Wire up postMessage handlers for search actions
+- [x] Task: Connect to backend services via Velo page code
+- [x] Task: Conductor - Verify Phase 8 Frontend
 
 ---
 
 ## Phase 9: Stripe Billing Integration
 
+> **NOTE:** This phase was extracted into its own dedicated track: `stripe_subscriptions_20260104` (COMPLETE).
+> See [../../stripe_subscriptions_20260104/](../../stripe_subscriptions_20260104/) for full details.
+
 ### 9.1 Stripe Setup
-- [ ] Task: Create Stripe products and prices (Pro, Enterprise)
-- [ ] Task: Add `STRIPE_SECRET_KEY` to Wix Secrets Manager
-- [ ] Task: Create `stripeService.jsw` for Stripe API calls
+- [x] Task: Create Stripe products and prices (Pro, Enterprise)
+- [x] Task: Add `STRIPE_SECRET_KEY` to Wix Secrets Manager
+- [x] Task: Create `stripeService.jsw` for Stripe API calls
 
 ### 9.2 Subscription Management
-- [ ] Task: Implement `createCheckoutSession()` for new subscriptions
-- [ ] Task: Implement `createCustomerPortalSession()` for self-service
-- [ ] Task: Implement webhook handler for subscription events
-- [ ] Task: Connect subscription changes to `CarrierSubscriptions` collection
+- [x] Task: Implement `createCheckoutSession()` for new subscriptions
+- [x] Task: Implement `createCustomerPortalSession()` for self-service
+- [x] Task: Implement webhook handler for subscription events
+- [x] Task: Connect subscription changes to `CarrierSubscriptions` collection
 
 ### 9.3 Testing
-- [ ] Task: Test with Stripe test mode
-- [ ] Task: Verify subscription creation flow
-- [ ] Task: Verify cancellation flow
-- [ ] Task: Verify quota reset on renewal
-- [ ] Task: Conductor - Verify Phase 9 Billing
+- [x] Task: Test with Stripe test mode
+- [x] Task: Verify subscription creation flow
+- [x] Task: Verify cancellation flow
+- [x] Task: Verify quota reset on renewal
+- [x] Task: Conductor - Verify Phase 9 Billing
 
 ---
 
 ## Phase 10: Notifications & Alerts (Enterprise)
 
 ### 10.1 Real-time Match Alerts
-- [ ] Task: Create `matchNotifications.jsw`
-- [ ] Task: Implement background job to detect new matching drivers
-- [ ] Task: Send email notifications for new matches (Enterprise)
-- [ ] Task: Implement SMS notifications via Twilio (Enterprise)
+- [x] Task: Create `matchNotifications.jsw`
+- [x] Task: Implement background job to detect new matching drivers (`scanForNewMatchingDrivers` — daily 7 AM UTC via `jobs.config`)
+- [x] Task: Send email notifications for new matches (Enterprise — tier-gated via `isEnterpriseTier()`)
+- [x] Task: Implement SMS notifications via Twilio (Enterprise — graceful degradation when secrets not configured)
 
 ### 10.2 Driver Notifications
-- [ ] Task: Notify drivers when profile is viewed (optional setting)
-- [ ] Task: Notify drivers when contacted by carrier
-- [ ] Task: Conductor - Verify Phase 10 Notifications
+- [x] Task: Notify drivers when profile is viewed (opt-in via `notification_preferences.profile_viewed`)
+- [x] Task: Notify drivers when contacted by carrier (opt-in via `notification_preferences.contacted`)
+- [x] Task: Write `matchNotifications.test.js` — 40 tests covering preferences, tier gating, SMS degradation, scan filtering, digest building, logging, validation
+- [x] Task: Add `matchNotificationLog` Airtable-only collection to `config.jsw` + `airtableClient.jsw`
+- [x] Task: Hook non-blocking notifications into `driverMatching.jsw` (profile viewed) and `driverOutreach.jsw` (contacted)
+- [x] Task: Conductor - Verify Phase 10 Notifications
 
 ---
 

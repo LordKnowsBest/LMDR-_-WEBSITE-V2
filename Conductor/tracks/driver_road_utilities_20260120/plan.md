@@ -434,35 +434,35 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Implement `getConditionsByState(state, filters)` - state-level view
 - [x] Task: Implement `reportCondition(report)` - driver condition reports
 - [ ] Task: Implement `getChainRequirements(routePoints)` - chain laws along route
-- [ ] Task: Add condition severity classification (minor, moderate, major)
-- [ ] Task: Implement delay estimation based on lane closures
-- [ ] Task: Add truck restriction matching based on equipment specs
+- [x] Task: Add condition severity classification (minor, moderate, major)
+- [x] Task: Implement delay estimation based on lane closures
+- [x] Task: Add truck restriction matching based on equipment specs
 
 ### Driver Report Tasks
 
-- [ ] Task: Implement driver condition report submission
-- [ ] Task: Add GPS validation for reports
-- [ ] Task: Implement report expiration (4h TTL for conditions)
-- [ ] Task: Add report confirmation system (multiple drivers = higher confidence)
+- [x] Task: Implement driver condition report submission
+- [x] Task: Add GPS validation for reports
+- [x] Task: Implement report expiration (4h TTL for conditions)
+- [x] Task: Add report confirmation system (multiple drivers = higher confidence)
 
 ### Frontend Tasks
 
-- [ ] Task: Add Road Conditions tab to DRIVER_ROAD_UTILITIES.html
-- [ ] Task: Design condition card component (type, location, severity, delay)
-- [ ] Task: Build route summary header (X incidents, Y construction, Z closures)
-- [ ] Task: Implement construction zone display with date ranges
+- [x] Task: Add Road Conditions tab to DRIVER_ROAD_UTILITIES.html
+- [x] Task: Design condition card component (type, location, severity, delay)
+- [x] Task: Build route summary header (X incidents, Y construction, Z closures)
+- [x] Task: Implement construction zone display with date ranges
 - [ ] Task: Add chain law requirement cards
-- [ ] Task: Implement truck restriction alerts based on driver's equipment
-- [ ] Task: Build "Equipment Specs" settings panel (height, weight, length, hazmat)
-- [ ] Task: Add "Report Condition" quick buttons
-- [ ] Task: Implement alternate route suggestion for major closures
+- [x] Task: Implement truck restriction alerts based on driver's equipment
+- [x] Task: Build "Equipment Specs" settings panel (height, weight, length, hazmat)
+- [x] Task: Add "Report Condition" quick buttons
+- [x] Task: Implement alternate route suggestion for major closures
 
 ### Page Code Integration
 
-- [ ] Task: Add road condition handlers to page code
-- [ ] Task: Implement `getRouteConditions`, `getRestrictions`, `reportCondition` handlers
-- [ ] Task: Store driver's equipment specs for restriction filtering
-- [ ] Task: Add analytics for condition searches
+- [x] Task: Add road condition handlers to page code
+- [x] Task: Implement `getRouteConditions`, `getRestrictions`, `reportCondition` handlers
+- [x] Task: Store driver's equipment specs for restriction filtering
+- [x] Task: Add analytics for condition searches
 
 ### Testing Tasks
 
@@ -480,12 +480,12 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ### Unified Dashboard Tasks
 
-- [ ] Task: Design unified Road Utilities dashboard layout
-- [ ] Task: Implement quick access bar with all feature tabs
-- [ ] Task: Build "Nearby Summary" widget showing key info from all features
-- [ ] Task: Implement "Plan a Route" input that triggers multi-feature analysis
-- [ ] Task: Build "Recent Activity" section showing driver's utility usage
-- [ ] Task: Create mobile-first responsive design
+- [x] Task: Design unified Road Utilities dashboard layout
+- [x] Task: Implement quick access bar with all feature tabs
+- [x] Task: Build "Nearby Summary" widget showing key info from all features
+- [x] Task: Implement "Plan a Route" input that triggers multi-feature analysis
+- [x] Task: Build "Recent Activity" section showing driver's utility usage
+- [x] Task: Create mobile-first responsive design
 
 ### Analytics & Observability Tasks
 

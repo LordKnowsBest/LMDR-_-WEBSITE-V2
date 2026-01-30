@@ -55,6 +55,23 @@ describe('Road Condition Service', () => {
             expect(result.success).toBe(false);
             expect(result.error).toBe('No route provided');
         });
+
+        it('should suggest alternate routes for major closures', async () => {
+            // Mock route points crossing Donner Pass (same as above)
+            const routePoints = [
+                { lat: 39.3, lng: -120.3 },
+                { lat: 39.4, lng: -120.0 }
+            ];
+
+            const result = await getRouteConditions(routePoints);
+
+            expect(result.success).toBe(true);
+            const closure = result.conditions.find(c => c.type === 'closure');
+            expect(closure).toBeDefined();
+            expect(closure.alternate_routes).toBeDefined();
+            expect(closure.alternate_routes.length).toBeGreaterThan(0);
+            expect(closure.alternate_routes[0].savings_minutes).toBeGreaterThan(0);
+        });
     });
 
     describe('getTruckRestrictions', () => {
