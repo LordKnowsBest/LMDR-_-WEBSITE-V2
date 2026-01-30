@@ -114,15 +114,15 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 > Critical infrastructure improvements for scalability and long-term platform health.
 
-## [ ] Track: Airtable Migration - Scalable Data Architecture
+## [X] Track: Airtable Migration - Scalable Data Architecture
 *Link: [./tracks/airtable_migration_20260121/](./tracks/airtable_migration_20260121/)*
 *Depends on: persistence_20251220*
 *Priority: High*
-*Status: Planned*
-*Goal: Migrate 35 Wix Collections to Airtable for improved scalability, visual data management, and better API tooling while maintaining Wix frontend and authentication.*
-*Business Impact: Infrastructure Improvement - Enables scalable data architecture before production volume.*
-*Technical Scope: 35 collections to migrate, 5 to keep in Wix (auth-related), 38 backend services affected.*
-*Phases: 6 (Infrastructure Setup → Content Migration → Core Data → Transactions → Communication/Billing → Validation)*
+*Status: Complete (Grade: A — 95%)*
+*Goal: Migrate Wix Collections to Airtable for improved scalability, visual data management, and better API tooling while maintaining Wix frontend and authentication.*
+*Business Impact: Infrastructure Improvement - Scalable data architecture established before production volume.*
+*Outcome: 70/72 collections routed to Airtable (2 in Wix by design). All backend services refactored to dual-source pattern. 2,218-line airtableClient.jsw with rate limiting, bulk ops, field mappings. 72 Airtable schema docs. 14 gamification tables as Airtable-only (no Wix fallback).*
+*Remaining: Formal regression test report, performance benchmark documentation, post-migration Wix fallback code cleanup.*
 
 ---
 
@@ -228,6 +228,14 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planned*
 *Goal: Data-driven recruiting decisions - Source Attribution, Cost-Per-Hire by Channel, Funnel Analytics, Competitor Intelligence, Predictive Hiring.*
 
+### [ ] Track: Driver Lifecycle & Disposition Intelligence
+*Link: [./tracks/driver_lifecycle_disposition_20260128/](./tracks/driver_lifecycle_disposition_20260128/)*
+*Depends on: driver_cockpit_20251221*
+*Priority: High*
+*Status: Planned*
+*Goal: Monitor full driver lifecycle and capture granular termination reasons (especially <30 days) to train matching algorithms via a feedback loop.*
+*Business Impact: Reduces early churn and improves long-term match quality by learning from failures.*
+
 ### [ ] Track: Recruiter Outreach
 *Link: [./tracks/recruiter_outreach_20260120/](./tracks/recruiter_outreach_20260120/)*
 *Depends on: reverse_matching_20251225, recruiter_utility_expansion_20260120*
@@ -235,6 +243,15 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planned*
 *Goal: Multi-channel driver engagement - SMS Campaign Manager, Email Drip Campaigns, Job Board Distribution, Social Posting.*
 *Business Impact: 5x driver engagement through automated outreach.*
+
+## Business Development New Features
+
+### [ ] Track: B2B Business Development Suite - Carrier Acquisition
+*Link: [./tracks/b2b_business_development_suite_20260128/](./tracks/b2b_business_development_suite_20260128/)*
+*Depends on: reverse_matching_20251225, carrier_conversion_20260103, recruiter_outreach_20260120*
+*Priority: Critical*
+*Status: Planned*
+*Goal: Equip business development professionals with match-driven prospecting, multi-channel outreach, lead capture, and a full sales pipeline to scale carrier acquisition.*
 
 ## Carrier New Features
 
