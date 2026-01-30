@@ -18,6 +18,7 @@ import wixWindow from 'wix-window';
 import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import wixUsers from 'wix-users';
+import { authentication } from 'wix-members-frontend';
 import { getPricingTiers, getFAQs } from 'backend/contentService';
 import { getCarrierPlatformStats } from 'backend/publicStatsService';
 import { submitCarrierStaffingRequest } from 'backend/carrierLeadsService';
@@ -843,19 +844,21 @@ function initSubscriptionHandlers() {
         // Check if user is logged in BEFORE attempting checkout
         const currentUser = wixUsers.currentUser;
         if (!currentUser.loggedIn) {
-          console.log('User not logged in, redirecting to login for subscription checkout');
+          console.log('User not logged in, prompting Wix login modal for subscription checkout');
 
-          // Preserve context through login flow
-          const query = wixLocation.query;
-          const params = new URLSearchParams();
-          if (query.email) params.set('email', query.email);
-          if (query.leadId) params.set('leadId', query.leadId);
-          params.set('plan', plan);  // Remember which plan they wanted
-          if (billingPeriod) params.set('billing', billingPeriod);
-
-          const returnUrl = `${wixLocation.baseUrl}/pricing?${params.toString()}`;
-          wixLocation.to(`/login?returnUrl=${encodeURIComponent(returnUrl)}`);
-          return;
+          // Use native Wix login modal instead of redirecting to non-existent /login page
+          try {
+            await authentication.promptLogin({ mode: 'login', modal: true });
+            console.log('Login successful, continuing to checkout');
+            // After login, fall through to checkout below
+          } catch (loginError) {
+            console.log('Login cancelled or failed:', loginError);
+            htmlComponent.postMessage({
+              type: 'checkoutError',
+              data: { error: 'Please log in to continue with your subscription.' }
+            });
+            return;
+          }
         }
 
         console.log(`Starting checkout for ${plan} plan (${billingPeriod || 'monthly'})`);
@@ -979,22 +982,23 @@ function initSubscriptionHandlers() {
     if (msg.type === 'requireLogin') {
       console.log('User needs to log in for subscription');
 
-      // Preserve lead context through login flow
-      // Build return URL with existing query params (email, leadId from homepage redirect)
-      const currentUrl = wixLocation.url;
-      const query = wixLocation.query;
+      // Use native Wix login modal instead of redirecting to non-existent /login page
+      try {
+        await authentication.promptLogin({ mode: 'login', modal: true });
+        console.log('Login successful after requireLogin prompt');
 
-      // Build return URL preserving email and leadId if present
-      let returnUrl = currentUrl;
-      if (!returnUrl.includes('?') && (query.email || query.leadId)) {
-        const params = new URLSearchParams();
-        if (query.email) params.set('email', query.email);
-        if (query.leadId) params.set('leadId', query.leadId);
-        returnUrl = `${wixLocation.baseUrl}${wixLocation.path}?${params.toString()}`;
+        // Notify the HTML component that login succeeded so it can retry
+        htmlComponent.postMessage({
+          type: 'loginSuccess',
+          data: { plan: msg.data?.selectedPlan || null }
+        });
+      } catch (loginError) {
+        console.log('Login cancelled or failed:', loginError);
+        htmlComponent.postMessage({
+          type: 'loginCancelled',
+          data: { error: 'Login is required for subscription checkout.' }
+        });
       }
-
-      // Redirect to login page with return URL
-      wixLocation.to(`/login?returnUrl=${encodeURIComponent(returnUrl)}`);
     }
   });
 }
