@@ -150,23 +150,44 @@ export async function log(logEntry) {
         tags: logEntry.tags || []
     };
 
-    // Try to persist logs, but don't fail if collections don't exist
+    // Persist logs via dual-source routing (Airtable/Wix)
     try {
-        // Add to appropriate collection based on level
+        // Add to errors collection for ERROR/CRITICAL levels
         if (entry.level === 'ERROR' || entry.level === 'CRITICAL') {
             try {
-                await wixData.insert(CONFIG.collections.errors, entry, { suppressAuth: true });
+                const errorRecord = {
+                    timestamp: entry.timestamp,
+                    level: entry.level,
+                    level_num: entry.levelNum,
+                    source: entry.source,
+                    message: entry.message,
+                    details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : entry.details,
+                    trace_id: entry.traceId,
+                    span_id: entry.spanId,
+                    parent_span_id: entry.parentSpanId,
+                    user_id: entry.userId,
+                    session_id: entry.sessionId,
+                    duration: entry.duration,
+                    tags: Array.isArray(entry.tags) ? entry.tags.join(', ') : entry.tags
+                };
+                await insertData(COLLECTION_KEYS.errors, CONFIG.collections.errors, errorRecord);
             } catch (errInsertError) {
-                // Errors collection may not exist - continue
+                // Errors collection insert failed - continue
             }
         }
 
-        await wixData.insert(CONFIG.collections.logs, entry, { suppressAuth: true });
+        // SystemLogs has limited fields — store essentials
+        const logRecord = {
+            log_id: entry.traceId + '_' + entry.spanId,
+            level: entry.level,
+            service: entry.source,
+            message: entry.message,
+            log_date: entry.timestamp
+        };
+        await insertData(COLLECTION_KEYS.logs, CONFIG.collections.logs, logRecord);
     } catch (error) {
-        // Collection may not exist - silently handle to not break calling code
-        if (!error.message?.includes('does not exist')) {
-            console.error('[Observability] Failed to log:', error);
-        }
+        // Silently handle to not break calling code
+        console.error('[Observability] Failed to log:', error.message);
     }
 
     return entry;
@@ -282,12 +303,20 @@ export async function startTrace(name, metadata = {}) {
         tags: metadata.tags || []
     };
 
-    // Try to persist trace, but don't fail if collection doesn't exist
+    // Persist trace via dual-source routing
     try {
-        await wixData.insert(CONFIG.collections.traces, trace, { suppressAuth: true });
+        const traceRecord = {
+            trace_id: trace.traceId,
+            name: trace.name,
+            start_time: trace.startTime,
+            status: trace.status,
+            spans: JSON.stringify(trace.spans),
+            metadata: typeof trace.metadata === 'object' ? JSON.stringify(trace.metadata) : trace.metadata,
+            tags: Array.isArray(trace.tags) ? trace.tags.join(', ') : trace.tags
+        };
+        await insertData(COLLECTION_KEYS.traces, CONFIG.collections.traces, traceRecord);
     } catch (error) {
-        // Collection may not exist yet - continue with in-memory trace
-        console.warn('[Observability] Could not persist trace (collection may not exist):', error.message);
+        console.warn('[Observability] Could not persist trace:', error.message);
     }
 
     return {
@@ -339,27 +368,30 @@ export function startSpan(traceId, name, parentSpanId = null) {
  */
 export async function endTrace(traceId, status = 'completed', summary = {}) {
     try {
-        const traces = await wixData.query(CONFIG.collections.traces)
-            .eq('traceId', traceId)
-            .find({ suppressAuth: true });
+        const traces = await queryData(COLLECTION_KEYS.traces, CONFIG.collections.traces, {
+            filter: `{Trace ID} = '${traceId}'`,
+            limit: 1
+        });
 
-        if (traces.items.length === 0) return null;
+        if (!traces || traces.length === 0) return null;
 
-        const trace = traces.items[0];
-        trace.endTime = new Date();
-        trace.status = status;
-        trace.duration = trace.endTime - trace.startTime;
-        trace.summary = summary;
+        const trace = traces[0];
+        const endTime = new Date();
+        const startTime = trace.start_time ? new Date(trace.start_time) : new Date();
+        const duration = endTime - startTime;
 
-        return await wixData.update(CONFIG.collections.traces, trace, { suppressAuth: true });
+        const traceUpdate = {
+            _id: trace._id,
+            end_time: endTime,
+            status: status,
+            duration: duration,
+            summary: typeof summary === 'object' ? JSON.stringify(summary) : summary
+        };
+
+        return await updateData(COLLECTION_KEYS.traces, CONFIG.collections.traces, traceUpdate);
 
     } catch (error) {
-        // Collection may not exist - silently handle
-        if (error.message?.includes('does not exist')) {
-            console.warn('[Observability] Trace collection not found, skipping endTrace');
-            return null;
-        }
-        console.error('[Observability] Failed to end trace:', error);
+        console.error('[Observability] Failed to end trace:', error.message);
         return null;
     }
 }
@@ -377,55 +409,50 @@ export async function getLogs(options = {}) {
     await requireSuperAdmin();
 
     try {
-        let query = wixData.query(CONFIG.collections.logs);
+        // Build Airtable filter formula from options
+        // SystemLogs fields: Log ID, Level, Service, Message, Log Date
+        const conditions = [];
 
-        // Apply filters
         if (options.level) {
-            query = query.eq('level', options.level);
-        }
-
-        if (options.minLevel) {
-            query = query.ge('levelNum', CONFIG.levels[options.minLevel] || 0);
+            conditions.push(`{Level} = '${options.level}'`);
         }
 
         if (options.source) {
-            query = query.eq('source', options.source);
-        }
-
-        if (options.traceId) {
-            query = query.eq('traceId', options.traceId);
+            conditions.push(`{Service} = '${options.source}'`);
         }
 
         if (options.startDate) {
-            query = query.ge('timestamp', new Date(options.startDate));
+            conditions.push(`IS_AFTER({Log Date}, '${new Date(options.startDate).toISOString()}')`);
         }
 
         if (options.endDate) {
-            query = query.le('timestamp', new Date(options.endDate));
+            conditions.push(`IS_BEFORE({Log Date}, '${new Date(options.endDate).toISOString()}')`);
         }
 
         if (options.search) {
-            query = query.contains('message', options.search);
+            conditions.push(`SEARCH('${options.search}', {Message}) > 0`);
         }
 
-        if (options.tags && options.tags.length > 0) {
-            query = query.hasSome('tags', options.tags);
-        }
+        const filter = conditions.length > 1
+            ? `AND(${conditions.join(', ')})`
+            : conditions[0] || '';
 
-        // Pagination
-        const skip = options.skip || 0;
         const limit = Math.min(options.limit || 50, 100);
+        const skip = options.skip || 0;
 
-        const result = await query
-            .descending('timestamp')
-            .skip(skip)
-            .limit(limit)
-            .find({ suppressAuth: true });
+        const items = await queryData(COLLECTION_KEYS.logs, CONFIG.collections.logs, {
+            filter,
+            sort: [{ field: 'Log Date', direction: 'desc' }],
+            limit: skip + limit
+        });
+
+        // Handle pagination in memory (Airtable doesn't support skip)
+        const paged = items.slice(skip, skip + limit);
 
         return {
-            items: result.items,
-            totalCount: result.totalCount,
-            hasMore: result.totalCount > skip + limit,
+            items: paged,
+            totalCount: items.length,
+            hasMore: items.length > skip + limit,
             page: Math.floor(skip / limit) + 1,
             pageSize: limit
         };
@@ -466,17 +493,24 @@ export async function getErrors(options = {}) {
                 startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
         }
 
-        let query = wixData.query(CONFIG.collections.errors)
-            .ge('timestamp', startDate);
+        // Build Airtable filter for SystemErrors
+        const conditions = [`IS_AFTER({Timestamp}, '${startDate.toISOString()}')`];
 
         if (options.source) {
-            query = query.eq('source', options.source);
+            conditions.push(`{Source} = '${options.source}'`);
         }
 
-        const result = await query
-            .descending('timestamp')
-            .limit(100)
-            .find({ suppressAuth: true });
+        const filter = conditions.length > 1
+            ? `AND(${conditions.join(', ')})`
+            : conditions[0];
+
+        const items = await queryData(COLLECTION_KEYS.errors, CONFIG.collections.errors, {
+            filter,
+            sort: [{ field: 'Timestamp', direction: 'desc' }],
+            limit: 100
+        });
+
+        const result = { items, totalCount: items.length };
 
         // Aggregate by source
         const bySource = {};
@@ -515,25 +549,27 @@ export async function getTrace(traceId) {
     await requireSuperAdmin();
 
     try {
-        // Get trace
-        const traces = await wixData.query(CONFIG.collections.traces)
-            .eq('traceId', traceId)
-            .find({ suppressAuth: true });
+        // Get trace from SystemTraces
+        const traces = await queryData(COLLECTION_KEYS.traces, CONFIG.collections.traces, {
+            filter: `{Trace ID} = '${traceId}'`,
+            limit: 1
+        });
 
-        if (traces.items.length === 0) {
+        if (!traces || traces.length === 0) {
             throw new Error('Trace not found');
         }
 
-        // Get all logs for this trace
-        const logs = await wixData.query(CONFIG.collections.logs)
-            .eq('traceId', traceId)
-            .ascending('timestamp')
-            .find({ suppressAuth: true });
+        // Get related errors for this trace (SystemErrors has Trace ID field)
+        const errorLogs = await queryData(COLLECTION_KEYS.errors, CONFIG.collections.errors, {
+            filter: `{Trace ID} = '${traceId}'`,
+            sort: [{ field: 'Timestamp', direction: 'asc' }],
+            limit: 100
+        });
 
         return {
-            trace: traces.items[0],
-            logs: logs.items,
-            timeline: buildTimeline(logs.items)
+            trace: traces[0],
+            logs: errorLogs,
+            timeline: buildTimeline(errorLogs)
         };
 
     } catch (error) {
@@ -565,10 +601,12 @@ export async function getHealthMetrics(period = 'hour') {
                 startDate = new Date(now.getTime() - 60 * 60 * 1000);
         }
 
-        // Get recent logs
-        const logs = await wixData.query(CONFIG.collections.logs)
-            .ge('timestamp', startDate)
-            .find({ suppressAuth: true });
+        // Get recent logs from SystemLogs
+        const logItems = await queryData(COLLECTION_KEYS.logs, CONFIG.collections.logs, {
+            filter: `IS_AFTER({Log Date}, '${startDate.toISOString()}')`,
+            sort: [{ field: 'Log Date', direction: 'desc' }],
+            limit: 100
+        });
 
         // Calculate metrics
         let totalRequests = 0;
@@ -577,22 +615,21 @@ export async function getHealthMetrics(period = 'hour') {
         let latencyCount = 0;
         const bySource = {};
 
-        for (const log of logs.items) {
+        for (const log of logItems) {
             totalRequests++;
 
-            if (log.level === 'ERROR' || log.level === 'CRITICAL') {
+            // SystemLogs returns: log_id, level, service, message, log_date
+            const logLevel = log.level || '';
+            const logSource = log.service || 'unknown';
+
+            if (logLevel === 'ERROR' || logLevel === 'CRITICAL') {
                 totalErrors++;
             }
 
-            if (log.duration) {
-                totalLatency += log.duration;
-                latencyCount++;
-            }
-
-            bySource[log.source] = bySource[log.source] || { requests: 0, errors: 0 };
-            bySource[log.source].requests++;
-            if (log.level === 'ERROR' || log.level === 'CRITICAL') {
-                bySource[log.source].errors++;
+            bySource[logSource] = bySource[logSource] || { requests: 0, errors: 0 };
+            bySource[logSource].requests++;
+            if (logLevel === 'ERROR' || logLevel === 'CRITICAL') {
+                bySource[logSource].errors++;
             }
         }
 
@@ -649,11 +686,12 @@ export async function getAIAnalytics(period = 'day') {
                 startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
         }
 
-        // Get AI-related logs
-        const logs = await wixData.query(CONFIG.collections.logs)
-            .ge('timestamp', startDate)
-            .hasSome('tags', ['ai'])
-            .find({ suppressAuth: true });
+        // Get AI-related errors/logs from SystemErrors (has details, tags, trace_id fields)
+        const aiItems = await queryData(COLLECTION_KEYS.errors, CONFIG.collections.errors, {
+            filter: `AND(IS_AFTER({Timestamp}, '${startDate.toISOString()}'), SEARCH('ai', {Tags}) > 0)`,
+            sort: [{ field: 'Timestamp', direction: 'desc' }],
+            limit: 100
+        });
 
         const byProvider = {};
         const byFunction = {};
@@ -661,8 +699,11 @@ export async function getAIAnalytics(period = 'day') {
         let totalCost = 0;
         let totalLatency = 0;
 
-        for (const log of logs.items) {
-            const details = log.details || {};
+        for (const log of aiItems) {
+            let details = log.details || {};
+            if (typeof details === 'string') {
+                try { details = JSON.parse(details); } catch (e) { details = {}; }
+            }
             const provider = details.provider || 'unknown';
             const functionId = details.functionId || 'unknown';
 
@@ -701,10 +742,10 @@ export async function getAIAnalytics(period = 'day') {
             startDate,
             endDate: now,
             summary: {
-                totalRequests: logs.items.length,
+                totalRequests: aiItems.length,
                 totalTokens,
                 totalCost: Math.round(totalCost * 100) / 100,
-                avgLatency: logs.items.length > 0 ? Math.round(totalLatency / logs.items.length) : 0
+                avgLatency: aiItems.length > 0 ? Math.round(totalLatency / aiItems.length) : 0
             },
             byProvider: Object.entries(byProvider).map(([name, stats]) => ({ provider: name, ...stats })),
             byFunction: Object.entries(byFunction).map(([name, stats]) => ({ functionId: name, ...stats }))
@@ -775,8 +816,8 @@ function sanitizeHeaders(headers) {
 function buildTimeline(logs) {
     return logs.map(log => ({
         timestamp: log.timestamp,
-        spanId: log.spanId,
-        parentSpanId: log.parentSpanId,
+        spanId: log.span_id || log.spanId,
+        parentSpanId: log.parent_span_id || log.parentSpanId,
         message: log.message,
         duration: log.duration,
         level: log.level
