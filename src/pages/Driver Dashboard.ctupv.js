@@ -4,7 +4,8 @@
 // ============================================================================
 
 import { getDriverApplications, withdrawApplication } from 'backend/applicationService';
-import { getOrCreateDriverProfile, getDriverProfileViews } from 'backend/driverProfiles';
+import { getOrCreateDriverProfile, getDriverProfileViews, setDiscoverability } from 'backend/driverProfiles';
+import { getDriverStats } from 'backend/driverInsightsService';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
@@ -44,6 +45,9 @@ const MESSAGE_REGISTRY = {
         'getUnreadCount',    // Unread badge request
         'markAsRead',
         'logFeatureInteraction', // Feature adoption tracking
+        'setDiscoverability',    // Phase 3: Privacy toggle
+        'navigateToMyCareer',    // Career nav
+        'navigateToProfile',     // Profile nav
         'ping'
     ],
     // Messages TO HTML that page code sends
@@ -54,6 +58,8 @@ const MESSAGE_REGISTRY = {
         'messageSent',
         'newMessagesData',   // Smart polling response
         'unreadCountData',   // Unread badge data
+        'viewsData',             // Phase 3: Who's viewed you
+        'insightsData',          // Phase 4: Insights panel
         'error',
         'pong'
     ]
@@ -222,6 +228,22 @@ async function handleHtmlMessage(msg) {
                     .catch(err => console.warn('Feature tracking failed:', err.message));
                 break;
 
+            case 'setDiscoverability':
+                if (msg.data && msg.data.isDiscoverable !== undefined) {
+                    setDiscoverability(msg.data.isDiscoverable)
+                        .then(result => {
+                            if (!result.success) {
+                                sendToHtml('error', { message: result.error || 'Failed to update privacy' });
+                            }
+                        })
+                        .catch(err => console.warn('Discoverability error:', err.message));
+                }
+                break;
+
+            case 'navigateToMyCareer':
+                wixLocation.to('/driver-my-career');
+                break;
+
             default:
                 console.warn('⚠️ Unhandled action:', action);
         }
@@ -274,10 +296,25 @@ async function loadDashboardData(isBackground = false) {
                 profile: profileResult.success ? profileResult.profile : null,
                 profileViews: viewsResult.success ? viewsResult.views : []
             });
+
+            // Phase 3: Send views data for "Who's Viewed You" panel
+            if (viewsResult.success) {
+                sendToHtml('viewsData', {
+                    views: viewsResult.views || [],
+                    isDiscoverable: profileResult.success ? (profileResult.profile.is_discoverable || false) : false
+                });
+            }
+
+            // Phase 4: Non-blocking insights load
+            getDriverStats().then(statsResult => {
+                if (statsResult.success) {
+                    sendToHtml('insightsData', { stats: statsResult.stats });
+                }
+            }).catch(err => console.warn('Insights load failed:', err.message));
         } else {
-            console.error('❌ Failed to load applications:', result.error);
+            console.error('❌ Failed to load applications:', appResult.error);
             sendToHtml('error', {
-                message: result.error || 'Failed to load applications',
+                message: appResult.error || 'Failed to load applications',
                 isBackground
             });
         }

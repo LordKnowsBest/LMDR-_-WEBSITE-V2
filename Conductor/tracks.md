@@ -145,12 +145,18 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 > Expand utility of existing features to maximize platform value before building new capabilities.
 
-## [~] Track: Driver Utility Expansion
+## [/] Track: Driver Utility Expansion
 *Link: [./conductor/tracks/driver_utility_expansion_20260120/](./conductor/tracks/driver_utility_expansion_20260120/)*
 *Depends on: driver_cockpit_20251221*
 *Priority: High*
-*Status: Planning Complete - Ready for Implementation*
+*Status: Phases 1-4 Implemented — Phase 5 Mobile QA Pending*
 *Goal: Increase driver engagement through Profile Strength Meter, Quick Response Templates, Reverse Alerts, and Insights Panel.*
+*Completed:*
+- *PostMessage bridge fix (payload→data key mismatch) — entire dashboard was non-functional*
+- *Restored missing utility functions: stripHtml, goToProfile, goToMatching, promptWithdraw, closeWithdrawModal, confirmWithdraw, useQuickReply*
+- *Wired viewsData + insightsData outbound messages from page code*
+- *Added setDiscoverability + navigateToMyCareer inbound handlers in page code*
+- *Fixed undefined variable bug (result.error → appResult.error)*
 
 ## [x] Track: Recruiter Utility Expansion
 *Link: [./tracks/recruiter_utility_expansion_20260120/](./tracks/recruiter_utility_expansion_20260120/)*
@@ -199,11 +205,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## Driver New Features
 
-### [x] Track: Driver Road Utilities
+### [/] Track: Driver Road Utilities
 *Link: [./tracks/driver_road_utilities_20260120/](./tracks/driver_road_utilities_20260120/)*
 *Depends on: driver_cockpit_20251221*
 *Priority: Critical*
-*Status: Complete*
+*Status: Integration Fixes Applied — Optimization & QA Pending*
 *Goal: Daily-use tools for drivers on the road - Parking Finder, Fuel Optimizer, Weigh Station Status, Rest Stop Ratings, Weather Alerts, Road Conditions.*
 *Business Impact: Transform platform to daily-use operating system.*
 *Completed Services:*
@@ -214,9 +220,13 @@ This file tracks all major tracks for the project. Each track has its own detail
 - *weatherAlertService.jsw (Phase 5 - NWS API, chain law detection)*
 - *roadConditionService.jsw (Phase 6 - traffic, closures, truck restrictions, chain requirements)*
 *Completed UI: DRIVER_ROAD_UTILITIES.html (unified 6-tab interface)*
-*Notes:*
-- *Core functionality for all 6 phases implemented.*
-- *Remaining tasks managed in post-launch optimization: Phase 4 photo upload/GPS, Phase 5 notification infra, Phase 6 testing, and Cross-Phase analytics/performance.*
+*Integration fixes (2026-01-30):*
+- *Fixed `savingsResult` vs `fuelSavingsCalculated` message mismatch (fuel savings never rendered)*
+- *Fixed `tabChanged` vs `tabSwitch` mismatch (tab analytics never fired)*
+- *Added missing HTML handlers: parkingDetails, reportResult, reviewsLoaded, reviewSubmitted, conditionReported, voteRegistered*
+- *Fixed getReviews missing locationId (always returned error)*
+- *Cleaned MESSAGE_REGISTRY: removed duplicates, added missing Phase 6 outbound entries*
+*Remaining: Phase 4 photo upload/GPS, Phase 5 notification infra, Phase 6 testing, Cross-Phase analytics/performance*
 
 ### [ ] Track: Driver Compliance Tools
 *Link: [./tracks/driver_compliance_tools_20260120/](./tracks/driver_compliance_tools_20260120/)*

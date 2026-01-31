@@ -58,17 +58,15 @@ const MESSAGE_REGISTRY = {
         'getDriverBypassServices',
         'saveDriverBypassServices',
         'tabSwitch',
-        'tabSwitch',
+        'tabChanged',            // Legacy alias for tabSwitch
         // Phase 4: Rest Stop Ratings
         'getReviews',
         'submitReview',
-        'reportCondition',
         'reportCondition',
         'verifyConditionReport',
         'voteReview',
         // Phase 5: Weather
         'getWeather',
-        // Phase 6: Road Conditions
         // Phase 6: Road Conditions
         'getRoadConditions',
         'getTruckRestrictions',
@@ -91,15 +89,17 @@ const MESSAGE_REGISTRY = {
         'bypassServicesSaved',
         'error',
         'pong',
-        'pong',
         // Phase 4: Rest Stop Ratings
         'reviewsLoaded',
         'reviewSubmitted',
         'conditionReported',
-        'conditionReported',
         'voteRegistered',
         // Phase 5: Weather
         'weatherResults',
+        // Phase 6: Road Conditions
+        'conditionsResults',
+        'restrictionResults',
+        'roadConditionReported',
         'init'
     ]
 };
@@ -315,10 +315,9 @@ async function handleHtmlMessage(msg) {
                 break;
 
             case 'tabSwitch':
+            case 'tabChanged':
                 handleTabSwitch(msg.data);
                 break;
-
-
 
             default:
                 console.warn('[RoadUtilities] Unhandled action:', action);
@@ -764,7 +763,9 @@ async function handleGetLocationReviews(data) {
         metadata: { locationId: data.locationId, sort: data.options?.sort }
     }).catch(err => console.warn('[RoadUtilities] Analytics error:', err));
 
-    const result = await getLocationReviews(data.locationId, data.options);
+    // 'all' = browse top-rated across all locations
+    const locationId = data.locationId === 'all' ? null : data.locationId;
+    const result = await getLocationReviews(locationId, data.options);
 
     if (result.success) {
         sendToHtml('reviewsLoaded', {

@@ -1,8 +1,8 @@
 # Track Plan: Driver Road Utilities
 
-> **STATUS: COMPLETE (Core Features Implemented)** - Phase 4/5/6 optimizations pending
+> **STATUS: INTEGRATION FIXES APPLIED** - Core features + message wiring fixed, Phase 4/5/6 optimizations pending
 >
-> **Updated**: 2026-01-29
+> **Updated**: 2026-01-30
 >
 > **Priority**: Critical
 
@@ -83,6 +83,8 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Add handlers: `searchParking`, `getParkingDetails`, `reportParking` [checkpoint: 7a8b9c0]
 - [x] Task: Implement geolocation for "Current Location" searches [checkpoint: 7a8b9c0]
 - [x] Task: Add analytics tracking for parking searches [checkpoint: 7a8b9c0]
+- [x] Task: Fix missing `parkingDetails` case handler in HTML switch block (response never rendered)
+- [x] Task: Fix missing `reportResult` case handler in HTML switch block (report feedback never shown)
 
 ### Testing Tasks
 
@@ -210,6 +212,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Implement `searchFuel`, `linkCard`, `calculateSavings` message handlers [checkpoint: fcffb62]
 - [x] Task: Store linked fuel cards in driver profile or local storage [checkpoint: fcffb62]
 - [x] Task: Add analytics tracking for fuel searches and card links [checkpoint: fcffb62]
+- [x] Task: Fix `savingsResult` vs `fuelSavingsCalculated` message name mismatch (savings result never rendered)
 
 ### Testing Tasks
 
@@ -267,6 +270,9 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Implement `getStationsAlongRoute`, `reportStatus` handlers
 - [x] Task: Store driver's bypass service preferences
 - [x] Task: Add analytics for station searches and reports
+- [x] Task: Fix `tabChanged` → `tabSwitch` message name mismatch (tab analytics never fired)
+- [x] Task: Add `tabChanged` as alias in page code switch for backwards compat
+- [x] Task: Clean MESSAGE_REGISTRY: remove duplicate entries (`tabSwitch`, `reportCondition`, `pong`, `conditionReported`)
 
 ### Testing Tasks
 
@@ -324,6 +330,9 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 - [x] Task: Add review service handlers to page code
 - [x] Task: Implement `getReviews`, `submitReview`, `voteReview`, `reportCondition` handlers
+- [x] Task: Fix missing HTML case handlers for `reviewsLoaded`, `reviewSubmitted`, `conditionReported`, `voteRegistered` (Phase 4 responses never rendered)
+- [x] Task: Fix `getReviews` missing `locationId` param (always returned error); pass `'all'` for top-rated browse
+- [x] Task: Fix page code handler to accept `'all'` locationId for general browse
 - [ ] Task: Implement GPS check before allowing review submission
 - [ ] Task: Add analytics for review engagement
 
@@ -469,6 +478,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Implement `getRouteConditions`, `getRestrictions`, `reportCondition` handlers
 - [x] Task: Store driver's equipment specs for restriction filtering
 - [x] Task: Add analytics for condition searches
+- [x] Task: Add missing Phase 6 outbound entries to MESSAGE_REGISTRY (`conditionsResults`, `restrictionResults`, `roadConditionReported`)
 
 ### Testing Tasks
 

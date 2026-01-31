@@ -12,6 +12,7 @@
 - [x] Task: Implement click handler to populate message box or auto-send
 - [x] Task: Add "interested" / "not interested" distinct actions that update application status if applicable
 - [x] Task: Mobile optimization for touch targets on templates
+- [x] Task: Fix `useQuickReply()` function definition (was missing, caused ReferenceError)
 
 ## Phase 3: Reverse Alerts (Carrier Views)
 - [x] Task: Update `driverMatching.jsw` to trigger `notifyDriverProfileViewed` on profile view
@@ -19,6 +20,9 @@
 - [x] Task: Implement `getWhoViewedMe` in backend to aggregate `CarrierDriverViews`
 - [x] Task: UI - Implement "Who's Viewed You" list in `DRIVER_DASHBOARD.html`
 - [x] Task: UI - Wire up Privacy Toggle to `setDiscoverability`
+- [x] Task: Fix PostMessage bridge (`payload` → `data` key mismatch) preventing all dashboard rendering
+- [x] Task: Wire `viewsData` outbound message from page code to HTML
+- [x] Task: Wire `setDiscoverability` inbound handler in page code
 - [ ] Task: Create email template `carrier_viewed_profile.html` (optional, start with in-app)
 
 ## Phase 4: Driver Insights Panel
@@ -26,6 +30,7 @@
 - [x] Task: Calculate stats: Profile Views (30d), Application Status breakdown
 - [x] Task: UI - Add "Insights" section to `DRIVER_DASHBOARD.html`
 - [x] Task: UI - Implement visual stats cards (Views, Active Apps, Hired Rate)
+- [x] Task: Wire `insightsData` outbound message from page code to HTML
 
 
 ## Phase 5: Mobile Optimization & Verification
