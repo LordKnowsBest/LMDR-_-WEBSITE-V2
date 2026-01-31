@@ -21,7 +21,7 @@ import wixUsers from 'wix-users';
 import { authentication } from 'wix-members-frontend';
 import { getPricingTiers, getFAQs } from 'backend/contentService';
 import { getCarrierPlatformStats } from 'backend/publicStatsService';
-import { submitCarrierStaffingRequest } from 'backend/carrierLeadsService';
+import { submitCarrierStaffingRequest, ensureCarrierRecord } from 'backend/carrierLeadsService';
 import {
   startCheckout,
   startPlacementCheckout,
@@ -863,11 +863,23 @@ function initSubscriptionHandlers() {
 
         console.log(`Starting checkout for ${plan} plan (${billingPeriod || 'monthly'})`);
 
-        // Start Stripe checkout session
-        // User is logged in, so getCurrentCarrier() will work
+        // Ensure a Carrier record exists for this user (bridges lead → carrier on first login)
+        const leadId = wixLocation.query.leadId || null;
+        const fallbackEmail = wixLocation.query.email || null;
+        const ensureResult = await ensureCarrierRecord(leadId, fallbackEmail);
+        if (ensureResult.success) {
+          console.log(`Carrier record ready: ${ensureResult.created ? 'created new' : 'already existed'}`, ensureResult.carrier);
+        } else {
+          console.warn('ensureCarrierRecord did not find/create a carrier:', ensureResult.error);
+          // Continue anyway — startCheckout has its own fallback
+        }
+
+        // Start Stripe checkout session (fallback params as safety net)
         const result = await startCheckout(
           plan,  // 'pro' or 'enterprise'
-          billingPeriod || 'monthly'
+          billingPeriod || 'monthly',
+          fallbackEmail,
+          null
         );
 
         if (result.success && result.checkoutUrl) {

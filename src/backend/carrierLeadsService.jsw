@@ -3,7 +3,8 @@
 // ============================================================================
 
 import wixData from 'wix-data';
-import { usesAirtable } from 'backend/config';
+import wixUsersBackend from 'wix-users-backend';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
 import * as airtable from 'backend/airtableClient';
 
 // ============================================================================
@@ -115,10 +116,10 @@ export async function submitCarrierStaffingRequest(leadData) {
         const dotNumberAsNumber = parseInt(leadData.dotNumber.trim(), 10);
 
         if (usesAirtable(carriersCollectionKey)) {
-          // Airtable path for carrier lookup - pass collection key directly
-          // Note: Carriers (Master) table uses DOT_NUMBER field name
+          // Airtable path - query Carriers (Master) FMCSA reference table directly
+          // Use 'Carriers' (PascalCase TABLE_NAMES key), not config key, to hit the FMCSA table
           const formula = `{DOT_NUMBER} = ${dotNumberAsNumber}`;
-          const result = await airtable.queryRecords(carriersCollectionKey, {
+          const result = await airtable.queryRecords('Carriers', {
             filterByFormula: formula,
             maxRecords: 1
           });
@@ -347,6 +348,119 @@ export async function getCarrierLeads(options = {}) {
 }
 
 // ============================================================================
+// SUBMIT CARRIER INTAKE PREFERENCES (Public — no auth required)
+// ============================================================================
+
+/**
+ * Submit carrier hiring preferences from the public Intake Questionnaire form.
+ * This is a lightweight wrapper that writes to CarrierHiringPreferences WITHOUT
+ * requiring a logged-in user — unlike carrierPreferences.jsw which is auth-gated.
+ *
+ * Called via PostMessage from Carrier_Intake_Questionnaire.html as the second
+ * message (after submitCarrierStaffingRequest creates the lead).
+ *
+ * @param {Object} prefData
+ * @param {string} [prefData.carrier_dot] - DOT number (links to carrier)
+ * @param {Array<string>} prefData.required_cdl_types - e.g. ['A','B']
+ * @param {Array<string>} [prefData.required_endorsements] - e.g. ['Hazmat','Tanker']
+ * @param {number} [prefData.target_radius_miles] - Default 100
+ * @param {Array<string>} [prefData.target_states] - e.g. ['TX','OK','LA']
+ * @param {Array<string>} [prefData.route_types] - e.g. ['OTR','Regional']
+ * @param {Array<string>} [prefData.equipment_types] - e.g. ['Dry Van','Reefer']
+ * @param {number} [prefData.offered_pay_min] - Min CPM or weekly pay
+ * @param {number} [prefData.offered_pay_max] - Max CPM or weekly pay
+ * @param {number} [prefData.min_experience_years] - e.g. 0, 0.5, 1, 2
+ * @param {number} [prefData.positions_open] - How many drivers needed
+ * @param {string} [prefData.urgency] - 'immediate' | '30_day' | 'ongoing'
+ * @returns {Promise<{success: boolean, preferenceId?: string, error?: string}>}
+ */
+export async function submitCarrierIntakePreferences(prefData) {
+  try {
+    // Basic validation — CDL types are the only truly required field
+    if (!prefData.required_cdl_types || !Array.isArray(prefData.required_cdl_types) || prefData.required_cdl_types.length === 0) {
+      return { success: false, error: 'At least one CDL type is required' };
+    }
+
+    // Validate CDL types
+    const validCdlTypes = ['A', 'B', 'C'];
+    for (const cdl of prefData.required_cdl_types) {
+      if (!validCdlTypes.includes(cdl)) {
+        return { success: false, error: `Invalid CDL type: ${cdl}` };
+      }
+    }
+
+    // Validate urgency if provided
+    const validUrgency = ['immediate', '30_day', 'ongoing'];
+    if (prefData.urgency && !validUrgency.includes(prefData.urgency)) {
+      return { success: false, error: `Invalid urgency value: ${prefData.urgency}` };
+    }
+
+    // Validate pay range if both provided
+    if (prefData.offered_pay_min != null && prefData.offered_pay_max != null) {
+      if (typeof prefData.offered_pay_min !== 'number' || typeof prefData.offered_pay_max !== 'number') {
+        return { success: false, error: 'Pay range values must be numbers' };
+      }
+      if (prefData.offered_pay_max < prefData.offered_pay_min) {
+        return { success: false, error: 'Max pay must be greater than or equal to min pay' };
+      }
+    }
+
+    const collectionKey = 'carrierHiringPreferences';
+    const collectionName = 'CarrierHiringPreferences';
+
+    // Build the preference record
+    const preferenceRecord = {
+      carrier_dot: prefData.carrier_dot || null,
+      recruiter_id: 'public_intake_form',  // No auth — mark source
+      required_cdl_types: prefData.required_cdl_types,
+      required_endorsements: prefData.required_endorsements || [],
+      target_radius_miles: prefData.target_radius_miles || 100,
+      target_states: prefData.target_states || [],
+      target_zip_codes: [],
+      route_types: prefData.route_types || [],
+      equipment_types: prefData.equipment_types || [],
+      offered_pay_min: prefData.offered_pay_min ?? null,
+      offered_pay_max: prefData.offered_pay_max ?? null,
+      min_experience_years: prefData.min_experience_years ?? null,
+      max_experience_years: null,
+      positions_open: prefData.positions_open ?? null,
+      urgency: prefData.urgency || null,
+      is_active: true,
+      source: 'carrier_intake_form'
+    };
+
+    // Insert using dual-source pattern
+    let inserted;
+    if (usesAirtable(collectionKey)) {
+      inserted = await airtable.createRecord(collectionKey, preferenceRecord);
+
+      if (inserted && inserted.success === false) {
+        console.error(`❌ Airtable createRecord failed for intake preferences: ${inserted.error}`);
+        return { success: false, error: inserted.error || 'Failed to save preferences' };
+      }
+
+      console.log(`✅ Carrier intake preferences saved to Airtable: ${inserted._id} (DOT: ${prefData.carrier_dot || 'N/A'})`);
+    } else {
+      inserted = await wixData.insert(collectionName, preferenceRecord, { suppressAuth: true });
+      console.log(`✅ Carrier intake preferences saved: ${inserted._id} (DOT: ${prefData.carrier_dot || 'N/A'})`);
+    }
+
+    return {
+      success: true,
+      preferenceId: inserted._id,
+      message: 'Carrier preferences saved successfully.'
+    };
+
+  } catch (error) {
+    console.error('❌ Error submitting carrier intake preferences:', error);
+    return {
+      success: false,
+      error: 'There was an error saving your preferences. Your contact info was already submitted.'
+    };
+  }
+}
+
+// ============================================================================
 // ADMIN: UPDATE LEAD STATUS
 // ============================================================================
 
@@ -420,6 +534,186 @@ export async function updateLeadStatus(leadId, newStatus, notes = '') {
     return { success: true, lead: updated };
   } catch (error) {
     console.error('❌ Error updating lead status:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// ENSURE CARRIER RECORD - Bridge lead → Carrier on first login
+// ============================================================================
+
+/**
+ * Ensures a Carrier account record exists in v2_Carriers for the current logged-in user.
+ *
+ * v2_Carriers is the user-facing carrier accounts table (has Owner field).
+ * Carriers (Master) is the FMCSA reference table (~25k records, read-only).
+ *
+ * Flow:
+ * 1. Check if a record already exists in v2_Carriers with this user as Owner → return it
+ * 2. Look up the lead by leadId (or by email) in v2_Carrier Staffing Requests
+ * 3. If the lead has a linked_carrier_id, pull FMCSA data from Carriers (Master) to enrich
+ * 4. Create a new record in v2_Carriers from the lead data (+ FMCSA enrichment if available)
+ *
+ * This is called after login on the pricing page so that getCurrentCarrier()
+ * in subscriptionService works natively on subsequent calls.
+ *
+ * @param {string|null} leadId - Airtable record ID from URL param (e.g. rec7W9737BAlDO606)
+ * @param {string|null} fallbackEmail - Email from URL param as a second lookup key
+ * @returns {Promise<{success: boolean, carrier?: Object, created?: boolean, error?: string}>}
+ */
+export async function ensureCarrierRecord(leadId = null, fallbackEmail = null) {
+  try {
+    const user = wixUsersBackend.currentUser;
+    if (!user.loggedIn) {
+      return { success: false, error: 'User not logged in' };
+    }
+
+    const userId = user.id;
+    const userEmail = await user.getEmail();
+    // v2_Carriers table name resolved via config → airtableClient TABLE_NAMES
+    const v2CarriersTable = getAirtableTableName('carrierAccounts'); // → 'v2_Carriers'
+
+    // ----- Step 1: Check if carrier account already exists for this user -----
+    let existingCarrier = null;
+    if (usesAirtable('carrierAccounts')) {
+      const ownerFilter = `{Owner} = '${userId}'`;
+      const ownerResult = await airtable.queryRecords(v2CarriersTable, {
+        filterByFormula: ownerFilter,
+        maxRecords: 1
+      });
+      if (ownerResult.records && ownerResult.records.length > 0) {
+        existingCarrier = ownerResult.records[0];
+      }
+    } else {
+      const ownerResult = await wixData.query(CONFIG.carriersCollection)
+        .eq('_owner', userId)
+        .limit(1)
+        .find({ suppressAuth: true });
+      if (ownerResult.items.length > 0) {
+        existingCarrier = ownerResult.items[0];
+      }
+    }
+
+    if (existingCarrier) {
+      console.log(`✅ ensureCarrierRecord: Carrier account already exists for user ${userId}`);
+      return {
+        success: true,
+        carrier: { id: existingCarrier._id, dotNumber: existingCarrier.dot_number, email: userEmail },
+        created: false
+      };
+    }
+
+    // ----- Step 2: Look up the lead -----
+    let lead = null;
+    const leadsKey = 'carrierStaffingRequests';
+
+    // Try by leadId first
+    if (leadId) {
+      try {
+        if (usesAirtable(leadsKey)) {
+          lead = await airtable.getRecord(leadsKey, leadId);
+          if (lead && lead.error) lead = null;
+        } else {
+          lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
+        }
+      } catch (e) {
+        console.warn('ensureCarrierRecord: Lead lookup by ID failed:', e.message);
+      }
+    }
+
+    // Fallback: search by email
+    if (!lead && (fallbackEmail || userEmail)) {
+      const searchEmail = (fallbackEmail || userEmail).toLowerCase();
+      try {
+        if (usesAirtable(leadsKey)) {
+          const emailFilter = `LOWER({email}) = '${searchEmail}'`;
+          const emailResult = await airtable.queryRecords(leadsKey, {
+            filterByFormula: emailFilter,
+            maxRecords: 1,
+            sort: [{ field: 'submitted_date', direction: 'desc' }]
+          });
+          if (emailResult.records && emailResult.records.length > 0) {
+            lead = emailResult.records[0];
+          }
+        } else {
+          const emailResult = await wixData.query(CONFIG.leadsCollection)
+            .eq('email', searchEmail)
+            .descending('submitted_date')
+            .limit(1)
+            .find({ suppressAuth: true });
+          if (emailResult.items.length > 0) {
+            lead = emailResult.items[0];
+          }
+        }
+      } catch (e) {
+        console.warn('ensureCarrierRecord: Lead lookup by email failed:', e.message);
+      }
+    }
+
+    if (!lead) {
+      console.warn('ensureCarrierRecord: No lead found for user', userId);
+      return { success: false, error: 'No lead record found to create carrier from' };
+    }
+
+    console.log(`✅ ensureCarrierRecord: Found lead ${lead._id} for user ${userId}`);
+
+    // ----- Step 3: If lead has a linked FMCSA carrier, pull reference data -----
+    let fmcsaData = null;
+    if (lead.linked_carrier_id) {
+      try {
+        // Fetch from Carriers (Master) — the FMCSA reference table (read-only)
+        fmcsaData = await airtable.getRecord('Carriers', lead.linked_carrier_id);
+        if (fmcsaData && fmcsaData.error) fmcsaData = null;
+        if (fmcsaData) {
+          console.log(`✅ ensureCarrierRecord: Found FMCSA data for DOT ${fmcsaData.dot_number}`);
+        }
+      } catch (e) {
+        console.warn('ensureCarrierRecord: FMCSA lookup failed, continuing with lead data only:', e.message);
+      }
+    }
+
+    // ----- Step 4: Create carrier account in v2_Carriers -----
+    // Field names match v2_Carriers schema (Title Case in Airtable, snake_case in Wix)
+    const dotNum = fmcsaData?.dot_number
+      || (lead.dot_number ? parseInt(lead.dot_number, 10) : null);
+
+    const newCarrier = {
+      owner: userId,
+      legal_name: fmcsaData?.legal_name || lead.company_name || '',
+      dot_number: dotNum,
+      email_address: lead.email || userEmail,
+      telephone: fmcsaData?.telephone || lead.phone || '',
+      city: fmcsaData?.phy_city || '',
+      state: fmcsaData?.phy_state || '',
+      carrier_operation: fmcsaData?.carrier_operation || '',
+      driver_total: fmcsaData?.driver_total || null,
+      power_units: fmcsaData?.nbr_power_unit || null
+    };
+
+    let created;
+    if (usesAirtable('carrierAccounts')) {
+      created = await airtable.createRecord(v2CarriersTable, newCarrier);
+      if (created && created.success === false) {
+        console.error('❌ ensureCarrierRecord: Airtable create failed:', created.error);
+        return { success: false, error: created.error };
+      }
+    } else {
+      created = await wixData.insert(CONFIG.carriersCollection, newCarrier, { suppressAuth: true });
+    }
+
+    console.log(`✅ ensureCarrierRecord: Created carrier account ${created._id} from lead ${lead._id} for user ${userId}`);
+    return {
+      success: true,
+      carrier: {
+        id: created._id,
+        dotNumber: dotNum ? String(dotNum) : 'PENDING',
+        email: newCarrier.email_address
+      },
+      created: true
+    };
+
+  } catch (error) {
+    console.error('❌ ensureCarrierRecord error:', error);
     return { success: false, error: error.message };
   }
 }
