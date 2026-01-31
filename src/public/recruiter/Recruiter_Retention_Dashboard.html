@@ -316,6 +316,7 @@
         document.addEventListener('DOMContentLoaded', () => {
             renderDashboard(MOCK_FLEET_DATA);
             initCharts();
+            loadInterventionTemplates();
         });
 
         function switchTab(tabId) {
@@ -348,13 +349,21 @@
                 const badgeClass = `risk-badge-${driver.risk.level.toLowerCase()}`;
                 const action = driver.risk.suggestedActions[0] || 'Review';
 
+                const riskTypeMap = {
+                    'Silence Signal': 'SILENCE_SIGNAL', 'Detractor': 'DETRACTOR_NPS',
+                    'Pay Volatility': 'PAY_VOLATILITY', 'Burnout': 'BURNOUT_RISK',
+                    'Safety': 'SAFETY_INCIDENT'
+                };
+                const detectedRisk = Object.keys(riskTypeMap).find(k => driver.risk.primaryFactor.includes(k));
+                const riskTypeValue = detectedRisk ? riskTypeMap[detectedRisk] : 'SILENCE_SIGNAL';
+
                 tr.innerHTML = `
                     <td class="px-6 py-4 font-bold text-slate-900">${driver.driverName}</td>
                     <td class="px-6 py-4"><span class="px-2 py-1 rounded text-xs font-bold ${badgeClass}">${driver.risk.level}</span></td>
                     <td class="px-6 py-4 text-xs font-medium text-slate-600">${driver.risk.primaryFactor}</td>
                     <td class="px-6 py-4 text-xs text-blue-600 font-bold">${action}</td>
                     <td class="px-6 py-4 text-right">
-                        <button class="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-3 py-1.5 rounded shadow-lg shadow-slate-900/10 transition-all transform hover:scale-105">
+                        <button onclick="openQuickIntervention('${driver.driverId}', '${riskTypeValue}')" class="bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs px-3 py-1.5 rounded shadow-lg shadow-slate-900/10 transition-all transform hover:scale-105">
                             Intervene <i class="fa-solid fa-arrow-right ml-1"></i>
                         </button>
                     </td>
@@ -409,7 +418,312 @@
             // Request fresh data from Velo Page Code
             window.parent.postMessage({ type: 'refresh' }, '*');
         }
+
+        // ==================== POSTMESSAGE BRIDGE ====================
+        function sendMessage(type, payload) {
+            window.parent.postMessage({ type, data: payload }, '*');
+        }
+
+        window.addEventListener('message', (event) => {
+            const data = event.data;
+            if (!data || !data.type) return;
+
+            switch (data.type) {
+                case 'interventionTemplatesLoaded':
+                    renderTemplateManagement(data.data);
+                    renderInterventionTemplateList(data.data);
+                    break;
+
+                case 'interventionSent':
+                    if (data.data.success) {
+                        showToast('Intervention sent!', 'success');
+                        closeQuickIntervention();
+                    } else {
+                        showToast(data.data.error || 'Failed to send intervention', 'error');
+                    }
+                    break;
+
+                case 'templateSaved':
+                    if (data.data.success) {
+                        showToast('Template saved!', 'success');
+                        closeTemplateEditor();
+                        loadInterventionTemplates();
+                    } else {
+                        showToast(data.data.error || 'Failed to save template', 'error');
+                    }
+                    break;
+
+                case 'templateDeleted':
+                    if (data.data.success) {
+                        showToast('Template deleted', 'success');
+                        loadInterventionTemplates();
+                    }
+                    break;
+
+                case 'interventionOutcomeLogged':
+                    if (data.data.success) showToast('Outcome logged', 'success');
+                    break;
+
+                case 'driverInterventionsLoaded':
+                    // Can be handled for driver detail views
+                    break;
+            }
+        });
+
+        // ==================== TOAST NOTIFICATIONS ====================
+        function showToast(message, type = 'info') {
+            const colors = {
+                success: 'bg-green-600',
+                error: 'bg-red-600',
+                info: 'bg-blue-600'
+            };
+            const toast = document.createElement('div');
+            toast.className = `fixed top-4 right-4 z-[100] ${colors[type] || colors.info} text-white px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-opacity duration-300`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('opacity-0');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // ==================== INTERVENTION FUNCTIONS ====================
+        function loadInterventionTemplates() {
+            sendMessage('getInterventionTemplates', {});
+        }
+
+        function openTemplateEditor(template = null) {
+            document.getElementById('templateModalTitle').textContent = template ? 'Edit Template' : 'Create Template';
+            document.getElementById('editTemplateId').value = template ? template._id : '';
+            document.getElementById('templateName').value = template ? template.template_name : '';
+            document.getElementById('templateRiskType').value = template ? template.risk_type : 'SILENCE_SIGNAL';
+            document.getElementById('templateChannel').value = template ? template.channel : 'sms';
+            document.getElementById('templateSubject').value = template ? template.subject_line : '';
+            document.getElementById('templateBody').value = template ? template.body_template : '';
+            toggleSubjectLine();
+            document.getElementById('templateEditorModal').classList.remove('hidden');
+            document.getElementById('templateEditorModal').classList.add('flex');
+        }
+
+        function closeTemplateEditor() {
+            document.getElementById('templateEditorModal').classList.add('hidden');
+            document.getElementById('templateEditorModal').classList.remove('flex');
+        }
+
+        function toggleSubjectLine() {
+            const channel = document.getElementById('templateChannel').value;
+            document.getElementById('subjectLineGroup').style.display = channel === 'email' ? 'block' : 'none';
+        }
+
+        function insertVar(varName) {
+            const textarea = document.getElementById('templateBody');
+            const pos = textarea.selectionStart;
+            const text = textarea.value;
+            textarea.value = text.substring(0, pos) + '{{' + varName + '}}' + text.substring(pos);
+            textarea.focus();
+        }
+
+        function submitTemplate() {
+            const templateId = document.getElementById('editTemplateId').value;
+            const payload = {
+                templateName: document.getElementById('templateName').value,
+                riskType: document.getElementById('templateRiskType').value,
+                channel: document.getElementById('templateChannel').value,
+                subjectLine: document.getElementById('templateSubject').value,
+                bodyTemplate: document.getElementById('templateBody').value,
+                tone: document.querySelector('input[name="templateTone"]:checked')?.value || 'professional'
+            };
+            if (templateId) payload.templateId = templateId;
+            sendMessage('saveTemplate', payload);
+        }
+
+        function deleteInterventionTemplate(templateId) {
+            if (confirm('Delete this template?')) {
+                sendMessage('deleteTemplate', { templateId });
+            }
+        }
+
+        function renderTemplateManagement(data) {
+            const container = document.getElementById('templatesByRiskType');
+            if (!data || !container) return;
+
+            const groups = data.templatesByRiskType || {};
+            const riskLabels = {
+                SILENCE_SIGNAL: 'Silence Signal', DETRACTOR_NPS: 'Detractor NPS',
+                PAY_VOLATILITY: 'Pay Volatility', BURNOUT_RISK: 'Burnout Risk',
+                SAFETY_INCIDENT: 'Safety Incident'
+            };
+
+            container.innerHTML = Object.entries(groups).map(([riskType, templates]) => {
+                if (!templates.length) return '';
+                return `<div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+                    <h4 class="text-sm font-bold text-slate-700 mb-3 uppercase tracking-wide">${riskLabels[riskType] || riskType}</h4>
+                    <div class="space-y-2">${templates.map(t => `
+                        <div class="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2 border border-slate-100">
+                            <div class="flex-1 min-w-0">
+                                <span class="text-sm font-semibold text-slate-900 block truncate">${t.template_name}</span>
+                                <span class="text-xs text-slate-500">${t.channel} | ${t.tone} | Used ${t.usage_count || 0}x | ${t.success_rate || 0}% success</span>
+                            </div>
+                            <div class="flex gap-2 ml-2">
+                                ${!t.is_default ? `<button onclick='openTemplateEditor(${JSON.stringify(t).replace(/'/g, "\\'")})' class="text-xs text-blue-600 hover:text-blue-700 font-bold">Edit</button>
+                                <button onclick="deleteInterventionTemplate('${t._id}')" class="text-xs text-red-500 hover:text-red-600 font-bold">Delete</button>` : '<span class="text-xs text-slate-400 font-bold">Default</span>'}
+                            </div>
+                        </div>
+                    `).join('')}</div>
+                </div>`;
+            }).filter(Boolean).join('');
+        }
+
+        function renderInterventionTemplateList(data) {
+            const container = document.getElementById('interventionTemplateList');
+            if (!data || !container) return;
+
+            const allTemplates = data.allTemplates || [];
+            if (!allTemplates.length) {
+                container.innerHTML = '<p class="text-sm text-slate-500 text-center py-4">No templates available. Create one first.</p>';
+                return;
+            }
+
+            container.innerHTML = allTemplates.map(t => `
+                <button onclick="sendQuickIntervention('${t._id}')"
+                    class="w-full text-left bg-slate-50 hover:bg-blue-50 border border-slate-200 hover:border-blue-200 rounded-lg px-4 py-3 transition-colors group">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <span class="text-sm font-semibold text-slate-900 group-hover:text-blue-700">${t.template_name}</span>
+                            <span class="text-xs text-slate-500 block mt-0.5">${t.channel} | ${t.tone}</span>
+                        </div>
+                        <i class="fa-solid fa-paper-plane text-slate-300 group-hover:text-blue-500 transition-colors"></i>
+                    </div>
+                </button>
+            `).join('');
+        }
+
+        function openQuickIntervention(driverId, riskType) {
+            document.getElementById('interventionDriverId').value = driverId;
+            document.getElementById('quickInterventionModal').classList.remove('hidden');
+            document.getElementById('quickInterventionModal').classList.add('flex');
+            sendMessage('getInterventionTemplates', { riskType });
+        }
+
+        function closeQuickIntervention() {
+            document.getElementById('quickInterventionModal').classList.add('hidden');
+            document.getElementById('quickInterventionModal').classList.remove('flex');
+        }
+
+        function sendQuickIntervention(templateId) {
+            const driverId = document.getElementById('interventionDriverId').value;
+            sendMessage('sendIntervention', { templateId, driverId, overrides: {} });
+        }
     </script>
+
+    <!-- ==================== INTERVENTION TEMPLATES MODAL ==================== -->
+    <div id="templateEditorModal" class="fixed inset-0 bg-black/50 z-50 hidden items-center justify-center">
+        <div class="bg-white border border-slate-200 rounded-xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto shadow-2xl">
+            <h3 class="text-lg font-bold text-slate-900 mb-4" id="templateModalTitle">Create Template</h3>
+            <input type="hidden" id="editTemplateId">
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-slate-600 mb-1">Template Name</label>
+                    <input id="templateName" type="text"
+                        class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                        placeholder="e.g. Burnout Check-in SMS">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 mb-1">Risk Type</label>
+                        <select id="templateRiskType"
+                            class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                            <option value="SILENCE_SIGNAL">Silence Signal</option>
+                            <option value="DETRACTOR_NPS">Detractor NPS</option>
+                            <option value="PAY_VOLATILITY">Pay Volatility</option>
+                            <option value="BURNOUT_RISK">Burnout Risk</option>
+                            <option value="SAFETY_INCIDENT">Safety Incident</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 mb-1">Channel</label>
+                        <select id="templateChannel" onchange="toggleSubjectLine()"
+                            class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                            <option value="sms">SMS</option>
+                            <option value="email">Email</option>
+                        </select>
+                    </div>
+                </div>
+                <div id="subjectLineGroup" style="display:none;">
+                    <label class="block text-sm font-medium text-slate-600 mb-1">Subject Line</label>
+                    <input id="templateSubject" type="text"
+                        class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                        placeholder="Email subject line">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-slate-600 mb-1">Message Body</label>
+                    <div class="flex flex-wrap gap-1 mb-2">
+                        <button onclick="insertVar('firstName')"
+                            class="px-2 py-1 bg-slate-100 text-xs text-slate-600 rounded hover:bg-blue-50 hover:text-blue-600 border border-slate-200 font-medium">{{firstName}}</button>
+                        <button onclick="insertVar('lastName')"
+                            class="px-2 py-1 bg-slate-100 text-xs text-slate-600 rounded hover:bg-blue-50 hover:text-blue-600 border border-slate-200 font-medium">{{lastName}}</button>
+                        <button onclick="insertVar('carrierName')"
+                            class="px-2 py-1 bg-slate-100 text-xs text-slate-600 rounded hover:bg-blue-50 hover:text-blue-600 border border-slate-200 font-medium">{{carrierName}}</button>
+                        <button onclick="insertVar('recruiterName')"
+                            class="px-2 py-1 bg-slate-100 text-xs text-slate-600 rounded hover:bg-blue-50 hover:text-blue-600 border border-slate-200 font-medium">{{recruiterName}}</button>
+                        <button onclick="insertVar('recruiterPhone')"
+                            class="px-2 py-1 bg-slate-100 text-xs text-slate-600 rounded hover:bg-blue-50 hover:text-blue-600 border border-slate-200 font-medium">{{recruiterPhone}}</button>
+                    </div>
+                    <textarea id="templateBody"
+                        class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm h-32 focus:ring-2 focus:ring-blue-500 outline-none resize-y"
+                        placeholder="Type your message..."></textarea>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-slate-600 mb-1">Tone</label>
+                    <div class="flex gap-4">
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="radio"
+                                name="templateTone" value="empathetic" class="accent-blue-600"> Empathetic</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="radio"
+                                name="templateTone" value="professional" checked class="accent-blue-600">
+                            Professional</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="radio"
+                                name="templateTone" value="urgent" class="accent-blue-600"> Urgent</label>
+                    </div>
+                </div>
+            </div>
+            <div class="flex justify-end gap-3 mt-6 pt-4 border-t border-slate-100">
+                <button onclick="closeTemplateEditor()"
+                    class="px-4 py-2 text-sm text-slate-500 hover:text-slate-900 font-medium">Cancel</button>
+                <button onclick="submitTemplate()"
+                    class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-bold shadow-sm">Save
+                    Template</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== QUICK INTERVENTION MODAL ==================== -->
+    <div id="quickInterventionModal" class="fixed inset-0 bg-black/50 z-50 hidden items-center justify-center">
+        <div class="bg-white border border-slate-200 rounded-xl p-6 w-full max-w-md mx-4 shadow-2xl">
+            <h3 class="text-lg font-bold text-slate-900 mb-4">Send Intervention</h3>
+            <input type="hidden" id="interventionDriverId">
+            <div class="space-y-4">
+                <div id="interventionTemplateList" class="space-y-2 max-h-60 overflow-y-auto"></div>
+                <p class="text-xs text-slate-400">Select a template to send to this driver</p>
+            </div>
+            <div class="flex justify-end gap-3 mt-4 pt-4 border-t border-slate-100">
+                <button onclick="closeQuickIntervention()"
+                    class="px-4 py-2 text-sm text-slate-500 hover:text-slate-900 font-medium">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== TEMPLATE MANAGEMENT SECTION ==================== -->
+    <div id="templateManagement" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-8">
+        <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-bold text-slate-900">Intervention Templates</h3>
+            <button onclick="openTemplateEditor()"
+                class="bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm px-4 py-2 rounded-lg shadow-sm transition-colors flex items-center gap-1">
+                <i class="fa-solid fa-plus"></i> New Template
+            </button>
+        </div>
+        <div id="templatesByRiskType" class="space-y-4"></div>
+    </div>
+
 </body>
 
 </html>

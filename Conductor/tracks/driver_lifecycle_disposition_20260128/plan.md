@@ -81,24 +81,25 @@ Build a "Black Box" for driver tenure—recording every meaningful event from hi
 ## 3. Implementation Steps
 
 ### Phase 1: Foundation (Data & Basic Logging)
-- [ ] Define `LifecycleEvents`, `TerminationLogs`, `SurveyDefinitions`, `SurveyResponses` schemas.
-- [ ] Implement `lifecycleService.jsw` with basic CRUD.
-- [ ] Create `logEvent` triggers on existing `HIRE` actions.
+- [x] Define `LifecycleEvents`, `TerminationLogs`, `SurveyDefinitions`, `SurveyResponses` schemas.
+    - *Created schema docs in `docs/schemas/airtable/`*
+- [x] Implement `lifecycleService.jsw` with basic CRUD.
+- [x] Create `logEvent` triggers on existing `HIRE` actions.
 
 ### Phase 2: The UI (Timeline & Disposition)
-- [ ] Build `Recruiter_Lifecycle_Monitor.html` layout.
-- [ ] Build `Driver_My_Career.html` for driver-side visibility.
-- [ ] Create the **Termination Wizard** (Standardized Disposition).
+- [x] Build `Recruiter_Lifecycle_Monitor.html` layout.
+- [x] Build `Driver_My_Career.html` for driver-side visibility.
+- [x] Create the **Termination Wizard** (Standardized Disposition).
 
 ### Phase 3: Survey Engine & Feedback Loop
-- [ ] Implement `surveyService.jsw` (Triggers & Sending).
-- [ ] Implement `feedbackLoopService.jsw` (Recursive Training Logic).
-- [ ] create default `SurveyDefinitions` (Orientation, Day 7, Day 30, Exit).
+- [x] Implement `surveyService.jsw` (Triggers & Sending).
+- [x] Implement `feedbackLoopService.jsw` (Recursive Training Logic).
+- [x] create default `SurveyDefinitions` (Orientation, Day 7, Day 30, Exit).
 
 ### Phase 4: Integration
-- [ ] Link "Terminate" button in `Driver Cockpit` to this new flow.
-- [ ] Add "My Career" section to Driver Dashboard.
-- [ ] Test the "Recursive Loop": Ensure a Driver Exit Survey updates the Matching Engine weights.
+- [x] Link "Terminate" button in `Driver Cockpit` to this new flow.
+- [x] Add "My Career" section to Driver Dashboard.
+- [x] Test the "Recursive Loop": Ensure a Driver Exit Survey updates the Matching Engine weights.
 
 ## 4. Verification Plan
 *   **Scenario 1 (Pulse Check):** Hire driver -> Wait 7 days -> Verify Survey Sent -> Driver responds "Low Pay" -> Verify Risk Alert on Recruiter Dashboard.

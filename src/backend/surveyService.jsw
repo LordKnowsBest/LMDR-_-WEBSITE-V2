@@ -1,0 +1,142 @@
+/**
+ * Survey Service
+ *
+ * Manages the "Pulse Check" system for drivers.
+ * Triggers surveys based on lifecycle events and processes responses.
+ *
+ * @module backend/surveyService
+ */
+
+import { insertRecord, queryRecords, updateRecord, getRecord } from 'backend/dataAccess';
+import * as lifecycleService from 'backend/lifecycleService';
+import { sendEmail } from 'backend/emailService'; // Hypothetical email sender
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+export const SURVEY_TYPES = {
+  ORIENTATION: 'ORIENTATION',
+  DAY_7: 'DAY_7',
+  DAY_30: 'DAY_30',
+  EXIT: 'EXIT'
+};
+
+const DEFAULT_QUESTIONS = {
+  ORIENTATION: [
+    { id: 'q1', text: 'Did the job description match reality?', type: 'scale_1_5' },
+    { id: 'q2', text: 'Was orientation organized?', type: 'scale_1_5' }
+  ],
+  DAY_7: [
+    { id: 'q1', text: 'How was your first week?', type: 'scale_1_5' },
+    { id: 'q2', text: 'Are you getting the miles promised?', type: 'yes_no' }
+  ],
+  DAY_30: [
+    { id: 'q1', text: 'Do you see yourself here in a year?', type: 'scale_1_5' },
+    { id: 'q2', text: 'Rate your dispatcher', type: 'scale_1_5' }
+  ]
+};
+
+// ============================================================================
+// CORE FUNCTIONS
+// ============================================================================
+
+/**
+ * Check for drivers who need a survey triggered
+ * Designed to be run by a scheduled job (e.g., daily)
+ */
+export async function checkSurveyTriggers() {
+  console.log('🔍 Checking survey triggers...');
+  
+  // In a real implementation, this would query:
+  // 1. Drivers who are 'Active'
+  // 2. Calculate days since 'HIRE' event
+  // 3. Check if survey already sent
+  // For prototype, we'll stub this logic.
+  
+  return { success: true, surveysSent: 0 };
+}
+
+/**
+ * Send a specific survey to a driver
+ *
+ * @param {string} driverId
+ * @param {string} carrierId
+ * @param {string} surveyType - One of SURVEY_TYPES
+ */
+export async function sendSurvey(driverId, carrierId, surveyType) {
+  try {
+    // 1. Get Survey Definition (or use default)
+    const questions = DEFAULT_QUESTIONS[surveyType] || [];
+
+    // 2. Log the "Survey Sent" event
+    await lifecycleService.logEvent(driverId, carrierId, lifecycleService.EVENT_TYPES.SURVEY_SENT, {
+      surveyType,
+      questionCount: questions.length
+    });
+
+    // 3. Send Notification (Email/SMS/Push)
+    // await sendEmail(driverId, 'Survey Available', ...);
+    
+    console.log(`✅ Survey ${surveyType} sent to driver ${driverId}`);
+    return { success: true };
+
+  } catch (error) {
+    console.error(`[surveyService] sendSurvey error:`, error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Process a survey response
+ *
+ * @param {string} driverId
+ * @param {string} carrierId
+ * @param {string} surveyType
+ * @param {Object} responseData - { scores: {}, comments: '' }
+ */
+export async function processResponse(driverId, carrierId, surveyType, responseData) {
+  try {
+    // 1. Save Response
+    const responseRecord = {
+      driverId,
+      carrierId,
+      surveyId: surveyType, // Using type as ID for default/static surveys
+      scores: JSON.stringify(responseData.scores),
+      comments: responseData.comments || ''
+    };
+
+    const result = await insertRecord('surveyResponses', responseRecord);
+
+    if (!result.success) {
+      throw new Error(`Failed to save response: ${result.error}`);
+    }
+
+    // 2. Log Completion Event
+    await lifecycleService.logEvent(driverId, carrierId, lifecycleService.EVENT_TYPES.SURVEY_COMPLETED, {
+      surveyType,
+      avgScore: calculateAvgScore(responseData.scores)
+    });
+
+    // 3. Trigger Feedback Loop (if score is low)
+    const feedbackLoop = await import('backend/feedbackLoopService'); // Lazy load
+    await feedbackLoop.analyzeSurvey(result.record);
+
+    return { success: true, record: result.record };
+
+  } catch (error) {
+    console.error(`[surveyService] processResponse error:`, error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+function calculateAvgScore(scores) {
+  if (!scores) return 0;
+  const values = Object.values(scores).filter(v => typeof v === 'number');
+  if (values.length === 0) return 0;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}

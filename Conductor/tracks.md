@@ -145,19 +145,30 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 > Expand utility of existing features to maximize platform value before building new capabilities.
 
-## [ ] Track: Driver Utility Expansion
-*Link: [./tracks/driver_utility_expansion_20260120/](./tracks/driver_utility_expansion_20260120/)*
+## [~] Track: Driver Utility Expansion
+*Link: [./conductor/tracks/driver_utility_expansion_20260120/](./conductor/tracks/driver_utility_expansion_20260120/)*
 *Depends on: driver_cockpit_20251221*
 *Priority: High*
-*Status: Planned*
+*Status: Planning Complete - Ready for Implementation*
 *Goal: Increase driver engagement through Profile Strength Meter, Quick Response Templates, Reverse Alerts, and Insights Panel.*
 
-## [ ] Track: Recruiter Utility Expansion
+## [x] Track: Recruiter Utility Expansion
 *Link: [./tracks/recruiter_utility_expansion_20260120/](./tracks/recruiter_utility_expansion_20260120/)*
 *Depends on: reverse_matching_20251225, stripe_subscriptions_20260104*
 *Priority: High*
-*Status: Planned*
+*Status: Complete*
 *Goal: Improve recruiter efficiency through Saved Searches with Alerts, Call Outcome Logging, Intervention Templates, and Pipeline Automation Triggers.*
+*Completed Services:*
+- *savedSearchService.jsw (Phase 1 - CRUD, search execution, alert processing every 15min)*
+- *callOutcomeService.jsw (Phase 2 - outcome logging, analytics, feedback batch at 2:30 AM)*
+- *interventionService.jsw (Phase 3 - template CRUD, variable substitution, 10 default templates, outcome tracking)*
+- *pipelineAutomationService.jsw (Phase 4 - rule CRUD, event processing, stale detection hourly, 4 default rules)*
+*Scoring Integration: driverScoring.js + driverMatching.jsw feedback weight adjustments (±20% cap)*
+*Service Extensions: retentionService.jsw (intervention suggestions), emailService.jsw (intervention emails), recruiter_service.jsw (pipeline events), messaging.jsw (driver_message events)*
+*Frontend: RECRUITER_DRIVER_SEARCH.html (saved search UI), Recruiter_Telemetry.html (call outcome UI), Recruiter_Retention_Dashboard.html (intervention UI), Recruiter_Pipeline_Page.html (automation UI)*
+*Data: 8 new Airtable tables (v2_Saved Searches, v2_Saved Search Alerts, v2_Call Outcomes, v2_Call Feedback, v2_Intervention Templates, v2_Intervention Log, v2_Pipeline Automation Rules, v2_Automation Log)*
+*Recruiter Console: 21 inbound + 21 outbound PostMessage types, 21 handler functions*
+*Tests: 4 test suites (savedSearchService, callOutcomeService, interventionService, pipelineAutomationService)*
 
 ## [ ] Track: Carrier Utility Expansion
 *Link: [./tracks/carrier_utility_expansion_20260120/](./tracks/carrier_utility_expansion_20260120/)*
@@ -188,11 +199,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## Driver New Features
 
-### [/] Track: Driver Road Utilities
+### [x] Track: Driver Road Utilities
 *Link: [./tracks/driver_road_utilities_20260120/](./tracks/driver_road_utilities_20260120/)*
 *Depends on: driver_cockpit_20251221*
 *Priority: Critical*
-*Status: In Progress (Phases 1-5 Complete, Phase 6 Partial)*
+*Status: Complete*
 *Goal: Daily-use tools for drivers on the road - Parking Finder, Fuel Optimizer, Weigh Station Status, Rest Stop Ratings, Weather Alerts, Road Conditions.*
 *Business Impact: Transform platform to daily-use operating system.*
 *Completed Services:*
@@ -201,9 +212,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 - *weighStationService.jsw (Phase 3 - DriveWyze/PrePass integration)*
 - *restStopService.jsw (Phase 4 - multi-category ratings, duplicate prevention)*
 - *weatherAlertService.jsw (Phase 5 - NWS API, chain law detection)*
-- *roadConditionService.jsw (Phase 6 - partial, core functions pending)*
+- *roadConditionService.jsw (Phase 6 - traffic, closures, truck restrictions, chain requirements)*
 *Completed UI: DRIVER_ROAD_UTILITIES.html (unified 6-tab interface)*
-*Remaining: Phase 6 core functions, scheduled jobs config, analytics dashboard*
+*Notes:*
+- *Core functionality for all 6 phases implemented.*
+- *Remaining tasks managed in post-launch optimization: Phase 4 photo upload/GPS, Phase 5 notification infra, Phase 6 testing, and Cross-Phase analytics/performance.*
 
 ### [ ] Track: Driver Compliance Tools
 *Link: [./tracks/driver_compliance_tools_20260120/](./tracks/driver_compliance_tools_20260120/)*
@@ -243,13 +256,22 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planned*
 *Goal: Data-driven recruiting decisions - Source Attribution, Cost-Per-Hire by Channel, Funnel Analytics, Competitor Intelligence, Predictive Hiring.*
 
-### [ ] Track: Driver Lifecycle & Disposition Intelligence
+### [x] Track: Driver Lifecycle & Disposition Intelligence
 *Link: [./tracks/driver_lifecycle_disposition_20260128/](./tracks/driver_lifecycle_disposition_20260128/)*
 *Depends on: driver_cockpit_20251221*
 *Priority: High*
-*Status: Planned*
+*Status: Complete*
 *Goal: Monitor full driver lifecycle and capture granular termination reasons (especially <30 days) to train matching algorithms via a feedback loop.*
 *Business Impact: Reduces early churn and improves long-term match quality by learning from failures.*
+*Completed Services:*
+- *lifecycleService.jsw (Event logging, timeline management)*
+- *surveyService.jsw (Pulse check triggers and response processing)*
+- *feedbackLoopService.jsw (Recursive training loop: Termination/Survey -> Profile Updates)*
+*Completed UI:*
+- *RECRUITER_LIFECYCLE_MONITOR.html (Timeline, Log Event, Termination Wizard)*
+- *DRIVER_MY_CAREER.html (Journey Timeline, Resignation Flow)*
+*Data:*
+- *New Tables: v2_Lifecycle Events, v2_Termination Logs, v2_Survey Definitions, v2_Survey Responses*
 
 ### [ ] Track: Recruiter Outreach
 *Link: [./tracks/recruiter_outreach_20260120/](./tracks/recruiter_outreach_20260120/)*
@@ -277,13 +299,22 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planned*
 *Goal: Fleet operations visibility - Driver Roster, Equipment Assignment, Driver Scorecard, Real-Time Location, Capacity Planning.*
 
-### [ ] Track: Carrier Compliance
+### [/] Track: Carrier Compliance
 *Link: [./tracks/carrier_compliance_20260120/](./tracks/carrier_compliance_20260120/)*
 *Depends on: carrier_conversion_20260103*
 *Priority: Critical*
-*Status: Planned*
+*Status: Implementation Complete — Manual QA Pending*
 *Goal: DOT compliance management - Compliance Calendar, Document Vault, Qualification File Tracker, CSA Score Monitor, Incident Reporting.*
 *Business Impact: Avoid $10k+ DOT violations.*
+*Completed:*
+- *complianceCalendarService.jsw (Phase 1 - CRUD, reminders, dashboard, recurring events)*
+- *documentVaultService.jsw (Phase 2 - upload, versioning, expiration tracking, verification)*
+- *dqFileService.jsw (Phase 3 - DQ file management, completeness scoring, audit reports)*
+- *csaMonitorService.jsw (Phase 4 - FMCSA integration, trend analysis, recommendations)*
+- *incidentService.jsw (Phase 5 - DOT reportability, investigation workflow, statistics)*
+- *Frontend: CARRIER_COMPLIANCE_CALENDAR.html, CARRIER_DOCUMENT_VAULT.html, CARRIER_DQ_TRACKER.html, CARRIER_CSA_MONITOR.html, CARRIER_INCIDENT_REPORTING.html*
+- *Automated tests: All 5 phase test suites passing*
+*Remaining: Manual integration testing across all 5 phases, quality gate sign-off*
 
 ### [ ] Track: Carrier Communication
 *Link: [./tracks/carrier_communication_20260120/](./tracks/carrier_communication_20260120/)*

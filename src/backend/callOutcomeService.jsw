@@ -1,0 +1,347 @@
+// ============================================================================
+// CALL OUTCOME SERVICE - Backend for Recruiter Call Outcome Logging & Analytics
+//
+// DUAL-SOURCE SUPPORT: Supports both Wix Data and Airtable based on config.jsw
+// ============================================================================
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import { logFeatureInteraction } from 'backend/featureAdoptionService';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const COLLECTION_KEYS = {
+  callOutcomes: 'callOutcomes',
+  callFeedback: 'callFeedback'
+};
+
+const VALID_OUTCOMES = ['interested', 'callback', 'not_now', 'wrong_fit', 'no_answer', 'voicemail'];
+const VALID_SENTIMENTS = ['positive', 'neutral', 'negative'];
+
+// ============================================================================
+// DUAL-SOURCE DATA HELPERS
+// ============================================================================
+
+async function queryData(collectionKey, airtableOptions = {}) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = getAirtableTableName(collectionKey);
+    const result = await airtable.queryRecords(tableName, airtableOptions);
+    return result.records || [];
+  }
+  const result = await wixData.query(getWixCollectionName(collectionKey)).find({ suppressAuth: true });
+  return result.items;
+}
+
+async function getAllData(collectionKey, filterFormula = null) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.getAllRecords(tableName, filterFormula);
+  }
+  const result = await wixData.query(getWixCollectionName(collectionKey)).find({ suppressAuth: true });
+  return result.items;
+}
+
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.createRecord(tableName, record);
+  }
+  return await wixData.insert(getWixCollectionName(collectionKey), record, { suppressAuth: true });
+}
+
+async function upsertData(collectionKey, lookupField, lookupValue, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.upsertRecord(tableName, lookupField, lookupValue, record);
+  }
+  // Wix fallback: query then insert/update
+  const existing = await wixData.query(getWixCollectionName(collectionKey))
+    .eq(lookupField, lookupValue)
+    .limit(1)
+    .find({ suppressAuth: true });
+  if (existing.items.length > 0) {
+    return await wixData.update(getWixCollectionName(collectionKey), { ...existing.items[0], ...record }, { suppressAuth: true });
+  }
+  return await wixData.insert(getWixCollectionName(collectionKey), { [lookupField]: lookupValue, ...record }, { suppressAuth: true });
+}
+
+// ============================================================================
+// HELPER: Get current user ID
+// ============================================================================
+
+async function getCurrentUserId() {
+  const currentUser = wixUsersBackend.currentUser;
+  return currentUser.loggedIn ? currentUser.id : null;
+}
+
+// ============================================================================
+// LOG CALL OUTCOME
+// ============================================================================
+
+/**
+ * Record a call outcome with current match score snapshot
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} outcomeData - Call outcome data
+ */
+export async function logCallOutcome(carrierDot, outcomeData) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) return { success: false, error: 'Not authenticated' };
+
+    const {
+      driverId, outcome, outcomeDetails, notes,
+      callDurationSeconds, followUpDate, followUpType,
+      matchScoreAtCall, source, sentiment
+    } = outcomeData;
+
+    if (!driverId) return { success: false, error: 'Driver ID is required' };
+    if (!VALID_OUTCOMES.includes(outcome)) {
+      return { success: false, error: `Invalid outcome. Must be one of: ${VALID_OUTCOMES.join(', ')}` };
+    }
+
+    const record = {
+      recruiter_id: userId,
+      carrier_dot: String(carrierDot),
+      driver_id: driverId,
+      call_timestamp: new Date().toISOString(),
+      call_duration_seconds: callDurationSeconds || 0,
+      outcome,
+      outcome_details: outcomeDetails || '',
+      follow_up_date: followUpDate || null,
+      follow_up_type: followUpType || null,
+      match_score_at_call: matchScoreAtCall || 0,
+      source: source || 'manual',
+      sentiment: VALID_SENTIMENTS.includes(sentiment) ? sentiment : 'neutral',
+      notes: notes || ''
+    };
+
+    const created = await insertData(COLLECTION_KEYS.callOutcomes, record);
+
+    // Gamification hook (non-blocking)
+    try {
+      const gamification = await import('backend/gamificationService');
+      await gamification.awardRecruiterPoints(userId, 'log_call', {
+        carrierDot, driverId, outcome
+      });
+    } catch (err) {
+      console.warn('Gamification award failed:', err.message);
+    }
+
+    // Log feature interaction (non-blocking)
+    logFeatureInteraction('call_outcome', userId, 'log', { carrierDot, outcome })
+      .catch(err => console.warn('Feature tracking failed:', err.message));
+
+    return { success: true, callOutcome: created };
+  } catch (error) {
+    console.error('logCallOutcome error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET DRIVER OUTCOMES
+// ============================================================================
+
+export async function getDriverOutcomes(driverId) {
+  try {
+    const outcomes = await queryData(COLLECTION_KEYS.callOutcomes, {
+      filterByFormula: `{Driver ID} = '${driverId}'`,
+      sort: [{ field: 'Call Timestamp', direction: 'desc' }],
+      maxRecords: 50
+    });
+
+    return { success: true, outcomes };
+  } catch (error) {
+    console.error('getDriverOutcomes error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET CARRIER OUTCOMES (paginated)
+// ============================================================================
+
+export async function getCarrierOutcomes(carrierDot, options = {}) {
+  try {
+    const { outcome, startDate, endDate, limit } = options;
+
+    let filterParts = [`{Carrier DOT} = '${carrierDot}'`];
+    if (outcome && VALID_OUTCOMES.includes(outcome)) {
+      filterParts.push(`{Outcome} = '${outcome}'`);
+    }
+    if (startDate) {
+      filterParts.push(`IS_AFTER({Call Timestamp}, '${startDate}')`);
+    }
+    if (endDate) {
+      filterParts.push(`IS_BEFORE({Call Timestamp}, '${endDate}')`);
+    }
+
+    const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : filterParts[0];
+
+    const outcomes = await queryData(COLLECTION_KEYS.callOutcomes, {
+      filterByFormula: filter,
+      sort: [{ field: 'Call Timestamp', direction: 'desc' }],
+      maxRecords: limit || 100
+    });
+
+    return { success: true, outcomes, total: outcomes.length };
+  } catch (error) {
+    console.error('getCarrierOutcomes error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET OUTCOME ANALYTICS
+// ============================================================================
+
+export async function getOutcomeAnalytics(carrierDot, dateRange = {}) {
+  try {
+    let filterParts = [`{Carrier DOT} = '${carrierDot}'`];
+    if (dateRange.startDate) {
+      filterParts.push(`IS_AFTER({Call Timestamp}, '${dateRange.startDate}')`);
+    }
+
+    const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : filterParts[0];
+
+    const outcomes = await getAllData(COLLECTION_KEYS.callOutcomes, filter);
+
+    // Outcome distribution
+    const distribution = {};
+    VALID_OUTCOMES.forEach(o => { distribution[o] = 0; });
+
+    // Sentiment breakdown
+    const sentimentCounts = { positive: 0, neutral: 0, negative: 0 };
+
+    // Score band analysis
+    const scoreBands = {
+      '90-100': { total: 0, interested: 0 },
+      '80-89': { total: 0, interested: 0 },
+      '70-79': { total: 0, interested: 0 },
+      '60-69': { total: 0, interested: 0 },
+      'below-60': { total: 0, interested: 0 }
+    };
+
+    outcomes.forEach(o => {
+      // Distribution
+      if (distribution.hasOwnProperty(o.outcome)) {
+        distribution[o.outcome]++;
+      }
+
+      // Sentiment
+      if (sentimentCounts.hasOwnProperty(o.sentiment)) {
+        sentimentCounts[o.sentiment]++;
+      }
+
+      // Score bands
+      const score = o.match_score_at_call || 0;
+      let band;
+      if (score >= 90) band = '90-100';
+      else if (score >= 80) band = '80-89';
+      else if (score >= 70) band = '70-79';
+      else if (score >= 60) band = '60-69';
+      else band = 'below-60';
+
+      scoreBands[band].total++;
+      if (o.outcome === 'interested' || o.outcome === 'callback') {
+        scoreBands[band].interested++;
+      }
+    });
+
+    // Conversion rates per band
+    const conversionByBand = {};
+    for (const [band, data] of Object.entries(scoreBands)) {
+      conversionByBand[band] = data.total > 0
+        ? Math.round((data.interested / data.total) * 100)
+        : 0;
+    }
+
+    const totalCalls = outcomes.length;
+    const positiveOutcomes = distribution.interested + distribution.callback;
+
+    return {
+      success: true,
+      analytics: {
+        totalCalls,
+        outcomeDistribution: distribution,
+        sentimentBreakdown: sentimentCounts,
+        conversionByScoreBand: conversionByBand,
+        overallConversionRate: totalCalls > 0 ? Math.round((positiveOutcomes / totalCalls) * 100) : 0,
+        avgSentiment: totalCalls > 0
+          ? (sentimentCounts.positive - sentimentCounts.negative) / totalCalls
+          : 0
+      }
+    };
+  } catch (error) {
+    console.error('getOutcomeAnalytics error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// PROCESS FEEDBACK BATCH (Scheduler Job - runs daily at 2:30 AM)
+// ============================================================================
+
+export async function processFeedbackBatch() {
+  console.log('[CallOutcomeService] Starting feedback batch processing...');
+  const startTime = Date.now();
+
+  try {
+    // Get all outcomes
+    const allOutcomes = await getAllData(COLLECTION_KEYS.callOutcomes);
+
+    // Group by carrier
+    const byCarrier = {};
+    allOutcomes.forEach(o => {
+      const dot = o.carrier_dot;
+      if (!byCarrier[dot]) byCarrier[dot] = [];
+      byCarrier[dot].push(o);
+    });
+
+    let processedCarriers = 0;
+
+    for (const [carrierDot, outcomes] of Object.entries(byCarrier)) {
+      // Calculate aggregated weights
+      const positiveCount = outcomes.filter(o =>
+        o.outcome === 'interested' || o.outcome === 'callback'
+      ).length;
+      const negativeCount = outcomes.filter(o =>
+        o.outcome === 'wrong_fit' || o.outcome === 'not_now'
+      ).length;
+      const totalCount = outcomes.length;
+
+      if (totalCount === 0) continue;
+
+      // Calculate weight adjustments (capped at ±20%)
+      const positiveWeight = Math.min(0.20, (positiveCount / totalCount) * 0.30);
+      const negativeWeight = Math.min(0.20, (negativeCount / totalCount) * 0.30);
+
+      // Upsert feedback record per carrier
+      await upsertData(
+        COLLECTION_KEYS.callFeedback,
+        'carrier_dot', carrierDot,
+        {
+          criteria_key: 'overall',
+          outcome_count: totalCount,
+          positive_weight: Math.round(positiveWeight * 100) / 100,
+          negative_weight: Math.round(negativeWeight * 100) / 100,
+          last_calculated: new Date().toISOString()
+        }
+      );
+
+      processedCarriers++;
+    }
+
+    const duration = Date.now() - startTime;
+    console.log(`[CallOutcomeService] Feedback batch complete. ${processedCarriers} carriers processed in ${duration}ms`);
+
+    return { success: true, processedCarriers, durationMs: duration };
+  } catch (error) {
+    console.error('[CallOutcomeService] Feedback batch failed:', error);
+    return { success: false, error: error.message };
+  }
+}

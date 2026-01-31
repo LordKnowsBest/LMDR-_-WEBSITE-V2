@@ -1,0 +1,375 @@
+// ============================================================================
+// SAVED SEARCH SERVICE - Backend for Recruiter Saved Searches & Alerts
+//
+// DUAL-SOURCE SUPPORT: Supports both Wix Data and Airtable based on config.jsw
+// ============================================================================
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import { logFeatureInteraction } from 'backend/featureAdoptionService';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const COLLECTION_KEYS = {
+  savedSearches: 'savedSearches',
+  savedSearchAlerts: 'savedSearchAlerts'
+};
+
+const VALID_FREQUENCIES = ['immediate', 'hourly', 'daily', 'weekly'];
+const VALID_CHANNELS = ['email', 'in_app', 'both'];
+
+// ============================================================================
+// DUAL-SOURCE DATA HELPERS
+// ============================================================================
+
+async function queryData(collectionKey, airtableOptions = {}, wixQueryBuilder = null) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = getAirtableTableName(collectionKey);
+    const result = await airtable.queryRecords(tableName, airtableOptions);
+    return result.records || [];
+  }
+  if (wixQueryBuilder) {
+    const result = await wixQueryBuilder();
+    return result.items;
+  }
+  const result = await wixData.query(getWixCollectionName(collectionKey)).find({ suppressAuth: true });
+  return result.items;
+}
+
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.createRecord(tableName, record);
+  }
+  return await wixData.insert(getWixCollectionName(collectionKey), record, { suppressAuth: true });
+}
+
+async function updateData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = getAirtableTableName(collectionKey);
+    return await airtable.updateRecord(tableName, record._id || record.id, record);
+  }
+  return await wixData.update(getWixCollectionName(collectionKey), record, { suppressAuth: true });
+}
+
+async function getRecord(collectionKey, recordId) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = getAirtableTableName(collectionKey);
+    const result = await airtable.getRecord(tableName, recordId);
+    return (result && !result.error) ? result : null;
+  }
+  return await wixData.get(getWixCollectionName(collectionKey), recordId, { suppressAuth: true });
+}
+
+// ============================================================================
+// HELPER: Get current user ID
+// ============================================================================
+
+async function getCurrentUserId() {
+  const currentUser = wixUsersBackend.currentUser;
+  return currentUser.loggedIn ? currentUser.id : null;
+}
+
+// ============================================================================
+// CREATE SAVED SEARCH
+// ============================================================================
+
+/**
+ * Create a new saved search for a carrier
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} searchData - { searchName, criteria, alertFrequency, alertChannel }
+ */
+export async function createSavedSearch(carrierDot, searchData) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) return { success: false, error: 'Not authenticated' };
+
+    const { searchName, criteria, alertFrequency, alertChannel } = searchData;
+
+    if (!searchName || !searchName.trim()) {
+      return { success: false, error: 'Search name is required' };
+    }
+
+    // Validate frequency and channel
+    const frequency = VALID_FREQUENCIES.includes(alertFrequency) ? alertFrequency : 'daily';
+    const channel = VALID_CHANNELS.includes(alertChannel) ? alertChannel : 'in_app';
+
+    // Check name uniqueness per carrier
+    const existing = await queryData(COLLECTION_KEYS.savedSearches, {
+      filterByFormula: `AND({Carrier DOT} = '${carrierDot}', {Recruiter ID} = '${userId}', {Search Name} = '${searchName.trim().replace(/'/g, "\\'")}', {Is Active} = TRUE())`,
+      maxRecords: 1
+    });
+
+    if (existing.length > 0) {
+      return { success: false, error: 'A saved search with this name already exists' };
+    }
+
+    const record = {
+      carrier_dot: String(carrierDot),
+      recruiter_id: userId,
+      search_name: searchName.trim(),
+      criteria_json: JSON.stringify(criteria || {}),
+      alert_frequency: frequency,
+      alert_channel: channel,
+      last_run_date: null,
+      last_match_count: 0,
+      new_matches_since_last: 0,
+      is_active: true
+    };
+
+    const created = await insertData(COLLECTION_KEYS.savedSearches, record);
+
+    // Log feature interaction (non-blocking)
+    logFeatureInteraction('saved_search', userId, 'create', { carrierDot })
+      .catch(err => console.warn('Feature tracking failed:', err.message));
+
+    return { success: true, savedSearch: created };
+  } catch (error) {
+    console.error('createSavedSearch error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// UPDATE SAVED SEARCH
+// ============================================================================
+
+export async function updateSavedSearch(searchId, updates) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) return { success: false, error: 'Not authenticated' };
+
+    const existing = await getRecord(COLLECTION_KEYS.savedSearches, searchId);
+    if (!existing) return { success: false, error: 'Saved search not found' };
+
+    // Ownership verification
+    if (existing.recruiter_id !== userId) {
+      return { success: false, error: 'Not authorized to update this search' };
+    }
+
+    const updatedRecord = {
+      ...existing,
+      search_name: updates.searchName || existing.search_name,
+      criteria_json: updates.criteria ? JSON.stringify(updates.criteria) : existing.criteria_json,
+      alert_frequency: VALID_FREQUENCIES.includes(updates.alertFrequency) ? updates.alertFrequency : existing.alert_frequency,
+      alert_channel: VALID_CHANNELS.includes(updates.alertChannel) ? updates.alertChannel : existing.alert_channel
+    };
+
+    const updated = await updateData(COLLECTION_KEYS.savedSearches, updatedRecord);
+    return { success: true, savedSearch: updated };
+  } catch (error) {
+    console.error('updateSavedSearch error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// DELETE SAVED SEARCH (soft delete)
+// ============================================================================
+
+export async function deleteSavedSearch(searchId) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) return { success: false, error: 'Not authenticated' };
+
+    const existing = await getRecord(COLLECTION_KEYS.savedSearches, searchId);
+    if (!existing) return { success: false, error: 'Saved search not found' };
+
+    if (existing.recruiter_id !== userId) {
+      return { success: false, error: 'Not authorized to delete this search' };
+    }
+
+    await updateData(COLLECTION_KEYS.savedSearches, { ...existing, is_active: false });
+    return { success: true };
+  } catch (error) {
+    console.error('deleteSavedSearch error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET SAVED SEARCHES
+// ============================================================================
+
+export async function getSavedSearches(carrierDot) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) return { success: false, error: 'Not authenticated' };
+
+    const searches = await queryData(COLLECTION_KEYS.savedSearches, {
+      filterByFormula: `AND({Carrier DOT} = '${carrierDot}', {Recruiter ID} = '${userId}', {Is Active} = TRUE())`,
+      sort: [{ field: 'Search Name', direction: 'asc' }],
+      maxRecords: 50
+    });
+
+    return {
+      success: true,
+      searches: searches.map(s => ({
+        ...s,
+        criteria: s.criteria_json ? JSON.parse(s.criteria_json) : {}
+      }))
+    };
+  } catch (error) {
+    console.error('getSavedSearches error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// EXECUTE SAVED SEARCH
+// ============================================================================
+
+export async function executeSavedSearch(searchId) {
+  try {
+    const userId = await getCurrentUserId();
+    if (!userId) return { success: false, error: 'Not authenticated' };
+
+    const search = await getRecord(COLLECTION_KEYS.savedSearches, searchId);
+    if (!search) return { success: false, error: 'Saved search not found' };
+    if (search.recruiter_id !== userId) {
+      return { success: false, error: 'Not authorized' };
+    }
+
+    // Parse criteria
+    let criteria = {};
+    try {
+      criteria = search.criteria_json ? JSON.parse(search.criteria_json) : {};
+    } catch (e) {
+      criteria = {};
+    }
+
+    // Lazy-load driverMatching to avoid circular deps
+    const { findMatchingDrivers } = await import('backend/driverMatching.jsw');
+    const result = await findMatchingDrivers(search.carrier_dot, criteria, {});
+
+    const currentMatchCount = result.success ? (result.drivers || []).length : 0;
+    const previousMatchCount = search.last_match_count || 0;
+    const newMatches = Math.max(0, currentMatchCount - previousMatchCount);
+
+    // Update search metadata
+    await updateData(COLLECTION_KEYS.savedSearches, {
+      ...search,
+      last_run_date: new Date().toISOString(),
+      last_match_count: currentMatchCount,
+      new_matches_since_last: newMatches
+    });
+
+    // Log feature interaction (non-blocking)
+    logFeatureInteraction('saved_search', userId, 'execute', { searchId })
+      .catch(err => console.warn('Feature tracking failed:', err.message));
+
+    return {
+      success: true,
+      drivers: result.success ? result.drivers : [],
+      total: currentMatchCount,
+      newMatches
+    };
+  } catch (error) {
+    console.error('executeSavedSearch error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// PROCESS SAVED SEARCH ALERTS (Scheduler Job)
+// ============================================================================
+
+export async function processSavedSearchAlerts() {
+  console.log('[SavedSearchService] Starting alert processing...');
+  const startTime = Date.now();
+
+  try {
+    const now = new Date();
+    let processedCount = 0;
+    let alertsSent = 0;
+
+    // Get all active searches
+    const allSearches = await queryData(COLLECTION_KEYS.savedSearches, {
+      filterByFormula: `{Is Active} = TRUE()`,
+      maxRecords: 500
+    });
+
+    // Filter by frequency due
+    const dueSearches = allSearches.filter(search => {
+      if (!search.last_run_date) return true; // Never run
+      const lastRun = new Date(search.last_run_date);
+      const hoursSince = (now - lastRun) / (1000 * 60 * 60);
+
+      switch (search.alert_frequency) {
+        case 'immediate': return true;
+        case 'hourly': return hoursSince >= 1;
+        case 'daily': return hoursSince >= 24;
+        case 'weekly': return hoursSince >= 168;
+        default: return hoursSince >= 24;
+      }
+    });
+
+    console.log(`[SavedSearchService] ${dueSearches.length} searches due for processing`);
+
+    // Process in batches of 10 with 200ms delay
+    for (let i = 0; i < dueSearches.length; i += 10) {
+      const batch = dueSearches.slice(i, i + 10);
+
+      for (const search of batch) {
+        try {
+          let criteria = {};
+          try { criteria = JSON.parse(search.criteria_json || '{}'); } catch (e) { /* skip */ }
+
+          const { findMatchingDrivers } = await import('backend/driverMatching.jsw');
+          const result = await findMatchingDrivers(search.carrier_dot, criteria, {});
+
+          const currentCount = result.success ? (result.drivers || []).length : 0;
+          const previousCount = search.last_match_count || 0;
+          const newMatches = Math.max(0, currentCount - previousCount);
+
+          // Update search
+          await updateData(COLLECTION_KEYS.savedSearches, {
+            ...search,
+            last_run_date: now.toISOString(),
+            last_match_count: currentCount,
+            new_matches_since_last: newMatches
+          });
+
+          // Create alert if new matches found
+          if (newMatches > 0) {
+            const newDriverIds = result.success
+              ? (result.drivers || []).slice(0, newMatches).map(d => d._id || d.driverId)
+              : [];
+
+            await insertData(COLLECTION_KEYS.savedSearchAlerts, {
+              saved_search_id: search._id,
+              recruiter_id: search.recruiter_id,
+              driver_ids_json: JSON.stringify(newDriverIds),
+              alert_status: 'pending',
+              sent_at: now.toISOString(),
+              channel_used: search.alert_channel || 'in_app'
+            });
+
+            alertsSent++;
+          }
+
+          processedCount++;
+        } catch (searchError) {
+          console.error(`[SavedSearchService] Error processing search ${search._id}:`, searchError.message);
+        }
+      }
+
+      // Rate limiting delay between batches
+      if (i + 10 < dueSearches.length) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+
+    const duration = Date.now() - startTime;
+    console.log(`[SavedSearchService] Complete. Processed ${processedCount}, alerts sent ${alertsSent} in ${duration}ms`);
+
+    return { success: true, processed: processedCount, alertsSent, durationMs: duration };
+  } catch (error) {
+    console.error('[SavedSearchService] Alert processing failed:', error);
+    return { success: false, error: error.message };
+  }
+}

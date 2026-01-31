@@ -17,6 +17,11 @@ POSTMESSAGE PROTOCOL:
   - saveDriver: { driverId } → { success }
   - contactDriver: { driverId, message } → { success }
   - getQuotaStatus: {} → { tier, used, limit, resetDate }
+  - saveSearch: { searchName, criteria, alertFrequency, alertChannel } → saveSearchResult
+  - loadSavedSearches: {} → savedSearchesLoaded { success, searches[] }
+  - runSavedSearch: { searchId } → savedSearchExecuted { success, drivers[], total, newMatches }
+  - deleteSavedSearch: { searchId } → savedSearchDeleted { success }
+  - updateSavedSearch: { searchId, ... } → savedSearchUpdated { success }
 
 ================================================================================
 -->
@@ -798,6 +803,10 @@ POSTMESSAGE PROTOCOL:
                             <i class="fa-solid fa-magnifying-glass"></i>
                             Search Drivers
                         </button>
+                        <button onclick="openSaveSearchModal()" class="w-full mt-2 text-sm text-blue-600 hover:text-blue-800 flex items-center justify-center gap-1.5 py-2 border border-slate-200 rounded-xl bg-white hover:bg-slate-50 transition-colors">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"></path></svg>
+                            Save Search
+                        </button>
                     </div>
 
                 </div>
@@ -805,6 +814,14 @@ POSTMESSAGE PROTOCOL:
 
             <!-- Results Area -->
             <main class="flex-1 min-w-0">
+                <!-- Saved Searches Panel -->
+                <div id="savedSearchesPanel" class="hidden mb-4">
+                    <button onclick="toggleSavedSearchesPanel()" class="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 mb-2 font-medium">
+                        <span id="savedSearchesToggle">&#9654;</span> Saved Searches (<span id="savedSearchCount">0</span>)
+                    </button>
+                    <div id="savedSearchesList" class="hidden space-y-2"></div>
+                </div>
+
                 <!-- Results Header -->
                 <div class="flex items-center justify-between mb-4">
                     <div id="resultsCount" class="text-sm text-slate-600">
@@ -1059,6 +1076,45 @@ POSTMESSAGE PROTOCOL:
                 if (pendingCallback && msg.type.endsWith('Result')) {
                     pendingCallback(msg.data);
                     pendingCallback = null;
+                }
+
+                // ========== Saved Search Handlers ==========
+                if (msg.type === 'saveSearchResult') {
+                    if (msg.data && msg.data.success) {
+                        showToast('Search saved successfully!', 'success');
+                        closeSaveSearchModal();
+                        loadSavedSearches();
+                    } else {
+                        showToast((msg.data && msg.data.error) || 'Failed to save search', 'error');
+                    }
+                }
+
+                if (msg.type === 'savedSearchesLoaded') {
+                    if (msg.data && msg.data.success) {
+                        renderSavedSearches(msg.data.searches || []);
+                    }
+                }
+
+                if (msg.type === 'savedSearchExecuted') {
+                    if (msg.data && msg.data.success) {
+                        renderDrivers(msg.data.drivers || []);
+                        updateResultsCount(msg.data.total || 0);
+                        showToast('Found ' + (msg.data.total || 0) + ' drivers (' + (msg.data.newMatches || 0) + ' new)', 'info');
+                    }
+                }
+
+                if (msg.type === 'savedSearchDeleted') {
+                    if (msg.data && msg.data.success) {
+                        showToast('Search deleted', 'success');
+                        loadSavedSearches();
+                    }
+                }
+
+                if (msg.type === 'savedSearchUpdated') {
+                    if (msg.data && msg.data.success) {
+                        showToast('Search updated', 'success');
+                        loadSavedSearches();
+                    }
                 }
             });
 
@@ -1648,7 +1704,98 @@ POSTMESSAGE PROTOCOL:
                 if (result) updateQuotaDisplay(result);
             }).catch(() => {});
 
+            // Load saved searches on init
+            loadSavedSearches();
+
+            // Expose getFilters for saved search usage
+            window._getSearchFilters = getFilters;
+
         })();
+
+        // ==================== SAVED SEARCH FUNCTIONS ====================
+        function openSaveSearchModal() {
+            document.getElementById('saveSearchModal').classList.remove('hidden');
+            document.getElementById('saveSearchModal').classList.add('flex');
+        }
+
+        function closeSaveSearchModal() {
+            document.getElementById('saveSearchModal').classList.add('hidden');
+            document.getElementById('saveSearchModal').classList.remove('flex');
+            document.getElementById('savedSearchName').value = '';
+        }
+
+        function submitSaveSearch() {
+            var name = document.getElementById('savedSearchName').value.trim();
+            if (!name) { alert('Please enter a search name'); return; }
+
+            var frequency = document.getElementById('savedSearchFrequency').value;
+            var channel = document.querySelector('input[name="alertChannel"]:checked');
+            channel = channel ? channel.value : 'in_app';
+
+            // Gather current filter criteria from the page
+            var criteria = window._getSearchFilters ? window._getSearchFilters() : {};
+
+            window.parent.postMessage({
+                type: 'saveSearch',
+                data: {
+                    searchName: name,
+                    criteria: criteria,
+                    alertFrequency: frequency,
+                    alertChannel: channel
+                }
+            }, '*');
+        }
+
+        function loadSavedSearches() {
+            window.parent.postMessage({ type: 'loadSavedSearches', data: {} }, '*');
+        }
+
+        function renderSavedSearches(searches) {
+            var panel = document.getElementById('savedSearchesPanel');
+            var list = document.getElementById('savedSearchesList');
+            var count = document.getElementById('savedSearchCount');
+
+            count.textContent = searches.length;
+            if (searches.length === 0) {
+                panel.classList.add('hidden');
+                return;
+            }
+
+            panel.classList.remove('hidden');
+            list.innerHTML = searches.map(function(s) {
+                var newBadge = (s.new_matches_since_last > 0)
+                    ? '<span class="ml-2 px-1.5 py-0.5 bg-blue-600 text-white text-xs rounded-full">' + s.new_matches_since_last + ' new</span>'
+                    : '';
+                return '<div class="flex items-center justify-between bg-white border border-slate-200 rounded-lg px-3 py-2 shadow-sm">'
+                    + '<div class="flex-1 min-w-0">'
+                    + '<span class="text-sm text-slate-800 font-medium truncate block">' + (s.search_name || 'Unnamed') + '</span>'
+                    + '<span class="text-xs text-slate-500">' + (s.alert_frequency || 'daily') + ' alerts</span>'
+                    + newBadge
+                    + '</div>'
+                    + '<div class="flex gap-2 ml-2">'
+                    + '<button onclick="runSavedSearch(\'' + s._id + '\')" class="text-xs text-blue-600 hover:text-blue-800 px-2 py-1 font-medium">Run</button>'
+                    + '<button onclick="deleteSavedSearchItem(\'' + s._id + '\')" class="text-xs text-red-500 hover:text-red-700 px-2 py-1 font-medium">Delete</button>'
+                    + '</div>'
+                    + '</div>';
+            }).join('');
+        }
+
+        function toggleSavedSearchesPanel() {
+            var list = document.getElementById('savedSearchesList');
+            var toggle = document.getElementById('savedSearchesToggle');
+            list.classList.toggle('hidden');
+            toggle.innerHTML = list.classList.contains('hidden') ? '&#9654;' : '&#9660;';
+        }
+
+        function runSavedSearch(searchId) {
+            window.parent.postMessage({ type: 'runSavedSearch', data: { searchId: searchId } }, '*');
+        }
+
+        function deleteSavedSearchItem(searchId) {
+            if (confirm('Delete this saved search?')) {
+                window.parent.postMessage({ type: 'deleteSavedSearch', data: { searchId: searchId } }, '*');
+            }
+        }
 
         // ============================================
         // ACCORDION FILTER FUNCTIONS (outside IIFE for onclick access)
@@ -1918,6 +2065,40 @@ POSTMESSAGE PROTOCOL:
 
     </div><!-- End Main Content Area -->
     </div><!-- End Main Layout with Sidebar -->
+
+<!-- ==================== SAVED SEARCHES MODAL ==================== -->
+<div id="saveSearchModal" class="fixed inset-0 bg-black/50 z-50 hidden items-center justify-center modal-backdrop">
+  <div class="bg-white border border-slate-200 rounded-xl p-6 w-full max-w-md mx-4 shadow-xl">
+    <h3 class="text-lg font-semibold text-slate-800 mb-4">Save This Search</h3>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm text-slate-600 mb-1 font-medium">Search Name</label>
+        <input id="savedSearchName" type="text" class="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-slate-800 text-sm focus:border-lmdr-blue focus:outline-none" placeholder="e.g. CDL-A OTR Drivers Near Dallas">
+      </div>
+      <div>
+        <label class="block text-sm text-slate-600 mb-1 font-medium">Alert Frequency</label>
+        <select id="savedSearchFrequency" class="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-slate-800 text-sm focus:border-lmdr-blue focus:outline-none">
+          <option value="daily">Daily</option>
+          <option value="hourly">Hourly</option>
+          <option value="weekly">Weekly</option>
+          <option value="immediate">Immediate</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm text-slate-600 mb-1 font-medium">Alert Channel</label>
+        <div class="flex gap-4">
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="radio" name="alertChannel" value="in_app" checked class="accent-blue-600"> In-App</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="radio" name="alertChannel" value="email" class="accent-blue-600"> Email</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="radio" name="alertChannel" value="both" class="accent-blue-600"> Both</label>
+        </div>
+      </div>
+    </div>
+    <div class="flex justify-end gap-3 mt-6">
+      <button onclick="closeSaveSearchModal()" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-800 font-medium">Cancel</button>
+      <button onclick="submitSaveSearch()" class="px-4 py-2 text-sm bg-lmdr-blue text-white rounded-lg hover:bg-blue-700 font-medium shadow-md">Save Search</button>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>

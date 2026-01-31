@@ -25,6 +25,14 @@ export const DRIVER_ACHIEVEMENT_CHECKERS = {
     }
   },
 
+  profile_all_star: {
+    name: 'Profile All-Star',
+    check: async (driverId, context) => {
+      const completion = context.profileCompletion || await getProfileCompletion(driverId);
+      return { current: completion, target: 80 };
+    }
+  },
+
   verified_pro: {
     name: 'Verified Pro',
     check: async (driverId, context) => {

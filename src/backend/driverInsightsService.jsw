@@ -1,0 +1,139 @@
+/**
+ * Driver Insights Service
+ * 
+ * Aggregates data for the Driver Dashboard "Insights" panel and "Who's Viewed You" feature.
+ * Supports dual data sources (Wix and Airtable) via config.jsw.
+ * 
+ * @module backend/driverInsightsService
+ */
+
+import wixUsersBackend from 'wix-users-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+/**
+ * Get a list of carriers who have viewed the current driver's profile
+ * Limit to recent unique views
+ */
+export async function getWhoViewedMe(limit = 10) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+    
+    // 1. Query CarrierDriverViews for this driver
+    const viewsResult = await dataAccess.queryRecords('carrierDriverViews', {
+        filters: { driver_id: currentUser.id },
+        sort: [{ field: '_createdDate', direction: 'desc' }],
+        limit: 50, // Get more to dedup
+        suppressAuth: true
+    });
+
+    if (!viewsResult.success) return { success: false, error: viewsResult.error };
+
+    // 2. Dedup by carrier_dot (show most recent view per carrier)
+    const uniqueViewsMap = new Map();
+    viewsResult.items.forEach(view => {
+        if (!uniqueViewsMap.has(view.carrier_dot)) {
+            uniqueViewsMap.set(view.carrier_dot, view);
+        }
+    });
+
+    const uniqueViews = Array.from(uniqueViewsMap.values()).slice(0, limit);
+
+    // 3. Enrich with basic carrier info (Name, Location)
+    // We need to fetch carrier details for each DOT
+    const enrichedViews = await Promise.all(uniqueViews.map(async (view) => {
+        // Try to get carrier name from CarrierHiringPreferences or subscription if available
+        // Or if we stored it in the view record (snapshot pattern)
+        
+        let carrierName = 'Top Carrier';
+        let location = 'USA';
+        
+        // Optimistic fetch for carrier name from subscriptions table or preferences
+        // Since we don't have a direct "Carriers" table mapped easily here yet without 
+        // circular deps or extra setup, we'll try 'carrierHiringPreferences'
+        
+        const prefsResult = await dataAccess.queryRecords('carrierHiringPreferences', {
+            filters: { carrier_dot: view.carrier_dot },
+            limit: 1,
+            suppressAuth: true
+        });
+
+        if (prefsResult.success && prefsResult.items.length > 0) {
+            carrierName = prefsResult.items[0].company_name || carrierName;
+        }
+
+        return {
+            carrierDot: view.carrier_dot,
+            carrierName: carrierName,
+            viewDate: view._createdDate,
+            isNew: (Date.now() - new Date(view._createdDate).getTime()) < (7 * 24 * 60 * 60 * 1000) // New if < 7 days
+        };
+    }));
+
+    return {
+        success: true,
+        views: enrichedViews
+    };
+
+  } catch (err) {
+    console.error('getWhoViewedMe error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Get aggregated stats for the Insights Panel
+ */
+export async function getDriverStats() {
+    try {
+        const currentUser = await wixUsersBackend.currentUser;
+        if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+
+        // 1. Get View Count (Last 30 Days)
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        
+        const viewsCountResult = await dataAccess.queryRecords('carrierDriverViews', {
+            filters: { 
+                driver_id: currentUser.id,
+                _createdDate: { $gt: thirtyDaysAgo } // Wix Data query support needed, or filter in mem
+            },
+            suppressAuth: true
+        });
+
+        // Filter manually if dataAccess doesn't support $gt natively yet for all adapters
+        // Assuming dataAccess might return more, let's filter in memory to be safe and simple
+        const recentViews = (viewsCountResult.items || []).filter(v => new Date(v._createdDate) > thirtyDaysAgo);
+        const viewsCount = recentViews.length;
+
+        // 2. Get Search Appearances (Mock/Estimate for now, or true count if we tracked it)
+        // We don't strictly track every search appearance row (too high volume), so we estimate
+        // based on views * multiplier or return a placeholder if not tracked.
+        const searchAppearances = Math.floor(viewsCount * 12.5); // Heuristic: 1 click per 12.5 impressions
+
+        // 3. Application Funnel Stats
+        // We can reuse getDriverApplications or query directly
+        const appsResult = await dataAccess.queryRecords('driverApplications', {
+            filters: { driver_id: currentUser.id },
+            suppressAuth: true
+        });
+
+        const apps = appsResult.items || [];
+        const activeApps = apps.filter(a => !['rejected', 'withdrawn', 'hired'].includes(a.status)).length;
+        const offerRate = apps.length > 0 ? Math.round((apps.filter(a => a.status === 'offer' || a.status === 'hired').length / apps.length) * 100) : 0;
+
+        return {
+            success: true,
+            stats: {
+                profileViews30d: viewsCount,
+                searchAppearances: searchAppearances,
+                activeApplications: activeApps,
+                offerRate: offerRate + '%'
+            }
+        };
+
+    } catch (err) {
+        console.error('getDriverStats error:', err);
+        return { success: false, error: err.message };
+    }
+}

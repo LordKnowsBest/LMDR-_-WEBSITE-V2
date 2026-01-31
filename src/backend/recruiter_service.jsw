@@ -10,6 +10,7 @@ import wixUsersBackend from 'wix-users-backend';
 import { sendStatusUpdateNotification } from 'backend/emailService';
 import { usesAirtable, getAirtableTableName } from 'backend/config';
 import * as airtable from 'backend/airtableClient';
+import * as lifecycleService from 'backend/lifecycleService';
 
 // Gamification hooks - lazy-loaded to avoid circular dependencies
 async function getGamificationService() {
@@ -60,6 +61,21 @@ async function processHireBonusNonBlocking(driverId, recruiterId, matchScore, me
     await referralService.processHireBonus(driverId, recruiterId, matchScore, metadata);
   } catch (err) {
     console.warn('Hire bonus processing failed:', err.message);
+  }
+}
+
+// Pipeline automation hooks - lazy-loaded to avoid circular dependencies
+async function getPipelineAutomation() {
+  return await import('backend/pipelineAutomationService');
+}
+
+// Non-blocking pipeline event emission
+async function emitPipelineEventNonBlocking(carrierDot, eventType, eventData) {
+  try {
+    const automation = await getPipelineAutomation();
+    await automation.processEvent(carrierDot, eventType, eventData);
+  } catch (err) {
+    console.warn(`Pipeline event emission failed for ${eventType}:`, err.message);
   }
 }
 
@@ -933,6 +949,18 @@ export async function updateCandidateStatus(interestId, newStatus, notes = '') {
     if (newStatus === CONFIG.PIPELINE_STAGES.HIRED) {
       const recruiterId = wixUsersBackend.currentUser?.id;
 
+      // Lifecycle: Log the HIRE event (non-blocking)
+      try {
+        await lifecycleService.logEvent(interest.driver_id, interest.carrier_dot, lifecycleService.EVENT_TYPES.HIRE, {
+          recruiterId: recruiterId,
+          matchScore: interest.match_score,
+          applicationId: interestId
+        });
+        console.log(`✅ Lifecycle HIRE event logged for driver ${interest.driver_id}`);
+      } catch (err) {
+        console.warn('Failed to log lifecycle hire event:', err.message);
+      }
+
       // Award XP to the driver who got hired
       if (interest.driver_id) {
         awardDriverXPNonBlocking(interest.driver_id, 'get_hired', {
@@ -964,6 +992,14 @@ export async function updateCandidateStatus(interestId, newStatus, notes = '') {
         carrierName: interest.carrier_name
       });
     }
+
+    // Pipeline Automation: Emit status_change event (non-blocking)
+    emitPipelineEventNonBlocking(interest.carrier_dot, 'status_change', {
+      driverId: interest.driver_id,
+      interestId,
+      fromStatus: interest.status,
+      toStatus: newStatus
+    });
 
     return {
       success: true,

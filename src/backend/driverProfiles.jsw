@@ -42,20 +42,30 @@ const CONFIG = {
     DORMANT: 'dormant'
   },
   
-  // Completeness scoring weights
+  // Completeness scoring weights (Spec: Base 20%, Exp 30%, Docs 30%, Prefs 20%)
   COMPLETENESS_WEIGHTS: {
+    // Base Info (20%)
     display_name: 10,
-    email: 10,
+    email: 5,
     phone: 5,
-    home_zip: 15,
-    preferred_operation_type: 10,
-    min_cpm: 10,
+    
+    // Experience (30%)
     years_experience: 10,
     cdl_class: 10,
-    endorsements: 5,
-    clean_mvr: 5,
-    accidents_last_3_years: 5,
-    violations_last_3_years: 5
+    endorsements: 4,
+    clean_mvr: 2,
+    accidents_last_3_years: 2,
+    violations_last_3_years: 2,
+
+    // Documents (30%)
+    cdl_images: 20,
+    med_card_image: 10,
+
+    // Preferences (20%)
+    home_zip: 5,
+    preferred_operation_type: 5,
+    min_cpm: 5,
+    fleet_size_preference: 5
   }
 };
 
@@ -958,16 +968,19 @@ export async function getDriverActivityStats() {
 /**
  * Calculate profile completeness score (0-100)
  */
+/**
+ * Calculate profile completeness score (0-100)
+ */
 function calculateCompleteness(profile) {
   let score = 0;
   const weights = CONFIG.COMPLETENESS_WEIGHTS;
   
+  // Base Info (20%)
   if (profile.display_name && profile.display_name.trim().length > 0) score += weights.display_name;
   if (profile.email && profile.email.includes('@')) score += weights.email;
   if (profile.phone && profile.phone.length >= 10) score += weights.phone;
-  if (profile.home_zip && profile.home_zip.length >= 5) score += weights.home_zip;
-  if (profile.preferred_operation_type && profile.preferred_operation_type !== 'no_preference') score += weights.preferred_operation_type;
-  if (profile.min_cpm && profile.min_cpm > 0) score += weights.min_cpm;
+  
+  // Experience (30%)
   if (profile.years_experience !== null && profile.years_experience >= 0) score += weights.years_experience;
   if (profile.cdl_class && profile.cdl_class.length > 0) score += weights.cdl_class;
   if (profile.endorsements && profile.endorsements.length > 0) score += weights.endorsements;
@@ -975,13 +988,22 @@ function calculateCompleteness(profile) {
   if (profile.accidents_last_3_years !== null) score += weights.accidents_last_3_years;
   if (profile.violations_last_3_years !== null) score += weights.violations_last_3_years;
 
-  // Bonus points for documents (Max 100 total still applies)
-  if (profile.cdl_front_image && profile.cdl_back_image) score += 10;
-  if (profile.med_card_image) score += 5;
+  // Documents (30%)
+  if (profile.cdl_front_image && profile.cdl_back_image) score += weights.cdl_images;
+  if (profile.med_card_image) score += weights.med_card_image;
   
+  // Preferences (20%)
+  if (profile.home_zip && profile.home_zip.length >= 5) score += weights.home_zip;
+  if (profile.preferred_operation_type && profile.preferred_operation_type !== 'no_preference') score += weights.preferred_operation_type;
+  if (profile.min_cpm && profile.min_cpm > 0) score += weights.min_cpm;
+  if (profile.fleet_size_preference && profile.fleet_size_preference !== 'no_preference') score += weights.fleet_size_preference;
+
   return Math.min(100, score);
 }
 
+/**
+ * Enrich profile with computed fields for frontend
+ */
 /**
  * Enrich profile with computed fields for frontend
  */
@@ -989,24 +1011,136 @@ function enrichProfile(profile) {
   if (!profile) return null;
   
   const completeness = calculateCompleteness(profile);
+  const weights = CONFIG.COMPLETENESS_WEIGHTS;
   
-  // Determine what's missing for completeness nudges
-  const missingFields = [];
+  // Create detailed suggestions list with point values
+  const suggestions = [];
   
-  if (!profile.display_name) missingFields.push('name');
-  if (!profile.home_zip) missingFields.push('home ZIP');
-  if (!profile.years_experience) missingFields.push('experience');
-  if (!profile.cdl_class) missingFields.push('CDL class');
-  if (!profile.cdl_front_image || !profile.cdl_back_image) missingFields.push('CDL photos');
-  if (!profile.med_card_image) missingFields.push('Medical Card');
+  // Base Info
+  if (!profile.display_name) suggestions.push({ label: 'Add your name', points: weights.display_name, action: 'edit_profile' });
+  if (!profile.phone) suggestions.push({ label: 'Add phone number', points: weights.phone, action: 'edit_profile' });
+  
+  // Experience
+  if (profile.years_experience === null) suggestions.push({ label: 'Set years of experience', points: weights.years_experience, action: 'edit_experience' });
+  if (!profile.cdl_class) suggestions.push({ label: 'Set CDL Class', points: weights.cdl_class, action: 'edit_experience' });
+  
+  // Documents
+  if (!profile.cdl_front_image || !profile.cdl_back_image) {
+    suggestions.push({ label: 'Upload CDL Photos', points: weights.cdl_images, action: 'upload_documents' });
+  }
+  if (!profile.med_card_image) {
+    suggestions.push({ label: 'Upload Medical Card', points: weights.med_card_image, action: 'upload_documents' });
+  }
+  
+  // Preferences
+  if (!profile.home_zip) suggestions.push({ label: 'Set Home ZIP', points: weights.home_zip, action: 'edit_preferences' });
+  if (!profile.min_cpm) suggestions.push({ label: 'Set Pay Expectations', points: weights.min_cpm, action: 'edit_preferences' });
+  
+  // Backward compatibility for existing frontend code that uses missing_fields array of strings
+  const missingFields = suggestions.map(s => s.label);
   
   return {
     ...profile,
     profile_completeness_score: completeness,
     missing_fields: missingFields,
+    suggestions: suggestions,
     is_complete: completeness >= 80,
     can_be_discovered: profile.is_discoverable && completeness >= 50
   };
+}
+
+// ============================================================================
+// PROFILE INSIGHTS
+// ============================================================================
+
+/**
+ * Get list of carriers who viewed the driver's profile
+ * Used for "Who's Viewed You" dashboard widget
+ */
+export async function getDriverProfileViews(limit = 10) {
+  try {
+    const currentUser = await wixUsersBackend.currentUser;
+    
+    if (!currentUser.loggedIn) {
+      return { success: false, error: 'User not logged in', views: [] };
+    }
+    
+    // Get driver profile first
+    const driverProfile = await getProfileByUserId(currentUser.id);
+    if (!driverProfile) {
+      return { success: false, error: 'Driver profile not found', views: [] };
+    }
+    
+    console.log(`👀 Getting profile views for driver ${driverProfile._id}`);
+
+    // Query views
+    const viewsResult = await dataAccess.queryRecords('carrierDriverViews', {
+      filters: {
+        driver_id: driverProfile._id
+      },
+      sort: [{ field: '_createdDate', direction: 'desc' }], // Wix field
+      limit: limit,
+      suppressAuth: true
+    });
+
+    if (!viewsResult.success || viewsResult.items.length === 0) {
+      return { success: true, views: [], totalCount: 0 };
+    }
+    
+    const views = viewsResult.items;
+    
+    // Extract unique carrier DOTs to fetch company details
+    const uniqueDots = [...new Set(views.map(v => v.carrier_dot))];
+    
+    // Fetch carrier details
+    // Note: We can't do a simple "IN" query easily with dataAccess if it doesn't support it strictly
+    // So we'll fetch them individually or use a filter query if the list is small
+    
+    let carriers = [];
+    if (uniqueDots.length > 0) {
+       // Only fetch what we need (Company Name, Location)
+       // Using a promise.all for specific DOTs or a larger query if possible
+       // For now, let's assume we can query by DOT
+       // If uniqueDots is large, we might want to optimize this. For limit=10, it's fine.
+       
+       const carrierPromises = uniqueDots.map(dot => 
+         dataAccess.queryRecords('carriers', {
+           filters: { dot_number: parseInt(dot) }, // Ensure number type for DOT if required
+           limit: 1,
+           suppressAuth: true
+         })
+       );
+       
+       const carrierResults = await Promise.all(carrierPromises);
+       carriers = carrierResults
+         .filter(r => r.success && r.items.length > 0)
+         .map(r => r.items[0]);
+    }
+    
+    // Map details back to views
+    const enrichedViews = views.map(view => {
+      const carrier = carriers.find(c => String(c.dot_number) === String(view.carrier_dot));
+      return {
+        view_id: view._id,
+        carrier_dot: view.carrier_dot,
+        carrier_name: carrier ? carrier.company_name : 'Unknown Carrier',
+        carrier_city: carrier ? carrier.city : '',
+        carrier_state: carrier ? carrier.state : '',
+        viewed_at: view._createdDate || view['Created Time'], // Handle both Wix/Airtable
+        view_type: view.view_type || 'full_profile'
+      };
+    });
+
+    return {
+      success: true,
+      views: enrichedViews,
+      totalCount: viewsResult.totalCount || enrichedViews.length
+    };
+
+  } catch (error) {
+    console.error('❌ Error getting profile views:', error);
+    return { success: false, error: error.message, views: [] };
+  }
 }
 
 // ============================================================================

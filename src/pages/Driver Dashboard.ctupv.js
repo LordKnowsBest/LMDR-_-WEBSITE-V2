@@ -4,6 +4,7 @@
 // ============================================================================
 
 import { getDriverApplications, withdrawApplication } from 'backend/applicationService';
+import { getOrCreateDriverProfile, getDriverProfileViews } from 'backend/driverProfiles';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
@@ -187,6 +188,10 @@ async function handleHtmlMessage(msg) {
                 wixLocation.to(CONFIG.matchingPageUrl);
                 break;
 
+            case 'navigateToProfile':
+                wixLocation.to(CONFIG.matchingPageUrl);
+                break;
+
             case 'withdrawApplication':
                 await handleWithdrawApplication(msg.data);
                 break;
@@ -249,18 +254,25 @@ async function loadDashboardData(isBackground = false) {
     console.log('📊 Loading driver applications...');
 
     try {
-        const result = await getDriverApplications();
+        const [appResult, profileResult, viewsResult] = await Promise.all([
+            getDriverApplications(),
+            getOrCreateDriverProfile(),
+            getDriverProfileViews(5) // Get top 5 recent views
+        ]);
 
-        console.log('📦 Applications loaded:', {
-            success: result.success,
-            count: result.applications?.length || 0
+        console.log('📦 Dashboard Data Loaded:', {
+            apps: appResult.applications?.length,
+            profile: profileResult.success,
+            views: viewsResult.views?.length
         });
 
-        if (result.success) {
+        if (appResult.success) {
             sendToHtml('dashboardData', {
-                applications: result.applications || [],
-                totalCount: result.totalCount || 0,
-                memberId: wixUsers.currentUser.id || null
+                applications: appResult.applications || [],
+                totalCount: appResult.totalCount || 0,
+                memberId: wixUsers.currentUser.id || null,
+                profile: profileResult.success ? profileResult.profile : null,
+                profileViews: viewsResult.success ? viewsResult.views : []
             });
         } else {
             console.error('❌ Failed to load applications:', result.error);

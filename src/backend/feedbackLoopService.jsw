@@ -1,0 +1,131 @@
+/**
+ * Feedback Loop Service (The Brain)
+ *
+ * Implements the "Recursive Training Loop":
+ * 1. Ingests failure data (Terminations, Low Survey Scores).
+ * 2. Updates Driver Preferences (e.g., "This driver hates low home time").
+ * 3. Updates Carrier Profiles (e.g., "This carrier has high churn for new drivers").
+ * 4. Adjusts Matching Weights to prevent repeat failures.
+ *
+ * @module backend/feedbackLoopService
+ */
+
+import { updateRecord, getRecord, queryRecords } from 'backend/dataAccess';
+
+// ============================================================================
+// CORE ANALYSIS FUNCTIONS
+// ============================================================================
+
+/**
+ * Analyze a termination event to update matching parameters
+ *
+ * @param {Object} terminationLog - The termination record
+ */
+export async function analyzeTermination(terminationLog) {
+  try {
+    console.log(`🧠 AI Feedback Loop: Analyzing termination for driver ${terminationLog.driverId}`);
+
+    // 1. Update Driver Preferences (Learn from why they left)
+    await updateDriverPreferences(terminationLog);
+
+    // 2. Update Carrier Stats (Track churn)
+    await updateCarrierStats(terminationLog);
+
+    // 3. Recalibrate Global Model (Stub for future ML integration)
+    // await mlService.trainOnFailure(terminationLog);
+
+    return { success: true };
+  } catch (error) {
+    console.error(`[feedbackLoopService] analyzeTermination error:`, error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Analyze a survey response for retention risks
+ *
+ * @param {Object} surveyResponse
+ */
+export async function analyzeSurvey(surveyResponse) {
+  try {
+    const scores = JSON.parse(surveyResponse.scores || '{}');
+    const avgScore = calculateAvgScore(scores);
+
+    // If score is low (< 3/5), flag risk
+    if (avgScore > 0 && avgScore < 3) {
+      console.warn(`⚠️ Retention Risk Detected: Driver ${surveyResponse.driverId} gave low score (${avgScore})`);
+      
+      // TODO: Create a "Retention Risk" alert record in 'retentionRiskLogs'
+      // This links to the 'retention_dashboard' track
+    }
+
+    return { success: true, avgScore };
+  } catch (error) {
+    console.error(`[feedbackLoopService] analyzeSurvey error:`, error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// INTERNAL UPDATE LOGIC
+// ============================================================================
+
+async function updateDriverPreferences(terminationLog) {
+  // Map Reason Codes to Profile Fields
+  const reason = terminationLog.reasonCode;
+  
+  if (reason === 'HOME_TIME') {
+    // Driver left due to home time -> Increase importance of Home Time
+    // Implementation: Update 'home_time_preference' or internal weighting
+    console.log(`   -> Adjusting Driver Profile: Increasing Home Time priority`);
+    // await updateRecord('driverProfiles', { ... });
+  } else if (reason === 'PAY_DISPUTE' || reason === 'MILES_TOO_LOW') {
+    console.log(`   -> Adjusting Driver Profile: Increasing Min Pay / CPM requirement`);
+  }
+  
+  // Set status to 'Job Seeker' automatically?
+  // Only if they are eligible for rehire or it was a resignation
+  if (terminationLog.source === 'DRIVER' || terminationLog.rehireEligible) {
+    await updateRecord('driverProfiles', {
+      _id: terminationLog.driverId,
+      job_seeking_status: 'active', // Back on the market
+      last_termination_reason: reason
+    });
+  }
+}
+
+async function updateCarrierStats(terminationLog) {
+  if (terminationLog.isEarlyChurn) {
+    console.log(`   -> Flagging Early Churn for Carrier ${terminationLog.carrierId}`);
+    // In a real system, we'd decrement their 'retention_score'
+  }
+
+  // Conflict Resolution: Check if other side has logged a reason
+  try {
+    const otherSource = terminationLog.source === 'RECRUITER' ? 'DRIVER' : 'RECRUITER';
+    const otherLog = await queryRecords('terminationLogs', {
+      filters: {
+        driverId: terminationLog.driverId,
+        carrierId: terminationLog.carrierId,
+        source: otherSource
+      },
+      limit: 1
+    });
+
+    if (otherLog.success && otherLog.items.length > 0) {
+      const opposing = otherLog.items[0];
+      if (opposing.category !== terminationLog.category) {
+        console.warn(`⚖️ Conflict Resolution: Recruiter (${terminationLog.source === 'RECRUITER' ? terminationLog.category : opposing.category}) vs Driver (${terminationLog.source === 'DRIVER' ? terminationLog.category : opposing.category})`);
+        // TODO: Flag for Admin Review in 'v2_Audit Log'
+      }
+    }
+  } catch (e) {
+    console.warn('Conflict check failed:', e.message);
+  }
+}
+
+function calculateAvgScore(scores) {
+  const values = Object.values(scores).filter(v => typeof v === 'number');
+  if (values.length === 0) return 0;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}

@@ -875,6 +875,75 @@ const generateDriverMatchRationale = (scores, driver, preferences) => {
   };
 };
 
+// ============================================================================
+// CARRIER FEEDBACK WEIGHT ADJUSTMENT (Phase 2 - Call Outcomes)
+// ============================================================================
+
+/**
+ * Fetch carrier-specific feedback weights from CallFeedback table
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Object|null} { positive_weight, negative_weight } or null if no feedback data
+ */
+const getCarrierFeedbackWeights = async (carrierDot) => {
+  try {
+    const { usesAirtable, getAirtableTableName } = require('backend/config');
+    const airtable = require('backend/airtableClient');
+
+    if (usesAirtable('callFeedback')) {
+      const tableName = getAirtableTableName('callFeedback');
+      const result = await airtable.queryRecords(tableName, {
+        filterByFormula: `{Carrier DOT} = '${carrierDot}'`,
+        maxRecords: 1
+      });
+      const records = result.records || [];
+      return records.length > 0 ? records[0] : null;
+    }
+    return null;
+  } catch (err) {
+    console.warn('getCarrierFeedbackWeights failed:', err.message);
+    return null;
+  }
+};
+
+/**
+ * Apply feedback-based adjustments to scoring weights, capped at ±20%
+ * @param {Object} baseWeights - Original scoring weights
+ * @param {Object} feedbackWeights - { positive_weight, negative_weight } from CallFeedback
+ * @returns {Object} Adjusted weights (same structure as baseWeights)
+ */
+const applyFeedbackAdjustments = (baseWeights, feedbackWeights) => {
+  if (!feedbackWeights) return baseWeights;
+
+  const positiveAdj = Math.min(0.20, feedbackWeights.positive_weight || 0);
+  const negativeAdj = Math.min(0.20, feedbackWeights.negative_weight || 0);
+
+  // Net adjustment factor: positive boosts engagement + qualifications, negative reduces salary fit
+  const adjusted = { ...baseWeights };
+
+  // Boost qualifications weight when positive outcomes correlate
+  if (adjusted.weight_qualifications !== undefined) {
+    adjusted.weight_qualifications = Math.round(
+      adjusted.weight_qualifications * (1 + positiveAdj)
+    );
+  }
+
+  // Reduce salary_fit weight when negative outcomes suggest pay mismatch isn't the issue
+  if (adjusted.weight_salary_fit !== undefined) {
+    adjusted.weight_salary_fit = Math.round(
+      adjusted.weight_salary_fit * (1 - negativeAdj)
+    );
+  }
+
+  // Boost engagement weight to reward drivers who are actively responding
+  if (adjusted.weight_engagement !== undefined) {
+    adjusted.weight_engagement = Math.round(
+      adjusted.weight_engagement * (1 + positiveAdj * 0.5)
+    );
+  }
+
+  return adjusted;
+};
+
 module.exports = {
   DEFAULT_WEIGHTS,
   FILTER_BOOST_MULTIPLIERS,
@@ -887,5 +956,7 @@ module.exports = {
   scoreSalaryFit,
   scoreEngagement,
   calculateDriverMatchScore,
-  generateDriverMatchRationale
+  generateDriverMatchRationale,
+  getCarrierFeedbackWeights,
+  applyFeedbackAdjustments
 };

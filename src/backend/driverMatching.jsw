@@ -14,7 +14,7 @@ import wixData from 'wix-data';
 import { currentUser } from 'wix-users-backend';
 // import { getSubscription, checkViewQuota, recordProfileView } from 'backend/dummySub.jsw';
 import { getSubscription, checkViewQuota, recordProfileView } from 'backend/subscriptionService';
-import { calculateDriverMatchScore, generateDriverMatchRationale } from 'backend/driverScoring';
+import { calculateDriverMatchScore, generateDriverMatchRationale, getCarrierFeedbackWeights, applyFeedbackAdjustments } from 'backend/driverScoring';
 import { startTrace, endTrace, log, logDatabase } from 'backend/observabilityService';
 import { withRetry } from 'backend/utils/retryUtils';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
@@ -30,6 +30,8 @@ async function getGamificationService() {
 }
 
 // Match notifications - lazy-loaded to avoid circular dependencies
+import { notifyDriverProfileViewedNonBlocking } from 'backend/matchNotifications';
+
 async function getMatchNotifications() {
   return await import('backend/matchNotifications');
 }
@@ -532,8 +534,19 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
       let scoringFailed = false;
 
       try {
+        // Fetch and apply carrier feedback weight adjustments (non-blocking fallback)
+        let feedbackAdjustedWeights = null;
+        try {
+          const feedbackWeights = await getCarrierFeedbackWeights(carrierDOT);
+          if (feedbackWeights) {
+            feedbackAdjustedWeights = applyFeedbackAdjustments(scoringPrefs, feedbackWeights);
+          }
+        } catch (fbErr) {
+          // Non-critical: feedback weights are optional
+        }
+
         // Pass filters as 4th parameter for dynamic weight boosting
-        const scoreResult = calculateDriverMatchScore(driver, scoringPrefs, null, filters);
+        const scoreResult = calculateDriverMatchScore(driver, feedbackAdjustedWeights || scoringPrefs, null, filters);
         score = scoreResult.overallScore || scoreResult.totalScore || 0;
 
         // generateDriverMatchRationale returns {summary, points, concerns}
@@ -798,6 +811,34 @@ export async function getDriverProfile(carrierDot, driverId, options = {}) {
 
     // Record profile view for quota tracking
     const viewResult = await recordProfileView(carrierDot, driverId, { userId });
+
+    // NOTIFICATION: Notify driver they were viewed (non-blocking)
+    notifyDriverProfileViewedNonBlocking(driverId, { 
+      carrierDot, 
+      carrierName: subscription.company_name || 'A Carrier' 
+    });
+
+    return {
+      success: true,
+      driver: maskPII(driver), // Always mask, full unlock happens via contact/application
+      viewId: viewResult.viewId
+    };
+
+  } catch (err) {
+    console.error('[driverMatching] getDriverProfile error:', err.message);
+    return {
+      success: false,
+      error: 'Failed to retrieve driver profile: ' + err.message
+    };
+  }
+}
+
+/**
+ * DEPRECATED: Use notifyDriverProfileViewedNonBlocking from backend/matchNotifications
+ */
+function notifyDriverProfileViewedNonBlocking_DEPRECATED(driverId, carrierInfo) {
+  // Kept for reference but implementation moved to matchNotifications.jsw
+}
 
     // Determine if quota was used (already viewed = no quota used)
     const quotaUsed = viewResult && !viewResult.alreadyViewed;
