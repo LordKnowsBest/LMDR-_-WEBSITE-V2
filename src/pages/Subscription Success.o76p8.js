@@ -77,93 +77,87 @@ function determinePlanType(urlPlan, sessionData) {
 }
 
 /**
+ * Build the data payload to send to the HTML component
+ */
+function buildSuccessPayload(sessionId, planType, sessionData) {
+  return {
+    type: 'subscriptionSuccessData',
+    data: {
+      sessionId: sessionId,
+      plan: planType,
+      amountPaid: sessionData?.amountTotal || null,
+      customerEmail: sessionData?.customerEmail || null,
+      companyName: sessionData?.metadata?.company_name || null
+    }
+  };
+}
+
+/**
  * Initialize the subscription success HTML component handler
- * Handles messages from Subscription_Success.html
+ * Broadcasts to ALL HTML components since we can't identify which is which
  */
 function initSubscriptionSuccessHandler(sessionId, planType, sessionData) {
-  // Try multiple possible HTML component IDs
   const possibleIds = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlComponent', '#subscriptionHtml'];
-  let htmlComponent = null;
+  const htmlComponents = [];
 
   for (const id of possibleIds) {
     try {
       const component = $w(id);
       if (component && typeof component.onMessage === 'function') {
-        htmlComponent = component;
+        htmlComponents.push({ id, component });
         console.log(`Subscription success handler attached to ${id}`);
-        break;
       }
     } catch (e) {
       // Component doesn't exist, try next
     }
   }
 
-  if (!htmlComponent) {
+  if (htmlComponents.length === 0) {
     console.log('No HTML component found for subscription success page');
     return;
   }
 
-  // Listen for messages from the HTML component
-  htmlComponent.onMessage(async (event) => {
-    const msg = event.data;
-    if (!msg || !msg.type) return;
+  const payload = buildSuccessPayload(sessionId, planType, sessionData);
 
-    console.log('Subscription success page received message:', msg.type);
+  // Attach message handler and send data to ALL HTML components
+  for (const { id, component } of htmlComponents) {
+    component.onMessage(async (event) => {
+      const msg = event.data;
+      if (!msg || !msg.type) return;
 
-    // Handle subscription success notification from HTML
-    if (msg.type === 'subscriptionSuccess') {
-      console.log('Subscription confirmed:', msg.data);
+      console.log(`Subscription success [${id}] received message:`, msg.type);
 
-      // Track successful subscription
-      try {
-        if (typeof wixWindow !== 'undefined' && wixWindow.trackEvent) {
-          wixWindow.trackEvent('SubscriptionCompleted', {
-            sessionId: sessionId,
-            plan: planType,
-            amount: sessionData?.amountTotal
-          });
+      if (msg.type === 'subscriptionSuccess') {
+        console.log('Subscription confirmed:', msg.data);
+        try {
+          if (typeof wixWindow !== 'undefined' && wixWindow.trackEvent) {
+            wixWindow.trackEvent('SubscriptionCompleted', {
+              sessionId: sessionId,
+              plan: planType,
+              amount: sessionData?.amountTotal
+            });
+          }
+        } catch (e) {
+          console.log('Analytics tracking not available');
         }
-      } catch (e) {
-        console.log('Analytics tracking not available');
       }
-    }
 
-    // Handle request for session data
-    if (msg.type === 'getSubscriptionSuccessData') {
-      htmlComponent.postMessage({
-        type: 'subscriptionSuccessData',
-        data: {
-          sessionId: sessionId,
-          plan: planType,
-          amountPaid: sessionData?.amountTotal || null,
-          customerEmail: sessionData?.customerEmail || null,
-          companyName: sessionData?.metadata?.company_name || null
-        }
-      });
-    }
+      if (msg.type === 'getSubscriptionSuccessData') {
+        component.postMessage(payload);
+      }
 
-    // Handle redirect to dashboard
-    if (msg.type === 'redirectToDashboard') {
-      wixLocation.to('/recruiter-console');
-    }
+      if (msg.type === 'redirectToDashboard') {
+        wixLocation.to('/recruiter-console');
+      }
 
-    // Handle redirect to driver search
-    if (msg.type === 'redirectToDriverSearch') {
-      wixLocation.to('/recruiter-driver-search');
-    }
-  });
-
-  // Send initial data to HTML component after a short delay
-  setTimeout(() => {
-    htmlComponent.postMessage({
-      type: 'subscriptionSuccessData',
-      data: {
-        sessionId: sessionId,
-        plan: planType,
-        amountPaid: sessionData?.amountTotal || null,
-        customerEmail: sessionData?.customerEmail || null,
-        companyName: sessionData?.metadata?.company_name || null
+      if (msg.type === 'redirectToDriverSearch') {
+        wixLocation.to('/recruiter-driver-search');
       }
     });
-  }, 500);
+
+    // Send initial data to each component
+    setTimeout(() => {
+      component.postMessage(payload);
+    }, 500);
+  }
 }
