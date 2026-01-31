@@ -313,7 +313,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./tracks/carrier_compliance_20260120/](./tracks/carrier_compliance_20260120/)*
 *Depends on: carrier_conversion_20260103*
 *Priority: Critical*
-*Status: Implementation Complete — Manual QA Pending*
+*Status: Implementation Complete — Page Code Bridges + Manual QA Pending*
 *Goal: DOT compliance management - Compliance Calendar, Document Vault, Qualification File Tracker, CSA Score Monitor, Incident Reporting.*
 *Business Impact: Avoid $10k+ DOT violations.*
 *Completed:*
@@ -324,7 +324,13 @@ This file tracks all major tracks for the project. Each track has its own detail
 - *incidentService.jsw (Phase 5 - DOT reportability, investigation workflow, statistics)*
 - *Frontend: CARRIER_COMPLIANCE_CALENDAR.html, CARRIER_DOCUMENT_VAULT.html, CARRIER_DQ_TRACKER.html, CARRIER_CSA_MONITOR.html, CARRIER_INCIDENT_REPORTING.html*
 - *Automated tests: All 5 phase test suites passing*
-*Remaining: Manual integration testing across all 5 phases, quality gate sign-off*
+*Integration Fixes (2026-01-30):*
+- *All 5 compliance HTML files: Added 5-second demo-data fallback timeouts (components render demo data if no page code responds)*
+- *CARRIER_DOCUMENT_VAULT.html: Defined missing `filterCategory()` function with explicit event parameter*
+- *CARRIER_DQ_TRACKER.html: Defined missing `exportAll()` function (CSV export)*
+- *Trucking Companies.html: Fixed `event.data.success` → `event.data.data.success` (wrong nesting depth)*
+- *CARRIER_WEIGHT_PREFERENCES.html: Added 15-second save timeout fallback*
+*Remaining: Page code bridges for 5 compliance HTML iframes (no Wix pages exist yet), manual integration testing*
 
 ### [ ] Track: Carrier Communication
 *Link: [./tracks/carrier_communication_20260120/](./tracks/carrier_communication_20260120/)*
