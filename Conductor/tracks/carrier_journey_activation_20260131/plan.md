@@ -57,11 +57,12 @@
 *Goal: Every carrier page resolves identity consistently, no hardcoded fallbacks*
 
 ### 2.1 Carrier Identity Service
-- [ ] Create `carrierIdentityService.jsw` with `getCarrierIdentity(memberId)`:
-  - Query RecruiterCarriers by member ID
-  - Return `{ dotNumber, mcNumber, companyName, plan, fleetSize, onboardingComplete }`
-  - Handle missing profile gracefully (return `{ needsOnboarding: true }`)
-- [ ] Add to config.jsw routing (RecruiterCarriers already routes to Airtable)
+- [x] Create `getCarrierIdentity()` in recruiter_service.jsw (wraps getOrCreateRecruiterProfile)
+  - Uses dual-source routing (Airtable/Wix) for recruiterCarriers lookup
+  - Returns `{ dotNumber, companyName, city, state, fleetSize, needsOnboarding }`
+  - Handle missing profile gracefully (returns `{ needsOnboarding: true }`)
+- [x] Create `getCarrierByDOT(dotNumber)` in recruiter_service.jsw
+  - Uses dual-source routing for carriers collection lookup
 - [ ] Write basic tests
 
 ### 2.2 Refactor Recruiter Console Page Code
@@ -70,10 +71,11 @@
 - [ ] Handle `needsOnboarding` state: redirect to `/carrier-welcome`
 
 ### 2.3 Refactor Driver Search Page Code
-- [ ] Remove `DEV_MODE_CARRIER_DOT = '123456'` hardcoded fallback
-- [ ] Use `getCarrierIdentity()` for carrier lookup
-- [ ] Handle missing DOT: show message + link to intake questionnaire
-- [ ] Pass real DOT# to search queries
+- [x] Remove `DEV_MODE_CARRIER_DOT = '123456'` hardcoded fallback
+- [x] Remove direct `wixData.query('recruiterCarriers')` (was bypassing Airtable routing)
+- [x] Use `getCarrierIdentity()` for carrier lookup (dual-source via recruiter_service.jsw)
+- [x] Handle missing DOT: sends `noCarrierAssigned` message to HTML component
+- [x] Pass real DOT# to search queries
 
 ### Phase 2 Quality Gate
 - [ ] Dashboard and Driver Search use `getCarrierIdentity()`

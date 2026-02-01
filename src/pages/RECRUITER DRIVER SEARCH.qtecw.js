@@ -12,19 +12,16 @@
  * @see conductor/tracks/reverse_matching_20251225/IMPLEMENTATION_PLAN.md
  */
 
-import wixData from 'wix-data';
 import wixUsers from 'wix-users';
+import wixLocation from 'wix-location';
 import { findMatchingDrivers, getDriverProfile } from 'backend/driverMatching';
 import { saveDriverToPipeline, sendMessageToDriver } from 'backend/driverOutreach';
 import { getUsageStats, getSubscription } from 'backend/subscriptionService';
 import { getWeightPreferences, saveWeightPreferences } from 'backend/carrierPreferences';
+import { getCarrierIdentity } from 'backend/recruiter_service';
 
 // Cache the carrier DOT for the current recruiter session
 let currentCarrierDot = null;
-
-// DEV MODE: Set to a test carrier DOT for development/testing
-// Set to null in production to require proper recruiter-carrier assignment
-const DEV_MODE_CARRIER_DOT = '123456'; // TODO: Remove or set to null for production
 
 $w.onReady(async function () {
   console.log('[VELO] RecruiterDriverSearch page ready');
@@ -37,8 +34,8 @@ $w.onReady(async function () {
     return;
   }
 
-  // Get the carrier DOT for this recruiter
-  await loadRecruiterCarrier(user.id);
+  // Get the carrier identity using unified lookup (via Airtable-routed recruiterCarriers)
+  await loadCarrierIdentity();
 
   // Initialize the search HTML component handlers
   initSearchHandlers();
@@ -48,55 +45,47 @@ $w.onReady(async function () {
 });
 
 /**
- * Load the carrier associated with this recruiter
+ * Load carrier identity using the unified service
+ * Uses dual-source helpers (Airtable/Wix) from recruiter_service.jsw
  */
-async function loadRecruiterCarrier(userId) {
+async function loadCarrierIdentity() {
   try {
-    console.log('[VELO] Looking up carrier for recruiter_id:', userId);
+    console.log('[VELO] Loading carrier identity...');
+    const identity = await getCarrierIdentity();
 
-    // First try with is_active: true
-    const activeResult = await wixData.query('recruiterCarriers')
-      .eq('recruiter_id', userId)
-      .eq('is_active', true)
-      .limit(1)
-      .find({ suppressAuth: true });
-
-    if (activeResult.items.length > 0) {
-      currentCarrierDot = activeResult.items[0].carrier_dot;
-      console.log('[VELO] Loaded active carrier DOT:', currentCarrierDot);
+    if (!identity.success) {
+      console.warn('[VELO] Carrier identity lookup failed:', identity.error);
+      notifyHtmlNoCarrier('Unable to load your account. Please try again.');
       return;
     }
 
-    // If no active record, check if there are ANY records (possibly inactive)
-    const anyResult = await wixData.query('recruiterCarriers')
-      .eq('recruiter_id', userId)
-      .limit(5)
-      .find({ suppressAuth: true });
-
-    if (anyResult.items.length > 0) {
-      // Found records but they're inactive - use first one anyway for dev
-      const record = anyResult.items[0];
-      currentCarrierDot = record.carrier_dot;
-      console.warn('[VELO] Found INACTIVE carrier record. carrier_dot:', currentCarrierDot, 'is_active:', record.is_active);
-      console.warn('[VELO] Record needs activation in Wix. Using it anyway for dev.');
+    if (identity.needsOnboarding) {
+      console.warn('[VELO] Carrier needs onboarding - no DOT assigned');
+      notifyHtmlNoCarrier('Please complete your fleet profile to start searching for drivers.');
       return;
     }
 
-    // No records at all - use dev fallback
-    if (DEV_MODE_CARRIER_DOT) {
-      currentCarrierDot = DEV_MODE_CARRIER_DOT;
-      console.warn('[VELO] No recruiterCarriers records found. DEV MODE: Using test carrier DOT:', currentCarrierDot);
-    } else {
-      console.warn('[VELO] No carrier assigned to this recruiter and no DEV_MODE fallback');
-    }
-
+    currentCarrierDot = identity.dotNumber;
+    console.log('[VELO] Carrier identity loaded. DOT:', currentCarrierDot, 'Company:', identity.companyName);
   } catch (err) {
-    console.error('[VELO] Failed to load recruiter carrier:', err);
-    if (DEV_MODE_CARRIER_DOT) {
-      currentCarrierDot = DEV_MODE_CARRIER_DOT;
-      console.warn('[VELO] DEV MODE: Fallback to test carrier DOT:', currentCarrierDot);
-    }
+    console.error('[VELO] Failed to load carrier identity:', err);
+    notifyHtmlNoCarrier('Error loading your account.');
   }
+}
+
+/**
+ * Notify HTML components that no carrier is assigned
+ */
+function notifyHtmlNoCarrier(message) {
+  const possibleIds = ['#html1', '#html2', '#html3', '#html4', '#html5', '#searchHtml'];
+  possibleIds.forEach(id => {
+    try {
+      const comp = $w(id);
+      if (comp && typeof comp.postMessage === 'function') {
+        comp.postMessage({ type: 'noCarrierAssigned', data: { message } });
+      }
+    } catch (e) { /* Component doesn't exist */ }
+  });
 }
 
 /**
