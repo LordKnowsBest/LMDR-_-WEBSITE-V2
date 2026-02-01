@@ -5,7 +5,7 @@
  * Each checker defines how to calculate progress for an achievement.
  */
 
-import { getAirtableTableName } from 'backend/config';
+import { getAirtableTableName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
 
 // =============================================================================
