@@ -98,6 +98,17 @@ Permissions are defined in `src/backend/permissions.json`. Current config allows
 
 ## File Organization Standards
 
+### Surface Branding (Enforced by Hook)
+
+**Non-driver surfaces use VelocityMatch branding. Driver surfaces keep LMDR.**
+
+| Surface | Brand | Logo Icon |
+|---------|-------|-----------|
+| `driver/` | LMDR | LM |
+| Everything else | VelocityMatch | VM |
+
+A PostToolUse hook (`enforce-surface-branding.ps1`) blocks any Write/Edit that introduces LMDR branding into non-driver HTML files.
+
 ### HTML Files
 
 **All HTML files are organized in `src/public/` subfolders by role:**
@@ -168,3 +179,4 @@ Supplementary docs are auto-injected by hooks when editing relevant files. They 
 | `wix-record-linking.md` | Editing record-linking services | Type mismatch gotcha, linking pattern |
 | `gamification-integration.md` | Editing gamification services | Integration hooks table, lazy-load pattern |
 | `pricing-and-tiers.md` | Editing Stripe/subscription files | Tiers, VelocityMatch pricing, Stripe IDs |
+| `surface-branding.md` | Editing non-driver HTML files | Brand-per-surface table, prohibited patterns |
