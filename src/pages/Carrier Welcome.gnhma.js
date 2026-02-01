@@ -74,7 +74,7 @@ function updateWelcomeElements(ctx) {
       } else if (ctx.memberName) {
         title.text = `Welcome, ${ctx.memberName}!`;
       } else {
-        title.text = 'Welcome to LMDR!';
+        title.text = 'Welcome to VelocityMatch!';
       }
     }
   } catch (e) { /* Element may not exist */ }
