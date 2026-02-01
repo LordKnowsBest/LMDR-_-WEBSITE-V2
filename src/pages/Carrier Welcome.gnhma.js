@@ -2,298 +2,194 @@
  * Carrier Welcome Page
  * Onboarding page for new carriers - personalized welcome, setup wizard, quick wins
  *
- * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
+ * Supports two entry paths:
+ * 1. Post-checkout: /carrier-welcome?plan=enterprise (or pro)
+ * 2. Post-intake: /carrier-welcome?dot=1234567
+ *
+ * Broadcasts carrier context to all HTML components via PostMessage.
  */
 
 import wixData from 'wix-data';
-import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
+import { currentMember } from 'wix-members-frontend';
 import { getCarrierByDOT } from 'backend/recruiter_service';
 
 $w.onReady(async function () {
-  const dotNumber = wixLocation.query.dot;
+  console.log('Carrier Welcome page initialized');
 
-  if (!dotNumber) {
-    // No DOT provided - show generic welcome
-    await loadGenericWelcome();
-    return;
+  const dotNumber = wixLocation.query.dot || null;
+  const plan = wixLocation.query.plan || null;
+
+  // Try to get logged-in member info
+  let member = null;
+  try {
+    member = await currentMember.getMember();
+  } catch (e) {
+    console.log('No logged-in member');
   }
 
-  await Promise.all([
-    loadCarrierWelcome(dotNumber),
-    loadOnboardingProgress(dotNumber),
-    loadQuickWins(dotNumber)
-  ]);
+  // Build carrier context from available data
+  const carrierContext = {
+    plan: plan || 'pro',
+    dotNumber: dotNumber || null,
+    memberName: member?.contactDetails?.firstName || null,
+    memberEmail: member?.loginEmail || null,
+    companyName: null,
+    city: null,
+    state: null,
+    fleetSize: null
+  };
 
-  // Set up HTML component message handlers
-  setupOnboardingHandlers();
+  // If we have a DOT number, load carrier details
+  if (dotNumber) {
+    try {
+      const carrier = await getCarrierByDOT(dotNumber);
+      if (carrier) {
+        carrierContext.companyName = carrier.legal_name || null;
+        carrierContext.city = carrier.city || null;
+        carrierContext.state = carrier.state || null;
+        carrierContext.fleetSize = carrier.fleet_size || null;
+      }
+    } catch (e) {
+      console.error('Failed to load carrier by DOT:', e);
+    }
+  }
+
+  // Update native Wix elements if they exist
+  updateWelcomeElements(carrierContext);
+
+  // Broadcast to all HTML components and set up handlers
+  broadcastToHtmlComponents(carrierContext);
 });
 
 /**
- * Load generic welcome for carriers without DOT
+ * Update native Wix elements on the page
  */
-async function loadGenericWelcome() {
+function updateWelcomeElements(ctx) {
   try {
     const title = $w('#welcomeTitle');
-    if (title) title.text = 'Welcome to LMDR!';
+    if (title) {
+      if (ctx.companyName) {
+        title.text = `Welcome, ${ctx.companyName}!`;
+      } else if (ctx.memberName) {
+        title.text = `Welcome, ${ctx.memberName}!`;
+      } else {
+        title.text = 'Welcome to LMDR!';
+      }
+    }
+  } catch (e) { /* Element may not exist */ }
 
+  try {
     const subtitle = $w('#welcomeSubtitle');
-    if (subtitle) subtitle.text = 'Start finding qualified drivers today';
-
-    // Hide carrier-specific elements
-    try {
-      const carrierLogo = $w('#carrierLogo');
-      if (carrierLogo && carrierLogo.hide) carrierLogo.hide();
-    } catch (e) {
-      // Element may not exist
+    if (subtitle) {
+      const planLabel = ctx.plan === 'enterprise' ? 'Enterprise' : 'Pro';
+      subtitle.text = `Your ${planLabel} subscription is active. Let's set up your account.`;
     }
+  } catch (e) { /* Element may not exist */ }
 
-    try {
-      const carrierDetails = $w('#carrierDetailsSection');
-      if (carrierDetails && carrierDetails.collapse) carrierDetails.collapse();
-    } catch (e) {
-      // Element may not exist
-    }
-
-  } catch (err) {
-    console.error('Failed to load generic welcome:', err);
-  }
-}
-
-/**
- * Load personalized carrier welcome
- * Elements: #welcomeTitle, #carrierLocation, #fleetSizeDisplay, #carrierLogo
- */
-async function loadCarrierWelcome(dotNumber) {
   try {
-    const carrier = await getCarrierByDOT(dotNumber);
-
-    if (!carrier) {
-      await loadGenericWelcome();
-      return;
+    const location = $w('#carrierLocation');
+    if (location && ctx.city && ctx.state) {
+      location.text = `${ctx.city}, ${ctx.state}`;
     }
+  } catch (e) { /* Element may not exist */ }
 
-    // Update welcome elements
-    try {
-      const title = $w('#welcomeTitle');
-      if (title) title.text = `Welcome, ${carrier.legal_name}!`;
-    } catch (e) {
-      // Element may not exist
-    }
-
-    try {
-      const location = $w('#carrierLocation');
-      if (location) location.text = `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, '');
-    } catch (e) {
-      // Element may not exist
-    }
-
-    try {
-      const fleetSize = $w('#fleetSizeDisplay');
-      if (fleetSize) fleetSize.text = `${carrier.fleet_size || 0} trucks`;
-    } catch (e) {
-      // Element may not exist
-    }
-
-    try {
-      const logo = $w('#carrierLogo');
-      if (logo && carrier.logo_url) {
-        logo.src = carrier.logo_url;
-        logo.show();
-      }
-    } catch (e) {
-      // Element may not exist
-    }
-
-  } catch (err) {
-    console.error('Failed to load carrier welcome:', err);
-    await loadGenericWelcome();
-  }
-}
-
-/**
- * Load onboarding progress for carrier
- * Elements: #progressBar, #progressText, #onboardingChecklist
- * Collection: CarrierOnboarding (if exists)
- */
-async function loadOnboardingProgress(dotNumber) {
   try {
-    const result = await wixData.query('CarrierOnboarding')
-      .eq('dot_number', dotNumber)
-      .find();
-
-    const progress = result.items[0] || {
-      profile_complete: false,
-      jobs_posted: 0,
-      branding_uploaded: false,
-      first_candidate_viewed: false,
-      payment_setup: false
-    };
-
-    // Calculate completion percentage
-    const steps = [
-      progress.profile_complete,
-      progress.jobs_posted > 0,
-      progress.branding_uploaded,
-      progress.payment_setup
-    ];
-    const completed = steps.filter(Boolean).length;
-    const percentage = Math.round((completed / steps.length) * 100);
-
-    // Update progress bar
-    try {
-      const progressBar = $w('#progressBar');
-      if (progressBar && progressBar.value !== undefined) {
-        progressBar.value = percentage;
-      }
-    } catch (e) {
-      // Element may not exist
+    const fleetSize = $w('#fleetSizeDisplay');
+    if (fleetSize && ctx.fleetSize) {
+      fleetSize.text = `${ctx.fleetSize} trucks`;
     }
-
-    try {
-      const progressText = $w('#progressText');
-      if (progressText) progressText.text = `${percentage}% Complete`;
-    } catch (e) {
-      // Element may not exist
-    }
-
-    // Send to HTML checklist component
-    try {
-      const htmlChecklist = $w('#onboardingChecklist');
-      if (htmlChecklist && htmlChecklist.postMessage) {
-        htmlChecklist.postMessage({
-          type: 'onboardingProgress',
-          data: progress
-        });
-      }
-    } catch (e) {
-      // HTML component may not exist
-    }
-
-  } catch (err) {
-    // Collection may not exist yet - show default state
-    console.log('CarrierOnboarding collection not found');
-  }
+  } catch (e) { /* Element may not exist */ }
 }
 
 /**
- * Load quick wins data for carrier
- * Shows potential candidates and platform success metrics
+ * Broadcast carrier context to all HTML components and handle messages
  */
-async function loadQuickWins(dotNumber) {
-  try {
-    const [candidatesResult, statsResult] = await Promise.all([
-      wixData.query('DriverProfiles')
-        .eq('status', 'active')
-        .eq('is_discoverable', true)
-        .limit(100)
-        .find(),
-      wixData.query('DriverCarrierInterests')
-        .eq('status', 'hired')
-        .find({ limit: 500 })
-    ]);
+function broadcastToHtmlComponents(carrierContext) {
+  const possibleIds = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlComponent', '#onboardingChecklist', '#quickWinsHtml'];
+  const htmlComponents = [];
 
-    const quickWins = {
-      availableDrivers: candidatesResult.totalCount || 0,
-      avgTimeToHire: calculateAvgTimeToHire(statsResult.items),
-      successRate: calculateSuccessRate(statsResult.items)
-    };
-
-    // Update quick wins elements
+  for (const id of possibleIds) {
     try {
-      const driversCount = $w('#availableDriversCount');
-      if (driversCount) driversCount.text = quickWins.availableDrivers.toLocaleString();
-    } catch (e) {
-      // Element may not exist
-    }
-
-    try {
-      const timeToHire = $w('#avgTimeToHire');
-      if (timeToHire) timeToHire.text = `${quickWins.avgTimeToHire} days`;
-    } catch (e) {
-      // Element may not exist
-    }
-
-    // Send to HTML component
-    try {
-      const htmlQuickWins = $w('#quickWinsHtml');
-      if (htmlQuickWins && htmlQuickWins.postMessage) {
-        htmlQuickWins.postMessage({ type: 'quickWins', data: quickWins });
+      const component = $w(id);
+      if (component && typeof component.onMessage === 'function') {
+        htmlComponents.push({ id, component });
+        console.log(`Carrier welcome handler attached to ${id}`);
       }
     } catch (e) {
-      // HTML component may not exist
+      // Component doesn't exist
     }
-
-    // Also send to onboarding checklist
-    try {
-      const htmlChecklist = $w('#onboardingChecklist');
-      if (htmlChecklist && htmlChecklist.postMessage) {
-        htmlChecklist.postMessage({ type: 'quickWins', data: quickWins });
-      }
-    } catch (e) {
-      // HTML component may not exist
-    }
-
-  } catch (err) {
-    console.error('Failed to load quick wins:', err);
   }
-}
 
-/**
- * Calculate average time to hire from historical data
- */
-function calculateAvgTimeToHire(hires) {
-  const times = hires
-    .filter(h => h.applied_date && h._updatedDate)
-    .map(h => {
-      const start = new Date(h.applied_date);
-      const end = new Date(h._updatedDate);
-      return Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+  if (htmlComponents.length === 0) {
+    console.log('No HTML components found on carrier welcome page');
+    return;
+  }
+
+  const payload = {
+    type: 'carrierWelcomeData',
+    data: carrierContext
+  };
+
+  for (const { id, component } of htmlComponents) {
+    // Handle messages from HTML
+    component.onMessage(async (event) => {
+      const msg = event.data;
+      if (!msg || !msg.type) return;
+
+      console.log(`Carrier welcome [${id}] received:`, msg.type);
+
+      // Navigation messages
+      if (msg.type === 'navigateToIntake') {
+        const intakeUrl = carrierContext.dotNumber
+          ? `/trucking-companies?dot=${carrierContext.dotNumber}`
+          : '/trucking-companies';
+        wixLocation.to(intakeUrl);
+      }
+
+      if (msg.type === 'navigateToPreferences') {
+        wixLocation.to('/recruiter-console?tab=settings');
+      }
+
+      if (msg.type === 'navigateToDashboard') {
+        wixLocation.to('/recruiter-console');
+      }
+
+      if (msg.type === 'navigateToDriverSearch') {
+        wixLocation.to('/recruiter-driver-search');
+      }
+
+      // Legacy navigation handler
+      if (msg.type === 'navigateOnboarding') {
+        const step = msg.data?.step;
+        switch (step) {
+          case 'profile':
+            wixLocation.to('/recruiter-console?tab=profile');
+            break;
+          case 'branding':
+            wixLocation.to('/recruiter-console?tab=branding');
+            break;
+          case 'jobs':
+            wixLocation.to('/recruiter-console?tab=jobs');
+            break;
+          case 'payment':
+            wixLocation.to('/checkout');
+            break;
+          case 'intake':
+            wixLocation.to('/trucking-companies');
+            break;
+          case 'preferences':
+            wixLocation.to('/recruiter-console?tab=settings');
+            break;
+          default:
+            wixLocation.to('/recruiter-console');
+        }
+      }
     });
 
-  return times.length > 0
-    ? Math.round(times.reduce((a, b) => a + b, 0) / times.length)
-    : 14;
-}
-
-/**
- * Calculate success rate from historical data
- */
-function calculateSuccessRate(hires) {
-  // Placeholder - could calculate from actual data
-  return 87;
-}
-
-/**
- * Set up message handlers for onboarding HTML components
- */
-function setupOnboardingHandlers() {
-  try {
-    const htmlChecklist = $w('#onboardingChecklist');
-    if (htmlChecklist && htmlChecklist.onMessage) {
-      htmlChecklist.onMessage((event) => {
-        if (event.data.type === 'navigateOnboarding') {
-          const step = event.data.data?.step;
-          switch (step) {
-            case 'profile':
-              wixLocation.to('/recruiter-console?tab=profile');
-              break;
-            case 'branding':
-              wixLocation.to('/recruiter-console?tab=branding');
-              break;
-            case 'jobs':
-              wixLocation.to('/recruiter-console?tab=jobs');
-              break;
-            case 'payment':
-              wixLocation.to('/checkout');
-              break;
-            default:
-              wixLocation.to('/recruiter-console');
-          }
-        }
-      });
-    }
-  } catch (e) {
-    // HTML component may not exist
+    // Send initial data
+    setTimeout(() => {
+      component.postMessage(payload);
+    }, 500);
   }
 }

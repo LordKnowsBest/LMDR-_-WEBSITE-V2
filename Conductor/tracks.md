@@ -302,6 +302,15 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ## Carrier New Features
 
+### [/] Track: Carrier Journey Activation - Checkout to Daily Operations
+*Link: [./tracks/carrier_journey_activation_20260131/](./tracks/carrier_journey_activation_20260131/)*
+*Depends on: stripe_subscriptions_20260104, carrier_conversion_20260103, carrier_compliance_20260120*
+*Priority: Critical*
+*Status: In Progress*
+*Goal: Wire the complete carrier path from Stripe checkout through onboarding, dashboard, compliance suite, and daily operations. Fixes dead ends where paying carriers land on broken/empty pages.*
+*Business Impact: Every paying carrier ($149-$499/mo) hits this flow. Broken post-checkout = immediate churn.*
+*Phases: 5 (Post-Checkout Onboarding → Unified Carrier Identity → Compliance Page Bridges → Navigation System → Retention/Analytics Wiring)*
+
 ### [ ] Track: Carrier Fleet Dashboard
 *Link: [./tracks/carrier_fleet_dashboard_20260120/](./tracks/carrier_fleet_dashboard_20260120/)*
 *Depends on: carrier_conversion_20260103, carrier_utility_expansion_20260120*

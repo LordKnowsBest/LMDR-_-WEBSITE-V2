@@ -146,6 +146,13 @@ function initSubscriptionSuccessHandler(sessionId, planType, sessionData) {
         component.postMessage(payload);
       }
 
+      if (msg.type === 'redirectToSetup') {
+        const welcomeUrl = planType === 'enterprise'
+          ? '/carrier-welcome?plan=enterprise'
+          : '/carrier-welcome?plan=pro';
+        wixLocation.to(welcomeUrl);
+      }
+
       if (msg.type === 'redirectToDashboard') {
         wixLocation.to('/recruiter-console');
       }

@@ -8,7 +8,7 @@
 import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import { getCarrierPlatformStats, getPublicStats } from 'backend/publicStatsService';
-import { submitCarrierStaffingRequest } from 'backend/carrierLeadsService';
+import { submitCarrierStaffingRequest, submitCarrierIntakePreferences } from 'backend/carrierLeadsService';
 
 $w.onReady(async function () {
   console.log('[VELO] ✅ Trucking Companies page onReady fired');
@@ -83,6 +83,30 @@ function setupCarrierFormHandler() {
               });
               console.log('[VELO] 📤 Sent error response to form');
             }
+          }
+
+          // Handle intake preferences submission (carrier matching criteria)
+          if (event.data.type === 'submitCarrierIntakePreferences') {
+            console.log('[VELO] 📋 Processing intake preferences:', event.data.data);
+            try {
+              const result = await submitCarrierIntakePreferences(event.data.data);
+              console.log('[VELO] ✅ Preferences saved:', result);
+              htmlComponent.postMessage({
+                type: 'intakePreferencesResult',
+                data: { success: true }
+              });
+            } catch (error) {
+              console.error('[VELO] ❌ Preferences save error:', error.message);
+              htmlComponent.postMessage({
+                type: 'intakePreferencesResult',
+                data: { success: false, error: error.message }
+              });
+            }
+          }
+
+          // Handle intake form ready signal
+          if (event.data.type === 'carrierIntakeReady') {
+            console.log(`[VELO] ✅ Carrier intake form in ${htmlId} is ready`);
           }
         });
       }
