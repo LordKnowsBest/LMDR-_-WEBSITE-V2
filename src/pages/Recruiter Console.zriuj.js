@@ -1080,7 +1080,13 @@ function handleNavigateTo(data) {
     'dashboard': '/recruiter-console',
     'driver-search': '/recruiter-driver-search',
     'pipeline': '/recruiter-console',
-    'settings': '/account/my-account'
+    'settings': '/account/my-account',
+    'compliance-calendar': '/carrier-compliance-calendar',
+    'document-vault': '/carrier-document-vault',
+    'dq-tracker': '/carrier-dq-tracker',
+    'csa-monitor': '/carrier-csa-monitor',
+    'incident-reporting': '/carrier-incident-reporting',
+    'carrier-welcome': '/carrier-welcome'
   };
 
   const route = pageRoutes[data.page] || data.page;

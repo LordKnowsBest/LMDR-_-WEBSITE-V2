@@ -1,0 +1,191 @@
+/**
+ * Compliance Page Bridge - Shared handler for all 5 compliance HTML pages
+ *
+ * Centralizes PostMessage routing so each compliance page code is minimal:
+ *
+ *   import { handleComplianceMessage, getCompliancePageData } from 'backend/complianceBridge';
+ *   import { getCarrierIdentity } from 'backend/recruiter_service';
+ *
+ * Page Code Pattern (same for all 5 pages):
+ *
+ *   $w.onReady(async function () {
+ *     const identity = await getCarrierIdentity();
+ *     if (!identity.success || identity.needsOnboarding) {
+ *       wixLocation.to('/carrier-welcome');
+ *       return;
+ *     }
+ *     const dot = identity.dotNumber;
+ *     const pageType = 'calendar'; // or 'vault', 'dqTracker', 'csaMonitor', 'incidents'
+ *
+ *     const possibleIds = ['#html1','#html2','#html3','#html4','#html5'];
+ *     for (const id of possibleIds) {
+ *       try {
+ *         const comp = $w(id);
+ *         if (comp && typeof comp.onMessage === 'function') {
+ *           comp.onMessage(async (event) => {
+ *             const result = await handleComplianceMessage(pageType, dot, event.data);
+ *             if (result) comp.postMessage(result);
+ *           });
+ *           const initialData = await getCompliancePageData(pageType, dot);
+ *           setTimeout(() => comp.postMessage(initialData), 500);
+ *         }
+ *       } catch (e) {}
+ *     }
+ *   });
+ */
+
+import * as calendarService from 'backend/complianceCalendarService';
+import * as vaultService from 'backend/documentVaultService';
+import * as dqService from 'backend/dqFileService';
+import * as csaService from 'backend/csaMonitorService';
+import * as incidentService from 'backend/incidentService';
+
+/**
+ * Get initial data payload for a compliance page
+ * @param {'calendar'|'vault'|'dqTracker'|'csaMonitor'|'incidents'} pageType
+ * @param {string} carrierDot
+ * @returns {Promise<Object>} PostMessage payload to send to HTML component
+ */
+export async function getCompliancePageData(pageType, carrierDot) {
+  try {
+    switch (pageType) {
+      case 'calendar': {
+        const dashboard = await calendarService.getComplianceDashboard(carrierDot);
+        const events = await calendarService.getComplianceEvents(carrierDot);
+        return {
+          type: 'setComplianceData',
+          data: {
+            events: events || [],
+            summary: dashboard || {}
+          }
+        };
+      }
+
+      case 'vault': {
+        const docs = await vaultService.getDocuments(carrierDot);
+        return {
+          type: 'setDocuments',
+          data: {
+            documents: docs || []
+          }
+        };
+      }
+
+      case 'dqTracker': {
+        const files = await dqService.getCarrierDQFiles(carrierDot);
+        const summary = await dqService.getDQFileSummary(carrierDot);
+        return {
+          type: 'setDQFiles',
+          data: {
+            files: files || [],
+            summary: summary || {}
+          }
+        };
+      }
+
+      case 'csaMonitor': {
+        const scores = await csaService.getCSAScoresWithTrends(carrierDot);
+        const history = await csaService.getCSAScoreHistory(carrierDot);
+        const recommendations = await csaService.getCSARecommendations(carrierDot);
+        return {
+          type: 'setCSAData',
+          data: {
+            basics: scores || {},
+            history: history || [],
+            recommendations: recommendations || []
+          }
+        };
+      }
+
+      case 'incidents': {
+        const incidents = await incidentService.getIncidentReports(carrierDot);
+        const stats = await incidentService.getIncidentStatistics(carrierDot);
+        return {
+          type: 'setIncidents',
+          data: {
+            incidents: incidents || [],
+            stats: stats || {}
+          }
+        };
+      }
+
+      default:
+        console.warn('Unknown compliance page type:', pageType);
+        return null;
+    }
+  } catch (error) {
+    console.error(`getCompliancePageData(${pageType}) error:`, error);
+    return null;
+  }
+}
+
+/**
+ * Handle a PostMessage from a compliance HTML component
+ * Routes to the correct backend service based on message type
+ *
+ * @param {'calendar'|'vault'|'dqTracker'|'csaMonitor'|'incidents'} pageType
+ * @param {string} carrierDot
+ * @param {Object} msg - The PostMessage event.data
+ * @returns {Promise<Object|null>} Response payload to send back, or null if no response needed
+ */
+export async function handleComplianceMessage(pageType, carrierDot, msg) {
+  if (!msg || !msg.type) return null;
+
+  try {
+    // Ready signals - respond with initial data
+    if (['calendarReady', 'vaultReady', 'dqTrackerReady', 'csaMonitorReady', 'incidentsReady'].includes(msg.type)) {
+      return await getCompliancePageData(pageType, carrierDot);
+    }
+
+    // Data request messages
+    if (msg.type === 'getComplianceData') {
+      return await getCompliancePageData('calendar', carrierDot);
+    }
+    if (msg.type === 'getDocuments') {
+      return await getCompliancePageData('vault', carrierDot);
+    }
+    if (msg.type === 'getDQFiles') {
+      return await getCompliancePageData('dqTracker', carrierDot);
+    }
+    if (msg.type === 'getCSAData') {
+      return await getCompliancePageData('csaMonitor', carrierDot);
+    }
+    if (msg.type === 'getIncidents') {
+      return await getCompliancePageData('incidents', carrierDot);
+    }
+
+    // Action messages
+    if (msg.type === 'createComplianceEvent') {
+      const result = await calendarService.createComplianceEvent({
+        ...msg.data,
+        carrier_dot: carrierDot
+      });
+      return { type: 'eventCreated', data: { success: true, event: result } };
+    }
+
+    if (msg.type === 'uploadDocument') {
+      const result = await vaultService.uploadDocument(carrierDot, msg.data);
+      return { type: 'documentUploaded', data: { success: true, document: result } };
+    }
+
+    if (msg.type === 'generateAuditReport') {
+      const result = await dqService.generateAuditReport(msg.data?.dqFileId);
+      return { type: 'auditReportGenerated', data: { success: true, report: result } };
+    }
+
+    if (msg.type === 'createIncidentReport') {
+      const result = await incidentService.createIncidentReport({
+        ...msg.data,
+        carrier_dot: carrierDot
+      });
+      return { type: 'incidentCreated', data: { success: true, incident: result } };
+    }
+
+    // Unhandled message - no response
+    return null;
+
+  } catch (error) {
+    console.error(`handleComplianceMessage(${msg.type}) error:`, error);
+    return { type: 'error', data: { error: error.message, originalType: msg.type } };
+  }
+}

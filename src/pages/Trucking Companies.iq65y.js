@@ -108,6 +108,16 @@ function setupCarrierFormHandler() {
           if (event.data.type === 'carrierIntakeReady') {
             console.log(`[VELO] ✅ Carrier intake form in ${htmlId} is ready`);
           }
+
+          // Handle post-submission navigation
+          if (event.data.type === 'navigateToPreferences') {
+            console.log('[VELO] 🔀 Navigating to preferences setup');
+            wixLocation.to('/recruiter-driver-search?openSettings=true');
+          }
+          if (event.data.type === 'navigateToDashboard') {
+            console.log('[VELO] 🔀 Navigating to dashboard');
+            wixLocation.to('/recruiter-console');
+          }
         });
       }
     } catch (e) {

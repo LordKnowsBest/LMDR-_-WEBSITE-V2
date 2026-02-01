@@ -42,6 +42,23 @@ $w.onReady(async function () {
 
   // Initialize the settings sidebar handlers
   initSettingsSidebarHandlers();
+
+  // Check for ?openSettings=true query param (from onboarding flow)
+  const openSettings = wixLocation.query.openSettings;
+  if (openSettings === 'true' && currentCarrierDot) {
+    console.log('[VELO] Auto-opening settings panel (from onboarding flow)');
+    setTimeout(() => {
+      const possibleIds = ['#html1', '#html2', '#html3', '#html4', '#html5', '#sidebarHtml'];
+      possibleIds.forEach(id => {
+        try {
+          const comp = $w(id);
+          if (comp && typeof comp.postMessage === 'function') {
+            comp.postMessage({ type: 'openSettingsPanel' });
+          }
+        } catch (e) { /* skip */ }
+      });
+    }, 1000);
+  }
 });
 
 /**

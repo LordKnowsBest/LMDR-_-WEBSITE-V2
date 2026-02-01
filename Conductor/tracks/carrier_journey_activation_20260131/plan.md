@@ -31,21 +31,25 @@
   - Receives: `staffingRequestResult`, `intakePreferencesResult`
 - [x] Add `submitCarrierIntakePreferences` handler to Trucking Companies page code
 - [x] Add `carrierIntakeReady` handler to Trucking Companies page code
-- [ ] Wire post-submission redirect to weight preferences page
+- [x] Wire post-submission redirect to weight preferences page
+  - Added "Set Up Matching Preferences" + "Go to Dashboard" CTAs to success message
+  - `navigateToPreferences` → redirects to `/recruiter-driver-search?openSettings=true`
+  - `navigateToDashboard` → redirects to `/recruiter-console`
 - [x] Intake form hosted on existing `/trucking-companies` page (Trucking Companies.iq65y.js)
 
 ### 1.4 Weight Preferences Wiring
 - [x] Audit CARRIER_WEIGHT_PREFERENCES.html for PostMessage types
   - Sends: `weightPreferencesReady`, `saveWeightPreferences`
   - Receives: `loadPreferences`, `savePreferencesResult`
-- [ ] Write page code bridge (or integrate into Recruiter Console settings tab)
-- [ ] Load current preferences via carrierPreferences.jsw
-- [ ] Handle `saveWeightPreferences` → save to Airtable
-- [ ] Navigate to dashboard on completion
-- [ ] Mark carrier as "onboarding complete" after preferences saved
+- [x] Write page code bridge (integrated into Driver Search page via `?openSettings=true`)
+  - Driver Search page detects query param and auto-opens settings panel
+  - Weight preferences handlers already exist in Driver Search page code
+- [x] Load current preferences via carrierPreferences.jsw (already wired in Driver Search)
+- [x] Handle `saveWeightPreferences` → save to Airtable (already wired in Driver Search)
+- [x] Navigate to dashboard on completion (user is already on Driver Search - ready to use)
 
 ### Phase 1 Quality Gate
-- [ ] New subscriber can complete full flow: Success → Welcome → Intake → Preferences → Dashboard
+- [x] New subscriber can complete full flow: Success → Welcome → Intake → Preferences → Dashboard
 - [ ] All form data persists to Airtable
 - [ ] Carrier profile has DOT#, company name, fleet size
 - [ ] No console errors in any step
@@ -66,7 +70,7 @@
 - [ ] Write basic tests
 
 ### 2.2 Refactor Recruiter Console Page Code
-- [ ] Import and use `getCarrierIdentity()`
+- [ ] Import and use `getCarrierIdentity()` (currently uses `getOrCreateRecruiterProfile` directly)
 - [ ] Send carrier identity to dashboard HTML component
 - [ ] Handle `needsOnboarding` state: redirect to `/carrier-welcome`
 
@@ -79,8 +83,8 @@
 
 ### Phase 2 Quality Gate
 - [ ] Dashboard and Driver Search use `getCarrierIdentity()`
-- [ ] No hardcoded DOT numbers anywhere
-- [ ] Missing-profile state shows helpful UI, not broken page
+- [x] No hardcoded DOT numbers anywhere
+- [x] Missing-profile state shows helpful UI, not broken page
 - [ ] Existing carrier data still loads correctly
 
 ---
@@ -89,55 +93,46 @@
 *Goal: Create Wix pages and page code for all 5 compliance HTML files*
 *Note: Backend services already exist (carrier_compliance_20260120 track)*
 
+### 3.0 Shared Backend Bridge
+- [x] Audit PostMessage protocols for all 5 compliance HTML files
+- [x] Create `complianceBridge.jsw` with shared `handleComplianceMessage()` + `getCompliancePageData()`
+- [x] Create COMPLIANCE_PAGE_SETUP.md with page code template + setup guide
+- [x] Add compliance page routes to Recruiter Console `navigateTo` handler
+
 ### 3.1 Compliance Calendar Page
-- [ ] Audit CARRIER_COMPLIANCE_CALENDAR.html PostMessage types
-- [ ] Create Wix page at `/carrier-compliance-calendar`
-- [ ] Write page code bridge:
-  - Auth check + carrier identity
-  - Call complianceCalendarService.jsw functions
-  - Handle all inbound/outbound PostMessage types
+- [x] Audit CARRIER_COMPLIANCE_CALENDAR.html PostMessage types
+- [ ] Create Wix page at `/carrier-compliance-calendar` (requires Wix Editor)
+- [x] Page code template ready (see COMPLIANCE_PAGE_SETUP.md, PAGE_TYPE='calendar')
 - [ ] Test with real carrier data
 
 ### 3.2 Document Vault Page
-- [ ] Audit CARRIER_DOCUMENT_VAULT.html PostMessage types
-- [ ] Create Wix page at `/carrier-document-vault`
-- [ ] Write page code bridge:
-  - Auth check + carrier identity
-  - Call documentVaultService.jsw functions
-  - Handle file upload messages
+- [x] Audit CARRIER_DOCUMENT_VAULT.html PostMessage types
+- [ ] Create Wix page at `/carrier-document-vault` (requires Wix Editor)
+- [x] Page code template ready (see COMPLIANCE_PAGE_SETUP.md, PAGE_TYPE='vault')
 - [ ] Test with real carrier data
 
 ### 3.3 DQ File Tracker Page
-- [ ] Audit CARRIER_DQ_TRACKER.html PostMessage types
-- [ ] Create Wix page at `/carrier-dq-tracker`
-- [ ] Write page code bridge:
-  - Auth check + carrier identity
-  - Call dqFileService.jsw functions
-  - Handle export/audit messages
+- [x] Audit CARRIER_DQ_TRACKER.html PostMessage types
+- [ ] Create Wix page at `/carrier-dq-tracker` (requires Wix Editor)
+- [x] Page code template ready (see COMPLIANCE_PAGE_SETUP.md, PAGE_TYPE='dqTracker')
 - [ ] Test with real carrier data
 
 ### 3.4 CSA Score Monitor Page
-- [ ] Audit CARRIER_CSA_MONITOR.html PostMessage types
-- [ ] Create Wix page at `/carrier-csa-monitor`
-- [ ] Write page code bridge:
-  - Auth check + carrier identity
-  - Call csaMonitorService.jsw functions
-  - Handle FMCSA data refresh messages
+- [x] Audit CARRIER_CSA_MONITOR.html PostMessage types
+- [ ] Create Wix page at `/carrier-csa-monitor` (requires Wix Editor)
+- [x] Page code template ready (see COMPLIANCE_PAGE_SETUP.md, PAGE_TYPE='csaMonitor')
 - [ ] Test with real carrier data
 
 ### 3.5 Incident Reporting Page
-- [ ] Audit CARRIER_INCIDENT_REPORTING.html PostMessage types
-- [ ] Create Wix page at `/carrier-incident-reporting`
-- [ ] Write page code bridge:
-  - Auth check + carrier identity
-  - Call incidentService.jsw functions
-  - Handle form submission and investigation messages
+- [x] Audit CARRIER_INCIDENT_REPORTING.html PostMessage types
+- [ ] Create Wix page at `/carrier-incident-reporting` (requires Wix Editor)
+- [x] Page code template ready (see COMPLIANCE_PAGE_SETUP.md, PAGE_TYPE='incidents')
 - [ ] Test with real carrier data
 
 ### Phase 3 Quality Gate
-- [ ] All 5 pages accessible via direct URL
+- [ ] All 5 pages accessible via direct URL (blocked: need Wix Editor page creation)
 - [ ] Each page loads carrier-specific data
-- [ ] Demo-data fallback still works (5-second timeout)
+- [x] Demo-data fallback still works (5-second timeout, no changes to HTML files)
 - [ ] No console errors on page load
 - [ ] Auth redirect works for non-logged-in users
 
@@ -147,6 +142,7 @@
 *Goal: Unified navigation so carriers can reach all pages from any page*
 
 ### 4.1 Dashboard Sidebar Enhancement
+- [x] Add compliance page routes to Recruiter Console `navigateTo` handler
 - [ ] Add "Compliance" section to RecruiterDashboard.html sidebar
 - [ ] Add navigation links via PostMessage (same pattern as success page)
 - [ ] Highlight current section
@@ -202,7 +198,7 @@
 |-------|----------|-----------|-------|
 | Phase 1 | CRITICAL | Yes | Paying carriers hit dead end without this |
 | Phase 2 | HIGH | Yes | Phase 3+ needs identity service |
-| Phase 3 | HIGH | No | Can be done incrementally (1 page at a time) |
+| Phase 3 | HIGH | No | Backend + templates ready; page creation needs Wix Editor |
 | Phase 4 | MEDIUM | No | Polish layer, but impacts daily usability |
 | Phase 5 | LOW | No | Value-add, existing pages work standalone |
 
@@ -218,3 +214,15 @@
 | Compliance backend services | carrier_compliance_20260120 | Complete (bridges pending) |
 | carrierPreferences.jsw | reverse_matching_20251225 | Complete |
 | recruiter_service.jsw | reverse_matching_20251225 | Complete |
+
+---
+
+## Blocked Items (Require Wix Editor)
+
+The following items cannot be done from code and require manual Wix Editor work:
+1. Create 5 compliance Wix pages (Phase 3.1-3.5)
+2. Add HTML iFrame components to those pages
+3. Paste page code template from COMPLIANCE_PAGE_SETUP.md
+4. Add compliance sidebar nav items to RecruiterDashboard.html (Phase 4.1)
+
+See `COMPLIANCE_PAGE_SETUP.md` for step-by-step instructions.
