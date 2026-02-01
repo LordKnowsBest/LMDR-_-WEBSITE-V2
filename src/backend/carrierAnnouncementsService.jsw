@@ -1,0 +1,727 @@
+/**
+ * Carrier Announcements Service
+ * Phase 1: Company Announcements backend for Carrier Communication Hub
+ *
+ * Collections:
+ * - CarrierAnnouncements
+ * - AnnouncementReadReceipts
+ * - AnnouncementComments
+ * - CarrierNotificationSettings
+ * - DriverNotificationPreferences
+ */
+
+import { mediaManager } from 'wix-media-backend';
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTION_KEYS = {
+  announcements: 'carrierAnnouncements',
+  readReceipts: 'announcementReadReceipts',
+  comments: 'announcementComments',
+  carrierSettings: 'carrierNotificationSettings',
+  driverPrefs: 'driverNotificationPreferences',
+  driverProfiles: 'driverProfiles'
+};
+
+const CONFIG = {
+  status: {
+    DRAFT: 'draft',
+    SCHEDULED: 'scheduled',
+    PUBLISHED: 'published',
+    ARCHIVED: 'archived'
+  },
+  priorities: ['normal', 'important', 'urgent'],
+  maxTitleLength: 120,
+  maxCommentLength: 500
+};
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+function stripHtml(html) {
+  if (!html) return '';
+  return String(html)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeTitle(title) {
+  return String(title || '').trim().slice(0, CONFIG.maxTitleLength);
+}
+
+function generateSlug(title) {
+  return normalizeTitle(title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+async function ensureUniqueSlug(carrierId, baseSlug, existingId = null) {
+  let slug = baseSlug || 'announcement';
+  let attempt = 1;
+
+  while (attempt <= 10) {
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.announcements, {
+      filters: { carrier_id: carrierId, slug },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    const found = result.success && result.items.length > 0 ? result.items[0] : null;
+    if (!found || (existingId && found._id === existingId)) {
+      return slug;
+    }
+
+    attempt += 1;
+    slug = `${baseSlug}-${attempt}`;
+  }
+
+  return `${baseSlug}-${Date.now()}`;
+}
+
+function normalizeTargetAudience(targetAudience) {
+  if (!targetAudience || typeof targetAudience !== 'object') {
+    return { type: 'all', segments: [] };
+  }
+
+  const type = targetAudience.type || 'all';
+  const segments = Array.isArray(targetAudience.segments) ? targetAudience.segments : [];
+  return { type, segments };
+}
+
+function isFutureDate(dateValue) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  return date && !Number.isNaN(date.getTime()) && date.getTime() > Date.now();
+}
+
+function isExpired(announcement) {
+  if (!announcement?.expires_at) return false;
+  const exp = new Date(announcement.expires_at);
+  return !Number.isNaN(exp.getTime()) && exp.getTime() <= Date.now();
+}
+
+async function getMemberId() {
+  try {
+    const member = await currentMember.getMember({ fieldsets: ['BASIC'] });
+    return member?._id || member?.id || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function normalizePriority(priority) {
+  if (!priority) return 'normal';
+  const next = String(priority).toLowerCase();
+  return CONFIG.priorities.includes(next) ? next : 'normal';
+}
+
+function normalizeStatus(status) {
+  if (!status) return CONFIG.status.DRAFT;
+  const next = String(status).toLowerCase();
+  return Object.values(CONFIG.status).includes(next) ? next : CONFIG.status.DRAFT;
+}
+
+function buildDriverFilters(targetAudience, carrierId) {
+  const filters = {};
+  const inMemorySegments = [];
+  const segments = targetAudience?.segments || [];
+
+  if (carrierId) {
+    filters.carrier_id = carrierId;
+  }
+
+  for (const segment of segments) {
+    if (!segment || !segment.field) continue;
+    const field = segment.field;
+    const operator = segment.operator || 'equals';
+    const value = segment.value;
+
+    switch (operator) {
+      case 'equals':
+        filters[field] = value;
+        break;
+      case 'greater_than':
+        filters[field] = { gt: value };
+        break;
+      case 'greater_than_or_equal':
+        filters[field] = { gte: value };
+        break;
+      case 'less_than':
+        filters[field] = { lt: value };
+        break;
+      case 'less_than_or_equal':
+        filters[field] = { lte: value };
+        break;
+      case 'contains':
+        filters[field] = { contains: value };
+        break;
+      case 'in':
+      default:
+        inMemorySegments.push(segment);
+        break;
+    }
+  }
+
+  return { filters, inMemorySegments };
+}
+
+function segmentMatchesValue(value, operator, segmentValue) {
+  if (operator === 'equals') {
+    return value === segmentValue;
+  }
+  if (operator === 'greater_than') {
+    return Number(value) > Number(segmentValue);
+  }
+  if (operator === 'greater_than_or_equal') {
+    return Number(value) >= Number(segmentValue);
+  }
+  if (operator === 'less_than') {
+    return Number(value) < Number(segmentValue);
+  }
+  if (operator === 'less_than_or_equal') {
+    return Number(value) <= Number(segmentValue);
+  }
+  if (operator === 'contains') {
+    return String(value || '').toLowerCase().includes(String(segmentValue || '').toLowerCase());
+  }
+  if (operator === 'in') {
+    if (Array.isArray(segmentValue)) {
+      if (Array.isArray(value)) {
+        return value.some(v => segmentValue.includes(v));
+      }
+      return segmentValue.includes(value);
+    }
+  }
+  return false;
+}
+
+function targetAudienceMatchesDriver(targetAudience, driverProfile) {
+  const normalized = normalizeTargetAudience(targetAudience);
+  if (normalized.type === 'all') return true;
+  if (!driverProfile) return false;
+  if (!Array.isArray(normalized.segments) || normalized.segments.length === 0) return true;
+
+  return normalized.segments.every(segment => {
+    if (!segment?.field) return true;
+    const value = driverProfile[segment.field];
+    const operator = segment.operator || 'equals';
+    return segmentMatchesValue(value, operator, segment.value);
+  });
+}
+
+async function getDriverProfile(driverId) {
+  if (!driverId) return null;
+  return await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
+}
+
+async function getDriverAnnouncementPrefs(driverId, carrierId) {
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverPrefs, {
+    filters: { driver_id: driverId, carrier_id: carrierId },
+    limit: 1,
+    suppressAuth: true
+  });
+  return result.success && result.items.length > 0 ? result.items[0] : null;
+}
+
+async function getRecipientDrivers(targetAudience, carrierId) {
+  const { filters, inMemorySegments } = buildDriverFilters(targetAudience, carrierId);
+  const drivers = await dataAccess.getAllRecords(COLLECTION_KEYS.driverProfiles, {
+    filters,
+    suppressAuth: true
+  });
+
+  if (!inMemorySegments.length) return drivers;
+
+  return drivers.filter(driver => {
+    return inMemorySegments.every(segment => {
+      const operator = segment.operator || 'equals';
+      return segmentMatchesValue(driver[segment.field], operator, segment.value);
+    });
+  });
+}
+
+async function archiveExpiredAnnouncement(announcement) {
+  if (!announcement || announcement.status !== CONFIG.status.PUBLISHED) return false;
+  if (!isExpired(announcement)) return false;
+  await dataAccess.updateRecord(COLLECTION_KEYS.announcements, {
+    ...announcement,
+    status: CONFIG.status.ARCHIVED,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+  return true;
+}
+
+async function triggerAnnouncementNotifications(announcement) {
+  // Placeholder for future email/push integration
+  return { success: true, message: 'Notification trigger queued', announcementId: announcement?._id };
+}
+
+// ============================================================================
+// ANNOUNCEMENTS CRUD
+// ============================================================================
+
+export async function createAnnouncement(input = {}) {
+  const carrierId = input.carrier_id || input.carrierId;
+  const title = normalizeTitle(input.title);
+  const content = input.content || '';
+
+  if (!carrierId) {
+    return { success: false, error: 'carrier_id is required' };
+  }
+  if (!title) {
+    return { success: false, error: 'title is required' };
+  }
+  if (!content) {
+    return { success: false, error: 'content is required' };
+  }
+
+  const now = new Date();
+  const status = normalizeStatus(input.status);
+  const scheduledAt = input.scheduled_at ? new Date(input.scheduled_at) : null;
+
+  if (status === CONFIG.status.SCHEDULED && !isFutureDate(scheduledAt)) {
+    return { success: false, error: 'scheduled_at must be a future date' };
+  }
+
+  const baseSlug = generateSlug(title);
+  const slug = await ensureUniqueSlug(carrierId, baseSlug);
+  const createdBy = input.created_by || await getMemberId();
+
+  const record = {
+    carrier_id: carrierId,
+    title,
+    slug,
+    content,
+    content_plain: stripHtml(content),
+    priority: normalizePriority(input.priority),
+    status,
+    target_audience: normalizeTargetAudience(input.target_audience),
+    scheduled_at: status === CONFIG.status.SCHEDULED ? scheduledAt : null,
+    published_at: status === CONFIG.status.PUBLISHED ? now : null,
+    expires_at: input.expires_at ? new Date(input.expires_at) : null,
+    allow_comments: input.allow_comments !== false,
+    created_by: createdBy,
+    created_at: now,
+    updated_at: now,
+    read_count: 0,
+    total_recipients: null,
+    attachments: Array.isArray(input.attachments) ? input.attachments : []
+  };
+
+  const result = await dataAccess.insertRecord(COLLECTION_KEYS.announcements, record, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to create announcement' };
+  }
+
+  return { success: true, announcement: result.record };
+}
+
+export async function updateAnnouncement(announcementId, updates = {}) {
+  if (!announcementId) return { success: false, error: 'announcementId is required' };
+  const existing = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!existing) return { success: false, error: 'Announcement not found' };
+
+  const status = existing.status || CONFIG.status.DRAFT;
+  if (![CONFIG.status.DRAFT, CONFIG.status.SCHEDULED].includes(status)) {
+    return { success: false, error: 'Only draft or scheduled announcements can be edited' };
+  }
+
+  if (updates.title) {
+    updates.title = normalizeTitle(updates.title);
+    updates.slug = await ensureUniqueSlug(existing.carrier_id, generateSlug(updates.title), existing._id);
+  }
+
+  if (updates.content) {
+    updates.content_plain = stripHtml(updates.content);
+  }
+
+  if (updates.priority) {
+    updates.priority = normalizePriority(updates.priority);
+  }
+
+  if (updates.target_audience) {
+    updates.target_audience = normalizeTargetAudience(updates.target_audience);
+  }
+
+  if (updates.scheduled_at) {
+    const scheduledAt = new Date(updates.scheduled_at);
+    if (!isFutureDate(scheduledAt)) {
+      return { success: false, error: 'scheduled_at must be a future date' };
+    }
+    updates.scheduled_at = scheduledAt;
+  }
+
+  const updated = {
+    ...existing,
+    ...updates,
+    updated_at: new Date()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.announcements, updated, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to update announcement' };
+  }
+  return { success: true, announcement: result.record };
+}
+
+export async function publishAnnouncement(announcementId) {
+  if (!announcementId) return { success: false, error: 'announcementId is required' };
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) return { success: false, error: 'Announcement not found' };
+  if (announcement.status === CONFIG.status.ARCHIVED) {
+    return { success: false, error: 'Archived announcements cannot be published' };
+  }
+  if (announcement.status === CONFIG.status.PUBLISHED) {
+    return { success: true, announcement };
+  }
+
+  const recipientPreview = await previewRecipients(announcement.carrier_id, announcement.target_audience);
+  const now = new Date();
+  const updated = {
+    ...announcement,
+    status: CONFIG.status.PUBLISHED,
+    scheduled_at: null,
+    published_at: now,
+    total_recipients: recipientPreview.total || 0,
+    updated_at: now
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.announcements, updated, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to publish announcement' };
+  }
+
+  await triggerAnnouncementNotifications(updated);
+  return { success: true, announcement: result.record };
+}
+
+export async function scheduleAnnouncement(announcementId, scheduledAt) {
+  if (!announcementId) return { success: false, error: 'announcementId is required' };
+  if (!isFutureDate(scheduledAt)) return { success: false, error: 'scheduled_at must be a future date' };
+
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) return { success: false, error: 'Announcement not found' };
+
+  const updated = {
+    ...announcement,
+    status: CONFIG.status.SCHEDULED,
+    scheduled_at: new Date(scheduledAt),
+    updated_at: new Date()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.announcements, updated, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to schedule announcement' };
+  }
+  return { success: true, announcement: result.record };
+}
+
+export async function archiveAnnouncement(announcementId) {
+  if (!announcementId) return { success: false, error: 'announcementId is required' };
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) return { success: false, error: 'Announcement not found' };
+
+  const updated = {
+    ...announcement,
+    status: CONFIG.status.ARCHIVED,
+    updated_at: new Date()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.announcements, updated, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to archive announcement' };
+  }
+  return { success: true, announcement: result.record };
+}
+
+export async function uploadAttachment(base64Data, fileName, mimeType, carrierId = 'general') {
+  if (!base64Data || !fileName || !mimeType) {
+    return { success: false, error: 'base64Data, fileName, and mimeType are required' };
+  }
+
+  const base64Content = base64Data.split(',')[1];
+  const buffer = Buffer.from(base64Content, 'base64');
+  const uploadFolder = `/carrier-announcements/${carrierId}/${Date.now()}`;
+
+  try {
+    const uploadResult = await mediaManager.upload(
+      uploadFolder,
+      buffer,
+      fileName,
+      {
+        mediaOptions: {
+          mimeType: mimeType,
+          mediaType: mimeType.startsWith('image/') ? 'image' : 'document'
+        }
+      }
+    );
+
+    return {
+      success: true,
+      attachment: {
+        name: fileName,
+        url: uploadResult.fileUrl,
+        type: mimeType.startsWith('image/') ? 'image' : 'document'
+      }
+    };
+  } catch (error) {
+    console.error('[Announcements] Upload error:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// RECIPIENTS & TARGETING
+// ============================================================================
+
+export async function previewRecipients(carrierId, targetAudience) {
+  if (!carrierId) return { success: false, error: 'carrierId is required' };
+  const normalized = normalizeTargetAudience(targetAudience);
+  const drivers = await getRecipientDrivers(normalized, carrierId);
+  return { success: true, total: drivers.length };
+}
+
+export function getDriverSegments() {
+  return [
+    { field: 'state', label: 'State', operators: ['equals', 'in'] },
+    { field: 'city', label: 'City', operators: ['equals', 'contains'] },
+    { field: 'years_experience', label: 'Years Experience', operators: ['greater_than', 'less_than'] },
+    { field: 'job_seeking_status', label: 'Job Seeking Status', operators: ['equals', 'in'] },
+    { field: 'cdl_class', label: 'CDL Class', operators: ['equals', 'in'] }
+  ];
+}
+
+// ============================================================================
+// READ RECEIPTS
+// ============================================================================
+
+export async function markAnnouncementRead(announcementId, driverId, deviceType = 'unknown', timeSpentSeconds = null) {
+  if (!announcementId || !driverId) {
+    return { success: false, error: 'announcementId and driverId are required' };
+  }
+
+  const existing = await dataAccess.queryRecords(COLLECTION_KEYS.readReceipts, {
+    filters: { announcement_id: announcementId, driver_id: driverId },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  if (existing.success && existing.items.length > 0) {
+    return { success: true, alreadyRead: true };
+  }
+
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) {
+    return { success: false, error: 'Announcement not found' };
+  }
+
+  const receipt = {
+    announcement_id: announcementId,
+    driver_id: driverId,
+    carrier_id: announcement.carrier_id,
+    read_at: new Date(),
+    device_type: deviceType,
+    time_spent_seconds: timeSpentSeconds
+  };
+
+  const insertResult = await dataAccess.insertRecord(COLLECTION_KEYS.readReceipts, receipt, { suppressAuth: true });
+  if (!insertResult.success) {
+    return { success: false, error: insertResult.error || 'Failed to mark read' };
+  }
+
+  const readCount = Number(announcement.read_count || 0) + 1;
+  await dataAccess.updateRecord(COLLECTION_KEYS.announcements, {
+    ...announcement,
+    read_count: readCount,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  return { success: true, readCount };
+}
+
+export async function getAnnouncementStats(announcementId) {
+  if (!announcementId) return { success: false, error: 'announcementId is required' };
+
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) return { success: false, error: 'Announcement not found' };
+
+  const reads = await dataAccess.countRecords(COLLECTION_KEYS.readReceipts, {
+    announcement_id: announcementId
+  }, { suppressAuth: true });
+
+  let totalRecipients = announcement.total_recipients;
+  if (!totalRecipients) {
+    const preview = await previewRecipients(announcement.carrier_id, announcement.target_audience);
+    totalRecipients = preview.total || 0;
+  }
+
+  const readRate = totalRecipients > 0 ? Math.round((reads / totalRecipients) * 100) : 0;
+
+  return {
+    success: true,
+    stats: {
+      announcementId,
+      readCount: reads,
+      totalRecipients,
+      readRate
+    }
+  };
+}
+
+export async function getReadReceipts(announcementId, limit = 50, offset = 0) {
+  if (!announcementId) return { success: false, error: 'announcementId is required' };
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.readReceipts, {
+    filters: { announcement_id: announcementId },
+    limit,
+    skip: offset,
+    sort: [{ field: 'read_at', direction: 'desc' }],
+    suppressAuth: true
+  });
+
+  return result.success
+    ? { success: true, receipts: result.items, totalCount: result.totalCount || result.items.length }
+    : { success: false, error: result.error || 'Failed to fetch read receipts' };
+}
+
+export async function getUnreadDrivers(announcementId, carrierId, limit = 50, offset = 0) {
+  if (!announcementId || !carrierId) {
+    return { success: false, error: 'announcementId and carrierId are required' };
+  }
+
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) return { success: false, error: 'Announcement not found' };
+
+  const targetDrivers = await getRecipientDrivers(announcement.target_audience, carrierId);
+  const receipts = await dataAccess.getAllRecords(COLLECTION_KEYS.readReceipts, {
+    filters: { announcement_id: announcementId },
+    suppressAuth: true
+  });
+
+  const readIds = new Set(receipts.map(r => r.driver_id));
+  const unread = targetDrivers.filter(driver => !readIds.has(driver._id));
+  const paged = unread.slice(offset, offset + limit);
+
+  return { success: true, drivers: paged, totalCount: unread.length };
+}
+
+// ============================================================================
+// DRIVER FEED
+// ============================================================================
+
+export async function getAnnouncementsForDriver(driverId, carrierId, options = {}) {
+  if (!driverId || !carrierId) {
+    return { success: false, error: 'driverId and carrierId are required' };
+  }
+
+  const prefs = await getDriverAnnouncementPrefs(driverId, carrierId);
+  if (prefs?.announcements_opt_out) {
+    return { success: true, announcements: [] };
+  }
+
+  const driverProfile = await getDriverProfile(driverId);
+  if (!driverProfile) {
+    return { success: false, error: 'Driver profile not found' };
+  }
+
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.announcements, {
+    filters: { carrier_id: carrierId, status: CONFIG.status.PUBLISHED },
+    sort: [{ field: 'published_at', direction: 'desc' }],
+    limit: options.limit || 50,
+    skip: options.offset || 0,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to fetch announcements' };
+  }
+
+  const receipts = await dataAccess.queryRecords(COLLECTION_KEYS.readReceipts, {
+    filters: { driver_id: driverId, carrier_id: carrierId },
+    limit: 1000,
+    suppressAuth: true
+  });
+  const readSet = new Set((receipts.items || []).map(r => r.announcement_id));
+
+  const announcements = [];
+  for (const announcement of result.items) {
+    if (await archiveExpiredAnnouncement(announcement)) {
+      continue;
+    }
+    if (!targetAudienceMatchesDriver(announcement.target_audience, driverProfile)) {
+      continue;
+    }
+    announcements.push({
+      ...announcement,
+      read_status: readSet.has(announcement._id) ? 'read' : 'unread'
+    });
+  }
+
+  return { success: true, announcements };
+}
+
+export async function addComment(announcementId, driverId, commentText) {
+  if (!announcementId || !driverId || !commentText) {
+    return { success: false, error: 'announcementId, driverId, and commentText are required' };
+  }
+  if (String(commentText).length > CONFIG.maxCommentLength) {
+    return { success: false, error: 'Comment exceeds 500 characters' };
+  }
+
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) return { success: false, error: 'Announcement not found' };
+  if (!announcement.allow_comments) return { success: false, error: 'Comments are disabled for this announcement' };
+
+  const driverProfile = await getDriverProfile(driverId);
+  const driverName = driverProfile ? `${driverProfile.first_name || ''} ${driverProfile.last_name || ''}`.trim() : '';
+
+  const record = {
+    announcement_id: announcementId,
+    driver_id: driverId,
+    driver_name: driverName,
+    comment_text: String(commentText).trim(),
+    is_hidden: false,
+    created_at: new Date()
+  };
+
+  const result = await dataAccess.insertRecord(COLLECTION_KEYS.comments, record, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to add comment' };
+  }
+  return { success: true, comment: result.record };
+}
+
+// ============================================================================
+// CARRIER DASHBOARD HELPERS
+// ============================================================================
+
+export async function getAnnouncementsForCarrier(carrierId, options = {}) {
+  if (!carrierId) return { success: false, error: 'carrierId is required' };
+  const filters = { carrier_id: carrierId };
+
+  const statusFilter = options.status;
+  if (statusFilter && !Array.isArray(statusFilter)) {
+    filters.status = statusFilter;
+  }
+
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.announcements, {
+    filters,
+    sort: [{ field: 'updated_at', direction: 'desc' }],
+    limit: options.limit || 50,
+    skip: options.offset || 0,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to fetch announcements' };
+  }
+
+  let items = result.items;
+  if (Array.isArray(statusFilter)) {
+    items = items.filter(item => statusFilter.includes(item.status));
+  }
+
+  return { success: true, announcements: items, totalCount: result.totalCount || items.length };
+}
