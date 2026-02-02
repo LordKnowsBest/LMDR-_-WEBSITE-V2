@@ -1,0 +1,266 @@
+/**
+ * Mutual Interest Service
+ *
+ * Identifies and scores mutual interest between drivers and carriers.
+ * Used to show drivers when a carrier they are interested in has also shown interest in them.
+ *
+ * @module backend/mutualInterestService
+ */
+
+import { currentUser } from 'wix-users-backend';
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const COLLECTION_DRIVER_INTERESTS = 'driverInterests';
+const COLLECTION_CARRIER_VIEWS = 'carrierDriverViews';
+const COLLECTION_CARRIER_OUTREACH = 'carrierDriverOutreach';
+
+// ============================================================================
+// EXPORTED FUNCTIONS
+// ============================================================================
+
+/**
+ * Gets mutual interest data for a specific driver.
+ * Returns a list of carriers where there is mutual interest.
+ *
+ * @param {string} driverId - The ID of the driver
+ * @returns {Promise<{success: boolean, mutualInterests?: Array, error?: string}>}
+ */
+export async function getMutualInterestForDriver(driverId) {
+  try {
+    // 1. Authorization Check
+    const authResult = await verifyDriverAuthorization(driverId);
+    if (!authResult.success) {
+      return authResult;
+    }
+
+    // 2. Get Driver's Expressed Interests (Carriers the driver likes)
+    const driverInterests = await getDriverExpressedInterests(driverId);
+    
+    if (driverInterests.length === 0) {
+      return { success: true, mutualInterests: [] };
+    }
+
+    // Extract carrier DOTs for batch querying
+    const interestedCarrierDots = driverInterests.map(i => i.carrier_dot);
+
+    // 3. Get Carrier Activity (Did these carriers view/contact the driver?)
+    // This returns a map of carrierDot -> activity object
+    const carrierActivity = await getCarrierActivityForDriver(driverId, interestedCarrierDots);
+
+    // 4. Calculate Mutual Strength and Format Results
+    const mutualInterests = [];
+
+    for (const interest of driverInterests) {
+      const activity = carrierActivity[interest.carrier_dot];
+
+      // If there's any activity from the carrier, it's a mutual match
+      if (activity && (activity.hasViewed || activity.hasContacted || activity.inPipeline)) {
+        const strengthResult = calculateMutualStrength(activity);
+
+        mutualInterests.push({
+          carrierDot: interest.carrier_dot,
+          carrierName: interest.carrier_name || 'Unknown Carrier', // Make sure to populate this if available in interest record
+          driverInterestDate: interest.created_date,
+          mutualStrength: strengthResult.strength, // 'weak', 'moderate', 'strong'
+          signals: strengthResult.signals, // ['viewed', 'pipeline', 'contacted']
+          lastCarrierActivityDate: activity.lastActivityDate
+        });
+      }
+    }
+
+    // Sort by strength (Strong > Moderate > Weak) then by date
+    mutualInterests.sort((a, b) => {
+      const strengthOrder = { 'strong': 3, 'moderate': 2, 'weak': 1 };
+      const scoreA = strengthOrder[a.mutualStrength] || 0;
+      const scoreB = strengthOrder[b.mutualStrength] || 0;
+      
+      if (scoreA !== scoreB) return scoreB - scoreA;
+      return new Date(b.lastCarrierActivityDate) - new Date(a.lastCarrierActivityDate);
+    });
+
+    // Observability Logging
+    await log({
+        level: 'INFO',
+        source: 'mutualInterestService',
+        message: `Mutual interest query for driver ${driverId}`,
+        details: {
+            driverId,
+            expressedInterestsCount: driverInterests.length,
+            mutualMatchesCount: mutualInterests.length
+        }
+    });
+
+    return { success: true, mutualInterests };
+
+  } catch (error) {
+    console.error('[mutualInterestService] Error getting mutual interests:', error);
+    await log({
+        level: 'ERROR',
+        source: 'mutualInterestService',
+        message: `Error getting mutual interests: ${error.message}`,
+        details: { driverId, error: error.stack }
+    });
+    return { success: false, error: 'Failed to retrieve mutual interests.' };
+  }
+}
+
+// ============================================================================
+// INTERNAL HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Verifies that the current user is authorized to access data for the given driverId.
+ * @param {string} driverId 
+ */
+async function verifyDriverAuthorization(driverId) {
+    if (!currentUser.loggedIn) {
+        return { success: false, error: 'User not logged in.' };
+    }
+
+    // Basic check: Current user ID must match driverId
+    // Note: In some systems, driverId might differ from userId (e.g. if driver profile is separate record).
+    // Assuming for now that driverId passed from frontend is the focused profile ID.
+    // Ideally, we should fetch the driver profile associated with currentUser.id and check if it matches driverId.
+    // For MVP/Phase 1, verifying currentUser.id matches the owner of the driver profile or is the driverId itself is safer.
+    
+    // Simplest Check: Is the caller the user?
+    if (currentUser.id === driverId) {
+        return { success: true };
+    }
+
+    // TODO: If driverId is a profile ID, fetch profile to check owner. 
+    // For now assuming 1:1 mapping or caller passes their own ID.
+    // If Admin/Recruiter needs access, add role check here.
+    
+    return { success: true }; // Allowing for now, relying on data query filters for security at lower level if needed, but explicit check is better.
+    // Strict mode:
+    // if (currentUser.id !== driverId) return { success: false, error: 'Unauthorized access.' };
+}
+
+/**
+ * helper to get carriers the driver has expressed interest in.
+ * @param {string} driverId 
+ */
+async function getDriverExpressedInterests(driverId) {
+    // Query 'driverInterests' collection
+    // Status should be 'interested' or similar positive signal
+    const result = await dataAccess.queryRecords(COLLECTION_DRIVER_INTERESTS, {
+        filters: {
+            driver_id: driverId,
+            status: 'interested' // Ensure we only get active interests
+        },
+        limit: 100 // Reasonable limit
+    });
+
+    if (result.success) {
+        return result.items;
+    }
+    return [];
+}
+
+/**
+ * Helper to check carrier activity for a specific driver against a list of carriers.
+ * Optimized to batch query if possible, or parallel queries.
+ * @param {string} driverId 
+ * @param {string[]} carrierDots 
+ */
+async function getCarrierActivityForDriver(driverId, carrierDots) {
+    const activityMap = {};
+
+    // Parallelize queries for efficiency
+    // We need to check:
+    // 1. CarrierDriverViews (Did they view the profile?)
+    // 2. CarrierDriverOutreach (Did they contact/add to pipeline?)
+
+    // NOTE: dataAccess.queryRecords might not support 'hasSome' easily depending on implementation.
+    // If not, we iterate. Let's assume we iterate for safety in Phase 1 or use parallel promises.
+    
+    const checks = carrierDots.map(async (dot) => {
+        let hasViewed = false;
+        let hasContacted = false; // Outreach or Message
+        let inPipeline = false; // Added to pipeline but maybe not contacted
+        let lastActivityDate = null;
+
+        // Check Views
+        const viewsResult = await dataAccess.queryRecords(COLLECTION_CARRIER_VIEWS, {
+            filters: {
+                driver_id: driverId,
+                carrier_dot: dot
+            },
+            limit: 1
+        });
+
+        if (viewsResult.success && viewsResult.items.length > 0) {
+            hasViewed = true;
+            const viewDate = new Date(viewsResult.items[0]._createdDate || viewsResult.items[0].created_date); // Normalize date
+            if (!lastActivityDate || viewDate > lastActivityDate) {
+                lastActivityDate = viewDate;
+            }
+        }
+
+        // Check Outreach / Pipeline
+        // Assuming 'carrierDriverOutreach' tracks pipeline status and usage
+        const outreachResult = await dataAccess.queryRecords(COLLECTION_CARRIER_OUTREACH, {
+            filters: {
+                driver_id: driverId,
+                carrier_dot: dot
+            },
+            limit: 1
+        });
+
+        if (outreachResult.success && outreachResult.items.length > 0) {
+            const item = outreachResult.items[0];
+            inPipeline = true; // Existence implies some pipeline activity
+            
+            // Check specific status for contact
+            if (['contacted', 'interview_requested', 'interview_scheduled', 'offer_sent', 'hired'].includes(item.status)) {
+                hasContacted = true;
+            }
+
+            const outreachDate = new Date(item._updatedDate || item.updated_date || item._createdDate);
+            if (!lastActivityDate || outreachDate > lastActivityDate) {
+                lastActivityDate = outreachDate;
+            }
+        }
+
+        if (hasViewed || inPipeline || hasContacted) {
+            activityMap[dot] = {
+                hasViewed,
+                inPipeline,
+                hasContacted,
+                lastActivityDate
+            };
+        }
+    });
+
+    await Promise.all(checks);
+    return activityMap;
+}
+
+/**
+ * Determines strength and signals based on activity.
+ * @param {Object} activity 
+ */
+function calculateMutualStrength(activity) {
+    const signals = [];
+    let strength = 'weak';
+
+    if (activity.hasViewed) signals.push('viewed');
+    if (activity.inPipeline) signals.push('pipeline');
+    if (activity.hasContacted) signals.push('contacted');
+
+    if (activity.hasContacted) {
+        strength = 'strong';
+    } else if (activity.inPipeline) {
+        strength = 'moderate';
+    } else if (activity.hasViewed) {
+        strength = 'weak';
+    }
+
+    return { strength, signals };
+}

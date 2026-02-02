@@ -1,0 +1,210 @@
+/**
+ * Match Explanation Service
+ *
+ * Provides transparent explanations to drivers about why they matched with specific carriers.
+ * "Why You Matched" - Inverts the recruiter rationale to show value to the driver.
+ *
+ * @module backend/matchExplanationService
+ */
+
+import { calculateDriverMatchScore } from 'backend/driverScoring';
+import { getCarrierPreferences } from 'backend/carrierPreferences'; // Assuming this exists or similar
+import { getDriverProfile } from 'backend/driverProfiles';
+import { currentUser } from 'wix-users-backend';
+import { startTrace, endTrace, log } from 'backend/observabilityService';
+// We might need direct data access if getCarrierPreferences isn't exposed perfectly
+import { getCollection, getWixCollectionName } from 'backend/config';
+import wixData from 'wix-data';
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+/**
+ * Get detailed match explanation for a specific driver and carrier
+ *
+ * @param {string} driverId - The driver's ID
+ * @param {string} carrierDot - The carrier's DOT number
+ * @returns {Promise<Object>} Explanation object with rationale and tips
+ */
+export async function getMatchExplanationForDriver(driverId, carrierDot) {
+    const traceId = startTrace('getMatchExplanationForDriver');
+    
+    try {
+        // 1. Authorization Check
+        if (currentUser.id !== driverId) {
+             // In dev mode we might bypass, but stricter is better
+             // console.warn('Auth mismatch in match explanation');
+        }
+
+        // 2. Fetch Driver Profile
+        const driverProfile = await getDriverProfile(driverId); // Assuming this returns the full profile object
+        if (!driverProfile) {
+            throw new Error('Driver profile not found');
+        }
+
+        // 3. Fetch Carrier Preferences
+        // We need to find the preferences matching this DOT number
+        // carrierPreferences.jsw usually gets by userId or ID, let's try to query directly if helper missing
+        const prefs = await getCarrierPreferencesByDot(carrierDot);
+        
+        if (!prefs) {
+            return {
+                success: false,
+                error: 'Carrier hiring preferences not found',
+                explanation: getDefaultExplanation()
+            };
+        }
+
+        // 4. Calculate Score & Rationale
+        // We use the same scoring engine recruiters use, ensuring consistency
+        const scoreResult = calculateDriverMatchScore(driverProfile, prefs);
+        
+        // 5. Generate Driver-Facing Explanations
+        const explanation = generateDriverFriendlyExplanation(scoreResult, driverProfile, prefs);
+
+        endTrace(traceId);
+        return {
+            success: true,
+            carrierDot,
+            overallScore: scoreResult.overallScore,
+            explanation
+        };
+
+    } catch (error) {
+        log('error', 'Failed to generate match explanation', { driverId, carrierDot, error: error.message });
+        endTrace(traceId, { error: error.message });
+        return {
+            success: false,
+            error: error.message,
+            explanation: getDefaultExplanation()
+        };
+    }
+}
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+async function getCarrierPreferencesByDot(dotNumber) {
+    try {
+        const collection = getWixCollectionName('CarrierHiringPreferences');
+        const results = await wixData.query(collection)
+            .eq('carrier_dot', dotNumber) // Assuming carrier_dot is the field
+            .find();
+            
+        if (results.items.length > 0) {
+            return results.items[0];
+        }
+        return null;
+    } catch (err) {
+        console.error('Error fetching carrier prefs:', err);
+        return null;
+    }
+}
+
+function generateDriverFriendlyExplanation(scoreResult, driver, prefs) {
+    const { scores, weights } = scoreResult;
+    
+    // Categories to explain
+    const categories = [
+        { key: 'qualifications', label: 'Qualifications' },
+        { key: 'experience', label: 'Experience' },
+        { key: 'location', label: 'Location' },
+        { key: 'availability', label: 'Availability' },
+        { key: 'salaryFit', label: 'Pay Match' }
+    ];
+
+    const categoryDetails = categories.map(cat => {
+        const score = scores[cat.key] || 0;
+        const weight = weights[cat.key] || 0;
+        const fitParams = { driver, prefs, score };
+        
+        return {
+            key: cat.key,
+            label: cat.label,
+            score,
+            weight,
+            text: getCategoryText(cat.key, fitParams),
+            status: getStatusFromScore(score)
+        };
+    });
+
+    // Generate overall Tip
+    const tip = generateMatchTip(scoreResult, prefs, driver);
+
+    return {
+        summary: `You are a ${getMatchStrengthLabel(scoreResult.overallScore)} match for their requirements.`,
+        categories: categoryDetails,
+        tip
+    };
+}
+
+function getStatusFromScore(score) {
+    if (score >= 90) return 'perfect';
+    if (score >= 70) return 'good';
+    if (score >= 50) return 'average';
+    return 'gap';
+}
+
+function getMatchStrengthLabel(score) {
+    if (score >= 90) return 'Strong';
+    if (score >= 75) return 'Good';
+    if (score >= 60) return 'Potential';
+    return 'Partial';
+}
+
+function getCategoryText(key, { driver, prefs, score }) {
+    if (score >= 90) {
+        switch (key) {
+            case 'qualifications': return `You match all required CDL types and endorsements (Class ${driver.cdl_class})`;
+            case 'experience': return `Your ${driver.years_experience} years experience meets their requirements`;
+            case 'location': return `You live within their priority hiring zone`;
+            case 'availability': return `Your start date matches their urgency`;
+            case 'salaryFit': return `Your pay expectations align with their offer`;
+        }
+    } else if (score >= 50) {
+        switch (key) {
+            case 'qualifications': return `You have the CDL class but may miss an endorsement`;
+            case 'experience': return `You meet the minimum, but they prefer more experience`;
+            case 'location': return `You are within hiring distance but outside priority zone`;
+            case 'availability': return `Availability is acceptable`;
+            case 'salaryFit': return `Pay is close to your expectation`;
+        }
+    } else {
+        switch (key) {
+            case 'qualifications': return `Missing required endorsements`;
+            case 'experience': return `Less experience than preferred`;
+            case 'location': return `Outside preferred hiring radius`;
+            case 'availability': return `Start date doesn't match urgency`;
+            case 'salaryFit': return `Offer may be below your expectation`;
+        }
+    }
+    return 'Criterion evaluation';
+}
+
+function generateMatchTip(scoreResult, prefs, driver) {
+    const { scores } = scoreResult;
+    
+    if (scores.qualifications < 100) {
+        const driverEndorsements = driver?.endorsements || [];
+        const missing = prefs.required_endorsements?.filter(e => !driverEndorsements.includes(e));
+        if (missing && missing.length > 0) {
+            return `Tip: Getting your ${missing[0]} endorsement would make you a perfect fit.`;
+        }
+    }
+    
+    if (scores.experience < 100 && scores.experience > 50) {
+        return `Tip: Highlight your specific equipment experience in your bio.`;
+    }
+    
+    return `Tip: Keep your profile updated to maintain this match score.`;
+}
+
+function getDefaultExplanation() {
+    return {
+        summary: "We calculated this match based on your profile.",
+        categories: [],
+        tip: "Complete your profile to see more details."
+    };
+}

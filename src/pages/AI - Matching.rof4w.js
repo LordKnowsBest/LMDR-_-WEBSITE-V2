@@ -1,8 +1,10 @@
 import { findMatchingCarriers, logMatchEvent, getDriverSavedCarriers } from 'backend/carrierMatching.jsw';
+import { getMutualInterestForDriver } from 'backend/mutualInterestService.jsw';
 import { enrichCarrier } from 'backend/aiEnrichment.jsw';
 import { getOrCreateDriverProfile, setDiscoverability, getDriverInterests, updateDriverDocuments } from 'backend/driverProfiles.jsw';
-import { submitApplication } from 'backend/applicationService.jsw';
+import { submitApplication, getDriverApplications } from 'backend/applicationService.jsw';
 import { extractDocumentForAutoFill } from 'backend/ocrService.jsw';
+import { getMatchExplanationForDriver } from 'backend/matchExplanationService.jsw';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import wixLocation from 'wix-location';
 import wixWindow from 'wix-window';
@@ -59,7 +61,10 @@ const MESSAGE_REGISTRY = {
     'submitApplication',
     'saveProfileDocs',
     'extractDocumentOCR', // Real-time OCR for form auto-fill
+    'getMatchExplanation', // Fetch detailed match rationale
     'logFeatureInteraction', // Feature adoption tracking
+    'getDriverApplications', // Fetch driver applications history
+    'getMutualInterest', // Phase 1: Fetch mutual interests
     'ping' // Health check
   ],
   // Messages TO HTML that page code sends
@@ -79,6 +84,9 @@ const MESSAGE_REGISTRY = {
     'discoverabilityUpdated',
     'profileSaved',
     'ocrResult', // Real-time OCR extraction result
+    'matchExplanation', // Return detailed match rationale
+    'driverApplications', // Return driver applications
+    'mutualInterestData', // Phase 1: Return mutual interest data
     'pong' // Health check response
   ]
 };
@@ -328,6 +336,18 @@ async function handleHtmlMessage(msg) {
       await handleExtractDocumentOCR(msg.data);
       break;
 
+    case 'getMatchExplanation':
+      await handleGetMatchExplanation(msg.data);
+      break;
+
+    case 'getDriverApplications':
+      await handleGetDriverApplications();
+      break;
+
+    case 'getMutualInterest':
+      await handleGetMutualInterest(msg.data);
+      break;
+
     case 'logFeatureInteraction':
       // Non-blocking feature tracking
       logFeatureInteraction(msg.data.featureId, msg.data.userId, msg.data.action, msg.data)
@@ -336,6 +356,39 @@ async function handleHtmlMessage(msg) {
 
     default:
       console.log('Unknown message type:', action);
+  }
+}
+
+async function handleGetMatchExplanation(payload) {
+  try {
+    const userStatus = await getUserStatus();
+
+    // We require login for personalization
+    if (!userStatus.loggedIn) {
+      sendToHtml('matchExplanation', {
+        success: false,
+        carrierDot: payload?.carrierDot,
+        error: 'Must be logged in to view detailed match info'
+      });
+      return;
+    }
+
+    const { carrierDot } = payload;
+    if (!carrierDot) {
+      console.warn('Missing carrierDot for match explanation');
+      return;
+    }
+
+    const result = await getMatchExplanationForDriver(userStatus.userId, carrierDot);
+
+    sendToHtml('matchExplanation', result);
+  } catch (error) {
+    console.error('Error getting match explanation:', error);
+    sendToHtml('matchExplanation', {
+      success: false,
+      carrierDot: payload?.carrierDot,
+      error: 'Failed to retrieve match explanation'
+    });
   }
 }
 
@@ -462,9 +515,46 @@ async function handleFindMatches(driverPrefs, userStatus) {
       cachedDriverProfile = { ...cachedDriverProfile, ...result.driverProfile };
     }
 
+    // Phase 1: Enrich with Mutual Interests (if logged in)
+    let enrichedMatches = result.matches;
+    if (userStatus?.userId || userStatus?.loggedIn) {
+      try {
+        const driverId = userStatus.userId || wixUsers.currentUser.id;
+        const interestResult = await getMutualInterestForDriver(driverId);
+
+        if (interestResult.success && interestResult.mutualInterests?.length > 0) {
+          console.log(`🤝 Found ${interestResult.mutualInterests.length} mutual matches`);
+
+          // Create lookup map for efficiency
+          const mutualMap = {};
+          interestResult.mutualInterests.forEach(m => {
+            mutualMap[String(m.carrierDot)] = m;
+          });
+
+          // Merge into matches
+          enrichedMatches = result.matches.map(match => {
+            const dot = String(match.carrier?.DOT_NUMBER);
+            if (mutualMap[dot]) {
+              return {
+                ...match,
+                isMutualMatch: true,
+                mutualStrength: mutualMap[dot].mutualStrength,
+                mutualSignals: mutualMap[dot].signals,
+                lastMutualActivity: mutualMap[dot].lastCarrierActivityDate
+              };
+            }
+            return match;
+          });
+        }
+      } catch (err) {
+        console.error('Failed to fetch mutual interests:', err);
+        // Don't fail the search, just log and continue without mutual data
+      }
+    }
+
     // Send results with tier info AND profile info
     sendToHtml('matchResults', {
-      matches: result.matches,
+      matches: enrichedMatches,
       totalScored: result.totalScored,
       userTier: result.userTier,
       maxAllowed: result.maxAllowed,
@@ -903,5 +993,65 @@ async function handleSubmitApplication(data) {
       success: false,
       error: error.message
     });
+  }
+}
+
+// ============================================================================
+// APPLICATION HISTORY HANDLER
+// ============================================================================
+
+async function handleGetDriverApplications() {
+  try {
+    const userStatus = await getUserStatus();
+
+    if (!userStatus.loggedIn) {
+      sendToHtml('driverApplications', []); // Return empty if not logged in
+      return;
+    }
+
+    const driverId = userStatus.userId;
+    console.log('📂 Fetching applications for driver:', driverId);
+
+    const result = await getDriverApplications(driverId);
+
+    // Check if result is array (old format) or object (new format)
+    // Based on previous step, it returns the applications directly if successful, 
+    // or we might need to handle success/error wrapper if the service was written that way.
+    // Checking service impl: 
+    // It returns `applications.map(...)`. So it returns an array directly.
+    // Wait, let's be safe.
+
+    // Looking at applicationService.jsw in diffs:
+    // export async function getDriverApplications(driverId) { ... return formattedApps; }
+    // It returns an array.
+
+    sendToHtml('driverApplications', result);
+
+  } catch (error) {
+    console.error('Error getting driver applications:', error);
+    // Send empty array on error to allow graceful degradation
+    sendToHtml('driverApplications', []);
+  }
+}
+
+async function handleGetMutualInterest(data) {
+  try {
+    const driverId = data.driverId || (wixUsers && wixUsers.currentUser.id);
+    if (!driverId) return;
+
+    console.log('🤝 Fetching mutual interests for:', driverId);
+    const result = await getMutualInterestForDriver(driverId);
+
+    if (result.success) {
+      sendToHtml('mutualInterestData', {
+        interests: result.mutualInterests || []
+      });
+    } else {
+      console.warn('Mutual interest fetch returned unsuccessful:', result);
+      sendToHtml('mutualInterestData', { interests: [] });
+    }
+  } catch (error) {
+    console.error('Error handling mutual interest request:', error);
+    sendToHtml('mutualInterestData', { interests: [], error: error.message });
   }
 }

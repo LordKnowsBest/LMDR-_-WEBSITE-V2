@@ -802,17 +802,13 @@ export async function withdrawApplication(carrierDOT) {
     const updatedApplication = {
       ...application,
       status: CONFIG.STATUS.WITHDRAWN,
-      outcome: 'withdrawn',
-      outcome_date: now,
+      action: 'withdrawn', // Optional: change primary action type
       status_history: JSON.stringify(statusHistory)
     };
 
-    const updateResult = await dataAccess.updateRecord('driverCarrierInterests', updatedApplication, { suppressAuth: true });
-    const updated = updateResult.record;
-
-    console.log(`🗑️ Application withdrawn: Driver ${profile._id} → Carrier DOT ${carrierDOT}`);
-
-    return { success: true, application: updated };
+    await dataAccess.updateRecord('driverCarrierInterests', updatedApplication, { suppressAuth: true });
+    
+    return { success: true };
 
   } catch (error) {
     console.error('❌ Error withdrawing application:', error);
@@ -825,35 +821,30 @@ export async function withdrawApplication(carrierDOT) {
 // ============================================================================
 
 /**
- * Get all applications for the current driver
+ * GET ALL DRIVER APPLICATIONS
+ * Fetches all applications for a specific driver
  */
-export async function getDriverApplications() {
+export async function getDriverApplications(driverId) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in', applications: [] };
-    }
-
-    const userId = currentUser.id;
-    const profile = await getDriverProfile(userId);
-
-    if (!profile) {
-      return { success: false, error: 'Driver profile not found', applications: [] };
+    const authResult = await verifyDriverAuthorization(driverId);
+    if (!authResult.success) {
+      return authResult;
     }
 
     const result = await dataAccess.queryRecords('driverCarrierInterests', {
-      filters: { driver_id: profile._id },
-      sort: [{ field: 'action_timestamp', direction: 'desc' }],
-      limit: 100,
+      filters: {
+        driver_id: driverId,
+        action: 'applied' // Only fetch actual applications, not just interests
+      },
+      limit: 100, // Reasonable limit
       suppressAuth: true
     });
 
     if (!result.success) {
-      return { success: false, error: result.error, applications: [] };
+      return { success: false, error: result.error || 'Failed to fetch applications' };
     }
 
-    // Parse status history for each application
+    // Process items to ensure history is parsed
     const applications = result.items.map(app => {
       let statusHistory = [];
       try {
@@ -861,22 +852,50 @@ export async function getDriverApplications() {
       } catch (e) {
         statusHistory = [];
       }
+      
       return {
         ...app,
-        status_history: statusHistory
+        status_history: statusHistory,
+        // Ensure carrier name is populated (it should be, but fallback just in case)
+        carrier_name: app.carrier_name || 'Unknown Carrier'
       };
     });
 
-    console.log(`📋 Found ${applications.length} applications for driver ${profile._id}`);
+    // Sort by most recent application first
+    applications.sort((a, b) => new Date(b.action_timestamp) - new Date(a.action_timestamp));
 
     return {
       success: true,
-      applications,
-      totalCount: result.totalCount
+      applications
     };
 
   } catch (error) {
     console.error('❌ Error getting driver applications:', error);
-    return { success: false, error: error.message, applications: [] };
+    return { success: false, error: error.message };
   }
 }
+
+/**
+ * Verifies that the current user is authorized to access data for the given driverId.
+ */
+async function verifyDriverAuthorization(driverId) {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) {
+        return { success: false, error: 'User not logged in.' };
+    }
+
+    if (currentUser.id === driverId) {
+        return { success: true };
+    }
+    
+    // Check if the current user owns the driver profile associated with driverId
+    const profile = await getDriverProfile(currentUser.id);
+    if (profile && profile._id === driverId) {
+        return { success: true };
+    }
+
+    return { success: false, error: 'Unauthorized access.' };
+}
+
+
+
