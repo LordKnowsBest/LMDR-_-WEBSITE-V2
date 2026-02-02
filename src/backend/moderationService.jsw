@@ -1,0 +1,190 @@
+/**
+ * Moderation Service
+ *
+ * Handles content moderation, reporting, and automated filtering
+ * for the Driver Community Forums.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+import wixUsersBackend from 'wix-users-backend';
+
+// Collection Keys (from config.jsw)
+const COLLECTIONS = {
+  REPORTS: 'forumReports',
+  POSTS: 'forumPosts',
+  THREADS: 'forumThreads'
+};
+
+const PROFANITY_LIST = ['spam', 'scam', 'abuse']; // Placeholder, expand with real list or external service
+
+// =============================================================================
+// REPORTING
+// =============================================================================
+
+/**
+ * Report a post
+ * @param {string} postId
+ * @param {string} reason
+ * @param {string} details
+ */
+export async function reportPost(postId, reason, details = '') {
+  try {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) throw new Error('Must be logged in to report');
+
+    const report = {
+      postId: postId,
+      reporterId: currentUser.id,
+      reason: reason,
+      details: details,
+      status: 'pending',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    // Check if user already reported this post to prevent spam
+    const existing = await dataAccess.queryRecords(COLLECTIONS.REPORTS, {
+      filters: {
+        postId: postId,
+        reporterId: currentUser.id
+      },
+      limit: 1
+    });
+
+    if (existing.items.length > 0) {
+      return { success: true, message: 'Already reported' };
+    }
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.REPORTS, report);
+    return { success: true, reportId: result.record._id || result.record.id };
+  } catch (error) {
+    console.error('reportPost error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// MODERATION QUEUE
+// =============================================================================
+
+/**
+ * Get moderation queue
+ * @param {object} options - { status: 'pending'|'resolved', limit, skip }
+ */
+export async function getModQueue(options = {}) {
+  try {
+    // Check if user is moderator/admin (TODO: Implement role check)
+    // const currentUser = wixUsersBackend.currentUser;
+    // if (!isAdmin(currentUser.id)) throw new Error('Unauthorized');
+
+    const filters = {
+      status: options.status || 'pending'
+    };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.REPORTS, {
+      filters,
+      limit: options.limit || 50,
+      skip: options.skip || 0,
+      sort: [{ field: 'createdAt', direction: 'asc' }]
+    });
+
+    // Enrich with post content?
+    // Often UI wants to show the content being reported. 
+    // We can do a second query or let frontend handle it.
+    // For MVP, return reports.
+    
+    return result;
+  } catch (error) {
+    console.error('getModQueue error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// MODERATION ACTIONS
+// =============================================================================
+
+/**
+ * Moderate a post (take action)
+ * @param {string} reportId
+ * @param {string} action - 'approve', 'hide', 'warn', 'ban'
+ * @param {string} notes
+ */
+export async function moderatePost(reportId, action, notes = '') {
+  try {
+    const currentUser = wixUsersBackend.currentUser;
+    // if (!isAdmin(currentUser.id)) throw new Error('Unauthorized');
+    
+    const report = await dataAccess.getRecord(COLLECTIONS.REPORTS, reportId);
+    if (!report) throw new Error('Report not found');
+
+    const now = new Date();
+
+    // Update Report Status
+    await dataAccess.updateRecord(COLLECTIONS.REPORTS, {
+      _id: reportId,
+      status: 'resolved',
+      resolution: action,
+      moderatorId: currentUser.id,
+      adminNotes: notes,
+      resolvedAt: now
+    });
+
+    // Perform Action on Post
+    if (action === 'hide' || action === 'delete') {
+       await dataAccess.updateRecord(COLLECTIONS.POSTS, {
+         _id: report.postId,
+         isDeleted: true,
+         deletedBy: currentUser.id,
+         deletionReason: notes
+       });
+    }
+
+    // TODO: Handle 'warn' and 'ban' (User logic)
+
+    return { success: true };
+  } catch (error) {
+    console.error('moderatePost error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// AUTOMATION
+// =============================================================================
+
+/**
+ * Check content for automated flags
+ * @param {string} content
+ * @returns {object} { isFlagged, reason }
+ */
+export function autoFilter(content) {
+  if (!content) return { isFlagged: false };
+  
+  const lower = content.toLowerCase();
+  
+  // Check profanity
+  for (const word of PROFANITY_LIST) {
+    if (lower.includes(word)) {
+      return { isFlagged: true, reason: 'profanity' };
+    }
+  }
+
+  // Check caps spam (>70% caps and length > 10)
+  if (content.length > 10) {
+    const capsCount = (content.match(/[A-Z]/g) || []).length;
+    if (capsCount / content.length > 0.7) {
+       return { isFlagged: true, reason: 'caps_spam' };
+    }
+  }
+
+  // Check link spam (more than 3 links)
+  const linkCount = (content.match(/http/g) || []).length;
+  if (linkCount > 3) {
+      return { isFlagged: true, reason: 'link_spam' };
+  }
+
+  return { isFlagged: false };
+}
