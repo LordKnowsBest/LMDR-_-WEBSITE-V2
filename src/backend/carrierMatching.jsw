@@ -6,6 +6,7 @@ import { log, logDatabase, startTrace, endTrace } from 'backend/observabilitySer
 import { usesAirtable, getWixCollectionName } from 'backend/configData';
 import * as dataAccess from 'backend/dataAccess';
 import * as airtable from 'backend/airtableClient';
+import { seedCarriers } from 'backend/seeds/seedMockData';
 
 // ============================================================================
 // SHARED SCORING MODULE
@@ -152,13 +153,32 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
 
     await logDatabase({ operation: 'query', collection: CONFIG.collectionsName, affectedRows: carrierItems.length, latencyMs: queryLatency, traceId });
 
+    // SEEDING LOGIC
+    if (carrierItems.length === 0) {
+      console.warn('⚠️ No carriers found in database. Seeding mock carriers...');
+      await log({ level: 'WARN', source: 'carrier-matching', message: 'No carriers in database, attempting seed', traceId });
+
+      const seedResult = await seedCarriers();
+      if (seedResult.seeded) {
+          // Re-query
+          if (usesAirtable('carriers')) {
+              const result = await airtable.queryRecords('Carriers', { maxRecords: 500 });
+              carrierItems = result.records || [];
+          } else {
+              const query = wixData.query(CONFIG.collectionsName).limit(500);
+              const results = await query.find();
+              carrierItems = results.items;
+          }
+      }
+    }
+
     console.log(`📊 Step 2: Query complete. Found ${carrierItems.length} carriers`);
 
     // Create a results object for compatibility with existing code
     const results = { items: carrierItems };
     
     if (results.items.length === 0) {
-      console.warn('⚠️ No carriers found in database');
+      console.warn('⚠️ No carriers found in database even after seed');
       await log({ level: 'WARN', source: 'carrier-matching', message: 'No carriers in database', traceId });
       await endTrace(traceId, 'completed', { totalMatches: 0, elapsed: Date.now() - startTime });
       return {
