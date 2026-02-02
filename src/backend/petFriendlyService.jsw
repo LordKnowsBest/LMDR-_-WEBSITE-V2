@@ -1,0 +1,227 @@
+/**
+ * Pet Friendly Service
+ *
+ * Backend logic for the Pet-Friendly Database.
+ * Handles location search, proximity calculations, reviews, and submissions.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+import { awardDriverXP } from 'backend/gamificationService';
+import wixUsersBackend from 'wix-users-backend';
+
+// Collection Keys (from config.jsw)
+const COLLECTIONS = {
+  LOCATIONS: 'petFriendlyLocations',
+  REVIEWS: 'petFriendlyReviews'
+};
+
+// =============================================================================
+// SEARCH & DISCOVERY
+// =============================================================================
+
+/**
+ * Search locations with filters
+ * @param {object} filters - { location_type, amenities, chain }
+ * @param {object} options - { limit, skip, sort }
+ */
+export async function searchLocations(filters = {}, options = {}) {
+  try {
+    const queryFilters = {
+      is_verified: true
+    };
+
+    if (filters.location_type) queryFilters.location_type = filters.location_type;
+    if (filters.chain) queryFilters.chain = filters.chain;
+    
+    // Note: Amenities is a Multiple Select in Airtable. 
+    // dataAccess/airtableClient needs to handle 'hasSome' for arrays.
+    if (filters.amenities && filters.amenities.length > 0) {
+        queryFilters.amenities = { hasSome: filters.amenities };
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.LOCATIONS, {
+      filters: queryFilters,
+      limit: options.limit || 20,
+      skip: options.skip || 0,
+      sort: options.sort || [{ field: 'avg_rating', direction: 'desc' }]
+    });
+
+    return result;
+  } catch (error) {
+    console.error('searchLocations error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get nearby locations (Proximity Search)
+ * Note: Since Airtable doesn't support native geo-distance queries,
+ * we fetch a subset and filter/calculate in JS, or use bounding box formula.
+ * @param {number} lat
+ * @param {number} lng
+ * @param {number} radiusMiles
+ */
+export async function getNearbyLocations(lat, lng, radiusMiles = 50) {
+  try {
+    // 1. Calculate bounding box (rough approximation)
+    // 1 degree lat approx 69 miles
+    // 1 degree lng approx 69 * cos(lat) miles
+    const latDelta = radiusMiles / 69;
+    const lngDelta = radiusMiles / (69 * Math.cos(lat * Math.PI / 180));
+
+    const filters = {
+      latitude: { ge: lat - latDelta, le: lat + latDelta },
+      longitude: { ge: lng - lngDelta, le: lng + lngDelta },
+      is_verified: true
+    };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.LOCATIONS, {
+      filters,
+      limit: 100
+    });
+
+    // 2. Exact distance calculation (Haversine)
+    const locationsWithDist = result.items.map(loc => {
+        const dist = calculateDistance(lat, lng, loc.latitude, loc.longitude);
+        return { ...loc, distance: dist };
+    }).filter(loc => loc.distance <= radiusMiles);
+
+    return locationsWithDist.sort((a, b) => a.distance - b.distance);
+  } catch (error) {
+    console.error('getNearbyLocations error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get location by ID with reviews
+ * @param {string} id
+ */
+export async function getLocationById(id) {
+  try {
+    const location = await dataAccess.getRecord(COLLECTIONS.LOCATIONS, id);
+    if (!location) throw new Error('Location not found');
+
+    const reviews = await dataAccess.queryRecords(COLLECTIONS.REVIEWS, {
+        filters: { location_id: id },
+        limit: 10,
+        sort: [{ field: 'created_at', direction: 'desc' }]
+    });
+
+    return {
+        ...location,
+        reviews: reviews.items
+    };
+  } catch (error) {
+    console.error('getLocationById error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// SUBMISSIONS
+// =============================================================================
+
+/**
+ * Submit a new location
+ * @param {object} data
+ */
+export async function submitLocation(data) {
+  try {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) throw new Error('Unauthorized');
+
+    const newLocation = {
+      ...data,
+      submitted_by: currentUser.id,
+      is_verified: false, // Needs admin review
+      avg_rating: 0,
+      review_count: 0,
+      created_at: new Date(),
+      updated_at: new Date()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.LOCATIONS, newLocation);
+    
+    // Award reputation for contribution
+    await awardDriverXP(currentUser.id, 'add_verified_location', { source: 'pet_friendly' });
+
+    return result;
+  } catch (error) {
+    console.error('submitLocation error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Submit a review
+ * @param {string} locationId
+ * @param {object} reviewData
+ */
+export async function submitReview(locationId, reviewData) {
+  try {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) throw new Error('Unauthorized');
+
+    const review = {
+      location_id: locationId,
+      author_id: currentUser.id,
+      rating: reviewData.rating,
+      pet_type: reviewData.pet_type,
+      visit_date: reviewData.visit_date || new Date(),
+      review_text: reviewData.review_text,
+      amenities_confirmed: reviewData.amenities_confirmed || [],
+      helpful_count: 0,
+      created_at: new Date()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.REVIEWS, review);
+    
+    // Update Location Aggregate Stats
+    await updateLocationStats(locationId);
+
+    // Award XP
+    await awardDriverXP(currentUser.id, 'leave_review', { source: 'pet_friendly' });
+
+    return result;
+  } catch (error) {
+    console.error('submitReview error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+function calculateDistance(lat1, lon1, lat2, lng2) {
+    const R = 3958.8; // Radius of Earth in miles
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lng2 - lon1) * Math.PI / 180;
+    const a = 
+        Math.sin(dLat/2) * Math.sin(dLat/2) +
+        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+        Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+async function updateLocationStats(locationId) {
+    const reviews = await dataAccess.queryRecords(COLLECTIONS.REVIEWS, {
+        filters: { location_id: locationId }
+    });
+
+    if (reviews.items.length === 0) return;
+
+    const totalRating = reviews.items.reduce((sum, r) => sum + (r.rating || 0), 0);
+    const avgRating = Math.round((totalRating / reviews.items.length) * 10) / 10;
+
+    await dataAccess.updateRecord(COLLECTIONS.LOCATIONS, {
+        _id: locationId,
+        avg_rating: avgRating,
+        review_count: reviews.items.length,
+        updated_at: new Date()
+    });
+}
