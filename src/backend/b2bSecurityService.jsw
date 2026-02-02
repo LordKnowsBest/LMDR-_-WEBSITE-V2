@@ -1,0 +1,515 @@
+// ============================================================================
+// B2B SECURITY SERVICE - Authentication, authorization, compliance, audit
+//
+// Centralized security layer for all B2B Business Development Suite actions.
+// Handles role-based access control, consent validation, quiet hours,
+// do-not-contact enforcement, and audit logging.
+//
+// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
+//
+// Used by: b2bBridgeService.jsw (entry-point guard for all B2B actions)
+// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
+// ============================================================================
+
+import { currentMember } from 'wix-members-backend';
+import wixData from 'wix-data';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// ============================================================================
+// COLLECTION KEYS
+// ============================================================================
+
+const COLLECTIONS = {
+  contacts: 'b2bContacts',
+  activities: 'b2bActivities'
+};
+
+// ============================================================================
+// ROLE DEFINITIONS
+// ============================================================================
+
+/**
+ * B2B role hierarchy (lowest to highest privilege):
+ *   viewer  → Can read dashboards, pipeline, analytics
+ *   rep     → Can create/edit accounts, contacts, log activities, run outreach
+ *   manager → Can manage sequences, campaigns, view all reps' data
+ *   admin   → Full access including delete, config, audit export
+ */
+const B2B_ROLES = {
+  VIEWER: 'b2b_viewer',
+  REP: 'b2b_rep',
+  MANAGER: 'b2b_manager',
+  ADMIN: 'b2b_admin'
+};
+
+const ROLE_HIERARCHY = {
+  [B2B_ROLES.VIEWER]: 0,
+  [B2B_ROLES.REP]: 1,
+  [B2B_ROLES.MANAGER]: 2,
+  [B2B_ROLES.ADMIN]: 3
+};
+
+// Site-level admin roles that automatically get B2B admin access
+const SITE_ADMIN_ROLES = ['admin', 'super_admin', 'ops_admin'];
+
+// ============================================================================
+// ACTION → MINIMUM ROLE MAPPING
+// ============================================================================
+
+const ACTION_PERMISSIONS = {
+  // Read-only actions — any B2B user
+  getDashboardKPIs: B2B_ROLES.VIEWER,
+  getTopProspects: B2B_ROLES.VIEWER,
+  getAlerts: B2B_ROLES.VIEWER,
+  getTopOpportunities: B2B_ROLES.VIEWER,
+  getNextActions: B2B_ROLES.VIEWER,
+  getAccount: B2B_ROLES.VIEWER,
+  listAccounts: B2B_ROLES.VIEWER,
+  getContacts: B2B_ROLES.VIEWER,
+  getSignal: B2B_ROLES.VIEWER,
+  getSignalSpikes: B2B_ROLES.VIEWER,
+  getPipeline: B2B_ROLES.VIEWER,
+  getForecast: B2B_ROLES.VIEWER,
+  getOpportunity: B2B_ROLES.VIEWER,
+  getOpportunitiesByAccount: B2B_ROLES.VIEWER,
+  getPipelineKPIs: B2B_ROLES.VIEWER,
+  getStageConversions: B2B_ROLES.VIEWER,
+  getRisks: B2B_ROLES.VIEWER,
+  getStageDefinitions: B2B_ROLES.VIEWER,
+  getPlaybookSuggestions: B2B_ROLES.VIEWER,
+  getValueProps: B2B_ROLES.VIEWER,
+  getTimeline: B2B_ROLES.VIEWER,
+  getActivityVelocity: B2B_ROLES.VIEWER,
+  getSequences: B2B_ROLES.VIEWER,
+  getSequence: B2B_ROLES.VIEWER,
+  getThrottleStatus: B2B_ROLES.VIEWER,
+  getOutreachMetrics: B2B_ROLES.VIEWER,
+  getChannelPerformance: B2B_ROLES.VIEWER,
+  getRepPerformance: B2B_ROLES.VIEWER,
+  getSourcePerformance: B2B_ROLES.VIEWER,
+  getCPA: B2B_ROLES.VIEWER,
+  getCompetitorIntel: B2B_ROLES.VIEWER,
+  getBrief: B2B_ROLES.VIEWER,
+
+  // Write actions — rep or above
+  createAccount: B2B_ROLES.REP,
+  updateAccount: B2B_ROLES.REP,
+  createContact: B2B_ROLES.REP,
+  updateContact: B2B_ROLES.REP,
+  generateSignal: B2B_ROLES.REP,
+  generateBatchSignals: B2B_ROLES.REP,
+  createOpportunity: B2B_ROLES.REP,
+  moveStage: B2B_ROLES.REP,
+  logActivity: B2B_ROLES.REP,
+  recordEmail: B2B_ROLES.REP,
+  recordSms: B2B_ROLES.REP,
+  recordCall: B2B_ROLES.REP,
+  captureLead: B2B_ROLES.REP,
+  addCompetitorIntel: B2B_ROLES.REP,
+  generateBrief: B2B_ROLES.REP,
+  quickAction: B2B_ROLES.REP,
+  accountAction: B2B_ROLES.REP,
+
+  // Manager actions — sequence/campaign management
+  saveSequence: B2B_ROLES.MANAGER,
+  addStep: B2B_ROLES.MANAGER,
+  createCallCampaign: B2B_ROLES.MANAGER,
+  saveSnapshot: B2B_ROLES.MANAGER
+};
+
+// Actions that mutate data and should be audit-logged
+const AUDITABLE_ACTIONS = [
+  'createAccount', 'updateAccount',
+  'createContact', 'updateContact',
+  'createOpportunity', 'moveStage',
+  'recordEmail', 'recordSms', 'recordCall',
+  'captureLead', 'saveSequence', 'addStep',
+  'createCallCampaign', 'addCompetitorIntel',
+  'generateBrief', 'generateBatchSignals',
+  'saveSnapshot', 'quickAction', 'accountAction'
+];
+
+// ============================================================================
+// CONSENT STATUSES
+// ============================================================================
+
+const CONSENT_STATUS = {
+  PENDING: 'pending',
+  OPTED_IN: 'opted_in',
+  OPTED_OUT: 'opted_out',
+  DO_NOT_CONTACT: 'do_not_contact'
+};
+
+// Channels that require explicit consent
+const CONSENT_REQUIRED_CHANNELS = ['sms', 'call'];
+
+// ============================================================================
+// QUIET HOURS CONFIG
+// ============================================================================
+
+const QUIET_HOURS = {
+  start: 21, // 9 PM
+  end: 8     // 8 AM
+};
+
+// ============================================================================
+// DUAL-SOURCE HELPERS
+// ============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.queryRecords(tableName, {
+      filterByFormula: options.filter || '',
+      sort: options.sort,
+      maxRecords: options.limit || 100
+    });
+    return { items: result.records || [], totalCount: result.records?.length || 0 };
+  }
+  let query = wixData.query(collectionKey);
+  if (options.limit) query = query.limit(options.limit);
+  return await query.find();
+}
+
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.createRecord(tableName, record);
+    return result.record || record;
+  }
+  return await wixData.insert(collectionKey, record);
+}
+
+async function findByField(collectionKey, fieldName, value) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    return await airtable.findByField(tableName, fieldName, value);
+  }
+  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
+  return result.items || [];
+}
+
+// ============================================================================
+// AUTHENTICATION — Get Current B2B User
+// ============================================================================
+
+/**
+ * Get the current authenticated user's B2B identity and role.
+ *
+ * Resolves B2B role from:
+ *   1. Member custom field `b2b_role` (explicit B2B assignment)
+ *   2. Site admin role → auto-mapped to b2b_admin
+ *   3. Fallback: logged-in member with no B2B role → null (unauthorized)
+ *
+ * @returns {Promise<{authenticated: boolean, user?: Object, error?: string}>}
+ */
+export async function getB2BUser() {
+  try {
+    const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+    if (!member) {
+      return { authenticated: false, error: 'Not logged in' };
+    }
+
+    const memberId = member._id;
+    const email = member.loginEmail || '';
+    const name = member.contactDetails?.firstName
+      ? `${member.contactDetails.firstName} ${member.contactDetails.lastName || ''}`.trim()
+      : email;
+    const customFields = member.contactDetails?.customFields || {};
+
+    // Check for explicit B2B role
+    let b2bRole = customFields.b2b_role || '';
+
+    // If no explicit B2B role, check if they're a site admin
+    if (!b2bRole) {
+      const siteRole = (customFields.role || '').toLowerCase();
+      if (SITE_ADMIN_ROLES.includes(siteRole)) {
+        b2bRole = B2B_ROLES.ADMIN;
+      }
+    }
+
+    // Also check AdminUsers collection as fallback
+    if (!b2bRole) {
+      try {
+        const adminCheck = await wixData.query('AdminUsers')
+          .eq('email', email)
+          .eq('status', 'active')
+          .find({ suppressAuth: true });
+        if (adminCheck.items && adminCheck.items.length > 0) {
+          b2bRole = B2B_ROLES.ADMIN;
+        }
+      } catch (e) {
+        // AdminUsers check failed — not critical
+      }
+    }
+
+    if (!b2bRole) {
+      return { authenticated: true, user: { memberId, email, name }, error: 'No B2B role assigned' };
+    }
+
+    return {
+      authenticated: true,
+      user: {
+        memberId,
+        email,
+        name,
+        role: b2bRole,
+        roleLevel: ROLE_HIERARCHY[b2bRole] ?? 0
+      }
+    };
+  } catch (error) {
+    console.error('[B2B Security] Error getting user:', error);
+    return { authenticated: false, error: error.message || 'Authentication failed' };
+  }
+}
+
+// ============================================================================
+// AUTHORIZATION — Role Checks
+// ============================================================================
+
+/**
+ * Check if a user has at least the minimum required role.
+ *
+ * @param {Object} user - User object from getB2BUser()
+ * @param {string} minRole - Minimum required role
+ * @returns {boolean}
+ */
+export function hasRole(user, minRole) {
+  if (!user || !user.role) return false;
+  const userLevel = ROLE_HIERARCHY[user.role] ?? -1;
+  const requiredLevel = ROLE_HIERARCHY[minRole] ?? 999;
+  return userLevel >= requiredLevel;
+}
+
+/**
+ * Get the minimum role required for a given action.
+ *
+ * @param {string} action - The B2B action name
+ * @returns {string} The minimum role required (defaults to b2b_rep for unknown actions)
+ */
+export function getRequiredRole(action) {
+  return ACTION_PERMISSIONS[action] || B2B_ROLES.REP;
+}
+
+/**
+ * Check if an action requires audit logging.
+ *
+ * @param {string} action - The B2B action name
+ * @returns {boolean}
+ */
+export function isAuditable(action) {
+  return AUDITABLE_ACTIONS.includes(action);
+}
+
+/**
+ * Check if a user can perform a specific action.
+ *
+ * @param {Object} user - User object from getB2BUser()
+ * @param {string} action - The B2B action name
+ * @returns {{allowed: boolean, reason?: string}}
+ */
+export function checkActionPermission(user, action) {
+  if (!user || !user.role) {
+    return { allowed: false, reason: 'No B2B role assigned. Contact an administrator.' };
+  }
+
+  const requiredRole = getRequiredRole(action);
+  if (!hasRole(user, requiredRole)) {
+    return {
+      allowed: false,
+      reason: `Action "${action}" requires ${requiredRole} role. Your role: ${user.role}.`
+    };
+  }
+
+  return { allowed: true };
+}
+
+// ============================================================================
+// COMPLIANCE — Consent Validation
+// ============================================================================
+
+/**
+ * Validate that a contact has given consent for a specific outreach channel.
+ *
+ * @param {string} contactId - Contact record ID
+ * @param {string} channel - Outreach channel (email, sms, call)
+ * @returns {Promise<{allowed: boolean, reason?: string, consent_status?: string}>}
+ */
+export async function validateConsent(contactId, channel) {
+  try {
+    if (!contactId) {
+      return { allowed: false, reason: 'Contact ID is required for consent check' };
+    }
+
+    // Email doesn't require explicit opt-in (CAN-SPAM allows until opt-out)
+    if (channel === 'email') {
+      const contacts = await findByField(COLLECTIONS.contacts, '_id', contactId);
+      const contact = contacts && contacts.length > 0 ? contacts[0] : null;
+      if (contact && (contact.consent_status === CONSENT_STATUS.OPTED_OUT || contact.consent_status === CONSENT_STATUS.DO_NOT_CONTACT)) {
+        return { allowed: false, reason: 'Contact has opted out', consent_status: contact.consent_status };
+      }
+      return { allowed: true, consent_status: contact?.consent_status || CONSENT_STATUS.PENDING };
+    }
+
+    // SMS and Call require explicit consent
+    if (CONSENT_REQUIRED_CHANNELS.includes(channel)) {
+      const contacts = await findByField(COLLECTIONS.contacts, '_id', contactId);
+      const contact = contacts && contacts.length > 0 ? contacts[0] : null;
+
+      if (!contact) {
+        return { allowed: false, reason: 'Contact not found' };
+      }
+
+      const status = contact.consent_status || CONSENT_STATUS.PENDING;
+
+      if (status === CONSENT_STATUS.DO_NOT_CONTACT) {
+        return { allowed: false, reason: 'Contact is on do-not-contact list', consent_status: status };
+      }
+      if (status === CONSENT_STATUS.OPTED_OUT) {
+        return { allowed: false, reason: `Contact has opted out of ${channel}`, consent_status: status };
+      }
+      if (status === CONSENT_STATUS.PENDING) {
+        return { allowed: false, reason: `${channel} requires explicit consent. Status is pending.`, consent_status: status };
+      }
+
+      return { allowed: true, consent_status: status };
+    }
+
+    // Other channels — allow by default
+    return { allowed: true };
+  } catch (error) {
+    console.error('[B2B Security] Consent validation error:', error);
+    return { allowed: false, reason: 'Consent check failed: ' + (error.message || 'Unknown error') };
+  }
+}
+
+/**
+ * Check if a contact is on the do-not-contact list.
+ *
+ * @param {string} contactId
+ * @returns {Promise<boolean>}
+ */
+export async function isDoNotContact(contactId) {
+  try {
+    if (!contactId) return false;
+    const contacts = await findByField(COLLECTIONS.contacts, '_id', contactId);
+    const contact = contacts && contacts.length > 0 ? contacts[0] : null;
+    return contact?.consent_status === CONSENT_STATUS.DO_NOT_CONTACT;
+  } catch (error) {
+    console.warn('[B2B Security] DNC check failed:', error.message);
+    return false;
+  }
+}
+
+// ============================================================================
+// COMPLIANCE — Quiet Hours
+// ============================================================================
+
+/**
+ * Check if the current time falls within quiet hours.
+ * Outreach (email, sms, call) should not be sent during quiet hours.
+ *
+ * @param {string} [timezone] - Contact timezone (future: use for local-time check)
+ * @returns {{inQuietHours: boolean, resumesAt: string}}
+ */
+export function checkQuietHours(timezone = '') {
+  const now = new Date();
+  const hour = now.getUTCHours();
+  const inQuietHours = hour >= QUIET_HOURS.start || hour < QUIET_HOURS.end;
+
+  let resumesAt = '';
+  if (inQuietHours) {
+    const resume = new Date(now);
+    if (hour >= QUIET_HOURS.start) {
+      resume.setUTCDate(resume.getUTCDate() + 1);
+    }
+    resume.setUTCHours(QUIET_HOURS.end, 0, 0, 0);
+    resumesAt = resume.toISOString();
+  }
+
+  return { inQuietHours, resumesAt };
+}
+
+// ============================================================================
+// COMPLIANCE — Outreach Pre-flight Check
+// ============================================================================
+
+/**
+ * Run all compliance checks before sending outreach.
+ * Combines consent, quiet hours, and DNC into one call.
+ *
+ * @param {string} contactId - Contact to reach
+ * @param {string} channel - email, sms, or call
+ * @returns {Promise<{allowed: boolean, reasons?: string[]}>}
+ */
+export async function preflightOutreachCheck(contactId, channel) {
+  const reasons = [];
+
+  // 1. Quiet hours
+  const { inQuietHours, resumesAt } = checkQuietHours();
+  if (inQuietHours) {
+    reasons.push(`Quiet hours active (9PM-8AM UTC). Resumes at ${resumesAt}`);
+  }
+
+  // 2. Consent
+  const consent = await validateConsent(contactId, channel);
+  if (!consent.allowed) {
+    reasons.push(consent.reason);
+  }
+
+  return {
+    allowed: reasons.length === 0,
+    reasons: reasons.length > 0 ? reasons : undefined
+  };
+}
+
+// ============================================================================
+// AUDIT LOGGING
+// ============================================================================
+
+/**
+ * Log a B2B action for audit purposes.
+ * Non-blocking — failures are logged but don't interrupt the operation.
+ *
+ * @param {Object} params
+ * @param {string} params.action - The action performed
+ * @param {string} params.userId - Who performed it
+ * @param {string} params.userEmail - User email
+ * @param {string} [params.targetType] - account, contact, opportunity, sequence, etc.
+ * @param {string} [params.targetId] - ID of the affected record
+ * @param {Object} [params.details] - Additional context
+ */
+export async function logB2BAudit({ action, userId, userEmail, targetType, targetId, details }) {
+  try {
+    const record = {
+      account_id: targetId || '',
+      contact_id: '',
+      type: 'audit',
+      channel: 'platform',
+      subject: `[AUDIT] ${action}`,
+      notes: JSON.stringify({
+        action,
+        user_id: userId,
+        user_email: userEmail,
+        target_type: targetType || '',
+        target_id: targetId || '',
+        details: details || {},
+        timestamp: new Date().toISOString()
+      }),
+      outcome: 'completed',
+      owner_id: userId || '',
+      created_at: new Date().toISOString()
+    };
+
+    await insertData(COLLECTIONS.activities, record);
+  } catch (error) {
+    console.warn('[B2B Audit] Failed to log audit entry:', error.message);
+  }
+}
+
+// ============================================================================
+// EXPORTS — Constants for external use
+// ============================================================================
+
+export { B2B_ROLES, ROLE_HIERARCHY, CONSENT_STATUS };

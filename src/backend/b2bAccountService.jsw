@@ -1,0 +1,592 @@
+// ============================================================================
+// B2B ACCOUNT SERVICE - Carrier target & contact management
+//
+// Manages B2B accounts (carrier prospects/clients), contacts (decision makers),
+// prospect lists with filters, and lead source tracking.
+//
+// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
+//
+// Used on: B2B Dashboard, Account Detail, Prospect Lists
+// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
+// ============================================================================
+
+import wixData from 'wix-data';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// ============================================================================
+// COLLECTION KEYS
+// ============================================================================
+
+const COLLECTIONS = {
+  accounts: 'b2bAccounts',
+  contacts: 'b2bContacts',
+  leadSources: 'b2bLeadSources',
+  carriers: 'carriers',
+  signals: 'b2bMatchSignals'
+};
+
+// ============================================================================
+// ACCOUNT STATUSES & SEGMENTS
+// ============================================================================
+
+const ACCOUNT_STATUS = {
+  TARGET: 'target',
+  PROSPECTING: 'prospecting',
+  ENGAGED: 'engaged',
+  CLIENT: 'client',
+  CHURNED: 'churned',
+  DISQUALIFIED: 'disqualified'
+};
+
+const ACCOUNT_SEGMENTS = {
+  ENTERPRISE: 'enterprise',       // 500+ trucks
+  MID_MARKET: 'mid_market',       // 100-499 trucks
+  SMALL_FLEET: 'small_fleet',     // 20-99 trucks
+  OWNER_OPERATOR: 'owner_operator' // <20 trucks
+};
+
+// ============================================================================
+// DUAL-SOURCE HELPERS
+// ============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.queryRecords(tableName, {
+      filterByFormula: options.filter || '',
+      sort: options.sort,
+      maxRecords: options.limit || 100
+    });
+    return { items: result.records || [], totalCount: result.records?.length || 0 };
+  }
+  let query = wixData.query(collectionKey);
+  if (options.limit) query = query.limit(options.limit);
+  return await query.find();
+}
+
+async function getRecord(collectionKey, recordId) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.getRecord(tableName, recordId);
+    return result.record || null;
+  }
+  return await wixData.get(collectionKey, recordId);
+}
+
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.createRecord(tableName, record);
+    return result.record || record;
+  }
+  return await wixData.insert(collectionKey, record);
+}
+
+async function updateData(collectionKey, recordId, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.updateRecord(tableName, recordId, record);
+    return result.record || record;
+  }
+  return await wixData.update(collectionKey, { _id: recordId, ...record });
+}
+
+async function findByField(collectionKey, fieldName, value) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    return await airtable.findByField(tableName, fieldName, value);
+  }
+  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
+  return result.items || [];
+}
+
+async function deleteData(collectionKey, recordId) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    return await airtable.deleteRecord(tableName, recordId);
+  }
+  return await wixData.remove(collectionKey, recordId);
+}
+
+// ============================================================================
+// ACCOUNT CRUD
+// ============================================================================
+
+/**
+ * Create a new B2B account (carrier prospect)
+ *
+ * @param {Object} accountData
+ * @param {string} accountData.carrier_dot - DOT number
+ * @param {string} accountData.carrier_name - Company name
+ * @param {string} [accountData.status='target'] - Account status
+ * @param {string} [accountData.segment] - Segment classification
+ * @param {string} [accountData.region] - Primary region
+ * @param {number} [accountData.fleet_size] - Fleet size
+ * @param {string} [accountData.source] - Lead source
+ * @param {string} [accountData.owner_id] - Assigned rep
+ * @returns {Promise<{success: boolean, account?: Object, error?: string}>}
+ */
+export async function createAccount(accountData) {
+  try {
+    if (!accountData.carrier_name || !accountData.carrier_name.trim()) {
+      return { success: false, error: 'Carrier name is required' };
+    }
+
+    // Check for duplicate by DOT
+    if (accountData.carrier_dot) {
+      const existing = await findByField(COLLECTIONS.accounts, 'carrier_dot', String(accountData.carrier_dot));
+      if (existing && existing.length > 0) {
+        return { success: false, error: 'Account already exists for this DOT number', existingId: existing[0]._id || existing[0].id };
+      }
+    }
+
+    const record = {
+      carrier_dot: accountData.carrier_dot ? String(accountData.carrier_dot).trim() : '',
+      carrier_name: accountData.carrier_name.trim(),
+      status: accountData.status || ACCOUNT_STATUS.TARGET,
+      segment: accountData.segment || classifySegment(accountData.fleet_size),
+      region: accountData.region || '',
+      fleet_size: accountData.fleet_size || 0,
+      primary_contact_id: '',
+      source: accountData.source || 'manual',
+      owner_id: accountData.owner_id || '',
+      tags: accountData.tags || '',
+      notes: accountData.notes || '',
+      last_activity_at: new Date().toISOString(),
+      created_at: new Date().toISOString()
+    };
+
+    const saved = await insertData(COLLECTIONS.accounts, record);
+
+    // Track lead source if provided
+    if (accountData.source && accountData.source !== 'manual') {
+      await trackLeadSource(saved._id || saved.id, accountData.source).catch(err =>
+        console.warn('Lead source tracking failed:', err.message)
+      );
+    }
+
+    return { success: true, account: saved };
+  } catch (error) {
+    console.error('Error creating B2B account:', error);
+    return { success: false, error: error.message || 'Failed to create account' };
+  }
+}
+
+/**
+ * Get a B2B account by ID
+ *
+ * @param {string} accountId
+ * @returns {Promise<{success: boolean, account?: Object, error?: string}>}
+ */
+export async function getAccount(accountId) {
+  try {
+    if (!accountId) return { success: false, error: 'Account ID is required' };
+
+    const record = await getRecord(COLLECTIONS.accounts, accountId);
+    if (!record) return { success: false, error: 'Account not found' };
+
+    return { success: true, account: record };
+  } catch (error) {
+    console.error('Error fetching B2B account:', error);
+    return { success: false, error: error.message || 'Failed to fetch account' };
+  }
+}
+
+/**
+ * Get a B2B account by carrier DOT number
+ *
+ * @param {string} carrierDot
+ * @returns {Promise<{success: boolean, account?: Object, error?: string}>}
+ */
+export async function getAccountByDot(carrierDot) {
+  try {
+    if (!carrierDot) return { success: false, error: 'Carrier DOT is required' };
+
+    const results = await findByField(COLLECTIONS.accounts, 'carrier_dot', String(carrierDot));
+    if (!results || results.length === 0) {
+      return { success: false, error: 'No account found for this DOT' };
+    }
+
+    return { success: true, account: results[0] };
+  } catch (error) {
+    console.error('Error fetching account by DOT:', error);
+    return { success: false, error: error.message || 'Failed to fetch account' };
+  }
+}
+
+/**
+ * Update a B2B account
+ *
+ * @param {string} accountId
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<{success: boolean, account?: Object, error?: string}>}
+ */
+export async function updateAccount(accountId, updates) {
+  try {
+    if (!accountId) return { success: false, error: 'Account ID is required' };
+
+    updates.last_activity_at = new Date().toISOString();
+    const saved = await updateData(COLLECTIONS.accounts, accountId, updates);
+
+    return { success: true, account: saved };
+  } catch (error) {
+    console.error('Error updating B2B account:', error);
+    return { success: false, error: error.message || 'Failed to update account' };
+  }
+}
+
+/**
+ * Delete a B2B account
+ *
+ * @param {string} accountId
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function removeAccount(accountId) {
+  try {
+    if (!accountId) return { success: false, error: 'Account ID is required' };
+    await deleteData(COLLECTIONS.accounts, accountId);
+    return { success: true };
+  } catch (error) {
+    console.error('Error removing B2B account:', error);
+    return { success: false, error: error.message || 'Failed to remove account' };
+  }
+}
+
+// ============================================================================
+// ACCOUNT LISTS & QUERIES
+// ============================================================================
+
+/**
+ * List B2B accounts with filters for prospect list building
+ *
+ * @param {Object} [filters]
+ * @param {string} [filters.status] - Filter by status
+ * @param {string} [filters.segment] - Filter by segment
+ * @param {string} [filters.region] - Filter by region (partial match)
+ * @param {number} [filters.minFleetSize] - Minimum fleet size
+ * @param {number} [filters.maxFleetSize] - Maximum fleet size
+ * @param {string} [filters.ownerId] - Filter by assigned owner
+ * @param {string} [filters.source] - Filter by lead source
+ * @param {string} [filters.tag] - Filter by tag (partial match)
+ * @param {number} [filters.limit=50] - Max results
+ * @param {string} [filters.sortBy='last_activity_at'] - Sort field
+ * @param {string} [filters.sortDir='desc'] - Sort direction
+ * @returns {Promise<{success: boolean, accounts?: Object[], totalCount?: number, error?: string}>}
+ */
+export async function listAccounts(filters = {}) {
+  try {
+    const limit = filters.limit || 50;
+    const parts = [];
+
+    if (filters.status) parts.push(`{status} = "${filters.status}"`);
+    if (filters.segment) parts.push(`{segment} = "${filters.segment}"`);
+    if (filters.region) parts.push(`FIND("${filters.region}", {region})`);
+    if (filters.ownerId) parts.push(`{owner_id} = "${filters.ownerId}"`);
+    if (filters.source) parts.push(`{source} = "${filters.source}"`);
+    if (filters.tag) parts.push(`FIND("${filters.tag}", {tags})`);
+    if (filters.minFleetSize) parts.push(`{fleet_size} >= ${filters.minFleetSize}`);
+    if (filters.maxFleetSize) parts.push(`{fleet_size} <= ${filters.maxFleetSize}`);
+
+    const filter = parts.length > 0
+      ? (parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`)
+      : '';
+
+    const sortField = filters.sortBy || 'last_activity_at';
+    const sortDir = filters.sortDir || 'desc';
+
+    const result = await queryData(COLLECTIONS.accounts, {
+      filter,
+      sort: [{ field: sortField, direction: sortDir }],
+      limit
+    });
+
+    return {
+      success: true,
+      accounts: result.items || [],
+      totalCount: result.totalCount || 0
+    };
+  } catch (error) {
+    console.error('Error listing B2B accounts:', error);
+    return { success: false, error: error.message || 'Failed to list accounts' };
+  }
+}
+
+/**
+ * Get non-client carriers with highest match potential, ranked by AI signal score.
+ * Merges account data with live match signals for the dashboard widget.
+ *
+ * @param {Object} [options]
+ * @param {number} [options.limit=25]
+ * @returns {Promise<{success: boolean, prospects?: Object[], error?: string}>}
+ */
+export async function getTopProspects(options = {}) {
+  try {
+    const limit = options.limit || 25;
+
+    // Get accounts that are targets or in prospecting (fetch extra for merge)
+    const filter = `OR({status} = "target", {status} = "prospecting")`;
+    const accountResult = await queryData(COLLECTIONS.accounts, {
+      filter,
+      sort: [{ field: 'last_activity_at', direction: 'desc' }],
+      limit: 200
+    });
+    const accounts = accountResult.items || [];
+
+    // Fetch live signals (no snapshot_date) to get AI scores
+    let signalMap = new Map();
+    try {
+      const signalResult = await queryData(COLLECTIONS.signals, {
+        filter: `OR({snapshot_date} = "", {snapshot_date} = BLANK())`,
+        sort: [{ field: 'signal_score', direction: 'desc' }],
+        limit: 200
+      });
+      (signalResult.items || []).forEach(s => {
+        signalMap.set(s.carrier_dot, s);
+      });
+    } catch (err) {
+      console.warn('Signal fetch for prospects failed (using accounts only):', err.message);
+    }
+
+    // Determine "new this week" cutoff
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+    const weekCutoff = oneWeekAgo.toISOString();
+
+    // Merge signal data into accounts
+    const enriched = accounts.map(account => {
+      const signal = signalMap.get(account.carrier_dot);
+      return {
+        ...account,
+        signal_score: signal ? signal.signal_score : 0,
+        driver_count_high_match: signal ? signal.driver_count_high_match : 0,
+        confidence: signal ? signal.confidence : 'low',
+        urgency: signal ? signal.urgency : 'low',
+        is_new_this_week: account.created_at >= weekCutoff
+      };
+    });
+
+    // Sort by signal_score descending, tie-break by last_activity_at
+    enriched.sort((a, b) => {
+      const scoreDiff = (b.signal_score || 0) - (a.signal_score || 0);
+      if (scoreDiff !== 0) return scoreDiff;
+      return (b.last_activity_at || '') > (a.last_activity_at || '') ? 1 : -1;
+    });
+
+    return {
+      success: true,
+      prospects: enriched.slice(0, limit)
+    };
+  } catch (error) {
+    console.error('Error fetching top prospects:', error);
+    return { success: false, error: error.message || 'Failed to fetch prospects' };
+  }
+}
+
+// ============================================================================
+// CONTACT CRUD
+// ============================================================================
+
+/**
+ * Create a contact for a B2B account
+ *
+ * @param {Object} contactData
+ * @param {string} contactData.account_id - Parent account ID
+ * @param {string} contactData.name - Contact name
+ * @param {string} [contactData.role] - Job title/role
+ * @param {string} [contactData.email] - Email
+ * @param {string} [contactData.phone] - Phone
+ * @param {string} [contactData.timezone] - Timezone
+ * @param {string} [contactData.preferred_channel] - Preferred contact method
+ * @returns {Promise<{success: boolean, contact?: Object, error?: string}>}
+ */
+export async function createContact(contactData) {
+  try {
+    if (!contactData.account_id) {
+      return { success: false, error: 'Account ID is required' };
+    }
+    if (!contactData.name || !contactData.name.trim()) {
+      return { success: false, error: 'Contact name is required' };
+    }
+
+    const record = {
+      account_id: contactData.account_id,
+      name: contactData.name.trim(),
+      role: contactData.role || '',
+      email: contactData.email || '',
+      phone: contactData.phone || '',
+      timezone: contactData.timezone || '',
+      preferred_channel: contactData.preferred_channel || 'email',
+      consent_status: contactData.consent_status || 'pending',
+      created_at: new Date().toISOString()
+    };
+
+    const saved = await insertData(COLLECTIONS.contacts, record);
+
+    // Set as primary contact if first contact on account
+    const existing = await findByField(COLLECTIONS.contacts, 'account_id', contactData.account_id);
+    if (existing && existing.length <= 1) {
+      await updateData(COLLECTIONS.accounts, contactData.account_id, {
+        primary_contact_id: saved._id || saved.id
+      }).catch(() => {});
+    }
+
+    return { success: true, contact: saved };
+  } catch (error) {
+    console.error('Error creating B2B contact:', error);
+    return { success: false, error: error.message || 'Failed to create contact' };
+  }
+}
+
+/**
+ * Get contacts for an account
+ *
+ * @param {string} accountId
+ * @returns {Promise<{success: boolean, contacts?: Object[], error?: string}>}
+ */
+export async function getContactsByAccount(accountId) {
+  try {
+    if (!accountId) return { success: false, error: 'Account ID is required' };
+
+    const results = await findByField(COLLECTIONS.contacts, 'account_id', accountId);
+
+    return { success: true, contacts: results || [] };
+  } catch (error) {
+    console.error('Error fetching contacts:', error);
+    return { success: false, error: error.message || 'Failed to fetch contacts' };
+  }
+}
+
+/**
+ * Update a contact
+ *
+ * @param {string} contactId
+ * @param {Object} updates
+ * @returns {Promise<{success: boolean, contact?: Object, error?: string}>}
+ */
+export async function updateContact(contactId, updates) {
+  try {
+    if (!contactId) return { success: false, error: 'Contact ID is required' };
+
+    const saved = await updateData(COLLECTIONS.contacts, contactId, updates);
+    return { success: true, contact: saved };
+  } catch (error) {
+    console.error('Error updating contact:', error);
+    return { success: false, error: error.message || 'Failed to update contact' };
+  }
+}
+
+/**
+ * Remove a contact
+ *
+ * @param {string} contactId
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function removeContact(contactId) {
+  try {
+    if (!contactId) return { success: false, error: 'Contact ID is required' };
+    await deleteData(COLLECTIONS.contacts, contactId);
+    return { success: true };
+  } catch (error) {
+    console.error('Error removing contact:', error);
+    return { success: false, error: error.message || 'Failed to remove contact' };
+  }
+}
+
+// ============================================================================
+// LEAD SOURCE TRACKING
+// ============================================================================
+
+/**
+ * Track a lead source for attribution
+ *
+ * @param {string} accountId
+ * @param {string} source - Source name (e.g., 'match_signal', 'event', 'referral', 'website')
+ * @param {string} [medium] - Medium (e.g., 'email', 'organic', 'paid')
+ * @param {string} [campaign] - Campaign name
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function trackLeadSource(accountId, source, medium = '', campaign = '') {
+  try {
+    const record = {
+      account_id: accountId,
+      source: source,
+      medium: medium,
+      campaign: campaign,
+      captured_at: new Date().toISOString()
+    };
+
+    await insertData(COLLECTIONS.leadSources, record);
+    return { success: true };
+  } catch (error) {
+    console.error('Error tracking lead source:', error);
+    return { success: false, error: error.message || 'Failed to track lead source' };
+  }
+}
+
+/**
+ * Create a B2B account from a match signal (auto-prospecting)
+ * Used by batch signal generation to auto-create target accounts
+ *
+ * @param {Object} signal - Match signal object
+ * @param {string} signal.carrier_dot - Carrier DOT
+ * @param {number} signal.signal_score - Signal score
+ * @param {string} [signal.top_regions] - Top regions
+ * @returns {Promise<{success: boolean, account?: Object, error?: string}>}
+ */
+export async function createAccountFromSignal(signal) {
+  try {
+    if (!signal || !signal.carrier_dot) {
+      return { success: false, error: 'Signal with carrier_dot is required' };
+    }
+
+    // Check if account already exists
+    const existing = await findByField(COLLECTIONS.accounts, 'carrier_dot', signal.carrier_dot);
+    if (existing && existing.length > 0) {
+      return { success: true, account: existing[0], alreadyExists: true };
+    }
+
+    // Try to get carrier name from master carriers table
+    let carrierName = `Carrier ${signal.carrier_dot}`;
+    try {
+      const carriers = await findByField(COLLECTIONS.carriers, 'dot_number', signal.carrier_dot);
+      if (carriers && carriers.length > 0) {
+        carrierName = carriers[0].legal_name || carriers[0].carrier_name || carrierName;
+      }
+    } catch (err) {
+      console.warn('Could not look up carrier name:', err.message);
+    }
+
+    // Build signal metadata tags
+    const signalTags = ['auto_prospected'];
+    if (signal.top_equipment) signalTags.push(`equip:${signal.top_equipment}`);
+    if (signal.job_types) signalTags.push(`jobs:${signal.job_types}`);
+
+    return await createAccount({
+      carrier_dot: signal.carrier_dot,
+      carrier_name: carrierName,
+      status: ACCOUNT_STATUS.TARGET,
+      region: signal.top_regions || '',
+      source: 'match_signal',
+      tags: signalTags.join(', ')
+    });
+  } catch (error) {
+    console.error('Error creating account from signal:', error);
+    return { success: false, error: error.message || 'Failed to create account from signal' };
+  }
+}
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+/**
+ * Classify fleet segment based on fleet size
+ */
+function classifySegment(fleetSize) {
+  if (!fleetSize || fleetSize <= 0) return '';
+  if (fleetSize >= 500) return ACCOUNT_SEGMENTS.ENTERPRISE;
+  if (fleetSize >= 100) return ACCOUNT_SEGMENTS.MID_MARKET;
+  if (fleetSize >= 20) return ACCOUNT_SEGMENTS.SMALL_FLEET;
+  return ACCOUNT_SEGMENTS.OWNER_OPERATOR;
+}
