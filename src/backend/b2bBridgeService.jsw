@@ -1,0 +1,756 @@
+// ============================================================================
+// B2B BRIDGE SERVICE - Unified message router for B2B HTML panels
+//
+// Single entry point that routes PostMessage actions from B2B HTML iframes
+// to the correct backend service and returns the response in the format
+// the HTML panels expect: { action, payload } or { action, message }.
+//
+// Security: Every action is authenticated and role-checked before routing.
+// Audit: All write/mutation actions are logged for compliance.
+//
+// Used by: B2B Console page code (src/pages/)
+// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
+// ============================================================================
+
+// -- Security imports --
+import {
+  getB2BUser,
+  checkActionPermission,
+  isAuditable,
+  logB2BAudit,
+  preflightOutreachCheck
+} from 'backend/b2bSecurityService';
+
+// -- Service imports --
+import {
+  generateSignal,
+  generateBatchSignals,
+  getTopOpportunities,
+  getSignalByCarrier,
+  getSignalTrends,
+  checkOpportunityAlerts,
+  detectSignalSpikes
+} from 'backend/b2bMatchSignalService';
+
+import {
+  createAccount,
+  getAccount,
+  getAccountByDot,
+  updateAccount,
+  removeAccount,
+  listAccounts,
+  getTopProspects,
+  createContact,
+  getContactsByAccount,
+  updateContact,
+  removeContact,
+  trackLeadSource,
+  createAccountFromSignal
+} from 'backend/b2bAccountService';
+
+import {
+  logActivity,
+  logEmail,
+  logSms,
+  logCall,
+  logMeeting,
+  logTask,
+  logNote,
+  logStageChange,
+  getAccountTimeline,
+  getRecentActivities,
+  getActivityCounts,
+  getActivityVelocity
+} from 'backend/b2bActivityService';
+
+import {
+  createOpportunity,
+  getOpportunity,
+  updateOpportunity,
+  moveStage,
+  getPipelineView,
+  getForecast,
+  getOpportunitiesByAccount,
+  getStageDefinitions,
+  getPipelineKPIs,
+  getStageConversions,
+  createAutomationRule,
+  listAutomationRules,
+  createPlaybook,
+  getPlaybookSuggestions,
+  createValueProp,
+  getValueProps,
+  getDealsAtRisk
+} from 'backend/b2bPipelineService';
+
+import {
+  createSequence,
+  getSequence,
+  updateSequence,
+  listSequences,
+  addStep,
+  updateStep,
+  renderTemplate,
+  recordEmail,
+  updateEmailStatus,
+  recordSms,
+  recordCall,
+  createCallCampaign,
+  getOutreachMetrics,
+  checkThrottleLimits
+} from 'backend/b2bSequenceService';
+
+import {
+  getDashboardKPIs,
+  getChannelPerformance,
+  getRepPerformance,
+  recordTouchpoint,
+  getAttribution,
+  getSourcePerformance,
+  recordSpend,
+  getCostPerAcquisition,
+  addCompetitorIntel,
+  getCompetitorIntel,
+  saveSnapshot,
+  getSnapshots
+} from 'backend/b2bAnalyticsService';
+
+import {
+  generateBrief,
+  getBrief
+} from 'backend/b2bResearchAgentService';
+
+// ============================================================================
+// MAIN ROUTER
+// ============================================================================
+
+/**
+ * Route a B2B action from an HTML panel to the correct backend service.
+ *
+ * Security flow:
+ *   1. Authenticate current user
+ *   2. Check role-based permission for the requested action
+ *   3. Route to the correct backend service
+ *   4. Audit-log write/mutation actions
+ *
+ * @param {string} action - The action name from the HTML postMessage
+ * @param {Object} data - The full message data (may include action + extra props)
+ * @returns {Promise<{action: string, payload?: Object, message?: string}>}
+ */
+export async function handleB2BAction(action, data = {}) {
+  try {
+    // ---- Step 1: Authenticate ----
+    const auth = await getB2BUser();
+    if (!auth.authenticated) {
+      return { action: 'actionError', message: 'Authentication required. Please log in.' };
+    }
+    const user = auth.user;
+    if (!user.role) {
+      return { action: 'actionError', message: 'No B2B role assigned. Contact an administrator.' };
+    }
+
+    // ---- Step 2: Authorize ----
+    const perm = checkActionPermission(user, action);
+    if (!perm.allowed) {
+      return { action: 'actionError', message: perm.reason };
+    }
+
+    // ---- Step 3: Route ----
+    const response = await routeAction(action, data, user);
+
+    // ---- Step 4: Audit-log write actions (non-blocking) ----
+    if (isAuditable(action) && response.action !== 'actionError') {
+      logB2BAudit({
+        action,
+        userId: user.memberId,
+        userEmail: user.email,
+        targetType: inferTargetType(action),
+        targetId: data.accountId || data.account_id || data.opportunityId || data.sequenceId || '',
+        details: { dataKeys: Object.keys(data) }
+      }).catch(() => {});
+    }
+
+    return response;
+  } catch (err) {
+    console.error(`[B2B Bridge] Error handling "${action}":`, err);
+    return { action: 'actionError', message: err.message || 'Internal error' };
+  }
+}
+
+/**
+ * Infer the target type (for audit logs) from the action name.
+ */
+function inferTargetType(action) {
+  if (action.includes('Account') || action === 'captureLead') return 'account';
+  if (action.includes('Contact')) return 'contact';
+  if (action.includes('Opportunity') || action.includes('Stage') || action.includes('Pipeline')) return 'opportunity';
+  if (action.includes('Sequence') || action.includes('Step')) return 'sequence';
+  if (action.includes('Email') || action.includes('Sms') || action.includes('Call')) return 'outreach';
+  if (action.includes('Brief') || action.includes('Research')) return 'research';
+  if (action.includes('Signal')) return 'signal';
+  if (action.includes('Snapshot') || action.includes('Intel')) return 'analytics';
+  return 'other';
+}
+
+/**
+ * Internal action router — called after auth + permission checks pass.
+ */
+async function routeAction(action, data, user) {
+  switch (action) {
+
+      // ====================================================================
+      // DASHBOARD
+      // ====================================================================
+
+      case 'getDashboardKPIs': {
+        const result = await getDashboardKPIs({ days: data.days || 30, ownerId: data.ownerId });
+        return result.success
+          ? { action: 'kpisLoaded', payload: result.kpis }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getTopProspects': {
+        const result = await getTopProspects({ limit: data.limit || 25 });
+        return result.success
+          ? { action: 'topProspectsLoaded', payload: result.prospects }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getAlerts': {
+        const result = await checkOpportunityAlerts();
+        return result.success
+          ? { action: 'alertsLoaded', payload: result.alerts }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getTopOpportunities': {
+        const result = await getTopOpportunities({ limit: data.limit || 10 });
+        return result.success
+          ? { action: 'topOpportunitiesLoaded', payload: result.signals }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getNextActions': {
+        // Aggregates upcoming tasks from pipeline + activities
+        const result = await getRecentActivities({
+          limit: data.limit || 20,
+          types: ['task']
+        });
+        return result.success
+          ? { action: 'nextActionsLoaded', payload: result.activities }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // ACCOUNT MANAGEMENT
+      // ====================================================================
+
+      case 'getAccount': {
+        const result = await getAccount(data.accountId);
+        return result.success
+          ? { action: 'accountLoaded', payload: result.account }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'createAccount': {
+        const result = await createAccount(data);
+        return result.success
+          ? { action: 'accountCreated', payload: result.account }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'updateAccount': {
+        const result = await updateAccount(data.accountId, data.updates);
+        return result.success
+          ? { action: 'accountUpdated', payload: result.account }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'listAccounts': {
+        const result = await listAccounts(data.filters || {});
+        return result.success
+          ? { action: 'accountsLoaded', payload: result.accounts }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // CONTACTS
+      // ====================================================================
+
+      case 'getContacts': {
+        const result = await getContactsByAccount(data.accountId);
+        return result.success
+          ? { action: 'contactsLoaded', payload: result.contacts }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'createContact': {
+        const result = await createContact(data);
+        return result.success
+          ? { action: 'contactCreated', payload: result.contact }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'updateContact': {
+        const result = await updateContact(data.contactId, data.updates);
+        return result.success
+          ? { action: 'contactUpdated', payload: result.contact }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // MATCH SIGNALS
+      // ====================================================================
+
+      case 'getSignal': {
+        const result = await getSignalByCarrier(data.carrierDot);
+        return result.success
+          ? { action: 'signalLoaded', payload: result.signal }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'generateSignal': {
+        const result = await generateSignal(data.carrierDot, data.matchData);
+        return result.success
+          ? { action: 'signalGenerated', payload: result.signal }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'generateBatchSignals': {
+        const result = await generateBatchSignals(data);
+        return result.success
+          ? { action: 'batchSignalsGenerated', payload: { signals: result.signals, processed: result.processed, qualified: result.qualified } }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getSignalSpikes': {
+        const result = await detectSignalSpikes(data);
+        return result.success
+          ? { action: 'signalSpikesLoaded', payload: result.spikes }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // PIPELINE & OPPORTUNITIES
+      // ====================================================================
+
+      case 'getPipeline': {
+        const result = await getPipelineView(data);
+        return result.success
+          ? { action: 'pipelineLoaded', payload: { stages: result.stages, summary: result.summary } }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getForecast': {
+        const result = await getForecast(data);
+        return result.success
+          ? { action: 'forecastLoaded', payload: result.forecast }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getOpportunity': {
+        const result = await getOpportunity(data.opportunityId);
+        return result.success
+          ? { action: 'opportunityLoaded', payload: result.opportunity }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getOpportunitiesByAccount': {
+        const result = await getOpportunitiesByAccount(data.accountId);
+        return result.success
+          ? { action: 'opportunityLoaded', payload: result.opportunities }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'createOpportunity': {
+        const result = await createOpportunity(data);
+        return result.success
+          ? { action: 'opportunityCreated', payload: result.opportunity }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'moveStage': {
+        const result = await moveStage(data.opportunityId, data.newStage, data.userId);
+        return result.success
+          ? { action: 'stageMoved', payload: result.opportunity }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getPipelineKPIs': {
+        const result = await getPipelineKPIs(data);
+        return result.success
+          ? { action: 'kpisLoaded', payload: result.kpis }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getStageConversions': {
+        const result = await getStageConversions();
+        return result.success
+          ? { action: 'conversionsLoaded', payload: result.conversions }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getRisks': {
+        const result = await getDealsAtRisk(data);
+        return result.success
+          ? { action: 'risksLoaded', payload: result.atRisk }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getStageDefinitions': {
+        const result = await getStageDefinitions();
+        return { action: 'stageDefinitionsLoaded', payload: result };
+      }
+
+      // ====================================================================
+      // PLAYBOOKS & VALUE PROPS
+      // ====================================================================
+
+      case 'getPlaybookSuggestions': {
+        const result = await getPlaybookSuggestions(data.stage, data.segment);
+        return result.success
+          ? { action: 'playbooksLoaded', payload: result.playbooks }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getValueProps': {
+        const result = await getValueProps(data);
+        return result.success
+          ? { action: 'valuePropsLoaded', payload: result.valueProps }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // ACTIVITY TIMELINE
+      // ====================================================================
+
+      case 'getTimeline': {
+        const result = await getAccountTimeline(data.accountId, data);
+        return result.success
+          ? { action: 'timelineLoaded', payload: result.activities }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'logActivity': {
+        const result = await logActivity(data);
+        return result.success
+          ? { action: 'activityLogged', payload: result.activity }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getActivityVelocity': {
+        const result = await getActivityVelocity(data.accountId, data);
+        return result.success
+          ? { action: 'velocityLoaded', payload: result.velocity }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // OUTREACH SEQUENCES
+      // ====================================================================
+
+      case 'getSequences': {
+        const result = await listSequences(data);
+        return result.success
+          ? { action: 'sequencesLoaded', payload: result.sequences }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getSequence': {
+        const result = await getSequence(data.sequenceId);
+        return result.success
+          ? { action: 'sequenceLoaded', payload: { sequence: result.sequence, steps: result.steps } }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'saveSequence': {
+        let result;
+        if (data.sequenceId) {
+          result = await updateSequence(data.sequenceId, data);
+        } else {
+          result = await createSequence(data);
+        }
+        return result.success
+          ? { action: 'sequenceSaved', payload: result.sequence }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'addStep': {
+        const result = await addStep(data.sequenceId, data.step);
+        return result.success
+          ? { action: 'stepAdded', payload: result.step }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getThrottleStatus': {
+        const result = await checkThrottleLimits();
+        return result.success
+          ? { action: 'throttleLoaded', payload: { allowed: result.allowed, remaining: result.remaining, used: result.used, limit: result.limit } }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // OUTREACH RECORDS (email, sms, call)
+      // ====================================================================
+
+      case 'recordEmail': {
+        // Compliance pre-flight for email
+        if (data.contact_id) {
+          const check = await preflightOutreachCheck(data.contact_id, 'email');
+          if (!check.allowed) {
+            return { action: 'actionError', message: 'Compliance block: ' + check.reasons.join('; ') };
+          }
+        }
+        const result = await recordEmail(data);
+        return result.success
+          ? { action: 'emailRecorded', payload: result.email }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'recordSms': {
+        // Compliance pre-flight for SMS (consent + quiet hours + DNC)
+        if (data.contact_id) {
+          const check = await preflightOutreachCheck(data.contact_id, 'sms');
+          if (!check.allowed) {
+            return { action: 'actionError', message: 'Compliance block: ' + check.reasons.join('; ') };
+          }
+        }
+        const result = await recordSms(data);
+        return result.success
+          ? { action: 'smsRecorded', payload: result.textMessage }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'recordCall': {
+        // Compliance pre-flight for calls (consent + quiet hours + DNC)
+        if (data.contact_id) {
+          const check = await preflightOutreachCheck(data.contact_id, 'call');
+          if (!check.allowed) {
+            return { action: 'actionError', message: 'Compliance block: ' + check.reasons.join('; ') };
+          }
+        }
+        const result = await recordCall(data);
+        return result.success
+          ? { action: 'callRecorded', payload: result.call }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'createCallCampaign': {
+        const result = await createCallCampaign(data);
+        return result.success
+          ? { action: 'callCampaignCreated', payload: result.campaign }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // CAMPAIGN REPORTING
+      // ====================================================================
+
+      case 'getOutreachMetrics': {
+        const result = await getOutreachMetrics({ days: data.days || 30 });
+        return result.success
+          ? { action: 'metricsLoaded', payload: result.metrics }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getChannelPerformance': {
+        const result = await getChannelPerformance({ days: data.days || 30 });
+        return result.success
+          ? { action: 'channelsLoaded', payload: result.channels }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getRepPerformance': {
+        const result = await getRepPerformance({ days: data.days || 30 });
+        return result.success
+          ? { action: 'repsLoaded', payload: result.reps }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // LEAD CAPTURE
+      // ====================================================================
+
+      case 'captureLead': {
+        const lead = data.lead || data;
+        // Create account + contact + lead capture event
+        let accountResult;
+        if (lead.dotNumber) {
+          accountResult = await getAccountByDot(lead.dotNumber);
+        }
+        if (!accountResult || !accountResult.success || !accountResult.account) {
+          accountResult = await createAccount({
+            carrier_dot: lead.dotNumber || '',
+            carrier_name: lead.companyName,
+            status: 'target',
+            region: lead.region || '',
+            fleet_size: lead.fleetSize || 0,
+            source: lead.captureSource || 'event_booth',
+            owner_id: lead.ownerId || ''
+          });
+        }
+        const accountId = accountResult.account?._id || accountResult.account?.id || '';
+
+        if (accountId && lead.contactName) {
+          await createContact({
+            account_id: accountId,
+            name: lead.contactName,
+            role: lead.contactRole || '',
+            email: lead.email || '',
+            phone: lead.phone || ''
+          });
+        }
+
+        if (accountId) {
+          await trackLeadSource(accountId, {
+            source: lead.captureSource || 'event',
+            medium: 'field',
+            campaign: lead.eventName || ''
+          });
+        }
+
+        if (lead.notes && accountId) {
+          await logNote({
+            account_id: accountId,
+            notes: lead.notes,
+            subject: 'Lead capture: ' + (lead.eventName || 'field')
+          });
+        }
+
+        return { action: 'leadCaptured', payload: { accountId, companyName: lead.companyName } };
+      }
+
+      // ====================================================================
+      // ANALYTICS
+      // ====================================================================
+
+      case 'getSourcePerformance': {
+        const result = await getSourcePerformance({ days: data.days || 30 });
+        return result.success
+          ? { action: 'sourcesLoaded', payload: result.sources }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getCPA': {
+        const result = await getCostPerAcquisition({ days: data.days || 30 });
+        return result.success
+          ? { action: 'cpaLoaded', payload: result.cpa }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getCompetitorIntel': {
+        const result = await getCompetitorIntel();
+        return result.success
+          ? { action: 'intelLoaded', payload: result.intel }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'addCompetitorIntel': {
+        const result = await addCompetitorIntel(data);
+        return result.success
+          ? { action: 'intelAdded', payload: result.intel }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'saveSnapshot': {
+        const result = await saveSnapshot({ days: data.days || 30, ownerId: data.ownerId });
+        return result.success
+          ? { action: 'snapshotSaved', payload: result.snapshot }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // RESEARCH AGENT
+      // ====================================================================
+
+      case 'generateBrief': {
+        const result = await generateBrief(data.accountId, !!data.forceRefresh);
+        return result.success
+          ? { action: 'briefLoaded', payload: { brief: result.brief, cached: result.cached } }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getBrief': {
+        const result = await getBrief(data.accountId);
+        return result.success
+          ? { action: 'briefLoaded', payload: { brief: result.brief, cached: true } }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // QUICK ACTIONS (from Dashboard)
+      // ====================================================================
+
+      case 'quickAction': {
+        return await handleQuickAction(data);
+      }
+
+      case 'accountAction': {
+        return await handleQuickAction(data);
+      }
+
+      // ====================================================================
+      // DEFAULT
+      // ====================================================================
+
+      default:
+        console.warn(`[B2B Bridge] Unknown action: ${action}`);
+        return { action: 'actionError', message: `Unknown action: ${action}` };
+    }
+}
+
+// ============================================================================
+// QUICK ACTION HANDLER
+// ============================================================================
+
+async function handleQuickAction(data) {
+  const { type, accountId, contactId } = data;
+  try {
+    // Compliance pre-flight for outreach quick actions
+    const outreachTypes = { call: 'call', email: 'email', text: 'sms', sms: 'sms' };
+    if (outreachTypes[type] && contactId) {
+      const check = await preflightOutreachCheck(contactId, outreachTypes[type]);
+      if (!check.allowed) {
+        return { action: 'actionError', message: 'Compliance block: ' + check.reasons.join('; ') };
+      }
+    }
+
+    switch (type) {
+      case 'call':
+        await logCall({ account_id: accountId, contact_id: contactId, subject: 'Quick call', outcome: 'completed' });
+        return { action: 'actionSuccess', payload: { type: 'call' } };
+
+      case 'email':
+        await logEmail({ account_id: accountId, contact_id: contactId, subject: 'Quick email', outcome: 'sent' });
+        return { action: 'actionSuccess', payload: { type: 'email' } };
+
+      case 'text':
+      case 'sms':
+        await logSms({ account_id: accountId, contact_id: contactId, subject: 'Quick SMS', outcome: 'sent' });
+        return { action: 'actionSuccess', payload: { type: 'sms' } };
+
+      case 'task':
+        await logTask({ account_id: accountId, subject: data.subject || 'Follow-up task', notes: data.notes || '' });
+        return { action: 'actionSuccess', payload: { type: 'task' } };
+
+      case 'note':
+        await logNote({ account_id: accountId, subject: data.subject || 'Note', notes: data.notes || '' });
+        return { action: 'actionSuccess', payload: { type: 'note' } };
+
+      case 'meeting':
+        await logMeeting({ account_id: accountId, contact_id: contactId, subject: data.subject || 'Meeting', outcome: 'scheduled' });
+        return { action: 'actionSuccess', payload: { type: 'meeting' } };
+
+      case 'generateBrief':
+        const briefResult = await generateBrief(accountId, true);
+        return briefResult.success
+          ? { action: 'briefLoaded', payload: { brief: briefResult.brief } }
+          : { action: 'actionError', message: briefResult.error };
+
+      default:
+        return { action: 'actionError', message: `Unknown quick action: ${type}` };
+    }
+  } catch (err) {
+    return { action: 'actionError', message: err.message || 'Quick action failed' };
+  }
+}
