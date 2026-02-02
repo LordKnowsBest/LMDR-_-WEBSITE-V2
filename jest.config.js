@@ -32,8 +32,10 @@ module.exports = {
     '^wix-secrets-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-secrets-backend.js',
     '^wix-users-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-users-backend.js',
     '^wix-fetch$': '<rootDir>/src/public/__tests__/__mocks__/wix-fetch.js',
-    // Map backend imports (handle both .js and .jsw)
-    '^backend/(.*)$': '<rootDir>/src/backend/$1.jsw'
+    '^wix-media-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-media-backend.js',
+    // Map backend imports (handle both .js and .jsw, prevent double .jsw)
+    '^backend/(.+)\\.jsw$': '<rootDir>/src/backend/$1.jsw',
+    '^backend/(.+)$': '<rootDir>/src/backend/$1.jsw'
   },
 
   // Setup files to run before tests

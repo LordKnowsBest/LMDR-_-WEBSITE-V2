@@ -78,6 +78,12 @@ export const DRIVER_XP_ACTIONS = {
   referral_hired: { xp: 500, description: 'Referred driver gets hired' },
   report_outdated: { xp: 10, description: 'Report outdated job (verified)' },
   complete_survey: { xp: 25, description: 'Complete survey' },
+  
+  // Forum Actions
+  forum_thread_created: { xp: 10, dailyLimit: 3, description: 'Create forum thread' },
+  forum_reply_created: { xp: 5, dailyLimit: 10, description: 'Reply to forum thread' },
+  forum_post_liked: { xp: 2, dailyLimit: 20, description: 'Post received a like' },
+  forum_best_answer: { xp: 50, dailyLimit: 1, description: 'Reply marked as best answer' },
 
   // Cross-Platform Bonuses
   match_quality_bonus: { xp: 0, description: 'Match quality bonus (variable based on score)' },

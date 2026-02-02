@@ -189,7 +189,42 @@ export const DATA_SOURCE = {
   interventionTemplates: 'airtable',
   interventionLog: 'airtable',
   pipelineAutomationRules: 'airtable',
-  automationLog: 'airtable'
+  automationLog: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Driver Community & Forums
+  // -------------------------------------------------------------------------
+  forumCategories: 'airtable',
+  forumThreads: 'airtable',
+  forumPosts: 'airtable',
+  forumReports: 'airtable',
+  petFriendlyLocations: 'airtable',
+  petFriendlyReviews: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // B2B Business Development Suite
+  // -------------------------------------------------------------------------
+  b2bAccounts: 'airtable',
+  b2bContacts: 'airtable',
+  b2bMatchSignals: 'airtable',
+  b2bOpportunities: 'airtable',
+  b2bActivities: 'airtable',
+  b2bAutomationRules: 'airtable',
+  b2bSequences: 'airtable',
+  b2bSequenceSteps: 'airtable',
+  b2bCalls: 'airtable',
+  b2bEmails: 'airtable',
+  b2bTextMessages: 'airtable',
+  b2bLeadCaptureEvents: 'airtable',
+  b2bLeadSources: 'airtable',
+  b2bAnalyticsSnapshots: 'airtable',
+  b2bAccountResearch: 'airtable',
+  b2bLeadAttribution: 'airtable',
+  b2bSpend: 'airtable',
+  b2bCompetitorIntel: 'airtable',
+  b2bCallCampaigns: 'airtable',
+  b2bPlaybooks: 'airtable',
+  b2bValueProps: 'airtable'
 };
 
 // =============================================================================
@@ -360,7 +395,38 @@ export const WIX_COLLECTION_NAMES = {
   interventionTemplates: 'InterventionTemplates',
   interventionLog: 'InterventionLog',
   pipelineAutomationRules: 'PipelineAutomationRules',
-  automationLog: 'AutomationLog'
+  automationLog: 'AutomationLog',
+
+  // Driver Community & Forums
+  forumCategories: 'ForumCategories',
+  forumThreads: 'ForumThreads',
+  forumPosts: 'ForumPosts',
+  forumReports: 'ForumReports',
+  petFriendlyLocations: 'PetFriendlyLocations',
+  petFriendlyReviews: 'PetFriendlyReviews',
+
+  // B2B Business Development Suite
+  b2bAccounts: 'B2BAccounts',
+  b2bContacts: 'B2BContacts',
+  b2bMatchSignals: 'B2BMatchSignals',
+  b2bOpportunities: 'B2BOpportunities',
+  b2bActivities: 'B2BActivities',
+  b2bAutomationRules: 'B2BAutomationRules',
+  b2bSequences: 'B2BSequences',
+  b2bSequenceSteps: 'B2BSequenceSteps',
+  b2bCalls: 'B2BCalls',
+  b2bEmails: 'B2BEmails',
+  b2bTextMessages: 'B2BTextMessages',
+  b2bLeadCaptureEvents: 'B2BLeadCaptureEvents',
+  b2bLeadSources: 'B2BLeadSources',
+  b2bAnalyticsSnapshots: 'B2BAnalyticsSnapshots',
+  b2bAccountResearch: 'B2BAccountResearch',
+  b2bLeadAttribution: 'B2BLeadAttribution',
+  b2bSpend: 'B2BSpend',
+  b2bCompetitorIntel: 'B2BCompetitorIntel',
+  b2bCallCampaigns: 'B2BCallCampaigns',
+  b2bPlaybooks: 'B2BPlaybooks',
+  b2bValueProps: 'B2BValueProps'
 };
 
 // =============================================================================
@@ -505,7 +571,38 @@ export const AIRTABLE_TABLE_NAMES = {
   interventionTemplates: 'v2_Intervention Templates',
   interventionLog: 'v2_Intervention Log',
   pipelineAutomationRules: 'v2_Pipeline Automation Rules',
-  automationLog: 'v2_Automation Log'
+  automationLog: 'v2_Automation Log',
+
+  // Driver Community & Forums
+  forumCategories: 'v2_Forum Categories',
+  forumThreads: 'v2_Forum Threads',
+  forumPosts: 'v2_Forum Posts',
+  forumReports: 'v2_Forum Reports',
+  petFriendlyLocations: 'v2_Pet Friendly Locations',
+  petFriendlyReviews: 'v2_Pet Friendly Reviews',
+
+  // B2B Business Development Suite
+  b2bAccounts: 'v2_B2B Accounts',
+  b2bContacts: 'v2_B2B Contacts',
+  b2bMatchSignals: 'v2_B2B Match Signals',
+  b2bOpportunities: 'v2_B2B Opportunities',
+  b2bActivities: 'v2_B2B Activities',
+  b2bAutomationRules: 'v2_B2B Automation Rules',
+  b2bSequences: 'v2_B2B Sequences',
+  b2bSequenceSteps: 'v2_B2B Sequence Steps',
+  b2bCalls: 'v2_B2B Calls',
+  b2bEmails: 'v2_B2B Emails',
+  b2bTextMessages: 'v2_B2B Text Messages',
+  b2bLeadCaptureEvents: 'v2_B2B Lead Capture Events',
+  b2bLeadSources: 'v2_B2B Lead Sources',
+  b2bAnalyticsSnapshots: 'v2_B2B Analytics Snapshots',
+  b2bAccountResearch: 'v2_B2B Account Research',
+  b2bLeadAttribution: 'v2_B2B Lead Attribution',
+  b2bSpend: 'v2_B2B Spend',
+  b2bCompetitorIntel: 'v2_B2B Competitor Intel',
+  b2bCallCampaigns: 'v2_B2B Call Campaigns',
+  b2bPlaybooks: 'v2_B2B Playbooks',
+  b2bValueProps: 'v2_B2B Value Props'
 };
 
 // =============================================================================
