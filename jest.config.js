@@ -34,6 +34,7 @@ module.exports = {
     '^wix-fetch$': '<rootDir>/src/public/__tests__/__mocks__/wix-fetch.js',
     '^wix-media-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-media-backend.js',
     // Map backend imports (handle both .js and .jsw, prevent double .jsw)
+    '^backend/configData$': '<rootDir>/src/backend/configData.js',
     '^backend/(.+)\\.jsw$': '<rootDir>/src/backend/$1.jsw',
     '^backend/(.+)$': '<rootDir>/src/backend/$1.jsw'
   },

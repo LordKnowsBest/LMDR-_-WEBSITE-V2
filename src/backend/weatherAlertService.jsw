@@ -5,10 +5,11 @@
 
 import wixData from 'wix-data';
 import { fetch } from 'wix-fetch';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
 import { getSecret } from 'wix-secrets-backend';
 import { sendWeatherAlertEmail } from 'backend/emailService';
+import { seedDriverSubscriptions } from 'backend/seeds/seedMockData';
 
 // ============================================
 // COLLECTIONS
@@ -21,7 +22,7 @@ const COLLECTIONS = {
 
 const COLLECTION_KEYS = {
     weatherAlerts: 'weatherAlerts',
-    driverWeatherSubscriptions: 'driverWeatherSubscriptions',
+    driverWeatherSubscriptions: 'driverNotificationPreferences', // Aligned with seedMockData assumption
     roadUtilityCache: 'roadUtilityCache'
 };
 
@@ -42,7 +43,6 @@ const circuitBreaker = {
 // ============================================
 // DUAL-SOURCE DATA HELPERS
 // ============================================
-// (Simplified for brevity, assuming standard pattern)
 
 async function queryData(collectionKey, wixCollectionName, options = {}) {
     if (usesAirtable(collectionKey)) {
@@ -53,7 +53,7 @@ async function queryData(collectionKey, wixCollectionName, options = {}) {
         });
         return result.records || [];
     }
-    let query = wixData.query(wixCollectionName);
+    let query = wixData.query(wixCollectionName || getWixCollectionName(collectionKey));
     if (options.eq) {
         for (const [field, value] of Object.entries(options.eq)) query = query.eq(field, value);
     }
@@ -233,15 +233,22 @@ export async function subscribeToAlerts(driverId, preferences) {
 export async function processNewAlerts() {
     console.log('[WeatherJob] Starting alert check...');
     
-    // 1. Get all subscribed drivers (mock query)
-    // In real app: wixData.query(COLLECTIONS.SUBSCRIPTIONS).find()
-    const subscribedDrivers = [
-        { driverId: 'mock-driver-1', location: { lat: 39.31, lng: -120.33 } } // Donner Pass
-    ];
+    // 1. Get all subscribed drivers
+    let subscribedDrivers = await queryData(COLLECTION_KEYS.driverWeatherSubscriptions, COLLECTIONS.SUBSCRIPTIONS);
+
+    // Seed if empty
+    if (!subscribedDrivers || subscribedDrivers.length === 0) {
+        const seedResult = await seedDriverSubscriptions();
+        if (seedResult.seeded) {
+            subscribedDrivers = await queryData(COLLECTION_KEYS.driverWeatherSubscriptions, COLLECTIONS.SUBSCRIPTIONS);
+        }
+    }
 
     let sentCount = 0;
 
     for (const driver of subscribedDrivers) {
+        if (!driver.location) continue;
+
         // 2. Check alerts for this driver's location
         const result = await getAlertsAtLocation(driver.location.lat, driver.location.lng);
         
@@ -252,7 +259,7 @@ export async function processNewAlerts() {
             for (const alert of severeAlerts) {
                 // 4. Send Notification
                 // Check deduplication log first (omitted)
-                await sendAlert(driver.driverId, alert);
+                await sendAlert(driver.driver_id, alert); // Assuming driver_id in subscription
                 sentCount++;
             }
         }
@@ -295,6 +302,7 @@ function normalizeAlert(feature) {
 
 // Helper: Haversine distance
 function calculateDistance(lat1, lng1, lat2, lng2) {
+    if (!lat1 || !lng1 || !lat2 || !lng2) return 0;
     const R = 3958.8; // miles
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lng2 - lng1) * Math.PI / 180;
