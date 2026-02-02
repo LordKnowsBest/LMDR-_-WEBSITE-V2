@@ -2,6 +2,7 @@ import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
 import { log } from 'backend/observabilityService';
 import { getSubscription } from 'backend/subscriptionService';
+import { seedDriverPerformance } from 'backend/seeds/seedMockData';
 
 // ============================================================================
 // Data Source Configuration
@@ -30,9 +31,6 @@ const ROI_CONSTANTS = {
     COST_PER_TURNOVER: 10000, // Industry avg $8.4k - $12k
     BASELINE_RETENTION_RATE: 0.55 // North American benchmark
 };
-
-// Mock data generator for initial rollout/demo
-const MOCK_DATA = true;
 
 // Collection keys (camelCase, matching config.jsw)
 const DRIVER_PERFORMANCE_KEY = 'driverPerformance';
@@ -184,10 +182,6 @@ async function verifyCarrierOwnership(carrierDot) {
     const user = wixUsersBackend.currentUser;
     if (!user.loggedIn) throw new Error('Not authenticated');
     
-    // In Mock Mode, we trust the caller for demo purposes, 
-    // BUT we still check login to simulate security.
-    if (MOCK_DATA) return true;
-
     try {
         // Check Carriers collection
         // Assumption: 'Carriers' collection has 'dot_number' and '_owner' field
@@ -248,34 +242,33 @@ export async function getCarrierRetentionDashboard(carrierDot) {
     try {
         let drivers = [];
 
-        // In production, fetch from appropriate data source
-        if (!MOCK_DATA) {
-            // Check if using Airtable for driver performance data
-            if (usesAirtable(DRIVER_PERFORMANCE_KEY)) {
-                try {
-                    const filter = `{Carrier DOT} = '${carrierDot}'`;
-                    const result = await airtable.queryRecords(getAirtableTableName(DRIVER_PERFORMANCE_KEY), {
-                        filterByFormula: filter
-                    });
-                    drivers = result.records || [];
-                } catch (error) {
-                    console.error('[RetentionService] Airtable query failed, using mock data:', error.message);
-                    drivers = generateMockDrivers();
-                }
-            } else {
-                // Wix query
-                try {
-                    const result = await wixData.query('DriverPerformance')
-                        .eq('carrier_dot', carrierDot)
-                        .find({ suppressAuth: true });
-                    drivers = result.items;
-                } catch (error) {
-                    console.error('[RetentionService] Wix query failed, using mock data:', error.message);
-                    drivers = generateMockDrivers();
-                }
+        // Check if using Airtable for driver performance data
+        if (usesAirtable(DRIVER_PERFORMANCE_KEY)) {
+            try {
+                const filter = `{Carrier DOT} = '${carrierDot}'`;
+                const result = await airtable.queryRecords(getAirtableTableName(DRIVER_PERFORMANCE_KEY), {
+                    filterByFormula: filter
+                });
+                drivers = result.records || [];
+            } catch (error) {
+                console.error('[RetentionService] Airtable query failed:', error.message);
             }
         } else {
-            drivers = generateMockDrivers();
+            // Wix query
+            try {
+                const result = await wixData.query('DriverPerformance')
+                    .eq('carrier_dot', carrierDot)
+                    .find({ suppressAuth: true });
+                drivers = result.items;
+            } catch (error) {
+                console.error('[RetentionService] Wix query failed:', error.message);
+            }
+        }
+
+        // SEEDING LOGIC: If no data found, seed it
+        if (!drivers || drivers.length === 0) {
+            console.log(`[RetentionService] No data for carrier ${carrierDot}. Seeding...`);
+            drivers = await seedDriverPerformance(carrierDot);
         }
 
         // Process data for dashboard
@@ -480,57 +473,4 @@ export async function getInterventionSuggestions(driverId, riskData) {
         console.error('getInterventionSuggestions error:', error);
         return { success: false, error: error.message, suggestions: [] };
     }
-}
-
-// ===========================================
-// MOCK DATA HELPER
-// ===========================================
-
-function generateMockDrivers() {
-    const mock = [];
-
-    // 1. Critical Risk - The "Silence Signal"
-    mock.push({
-        driver_id: 'd_silent_01', driver_name: 'David Ghost',
-        miles_driven: 2000, on_time_delivery_rate: 90, safety_incidents: 0, home_time_days: 3,
-        avg_weekly_pay: 1300, pay_volatility_index: 5,
-        app_sessions_last_7d: 1, app_sessions_prev_7d: 12, // HUGE DROP
-        dnps_score: 8
-    });
-
-    // 2. Critical Risk - Detractor (dNPS)
-    mock.push({
-        driver_id: 'd_nps_01', driver_name: 'Angry Adam',
-        miles_driven: 3000, on_time_delivery_rate: 99, safety_incidents: 0, home_time_days: 6,
-        avg_weekly_pay: 1500, pay_volatility_index: 2,
-        app_sessions_last_7d: 10, app_sessions_prev_7d: 10,
-        dnps_score: 4 // DETRACTOR
-    });
-
-    // 3. High Risk - Pay Volatility
-    mock.push({
-        driver_id: 'd_pay_01', driver_name: 'Sarah Volatile',
-        miles_driven: 2800, on_time_delivery_rate: 98, safety_incidents: 0, home_time_days: 5,
-        avg_weekly_pay: 1100, pay_volatility_index: 28,
-        app_sessions_last_7d: 8, app_sessions_prev_7d: 9,
-        dnps_score: 7
-    });
-
-    // 4-15. Normal Drivers
-    for (let i = 4; i <= 15; i++) {
-        mock.push({
-            driver_id: `d_norm_${i}`, driver_name: `Driver ${i}`,
-            miles_driven: 2800 + (Math.random() * 500),
-            on_time_delivery_rate: 96 + (Math.random() * 4),
-            safety_incidents: 0,
-            home_time_days: 5 + Math.floor(Math.random() * 4),
-            avg_weekly_pay: 1300 + (Math.random() * 400),
-            pay_volatility_index: Math.floor(Math.random() * 10),
-            app_sessions_last_7d: 8 + Math.floor(Math.random() * 5),
-            app_sessions_prev_7d: 8 + Math.floor(Math.random() * 5),
-            dnps_score: 8 + Math.floor(Math.random() * 2)
-        });
-    }
-
-    return mock;
 }
