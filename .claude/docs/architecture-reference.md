@@ -65,6 +65,11 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **gamificationConfig.js** - Static configuration for levels, ranks, XP values, and action definitions
 - **achievementCheckers.js** - Logic definitions for specific achievement criteria (profile, community, recruiter stats)
 
+**Community Services:**
+- **forumService.jsw** - Driver community forums backend handling categories, threads, posts, and view tracking
+- **moderationService.jsw** - Content moderation system with automated filtering, user reporting, and admin review queue
+- **reputationService.jsw** - Bridge service connecting community actions (posts, likes, answers) to the gamification engine
+
 **Public Services:**
 - **publicStatsService.jsw** - Public-facing platform statistics for homepage and landing pages (driver count, active carriers, hires)
 
@@ -111,6 +116,12 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 **Content & CMS:**
 - `BlogPosts`, `BlogCategories`, `FAQs`, `ComplianceGuides`, `BestPracticesGuides`
 - `PricingTiers`, `ServiceFeatures`, `CaseStudies`, `IndustryComparisons`
+
+**Community & Forums:**
+- `ForumCategories` - Forum sections and metadata
+- `ForumThreads` - Discussion topics with author and stats
+- `ForumPosts` - Individual posts and replies
+- `ForumReports` - Moderation queue for flagged content
 
 **Reviews & Testimonials:**
 - `CarrierReviews`, `CarrierTestimonials`, `DriverTestimonials`

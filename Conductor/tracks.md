@@ -83,11 +83,18 @@ This file tracks all major tracks for the project. Each track has its own detail
 - *Test suite: featureAdoptionService.test.js (111/111 tests passing)*
 - *Airtable tables verified: v2_Feature Adoption Logs, v2_Feature Registry, v2_Feature Funnels, v2_Feature Metrics Daily*
 
-## [X] Track: UI/UX Consistency & Standardization
+## [/] Track: UI/UX Consistency & Standardization
 *Link: [./conductor/tracks/ui_standardization_20260120/](./conductor/tracks/ui_standardization_20260120/)*
 *Priority: High*
 *Goal: Unify Tailwind configs, icons, buttons, and theme logic across the platform.*
-*Status: In Progress (Phase 3 Complete, Phase 4: Component Refactoring)*
+*Status: In Progress — approach pivoted to inline Tailwind config (external lmdr-config.js fails in Wix iframes)*
+*Progress (audited 2026-01-31):*
+- *Phase 1 (Tailwind Unification): Complete — lmdr-config.js + theme-utils.js created as reference; inline config is the runtime pattern*
+- *Phase 2 (Dashboards): Partial — 10/10 recruiter files tokenized, only 2/11 admin files tokenized*
+- *Phase 3 (Landing Pages): 13/18 files tokenized (5 landing pages untouched)*
+- *Phase 4 (Carrier Pages): 7 files partially tokenized, 2 retain only hardcoded classes*
+- *Phase 5 (Component Refactoring): Not verified*
+- *Hardcoded class cleanup: 34 files still contain 341 occurrences of old color classes alongside LMDR tokens*
 
 ## [ ] Track: Systematic HTML Mobile Optimization
 *Link: [./conductor/tracks/mobile_optimization_20260122/](./conductor/tracks/mobile_optimization_20260122/)*
@@ -190,12 +197,16 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planned*
 *Goal: Reduce operational costs and improve reliability through Cost Optimizer Mode, Anomaly Alerts, and Compliance Reports.*
 
-## [ ] Track: Cross-Role Utility
+## [/] Track: Cross-Role Utility
 *Link: [./tracks/cross_role_utility_20260120/](./tracks/cross_role_utility_20260120/)*
 *Depends on: driver_cockpit_20251221, reverse_matching_20251225, retention_dashboard*
 *Priority: High*
-*Status: Planned*
+*Status: In Progress — Phase 3 (Match Explanation) & Phase 4 (System Health) Complete*
 *Goal: Cross-pollinate features between roles through Mutual Interest Indicator, Retention Dashboard for Carriers, Match Explanation for Drivers, and System Health for Recruiters.*
+*Completed:*
+- *matchExplanationService.jsw (Driver match "Why?" explanations)*
+- *recruiterHealthService.jsw (System health monitoring for recruiters)*
+- *UI: AI_MATCHING.html (Explanation Panel), RecruiterDashboard.html (System Health Widget)*
 
 ---
 

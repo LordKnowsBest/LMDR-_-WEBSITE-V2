@@ -5,99 +5,99 @@
 The forum system provides the foundation for all community interactions and establishes the reputation system used across features.
 
 ### 1.1 Backend Infrastructure
-- [ ] Task: Create `ForumCategories` collection in Wix with schema from spec
-- [ ] Task: Create `ForumThreads` collection with proper indexes (category_id, created_at, is_pinned)
-- [ ] Task: Create `ForumPosts` collection with indexes (thread_id, created_at)
-- [ ] Task: Create `ForumReputationLog` collection for point tracking
-- [ ] Task: Create `UserReputation` collection (or extend DriverProfiles)
-- [ ] Task: Create `ReputationBadges` collection with initial badge definitions
+- [x] Task: Create `ForumCategories` collection in Wix with schema from spec
+- [x] Task: Create `ForumThreads` collection with proper indexes (category_id, created_at, is_pinned)
+- [x] Task: Create `ForumPosts` collection with indexes (thread_id, created_at)
+- [x] Task: Create `ForumReputationLog` collection for point tracking
+- [x] Task: Create `UserReputation` collection (or extend DriverProfiles)
+- [x] Task: Create `ReputationBadges` collection with initial badge definitions
 
 ### 1.2 Forum Service Backend
-- [ ] Task: Create `forumService.jsw` with category CRUD operations
-- [ ] Task: Implement `getCategories()` with cached thread/post counts
-- [ ] Task: Implement `getCategoryBySlug()` with stats aggregation
-- [ ] Task: Implement `getThreadsByCategory()` with pagination (limit, offset, sort)
-- [ ] Task: Implement `getThreadBySlug()` including first page of posts
-- [ ] Task: Implement `createThread()` with author validation and slug generation
-- [ ] Task: Implement `updateThread()` with author-only permission check
-- [ ] Task: Implement `getPostsByThread()` with pagination and nested reply support
-- [ ] Task: Implement `createPost()` with parent_post_id for nested replies
-- [ ] Task: Implement `updatePost()` with edit history tracking
-- [ ] Task: Implement `deletePost()` as soft delete (is_hidden = true)
-- [ ] Task: Implement `likePost()` with duplicate prevention
-- [ ] Task: Implement `markBestAnswer()` with thread author validation
+- [x] Task: Create `forumService.jsw` with category CRUD operations
+- [x] Task: Implement `getCategories()` with cached thread/post counts
+- [x] Task: Implement `getCategoryBySlug()` with stats aggregation
+- [x] Task: Implement `getThreadsByCategory()` with pagination (limit, offset, sort)
+- [x] Task: Implement `getThreadBySlug()` including first page of posts
+- [x] Task: Implement `createThread()` with author validation and slug generation
+- [x] Task: Implement `updateThread()` with author-only permission check
+- [x] Task: Implement `getPostsByThread()` with pagination and nested reply support
+- [x] Task: Implement `createPost()` with parent_post_id for nested replies
+- [x] Task: Implement `updatePost()` with edit history tracking
+- [x] Task: Implement `deletePost()` as soft delete (is_hidden = true)
+- [x] Task: Implement `likePost()` with duplicate prevention
+- [x] Task: Implement `markBestAnswer()` with thread author validation
 
 ### 1.3 Reputation Service Backend
-- [ ] Task: Create `reputationService.jsw` for point management
-- [ ] Task: Implement `awardPoints()` with action type validation
-- [ ] Task: Implement `getReputation()` returning full profile with badges
-- [ ] Task: Implement `getLeaderboard()` with timeframe filtering (week, month, all)
-- [ ] Task: Implement `checkBadgeEligibility()` for automatic badge awards
-- [ ] Task: Implement `awardBadge()` for manual badge assignment
-- [ ] Task: Add reputation hooks to forum actions (post created, like received, best answer)
+- [x] Task: Create `reputationService.jsw` for point management
+- [x] Task: Implement `awardPoints()` with action type validation
+- [x] Task: Implement `getReputation()` returning full profile with badges
+- [x] Task: Implement `getLeaderboard()` with timeframe filtering (week, month, all)
+- [x] Task: Implement `checkBadgeEligibility()` for automatic badge awards
+- [x] Task: Implement `awardBadge()` for manual badge assignment
+- [x] Task: Add reputation hooks to forum actions (post created, like received, best answer)
 
 ### 1.4 Moderation Backend
-- [ ] Task: Create auto-moderation utility with profanity filter integration
-- [ ] Task: Implement `reportPost()` for user-submitted reports
-- [ ] Task: Implement `getModQueue()` for moderator review queue
-- [ ] Task: Implement `moderatePost()` with action logging (approve, hide, warn)
-- [ ] Task: Add new-user approval flow (first 3 posts require review)
-- [ ] Task: Implement spam detection patterns (multiple links, all caps)
-- [ ] Task: Create moderator role check utilities (`canModerate()`, `canBan()`)
+- [x] Task: Create auto-moderation utility with profanity filter integration
+- [x] Task: Implement `reportPost()` for user-submitted reports
+- [x] Task: Implement `getModQueue()` for moderator review queue
+- [x] Task: Implement `moderatePost()` with action logging (approve, hide, warn)
+- [x] Task: Add new-user approval flow (first 3 posts require review)
+- [x] Task: Implement spam detection patterns (multiple links, all caps)
+- [x] Task: Create moderator role check utilities (`canModerate()`, `canBan()`)
 
 ### 1.5 Forum UI - Category List
-- [ ] Task: Create `DRIVER_FORUMS.html` in `src/public/driver/`
-- [ ] Task: Build category list component with icons and stats
-- [ ] Task: Add last activity timestamp with relative time display
-- [ ] Task: Implement "New Thread" button with category pre-selection
-- [ ] Task: Add search bar for full-text thread search
-- [ ] Task: Style with LMDR theme variables (dark mode support)
+- [x] Task: Create `DRIVER_FORUMS.html` in `src/public/driver/`
+- [x] Task: Build category list component with icons and stats
+- [x] Task: Add last activity timestamp with relative time display
+- [x] Task: Implement "New Thread" button with category pre-selection
+- [x] Task: Add search bar for full-text thread search
+- [x] Task: Style with LMDR theme variables (dark mode support)
 
 ### 1.6 Forum UI - Thread View
-- [ ] Task: Create thread detail view component
-- [ ] Task: Build post card component with author info and reputation badges
-- [ ] Task: Implement like button with optimistic UI update
-- [ ] Task: Add "Best Answer" marking UI (thread author only)
-- [ ] Task: Build reply composer with markdown support
-- [ ] Task: Add nested reply threading UI (indent levels)
-- [ ] Task: Implement post edit mode with cancel/save
-- [ ] Task: Add report button with reason selection modal
+- [x] Task: Create thread detail view component
+- [x] Task: Build post card component with author info and reputation badges
+- [x] Task: Implement like button with optimistic UI update
+- [x] Task: Add "Best Answer" marking UI (thread author only)
+- [x] Task: Build reply composer with markdown support
+- [x] Task: Add nested reply threading UI (indent levels)
+- [x] Task: Implement post edit mode with cancel/save
+- [x] Task: Add report button with reason selection modal
 
 ### 1.7 Forum UI - Create Thread
-- [ ] Task: Create new thread modal/page
-- [ ] Task: Build title input with character counter (200 max)
-- [ ] Task: Implement rich text editor for post body
-- [ ] Task: Add tag input with autocomplete suggestions
-- [ ] Task: Add category selector dropdown
-- [ ] Task: Implement form validation and error states
-- [ ] Task: Add preview mode before posting
+- [x] Task: Create new thread modal/page
+- [x] Task: Build title input with character counter (200 max)
+- [x] Task: Implement rich text editor for post body
+- [x] Task: Add tag input with autocomplete suggestions
+- [x] Task: Add category selector dropdown
+- [x] Task: Implement form validation and error states
+- [x] Task: Add preview mode before posting
 
 ### 1.8 Moderation UI
-- [ ] Task: Create `ADMIN_MODERATION.html` in `src/public/admin/`
-- [ ] Task: Build moderation queue list with filters (pending, reported)
-- [ ] Task: Add post preview with full context (thread, author history)
-- [ ] Task: Implement quick action buttons (approve, hide, warn, ban)
-- [ ] Task: Add moderator notes field for internal tracking
-- [ ] Task: Build user warning/ban interface with reason templates
+- [x] Task: Create `ADMIN_MODERATION.html` in `src/public/admin/`
+- [x] Task: Build moderation queue list with filters (pending, reported)
+- [x] Task: Add post preview with full context (thread, author history)
+- [x] Task: Implement quick action buttons (approve, hide, warn, ban)
+- [x] Task: Add moderator notes field for internal tracking
+- [x] Task: Build user warning/ban interface with reason templates
 
 ### 1.9 Wix Page Integration
 - [ ] Task: Create "Community Forums" page in Wix Editor
-- [ ] Task: Add HTML component and connect to DRIVER_FORUMS.html
-- [ ] Task: Set up postMessage bridge for backend calls
+- [x] Task: Add HTML component and connect to DRIVER_FORUMS.html
+- [x] Task: Set up postMessage bridge for backend calls
 - [ ] Task: Configure page permissions (members only)
-- [ ] Task: Add forum link to driver dashboard navigation
+- [x] Task: Add forum link to driver dashboard navigation
 - [ ] Task: Update masterPage.js with forum notification badge
 
 ### 1.10 Testing - Forums
-- [ ] Task: Write unit tests for `forumService.jsw` CRUD operations
-- [ ] Task: Write unit tests for `reputationService.jsw` point calculations
-- [ ] Task: Write unit tests for moderation auto-filter rules
-- [ ] Task: Test thread creation with various edge cases (long titles, special chars)
-- [ ] Task: Test nested reply threading to 3 levels deep
-- [ ] Task: Test pagination with 100+ posts per thread
+- [x] Task: Write unit tests for `forumService.jsw` CRUD operations
+- [x] Task: Write unit tests for `reputationService.jsw` point calculations
+- [x] Task: Write unit tests for moderation auto-filter rules
+- [x] Task: Test thread creation with various edge cases (long titles, special chars)
+- [x] Task: Test nested reply threading to 3 levels deep
+- [x] Task: Test pagination with 100+ posts per thread
 - [ ] Task: Manual test: full forum flow as new user (post approval required)
 - [ ] Task: Manual test: moderation queue workflow
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Driver Forums'
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Driver Forums'
 
 ---
 
@@ -106,44 +106,44 @@ The forum system provides the foundation for all community interactions and esta
 A crowdsourced database of trucker-friendly pet amenities. Quick to build, high emotional value.
 
 ### 2.1 Backend Collections
-- [ ] Task: Create `PetFriendlyLocations` collection with schema from spec
-- [ ] Task: Create `PetFriendlyReviews` collection with location reference
-- [ ] Task: Add geolocation indexes for proximity search (latitude, longitude)
-- [ ] Task: Seed initial data with 50 popular truck stop locations
+- [x] Task: Create `PetFriendlyLocations` collection with schema from spec
+- [x] Task: Create `PetFriendlyReviews` collection with location reference
+- [x] Task: Add geolocation indexes for proximity search (latitude, longitude)
+- [x] Task: Seed initial data with 50 popular truck stop locations
 
 ### 2.2 Pet-Friendly Service Backend
-- [ ] Task: Create `petFriendlyService.jsw` for location management
-- [ ] Task: Implement `searchLocations()` with filter support (amenities, type, chain)
-- [ ] Task: Implement `getNearbyLocations()` with geo radius calculation
-- [ ] Task: Implement `getLocationById()` with reviews included
-- [ ] Task: Implement `submitLocation()` with required field validation
-- [ ] Task: Implement `updateLocation()` with author-only permission
+- [x] Task: Create `petFriendlyService.jsw` for location management
+- [x] Task: Implement `searchLocations()` with filter support (amenities, type, chain)
+- [x] Task: Implement `getNearbyLocations()` with geo radius calculation
+- [x] Task: Implement `getLocationById()` with reviews included
+- [x] Task: Implement `submitLocation()` with required field validation
+- [x] Task: Implement `updateLocation()` with author-only permission
 - [ ] Task: Implement `verifyLocation()` for admin verification flow
-- [ ] Task: Implement `getReviewsByLocation()` with pagination
-- [ ] Task: Implement `submitReview()` with rating validation (1-5)
+- [x] Task: Implement `getReviewsByLocation()` with pagination
+- [x] Task: Implement `submitReview()` with rating validation (1-5)
 - [ ] Task: Implement `markReviewHelpful()` with duplicate prevention
 - [ ] Task: Implement `reportReview()` for inappropriate content
 - [ ] Task: Implement `getTopRatedLocations()` by state aggregation
 - [ ] Task: Implement `getRecentlyAdded()` for discovery feed
 
 ### 2.3 Pet-Friendly UI - Search
-- [ ] Task: Create `PET_FRIENDLY.html` in `src/public/driver/`
-- [ ] Task: Build search form with location input (city, state, zip)
-- [ ] Task: Add radius selector dropdown (10, 25, 50, 100 miles)
-- [ ] Task: Create amenity filter checkboxes (dog run, water, shade, etc.)
-- [ ] Task: Add location type filter (truck stop, rest area, park, vet)
-- [ ] Task: Implement search results list with cards
+- [x] Task: Create `PET_FRIENDLY.html` in `src/public/driver/`
+- [x] Task: Build search form with location input (city, state, zip)
+- [x] Task: Add radius selector dropdown (10, 25, 50, 100 miles)
+- [x] Task: Create amenity filter checkboxes (dog run, water, shade, etc.)
+- [x] Task: Add location type filter (truck stop, rest area, park, vet)
+- [x] Task: Implement search results list with cards
 
 ### 2.4 Pet-Friendly UI - Location Card
-- [ ] Task: Build location card component with name, address, rating
-- [ ] Task: Display amenity badges with icons
-- [ ] Task: Show review snippet from most recent review
-- [ ] Task: Add "Get Directions" button (Google Maps link)
-- [ ] Task: Add "View Details" button for full location modal
+- [x] Task: Build location card component with name, address, rating
+- [x] Task: Display amenity badges with icons
+- [x] Task: Show review snippet from most recent review
+- [x] Task: Add "Get Directions" button (Google Maps link)
+- [x] Task: Add "View Details" button for full location modal
 
 ### 2.5 Pet-Friendly UI - Location Detail
-- [ ] Task: Create location detail modal/page
-- [ ] Task: Display full location info with all amenities
+- [x] Task: Create location detail modal/page
+- [x] Task: Display full location info with all amenities
 - [ ] Task: Show photo gallery (user-submitted)
 - [ ] Task: Build reviews list with pagination
 - [ ] Task: Add "Write Review" form with rating stars
@@ -151,14 +151,14 @@ A crowdsourced database of trucker-friendly pet amenities. Quick to build, high 
 - [ ] Task: Add "Confirm Amenities" checklist in review form
 
 ### 2.6 Pet-Friendly UI - Add Location
-- [ ] Task: Create "Add New Location" modal
+- [x] Task: Create "Add New Location" modal
 - [ ] Task: Build address input with autocomplete (Google Places API optional)
-- [ ] Task: Add location type selector
-- [ ] Task: Create amenity multi-select checkboxes
-- [ ] Task: Add pet policy selector (dogs welcome, leash required, etc.)
+- [x] Task: Add location type selector
+- [x] Task: Create amenity multi-select checkboxes
+- [x] Task: Add pet policy selector (dogs welcome, leash required, etc.)
 - [ ] Task: Implement photo upload for location
-- [ ] Task: Add notes/description textarea
-- [ ] Task: Show "Pending Verification" message after submission
+- [x] Task: Add notes/description textarea
+- [x] Task: Show "Pending Verification" message after submission
 
 ### 2.7 Admin Verification
 - [ ] Task: Add pet locations to admin moderation queue

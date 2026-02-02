@@ -167,7 +167,7 @@ parent_post_id: String          // For nested replies (null = top-level)
 author_id: Reference -> DriverProfiles
 author_name: String             // Denormalized
 content: String                 // Post body (markdown)
-content_html: String            // Pre-rendered HTML
+// content_html: String         // Rendered client-side
 created_at: Date
 updated_at: Date
 edited_at: Date                 // Last edit timestamp
@@ -176,15 +176,25 @@ likes_count: Number             // Upvotes
 is_best_answer: Boolean         // Marked by thread author
 ```
 
-#### ForumReputationLog Collection
+#### ForumReports Collection
 ```
 _id: String (auto)
-user_id: Reference -> DriverProfiles
-action_type: String             // "post_created", "like_received", "best_answer"
-points: Number                  // Points earned (+5, +10, etc.)
-source_id: String               // Thread/post that triggered
+post_id: Reference -> ForumPosts
+reporter_id: Reference -> DriverProfiles
+reason: String                  // "spam", "abuse", "harassment"
+details: String                 // User comments
+status: String                  // "pending", "resolved", "dismissed"
+resolution: String              // "approve", "hide", "warn", "ban"
+moderator_id: Reference -> AdminUsers
+admin_notes: String
+resolved_at: Date
 created_at: Date
 ```
+
+#### Reputation Log
+*Note: Uses shared `gamificationEvents` collection (see Gamification Track)*
+- `action_type`: "forum_thread_created", "forum_reply_created", etc.
+- `source_id`: thread_id or post_id
 
 ### 3.2 Mentor Collections
 

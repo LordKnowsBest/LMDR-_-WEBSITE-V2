@@ -178,5 +178,18 @@ Supplementary docs are auto-injected by hooks when editing relevant files. They 
 | `carrier-staffing-forms.md` | Editing carrier/staffing HTML | Form template, PostMessage bridge |
 | `wix-record-linking.md` | Editing record-linking services | Type mismatch gotcha, linking pattern |
 | `gamification-integration.md` | Editing gamification services | Integration hooks table, lazy-load pattern |
-| `pricing-and-tiers.md` | Editing Stripe/subscription files | Tiers, VelocityMatch pricing, Stripe IDs |
-| `surface-branding.md` | Editing non-driver HTML files | Brand-per-surface table, prohibited patterns |
+
+## New Services (2026-02-01)
+
+### Match Explanation Service
+**File:** `src/backend/matchExplanationService.jsw`
+- **Purpose:** Generates driver-facing "Why You Matched" rationale.
+- **Key Method:** `getMatchExplanationForDriver(driverId, carrierDot)`
+- **Dependencies:** `driverScoring.js`, `carrierPreferences.jsw`
+
+### Recruiter Health Service
+**File:** `src/backend/recruiterHealthService.jsw`
+- **Purpose:** Monitors system health (Database, AI, Enrichment, FMCSA) for recruiters.
+- **Key Method:** `getRecruiterHealthStatus(carrierDot)`
+- **Features:** 30s Caching, Aggregated Status ('operational'|'degraded'|'outage').
+
