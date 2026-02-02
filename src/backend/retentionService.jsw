@@ -1,5 +1,7 @@
 import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
 import { log } from 'backend/observabilityService';
+import { getSubscription } from 'backend/subscriptionService';
 
 // ============================================================================
 // Data Source Configuration
@@ -172,6 +174,70 @@ export function calculateRiskScore(metrics) {
 // ===========================================
 // EXPORTED SERVICES
 // ===========================================
+
+/**
+ * Verify if the current user owns the carrier account
+ * @param {string} carrierDot - Carrier DOT to check
+ * @returns {Promise<boolean>} TRUE if owner, throws Error if not
+ */
+async function verifyCarrierOwnership(carrierDot) {
+    const user = wixUsersBackend.currentUser;
+    if (!user.loggedIn) throw new Error('Not authenticated');
+    
+    // In Mock Mode, we trust the caller for demo purposes, 
+    // BUT we still check login to simulate security.
+    if (MOCK_DATA) return true;
+
+    try {
+        // Check Carriers collection
+        // Assumption: 'Carriers' collection has 'dot_number' and '_owner' field
+        const result = await wixData.query('Carriers')
+            .eq('dot_number', carrierDot)
+            .eq('_owner', user.id)
+            .find({ suppressAuth: true });
+            
+        if (result.items.length > 0) return true;
+        
+        throw new Error('Ownership verification failed');
+    } catch (error) {
+        console.error('Ownership check failed:', error);
+        throw new Error('Unauthorized access to carrier data');
+    }
+}
+
+/**
+ * SECURE wrapper for dashboard access
+ * Checks: Login, Ownership, Subscription Tier
+ */
+export async function getCarrierRetentionDashboardForCarrier(carrierDot) {
+    try {
+        // 1. Auth & Ownership
+        await verifyCarrierOwnership(carrierDot);
+
+        // 2. Subscription Check
+        const sub = await getSubscription(carrierDot);
+        const allowFull = sub.plan_type === 'pro' || sub.plan_type === 'enterprise';
+
+        // 3. Feature Gating
+        if (!allowFull) {
+            // Free Tier: Return limited preview / upgrade prompt
+            return {
+                success: true,
+                isFreeTier: true,
+                message: 'Upgrade to Pro to identify flight-risk drivers.',
+                upgradeUrl: '/pricing',
+                overview: null // Hide actual data
+            };
+        }
+
+        // 4. Fetch Full Data
+        return await getCarrierRetentionDashboard(carrierDot);
+
+    } catch (error) {
+        console.warn('Retention dashboard access denied:', error.message);
+        return { success: false, error: error.message };
+    }
+}
 
 /**
  * Get aggregated retention dashboard data for a carrier

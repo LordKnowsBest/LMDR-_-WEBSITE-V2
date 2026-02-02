@@ -74,6 +74,8 @@ import {
   getAutomationLog
 } from 'backend/pipelineAutomationService';
 
+import { getRecruiterHealthStatus } from 'backend/recruiterHealthService.jsw';
+
 import wixLocation from 'wix-location';
 
 let wixUsers;
@@ -154,7 +156,8 @@ const MESSAGE_REGISTRY = {
     'updateAutomationRule',
     'deleteAutomationRule',
     'toggleRuleStatus',
-    'getAutomationLog'
+    'getAutomationLog',
+    'getSystemHealth' // New System Health Check
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -209,7 +212,8 @@ const MESSAGE_REGISTRY = {
     'automationRuleUpdated',
     'automationRuleDeleted',
     'automationRuleToggled',
-    'automationLogLoaded'
+    'automationLogLoaded',
+    'systemHealthUpdate' // New System Health Response
   ]
 };
 
@@ -477,6 +481,10 @@ async function handleHtmlMessage(msg, component) {
         break;
       case 'getAutomationLog':
         await handleGetAutomationLog(component);
+        break;
+
+      case 'getSystemHealth':
+        await handleGetSystemHealth(msg.data, component);
         break;
 
       default:
@@ -1080,6 +1088,7 @@ function handleNavigateTo(data) {
     'dashboard': '/recruiter-console',
     'driver-search': '/recruiter-driver-search',
     'pipeline': '/recruiter-console',
+    'retention': '/carrier-retention',
     'settings': '/account/my-account',
     'compliance-calendar': '/carrier-compliance-calendar',
     'document-vault': '/carrier-document-vault',
@@ -1333,14 +1342,27 @@ async function handleToggleRuleStatus(data, component) {
 }
 
 async function handleGetAutomationLog(component) {
-  if (!currentCarrierDOT) {
-    sendToHtml(component, 'automationLogLoaded', { success: true, log: [] });
-    return;
-  }
+  if (!currentCarrierDOT) return;
+  const result = await getAutomationLog(currentCarrierDOT);
+  sendToHtml(component, 'automationLogLoaded', result);
+}
+
+// ============================================================================
+// SYSTEM HEALTH HANDLERS
+// ============================================================================
+
+async function handleGetSystemHealth(data, component) {
+  // Use currentCarrierDOT as context if not provided
+  const carrierDot = data?.carrierDot || currentCarrierDOT;
+
   try {
-    const result = await getAutomationLog(currentCarrierDOT);
-    sendToHtml(component, 'automationLogLoaded', result);
+    const result = await getRecruiterHealthStatus(carrierDot);
+    sendToHtml(component, 'systemHealthUpdate', result);
   } catch (error) {
-    sendToHtml(component, 'automationLogLoaded', { success: false, error: error.message });
+    console.warn('Health check failed:', error);
+    sendToHtml(component, 'systemHealthUpdate', {
+      status: 'unknown',
+      error: error.message
+    });
   }
 }
