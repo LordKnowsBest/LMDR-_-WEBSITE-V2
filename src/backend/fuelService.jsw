@@ -12,15 +12,16 @@
 import wixData from 'wix-data';
 import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
-import { seedFuelPrices } from 'backend/seeds/seedMockData';
+import { seedFuelPrices, seedFuelTrends } from 'backend/seeds/seedMockData';
 
 // Collection keys for dual-source routing
 const COLLECTION_KEYS = {
     fuelPrices: 'fuelPrices',
     fuelCards: 'fuelCards',
-    roadUtilityCache: 'roadUtilityCache'
+    roadUtilityCache: 'roadUtilityCache',
+    fuelPriceTrends: 'fuelPriceTrends'
 };
 
 // ============================================
@@ -37,7 +38,7 @@ async function queryData(collectionKey, wixCollectionName, options = {}) {
         });
         return result.records || [];
     }
-    let query = wixData.query(wixCollectionName);
+    let query = wixData.query(wixCollectionName || getWixCollectionName(collectionKey));
     if (options.eq) {
         for (const [field, value] of Object.entries(options.eq)) {
             query = query.eq(field, value);
@@ -128,7 +129,8 @@ function calculateDistance(lat1, lng1, lat2, lng2) {
 const COLLECTIONS = {
     PRICES: 'FuelPrices',
     CARDS: 'FuelCards',
-    CACHE: 'RoadUtilityCache'
+    CACHE: 'RoadUtilityCache',
+    TRENDS: 'FuelPriceTrends' // Added for trends
 };
 
 // Fuel card discount rates (cents per gallon)
@@ -154,7 +156,7 @@ export async function searchFuelPrices(lat, lng, radius = 50, options = {}) {
     const cacheKey = `fuel:${lat.toFixed(2)}:${lng.toFixed(2)}:${radius}:${options.cardType || 'none'}`;
 
     try {
-        // 1. Check cache first using dual-source routing
+        // 1. Check cache first
         let cachedItems = [];
         if (usesAirtable(COLLECTION_KEYS.roadUtilityCache)) {
             const tableName = getAirtableTableName(COLLECTION_KEYS.roadUtilityCache);
@@ -177,91 +179,51 @@ export async function searchFuelPrices(lat, lng, radius = 50, options = {}) {
             return { success: true, items: cachedItems[0].data, fromCache: true };
         }
 
-        // 2. Query local database using dual-source routing
-        let items = [];
-        if (usesAirtable(COLLECTION_KEYS.fuelPrices)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.fuelPrices);
-            const result = await airtable.queryRecords(tableName, { maxRecords: 1000 });
-            items = (result.records || []).map(r => ({
-                _id: r.id || r._id,
-                station_id: r['Station Id'] || r.station_id || r.fields?.['Station Id'],
-                brand: r.Brand || r.brand || r.fields?.['Brand'],
-                name: r.Name || r.name || r.fields?.['Name'],
-                location: r.Location || r.location || r.fields?.['Location'],
-                diesel_price: r['Diesel Price'] || r.diesel_price || r.fields?.['Diesel Price'],
-                def_price: r['Def Price'] || r.def_price || r.fields?.['Def Price'],
-                card_discounts: r['Card Discounts'] || r.card_discounts || r.fields?.['Card Discounts'],
-                amenities: r.Amenities || r.amenities || r.fields?.['Amenities'],
-                address: r.Address || r.address || r.fields?.['Address']
-            }));
-        } else {
-            const results = await wixData.query(COLLECTIONS.PRICES)
-                .limit(1000)
-                .find({ suppressAuth: true });
-            items = results.items || [];
-        }
-
-        console.log('[FuelService] Database query returned:', items.length, 'items');
+        // 2. Query local database
+        let items = await queryData('fuelPrices', COLLECTIONS.PRICES, { limit: 1000 });
 
         // If no local data, seed data using seedMockData service
         if (items.length === 0) {
             console.log('[FuelService] Seeding mock data for location:', { lat, lng, radius });
-            const seededItems = await seedFuelPrices(lat, lng, radius);
-            console.log('[FuelService] Seeded', seededItems.length, 'stations');
-
-            // Map seeded items to normalized structure
-            items = seededItems.map(r => ({
-                _id: r.id || r._id,
-                station_id: r['Station Id'] || r.station_id || r.fields?.['Station Id'],
-                brand: r.Brand || r.brand || r.fields?.['Brand'],
-                name: r.Name || r.name || r.fields?.['Name'],
-                location: r.Location || r.location || r.fields?.['Location'],
-                diesel_price: r['Diesel Price'] || r.diesel_price || r.fields?.['Diesel Price'],
-                def_price: r['Def Price'] || r.def_price || r.fields?.['Def Price'],
-                card_discounts: r['Card Discounts'] || r.card_discounts || r.fields?.['Card Discounts'],
-                amenities: r.Amenities || r.amenities || r.fields?.['Amenities'],
-                address: r.Address || r.address || r.fields?.['Address']
-            }));
+            await seedFuelPrices(lat, lng, radius);
+            items = await queryData('fuelPrices', COLLECTIONS.PRICES, { limit: 1000 });
         }
 
+        // Normalize data (Airtable/Wix structure alignment)
+        const normalizedItems = items.map(r => ({
+            _id: r._id || r.id,
+            station_id: r.station_id || r.fields?.['Station Id'] || r['Station Id'],
+            brand: r.brand || r.fields?.['Brand'] || r['Brand'],
+            name: r.name || r.fields?.['Name'] || r['Name'],
+            location: r.location || r.fields?.['Location'] || r['Location'],
+            diesel_price: r.diesel_price || r.fields?.['Diesel Price'] || r['Diesel Price'],
+            def_price: r.def_price || r.fields?.['Def Price'] || r['Def Price'],
+            card_discounts: r.card_discounts || r.fields?.['Card Discounts'] || r['Card Discounts'],
+            amenities: r.amenities || r.fields?.['Amenities'] || r['Amenities'],
+            address: r.address || r.fields?.['Address'] || r['Address']
+        }));
+
         // 3. Filter by radius and calculate distance
-        const nearbyStations = items.filter(station => {
+        const nearbyStations = normalizedItems.filter(station => {
             if (!station.location?.lat || !station.location?.lng) return false;
             const stationLat = parseFloat(station.location.lat);
             const stationLng = parseFloat(station.location.lng);
             if (isNaN(stationLat) || isNaN(stationLng)) return false;
 
-            const distance = calculateDistance(
-                parseFloat(lat),
-                parseFloat(lng),
-                stationLat,
-                stationLng
-            );
-
-            // Defensive check for invalid distance
-            if (typeof distance !== 'number' || isNaN(distance)) {
-                console.warn('[FuelService] Invalid distance calculated:', { lat, lng, stationLat, stationLng, distance });
-                return false;
-            }
-
+            const distance = calculateDistance(parseFloat(lat), parseFloat(lng), stationLat, stationLng);
             station.distance_miles = parseFloat(distance.toFixed(2));
             return distance <= radius;
         });
-
-        console.log('[FuelService] After radius filter:', nearbyStations.length, 'stations within', radius, 'miles');
 
         // 4. Apply fuel card discounts
         const processedStations = nearbyStations.map(station => {
             let discount = 0;
             let discountSource = 'none';
 
-            // Check station-specific discounts first
             if (options.cardType && station.card_discounts && station.card_discounts[options.cardType]) {
                 discount = station.card_discounts[options.cardType];
                 discountSource = 'station';
-            }
-            // Fall back to standard card discount
-            else if (options.cardType && FUEL_CARD_DISCOUNTS[options.cardType]) {
+            } else if (options.cardType && FUEL_CARD_DISCOUNTS[options.cardType]) {
                 discount = FUEL_CARD_DISCOUNTS[options.cardType].base;
                 discountSource = 'standard';
             }
@@ -276,11 +238,11 @@ export async function searchFuelPrices(lat, lng, radius = 50, options = {}) {
                 discount_source: discountSource,
                 effective_price: effectivePrice,
                 savings_per_gallon: discount,
-                savings_per_fill: parseFloat((discount * 150).toFixed(2)) // Assume 150 gal fill
+                savings_per_fill: parseFloat((discount * 150).toFixed(2))
             };
         });
 
-        // 5. Filter by amenities if specified
+        // 5. Filter by amenities
         let finalItems = processedStations;
         if (options.amenities && Array.isArray(options.amenities) && options.amenities.length > 0) {
             finalItems = processedStations.filter(station =>
@@ -288,13 +250,11 @@ export async function searchFuelPrices(lat, lng, radius = 50, options = {}) {
             );
         }
 
-        // 6. Sort by effective price (cheapest first)
+        // 6. Sort and Limit
         finalItems.sort((a, b) => a.effective_price - b.effective_price);
-
-        // 7. Limit to top 25 results
         finalItems = finalItems.slice(0, 25);
 
-        // 8. Store in cache using dual-source routing
+        // 8. Store in cache
         const expiry = new Date();
         expiry.setMinutes(expiry.getMinutes() + CACHE_TTL_MINUTES);
 
@@ -330,7 +290,6 @@ export async function getFuelAlongRoute(routePoints, options = {}) {
         const allStations = [];
         const seenIds = new Set();
 
-        // Sample points along the route (every ~100 miles or so)
         const samplePoints = sampleRoutePoints(routePoints, maxStops);
 
         for (const point of samplePoints) {
@@ -339,7 +298,6 @@ export async function getFuelAlongRoute(routePoints, options = {}) {
             });
 
             if (result.success) {
-                // Take top 3 from each waypoint
                 const top3 = result.items.slice(0, 3);
                 for (const station of top3) {
                     if (!seenIds.has(station._id)) {
@@ -351,7 +309,6 @@ export async function getFuelAlongRoute(routePoints, options = {}) {
             }
         }
 
-        // Sort by effective price
         allStations.sort((a, b) => a.effective_price - b.effective_price);
 
         return {
@@ -380,7 +337,6 @@ function sampleRoutePoints(routePoints, maxSamples) {
         if (samples.length >= maxSamples) break;
     }
 
-    // Always include the last point
     if (samples[samples.length - 1] !== routePoints[routePoints.length - 1]) {
         samples.push(routePoints[routePoints.length - 1]);
     }
@@ -403,7 +359,6 @@ export async function calculateFuelSavings(driverId, tripDetails) {
         const currentPrice = tripDetails.currentPrice || 3.50;
         const cardType = tripDetails.cardType || 'none';
 
-        // If route provided, find cheapest along route
         let cheapestStation = null;
         if (tripDetails.routePoints && tripDetails.routePoints.length >= 2) {
             const routeResult = await getFuelAlongRoute(tripDetails.routePoints, { cardType });
@@ -417,20 +372,17 @@ export async function calculateFuelSavings(driverId, tripDetails) {
             }
         }
 
-        // Calculate savings
         const currentCost = gallons * currentPrice;
         const cheapestPrice = cheapestStation ? cheapestStation.effective_price : currentPrice;
         const cheapestCost = gallons * cheapestPrice;
         const savings = currentCost - cheapestCost;
 
-        // Card discount savings
         let cardDiscount = 0;
         if (cardType !== 'none' && FUEL_CARD_DISCOUNTS[cardType]) {
             cardDiscount = FUEL_CARD_DISCOUNTS[cardType].base;
         }
         const cardSavings = gallons * cardDiscount;
 
-        // Regional average comparison
         const stateAverage = await getStateAveragePrice(tripDetails.state || 'US');
         const vsAverageSavings = gallons * (stateAverage - cheapestPrice);
 
@@ -487,7 +439,6 @@ export async function linkFuelCard(driverId, cardInfo) {
     }
 
     try {
-        // Check if card already linked using dual-source routing
         let existingCount = 0;
         if (usesAirtable(COLLECTION_KEYS.fuelCards)) {
             const tableName = getAirtableTableName(COLLECTION_KEYS.fuelCards);
@@ -508,7 +459,6 @@ export async function linkFuelCard(driverId, cardInfo) {
             return { success: false, error: 'This card is already linked to your account' };
         }
 
-        // Check max cards limit (5 per driver) using dual-source routing
         const cardCount = await countData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, {
             eq: { driver_id: driverId },
             filter: `{Driver Id} = "${driverId}"`
@@ -518,7 +468,6 @@ export async function linkFuelCard(driverId, cardInfo) {
             return { success: false, error: 'Maximum of 5 fuel cards allowed per driver' };
         }
 
-        // Determine if this should be primary (first card = primary)
         const isPrimary = cardCount === 0;
 
         const record = {
@@ -530,7 +479,6 @@ export async function linkFuelCard(driverId, cardInfo) {
             linked_at: new Date()
         };
 
-        // Use dual-source routing
         const result = await insertData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, record);
 
         return {
@@ -557,40 +505,20 @@ export async function getDriverFuelCards(driverId) {
     if (!driverId) return { success: false, error: 'driverId is required' };
 
     try {
-        let resultItems = [];
-
-        // Dual-source routing
-        if (usesAirtable(COLLECTION_KEYS.fuelCards)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.fuelCards);
-            const filter = `{Driver Id} = "${driverId}"`;
-            const result = await airtable.queryRecords(tableName, {
-                filterByFormula: filter,
-                sort: [{ field: 'Is Primary', direction: 'desc' }],
-                maxRecords: 100
-            });
-            resultItems = (result.records || []).map(r => ({
-                _id: r.id || r._id,
-                card_type: r['Card Type'] || r.card_type,
-                card_number_last4: r['Card Number Last4'] || r.card_number_last4,
-                nickname: r.Nickname || r.nickname,
-                is_primary: r['Is Primary'] || r.is_primary,
-                linked_at: r['Linked At'] || r.linked_at
-            }));
-        } else {
-            const result = await wixData.query(COLLECTIONS.CARDS)
-                .eq('driver_id', driverId)
-                .descending('is_primary')
-                .find({ suppressAuth: true });
-            resultItems = result.items;
-        }
+        let resultItems = await queryData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, {
+            filter: `{Driver Id} = "${driverId}"`,
+            eq: { driver_id: driverId },
+            sort: [{ field: 'Is Primary', direction: 'desc' }],
+            descending: 'is_primary'
+        });
 
         const cards = resultItems.map(card => ({
-            _id: card._id,
-            cardType: card.card_type,
-            last4: card.card_number_last4,
-            nickname: card.nickname,
-            isPrimary: card.is_primary,
-            linkedAt: card.linked_at
+            _id: card._id || card.id,
+            cardType: card.card_type || card['Card Type'],
+            last4: card.card_number_last4 || card['Card Number Last4'],
+            nickname: card.nickname || card['Nickname'],
+            isPrimary: card.is_primary || card['Is Primary'],
+            linkedAt: card.linked_at || card['Linked At']
         }));
 
         return { success: true, cards };
@@ -611,38 +539,29 @@ export async function unlinkFuelCard(driverId, cardId) {
     }
 
     try {
-        // Verify ownership using dual-source routing
         const card = await getRecord(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, cardId);
         const cardDriverId = card?.driver_id || card?.['Driver Id'];
         if (!card || cardDriverId !== driverId) {
             return { success: false, error: 'Card not found or access denied' };
         }
 
-        // Remove using dual-source routing
         await removeData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, cardId);
 
         // If this was primary, make another card primary
         const isPrimary = card.is_primary || card['Is Primary'];
         if (isPrimary) {
-            let remainingItems = [];
-            if (usesAirtable(COLLECTION_KEYS.fuelCards)) {
-                const tableName = getAirtableTableName(COLLECTION_KEYS.fuelCards);
-                const filter = `{Driver Id} = "${driverId}"`;
-                const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-                remainingItems = (result.records || []).map(r => ({
-                    _id: r.id || r._id,
-                    is_primary: true
-                }));
-            } else {
-                const remaining = await wixData.query(COLLECTIONS.CARDS)
-                    .eq('driver_id', driverId)
-                    .limit(1)
-                    .find({ suppressAuth: true });
-                remainingItems = remaining.items.map(r => ({ _id: r._id, is_primary: true }));
-            }
+            let remainingItems = await queryData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, {
+                filter: `{Driver Id} = "${driverId}"`,
+                eq: { driver_id: driverId },
+                limit: 1
+            });
 
             if (remainingItems.length > 0) {
-                await updateData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, remainingItems[0]);
+                const newPrimary = remainingItems[0];
+                newPrimary.is_primary = true;
+                if (newPrimary['Is Primary'] !== undefined) newPrimary['Is Primary'] = true;
+
+                await updateData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, newPrimary);
             }
         }
 
@@ -662,37 +581,49 @@ export async function getFuelPriceTrends(state, days = 30) {
     if (!state) return { success: false, error: 'state is required' };
 
     try {
-        // In production, this would query historical data from EIA or cached API responses
-        // For now, generate mock trend data
-        const currentAvg = await getStateAveragePrice(state);
-        const trends = [];
+        // Query trend data from DB
+        let trends = await queryData(COLLECTION_KEYS.fuelPriceTrends, COLLECTIONS.TRENDS, {
+            filter: `{State} = "${state}"`,
+            eq: { state: state },
+            sort: [{ field: 'Date', direction: 'desc' }],
+            descending: 'date',
+            limit: days
+        });
 
-        for (let i = days; i >= 0; i--) {
-            const date = new Date();
-            date.setDate(date.getDate() - i);
-
-            // Simulate price fluctuation
-            const variation = (Math.random() - 0.5) * 0.15;
-            const price = currentAvg + variation + (i * 0.002); // Slight downward trend
-
-            trends.push({
-                date: date.toISOString().split('T')[0],
-                avgPrice: parseFloat(price.toFixed(3))
-            });
+        // If empty, seed data
+        if (!trends || trends.length === 0) {
+            console.log(`[FuelService] Seeding mock trends for ${state}...`);
+            const seedResult = await seedFuelTrends(state);
+            if (seedResult.seeded) {
+                trends = await queryData(COLLECTION_KEYS.fuelPriceTrends, COLLECTIONS.TRENDS, {
+                    filter: `{State} = "${state}"`,
+                    eq: { state: state },
+                    sort: [{ field: 'Date', direction: 'desc' }],
+                    descending: 'date',
+                    limit: days
+                });
+            }
         }
 
+        // Normalize
+        const normalizedTrends = trends.map(t => ({
+            date: t.date || t['Date'] || t.fields?.['Date'],
+            avgPrice: t.avgPrice || t['Average Price'] || t.fields?.['Average Price'] || t.avg_price // Mapping variability handling
+        })).sort((a, b) => new Date(a.date) - new Date(b.date)); // Sort ascending for chart
+
         // Calculate trend direction
-        const firstWeekAvg = trends.slice(0, 7).reduce((sum, t) => sum + t.avgPrice, 0) / 7;
-        const lastWeekAvg = trends.slice(-7).reduce((sum, t) => sum + t.avgPrice, 0) / 7;
+        const currentAvg = normalizedTrends.length > 0 ? normalizedTrends[normalizedTrends.length - 1].avgPrice : 0;
+        const firstWeekAvg = normalizedTrends.slice(0, 7).reduce((sum, t) => sum + t.avgPrice, 0) / 7 || currentAvg;
+        const lastWeekAvg = normalizedTrends.slice(-7).reduce((sum, t) => sum + t.avgPrice, 0) / 7 || currentAvg;
         const trendChange = lastWeekAvg - firstWeekAvg;
 
         return {
             success: true,
             state,
-            currentAverage: currentAvg,
+            currentAverage: parseFloat(currentAvg.toFixed(3)),
             trendDirection: trendChange < -0.02 ? 'down' : trendChange > 0.02 ? 'up' : 'stable',
             trendAmount: parseFloat(Math.abs(trendChange).toFixed(3)),
-            trends
+            trends: normalizedTrends
         };
     } catch (error) {
         console.error('[FuelService] getFuelPriceTrends failed:', error);

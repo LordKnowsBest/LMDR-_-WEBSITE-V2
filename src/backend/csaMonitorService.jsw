@@ -1,7 +1,8 @@
 import wixData from 'wix-data';
 import { getDetailedCSAData } from './fmcsaService';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
+import { seedCSAScores } from 'backend/seeds/seedMockData';
 
 const COLLECTION = 'CSAScoreHistory';
 const ALERTS_COLLECTION = 'ComplianceAlerts';
@@ -27,7 +28,7 @@ async function queryData(collectionKey, wixCollectionName, options = {}) {
         });
         return result.records || [];
     }
-    let query = wixData.query(wixCollectionName);
+    let query = wixData.query(wixCollectionName || getWixCollectionName(collectionKey));
     if (options.eq) {
         for (const [field, value] of Object.entries(options.eq)) {
             query = query.eq(field, value);
@@ -56,7 +57,7 @@ async function insertData(collectionKey, wixCollectionName, data) {
         const tableName = getAirtableTableName(collectionKey);
         return await airtable.createRecord(tableName, data);
     }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
+    return await wixData.insert(wixCollectionName || getWixCollectionName(collectionKey), data, { suppressAuth: true });
 }
 
 // ============================================================
@@ -70,18 +71,32 @@ async function insertData(collectionKey, wixCollectionName, data) {
  */
 export async function getCSAScoresWithTrends(carrierDot) {
   // Get latest snapshot
-  const latestSnapshot = await wixData.query(COLLECTION)
-    .eq('carrier_dot', carrierDot)
-    .descending('snapshot_date')
-    .limit(1)
-    .find({ suppressAuth: true });
+  let latestSnapshot = await queryData('csaScoreHistory', COLLECTION, {
+      eq: { carrier_dot: carrierDot },
+      descending: 'snapshot_date',
+      limit: 1
+  });
 
-  if (latestSnapshot.items.length === 0) {
-    // No history, fetch fresh
-    return snapshotCSAScores(carrierDot, 'manual');
+  if (latestSnapshot.length === 0) {
+    // If no history, try to seed first (for dev/demo scenarios where API might fail or be empty)
+    // Note: We only seed if we want mock data. If this is prod, maybe we skip.
+    // Assuming this seeding is for dev convenience or fallback.
+    const seedResult = await seedCSAScores(carrierDot);
+    if (seedResult.seeded) {
+        latestSnapshot = await queryData('csaScoreHistory', COLLECTION, {
+            eq: { carrier_dot: carrierDot },
+            descending: 'snapshot_date',
+            limit: 1
+        });
+    }
+
+    // If still empty, fetch fresh from API
+    if (latestSnapshot.length === 0) {
+        return snapshotCSAScores(carrierDot, 'manual');
+    }
   }
 
-  return latestSnapshot.items[0];
+  return latestSnapshot[0];
 }
 
 /**
@@ -94,13 +109,27 @@ export async function getCSAScoreHistory(carrierDot, months = 12) {
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - months);
 
-  const result = await wixData.query(COLLECTION)
-    .eq('carrier_dot', carrierDot)
-    .ge('snapshot_date', cutoff)
-    .ascending('snapshot_date')
-    .find({ suppressAuth: true });
+  // Check if we need to seed
+  // (Optional optimization: check count first, or just let query handle empty)
+  // For charting, we want history. If empty, maybe seed?
+  let result = await queryData('csaScoreHistory', COLLECTION, {
+      eq: { carrier_dot: carrierDot },
+      ge: { snapshot_date: cutoff },
+      ascending: 'snapshot_date'
+  });
 
-  return result.items;
+  if (result.length === 0) {
+      const seedResult = await seedCSAScores(carrierDot);
+      if (seedResult.seeded) {
+          result = await queryData('csaScoreHistory', COLLECTION, {
+              eq: { carrier_dot: carrierDot },
+              ge: { snapshot_date: cutoff },
+              ascending: 'snapshot_date'
+          });
+      }
+  }
+
+  return result;
 }
 
 /**
@@ -118,13 +147,13 @@ export async function snapshotCSAScores(carrierDot, source = 'manual') {
   }
 
   // 2. Get previous snapshot for comparison
-  const prevResult = await wixData.query(COLLECTION)
-    .eq('carrier_dot', carrierDot)
-    .descending('snapshot_date')
-    .limit(1)
-    .find({ suppressAuth: true });
+  const prevResult = await queryData('csaScoreHistory', COLLECTION, {
+      eq: { carrier_dot: carrierDot },
+      descending: 'snapshot_date',
+      limit: 1
+  });
     
-  const prev = prevResult.items[0];
+  const prev = prevResult[0];
 
   // 3. Calculate trends
   const trend = {};
@@ -153,7 +182,7 @@ export async function snapshotCSAScores(carrierDot, source = 'manual') {
     _createdDate: new Date()
   };
 
-  const result = await wixData.insert(COLLECTION, snapshot, { suppressAuth: true });
+  const result = await insertData('csaScoreHistory', COLLECTION, snapshot);
   
   // 5. Generate Alerts if scheduled
   if (source === 'scheduled') {
@@ -199,7 +228,7 @@ async function checkAndAlert(carrierDot, current, prev) {
     
     // Save alerts
     for (const a of newAlerts) {
-        await wixData.insert(ALERTS_COLLECTION, {
+        await insertData('complianceAlerts', ALERTS_COLLECTION, {
             carrier_dot: carrierDot,
             alert_type: a.type,
             severity: a.severity,
@@ -207,9 +236,9 @@ async function checkAndAlert(carrierDot, current, prev) {
             message: a.message,
             status: 'active',
             related_entity_type: 'csa_score',
-            related_entity_id: current._id,
+            related_entity_id: current._id || current.id,
             _createdDate: new Date()
-        }, { suppressAuth: true });
+        });
     }
 }
 
@@ -221,13 +250,13 @@ async function checkAndAlert(carrierDot, current, prev) {
 export async function processCSAScoreUpdates() {
   // Get all active carriers (from subscriptions or profiles)
   // For now, querying CarrierSubscriptions is safest
-  const subs = await wixData.query('CarrierSubscriptions')
-    .eq('is_active', true)
-    .find({ suppressAuth: true });
+  const subs = await queryData('carrierSubscriptions', 'CarrierSubscriptions', {
+      eq: { is_active: true }
+  });
     
   let processed = 0;
   
-  for (const sub of subs.items) {
+  for (const sub of subs) {
       if (sub.carrier_dot) {
           try {
               await snapshotCSAScores(sub.carrier_dot, 'scheduled');
