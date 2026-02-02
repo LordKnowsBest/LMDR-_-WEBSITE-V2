@@ -1,0 +1,521 @@
+// ============================================================================
+// B2B RESEARCH AGENT SERVICE - Account intelligence & research briefs
+//
+// Generates one-click research briefs for carrier accounts using FMCSA data,
+// match signals, compliance records, and hiring signals. Provides suggested
+// talk tracks and next-step recommendations for business development.
+//
+// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
+//
+// Used on: Account Detail (Research Agent Panel), B2B Dashboard
+// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
+// ============================================================================
+
+import wixData from 'wix-data';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+
+// ============================================================================
+// COLLECTION KEYS
+// ============================================================================
+
+const COLLECTIONS = {
+  research: 'b2bAccountResearch',
+  accounts: 'b2bAccounts',
+  signals: 'b2bMatchSignals',
+  carriers: 'carriers',
+  enrichments: 'carrierEnrichments',
+  safetyData: 'carrierSafetyData',
+  hiringPrefs: 'carrierHiringPreferences',
+  contacts: 'b2bContacts'
+};
+
+// ============================================================================
+// CONFIG
+// ============================================================================
+
+const CACHE_TTL_DAYS = 7; // Research briefs cached for 7 days
+
+// ============================================================================
+// DUAL-SOURCE HELPERS
+// ============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.queryRecords(tableName, {
+      filterByFormula: options.filter || '',
+      sort: options.sort,
+      maxRecords: options.limit || 100
+    });
+    return { items: result.records || [], totalCount: result.records?.length || 0 };
+  }
+  let query = wixData.query(collectionKey);
+  if (options.limit) query = query.limit(options.limit);
+  return await query.find();
+}
+
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.createRecord(tableName, record);
+    return result.record || record;
+  }
+  return await wixData.insert(collectionKey, record);
+}
+
+async function updateData(collectionKey, recordId, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.updateRecord(tableName, recordId, record);
+    return result.record || record;
+  }
+  return await wixData.update(collectionKey, { _id: recordId, ...record });
+}
+
+async function findByField(collectionKey, fieldName, value) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    return await airtable.findByField(tableName, fieldName, value);
+  }
+  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
+  return result.items || [];
+}
+
+// ============================================================================
+// RESEARCH BRIEF GENERATION
+// ============================================================================
+
+/**
+ * Generate a research brief for a carrier account
+ * Aggregates FMCSA data, match signals, safety records, and hiring signals
+ * into an actionable brief for business development.
+ *
+ * Uses 7-day cache - returns cached brief if fresh enough.
+ *
+ * @param {string} accountId - B2B Account ID
+ * @param {boolean} [forceRefresh=false] - Skip cache and regenerate
+ * @returns {Promise<{success: boolean, brief?: Object, cached?: boolean, error?: string}>}
+ */
+export async function generateBrief(accountId, forceRefresh = false) {
+  try {
+    if (!accountId) return { success: false, error: 'Account ID is required' };
+
+    // Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cached = await getCachedBrief(accountId);
+      if (cached) {
+        return { success: true, brief: cached, cached: true };
+      }
+    }
+
+    // Get account details
+    const accounts = await findByField(COLLECTIONS.accounts, '_id', accountId);
+    const account = accounts && accounts.length > 0 ? accounts[0] : null;
+    if (!account) {
+      return { success: false, error: 'Account not found' };
+    }
+
+    const carrierDot = account.carrier_dot;
+
+    // Gather intelligence from multiple sources in parallel
+    const [
+      carrierData,
+      enrichmentData,
+      safetyData,
+      signalData,
+      hiringData,
+      contactData
+    ] = await Promise.all([
+      getCarrierProfile(carrierDot),
+      getEnrichmentData(carrierDot),
+      getSafetyProfile(carrierDot),
+      getSignalProfile(carrierDot),
+      getHiringSignals(carrierDot),
+      getAccountContacts(accountId)
+    ]);
+
+    // Assemble the brief
+    const highlights = buildHighlights(carrierData, enrichmentData, safetyData, signalData, hiringData);
+    const talkTrack = buildTalkTrack(account, signalData, hiringData);
+    const nextSteps = buildNextSteps(account, signalData, hiringData, contactData);
+    const sources = buildSources(carrierData, enrichmentData, safetyData, hiringData);
+
+    const brief = {
+      account_id: accountId,
+      carrier_dot: carrierDot,
+      carrier_name: account.carrier_name,
+      summary: highlights.join('\n'),
+      highlights: JSON.stringify(highlights),
+      talk_track: talkTrack,
+      next_steps: JSON.stringify(nextSteps),
+      sources: JSON.stringify(sources),
+      signals: JSON.stringify({
+        match_score: signalData.signal_score || 0,
+        driver_count: signalData.driver_count_high_match || 0,
+        top_regions: signalData.top_regions || '',
+        fleet_size: carrierData.fleet_size || 0,
+        safety_rating: safetyData.rating || 'unknown'
+      }),
+      recommendations: nextSteps.map(s => s.text).join('; '),
+      generated_at: new Date().toISOString(),
+      generated_by: 'research_agent'
+    };
+
+    // Save/update the brief
+    const existing = await findByField(COLLECTIONS.research, 'account_id', accountId);
+    let saved;
+    if (existing && existing.length > 0) {
+      saved = await updateData(COLLECTIONS.research, existing[0]._id || existing[0].id, brief);
+    } else {
+      saved = await insertData(COLLECTIONS.research, brief);
+    }
+
+    return { success: true, brief: saved, cached: false };
+  } catch (error) {
+    console.error('Error generating research brief:', error);
+    return { success: false, error: error.message || 'Failed to generate brief' };
+  }
+}
+
+/**
+ * Get existing research brief for an account (no generation)
+ *
+ * @param {string} accountId
+ * @returns {Promise<{success: boolean, brief?: Object, error?: string}>}
+ */
+export async function getBrief(accountId) {
+  try {
+    if (!accountId) return { success: false, error: 'Account ID is required' };
+
+    const results = await findByField(COLLECTIONS.research, 'account_id', accountId);
+    if (!results || results.length === 0) {
+      return { success: false, error: 'No research brief found. Generate one first.' };
+    }
+
+    const brief = results[0];
+    // Parse JSON fields for frontend consumption
+    try { brief.highlights = JSON.parse(brief.highlights || '[]'); } catch (e) { brief.highlights = []; }
+    try { brief.next_steps = JSON.parse(brief.next_steps || '[]'); } catch (e) { brief.next_steps = []; }
+    try { brief.sources = JSON.parse(brief.sources || '[]'); } catch (e) { brief.sources = []; }
+    try { brief.signals = JSON.parse(brief.signals || '{}'); } catch (e) { brief.signals = {}; }
+
+    return { success: true, brief };
+  } catch (error) {
+    console.error('Error fetching research brief:', error);
+    return { success: false, error: error.message || 'Failed to fetch brief' };
+  }
+}
+
+// ============================================================================
+// DATA GATHERING HELPERS
+// ============================================================================
+
+/**
+ * Get carrier profile from FMCSA master table
+ */
+async function getCarrierProfile(carrierDot) {
+  if (!carrierDot) return {};
+  try {
+    const results = await findByField(COLLECTIONS.carriers, 'dot_number', carrierDot);
+    if (results && results.length > 0) {
+      const c = results[0];
+      return {
+        legal_name: c.legal_name || c.carrier_name || '',
+        fleet_size: c.total_drivers || c.fleet_size || 0,
+        total_power_units: c.total_power_units || 0,
+        state: c.physical_state || c.state || '',
+        city: c.physical_city || c.city || '',
+        operation_type: c.carrier_operation || '',
+        entity_type: c.entity_type || '',
+        source: 'FMCSA'
+      };
+    }
+  } catch (err) {
+    console.warn('Carrier profile lookup failed:', err.message);
+  }
+  return {};
+}
+
+/**
+ * Get enrichment data (AI-generated insights)
+ */
+async function getEnrichmentData(carrierDot) {
+  if (!carrierDot) return {};
+  try {
+    const results = await findByField(COLLECTIONS.enrichments, 'carrier_dot', carrierDot);
+    if (results && results.length > 0) {
+      const e = results[0];
+      return {
+        pay_range: e.pay_range || '',
+        benefits_summary: e.benefits_summary || '',
+        driver_sentiment: e.driver_sentiment || '',
+        social_media_summary: e.social_media_summary || '',
+        source: 'Platform Enrichment'
+      };
+    }
+  } catch (err) {
+    console.warn('Enrichment lookup failed:', err.message);
+  }
+  return {};
+}
+
+/**
+ * Get safety/compliance data
+ */
+async function getSafetyProfile(carrierDot) {
+  if (!carrierDot) return {};
+  try {
+    const results = await findByField(COLLECTIONS.safetyData, 'carrier_dot', carrierDot);
+    if (results && results.length > 0) {
+      const s = results[0];
+      return {
+        rating: s.safety_rating || s.overall_rating || 'unknown',
+        basic_alerts: s.basic_alerts || '',
+        crash_total: s.crash_total || 0,
+        inspection_total: s.inspection_total || 0,
+        oos_rate: s.out_of_service_rate || 0,
+        source: 'FMCSA Safety'
+      };
+    }
+  } catch (err) {
+    console.warn('Safety profile lookup failed:', err.message);
+  }
+  return {};
+}
+
+/**
+ * Get match signal data
+ */
+async function getSignalProfile(carrierDot) {
+  if (!carrierDot) return {};
+  try {
+    const results = await findByField(COLLECTIONS.signals, 'carrier_dot', carrierDot);
+    if (results && results.length > 0) return results[0];
+  } catch (err) {
+    console.warn('Signal lookup failed:', err.message);
+  }
+  return {};
+}
+
+/**
+ * Get hiring preferences/signals
+ */
+async function getHiringSignals(carrierDot) {
+  if (!carrierDot) return {};
+  try {
+    const results = await findByField(COLLECTIONS.hiringPrefs, 'carrier_dot', carrierDot);
+    if (results && results.length > 0) {
+      const h = results[0];
+      return {
+        regions: h.regions || '',
+        equipment_types: h.equipment_types || '',
+        job_types: h.job_types || '',
+        experience_min: h.experience_min || '',
+        active: true,
+        source: 'Platform Hiring Prefs'
+      };
+    }
+  } catch (err) {
+    console.warn('Hiring signals lookup failed:', err.message);
+  }
+  return {};
+}
+
+/**
+ * Get contacts for the account
+ */
+async function getAccountContacts(accountId) {
+  try {
+    const results = await findByField(COLLECTIONS.contacts, 'account_id', accountId);
+    return results || [];
+  } catch (err) {
+    console.warn('Contacts lookup failed:', err.message);
+    return [];
+  }
+}
+
+// ============================================================================
+// BRIEF ASSEMBLY
+// ============================================================================
+
+/**
+ * Build highlight bullets from gathered data
+ */
+function buildHighlights(carrier, enrichment, safety, signal, hiring) {
+  const highlights = [];
+
+  // Fleet size
+  if (carrier.fleet_size) {
+    highlights.push(`Fleet size: ~${carrier.fleet_size} drivers (${carrier.total_power_units || '?'} power units)`);
+  }
+  if (carrier.state) {
+    highlights.push(`Based in ${carrier.city ? carrier.city + ', ' : ''}${carrier.state}`);
+  }
+
+  // Match signal
+  if (signal.driver_count_high_match) {
+    highlights.push(`${signal.driver_count_high_match} qualified drivers match this carrier's profile`);
+  }
+  if (signal.top_regions) {
+    highlights.push(`Driver matches concentrated in: ${signal.top_regions}`);
+  }
+
+  // Hiring signals
+  if (hiring.active) {
+    const regions = hiring.regions || 'multiple regions';
+    highlights.push(`Active hiring signals in ${regions}`);
+  }
+  if (hiring.equipment_types) {
+    highlights.push(`Equipment needs: ${hiring.equipment_types}`);
+  }
+
+  // Safety
+  if (safety.rating && safety.rating !== 'unknown') {
+    highlights.push(`Safety rating: ${safety.rating}`);
+  }
+  if (safety.basic_alerts) {
+    highlights.push(`CSA BASIC alerts: ${safety.basic_alerts}`);
+  }
+
+  // Enrichment
+  if (enrichment.pay_range) {
+    highlights.push(`Pay range: ${enrichment.pay_range}`);
+  }
+  if (enrichment.driver_sentiment) {
+    highlights.push(`Driver sentiment: ${enrichment.driver_sentiment}`);
+  }
+
+  return highlights.length > 0 ? highlights : ['Limited data available. Consider manual research.'];
+}
+
+/**
+ * Build suggested talk track
+ */
+function buildTalkTrack(account, signal, hiring) {
+  const parts = [];
+
+  // Opening
+  const driverCount = signal.driver_count_high_match || 'several';
+  const regions = signal.top_regions || hiring.regions || 'your area';
+  parts.push(`"We have ${driverCount} qualified drivers in ${regions} who match your requirements."`);
+
+  // Value prop
+  if (hiring.equipment_types) {
+    parts.push(`Specifically, we have ${hiring.equipment_types}-qualified drivers ready to start.`);
+  }
+
+  // Social proof
+  parts.push(`We've helped similar carriers fill positions faster through our match-driven approach.`);
+
+  // Close
+  parts.push(`Would a 15-minute review of the top driver matches make sense?`);
+
+  return parts.join(' ');
+}
+
+/**
+ * Build recommended next steps
+ */
+function buildNextSteps(account, signal, hiring, contacts) {
+  const steps = [];
+
+  // Contact situation
+  if (!contacts || contacts.length === 0) {
+    steps.push({
+      priority: 1,
+      text: 'Identify decision maker and add as contact',
+      type: 'research'
+    });
+  }
+
+  // Primary outreach
+  const score = signal.signal_score || 0;
+  if (score >= 80) {
+    steps.push({
+      priority: 2,
+      text: 'Call owner/recruiter with match count and lane fit data',
+      type: 'call'
+    });
+    steps.push({
+      priority: 3,
+      text: 'Offer a 2-week pilot for fast fill',
+      type: 'proposal'
+    });
+  } else if (score >= 50) {
+    steps.push({
+      priority: 2,
+      text: 'Send intro email with match highlights',
+      type: 'email'
+    });
+    steps.push({
+      priority: 3,
+      text: 'Follow up with call 2 days after email',
+      type: 'call'
+    });
+  } else {
+    steps.push({
+      priority: 2,
+      text: 'Add to nurture sequence for future engagement',
+      type: 'sequence'
+    });
+  }
+
+  // Account status based
+  if (account.status === 'target') {
+    steps.push({
+      priority: 4,
+      text: 'Update account status to prospecting after first touch',
+      type: 'admin'
+    });
+  }
+
+  return steps.sort((a, b) => a.priority - b.priority);
+}
+
+/**
+ * Build sources list
+ */
+function buildSources(carrier, enrichment, safety, hiring) {
+  const sources = [];
+  if (carrier.source) sources.push(carrier.source);
+  if (enrichment.source) sources.push(enrichment.source);
+  if (safety.source) sources.push(safety.source);
+  if (hiring.source) sources.push(hiring.source);
+  return [...new Set(sources)]; // Deduplicate
+}
+
+// ============================================================================
+// CACHE MANAGEMENT
+// ============================================================================
+
+/**
+ * Get cached brief if within TTL
+ */
+async function getCachedBrief(accountId) {
+  try {
+    const results = await findByField(COLLECTIONS.research, 'account_id', accountId);
+    if (!results || results.length === 0) return null;
+
+    const brief = results[0];
+    if (!brief.generated_at) return null;
+
+    const generatedAt = new Date(brief.generated_at);
+    const now = new Date();
+    const ageDays = (now - generatedAt) / (1000 * 60 * 60 * 24);
+
+    if (ageDays <= CACHE_TTL_DAYS) {
+      // Parse JSON fields
+      try { brief.highlights = JSON.parse(brief.highlights || '[]'); } catch (e) { brief.highlights = []; }
+      try { brief.next_steps = JSON.parse(brief.next_steps || '[]'); } catch (e) { brief.next_steps = []; }
+      try { brief.sources = JSON.parse(brief.sources || '[]'); } catch (e) { brief.sources = []; }
+      try { brief.signals = JSON.parse(brief.signals || '{}'); } catch (e) { brief.signals = {}; }
+      return brief;
+    }
+
+    return null; // Expired
+  } catch (err) {
+    console.warn('Cache check failed:', err.message);
+    return null;
+  }
+}
