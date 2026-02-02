@@ -5,9 +5,10 @@
 
 import wixData from 'wix-data';
 import { fetch } from 'wix-fetch';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
 import { fetchMultiStateConditions } from 'backend/adapters/state511';
+import { seedRoadConditions, seedTruckRestrictions } from 'backend/seeds/seedMockData';
 
 // ============================================
 // COLLECTIONS
@@ -19,58 +20,34 @@ const COLLECTIONS = {
 };
 
 // ============================================
-// STATIC MOCK DATA (Phase 6 MVP)
+// DUAL-SOURCE DATA HELPERS
 // ============================================
-const MOCK_CONDITIONS = [
-    {
-        _id: 'cond_1',
-        type: 'closure', // closure, accident, construction, weather
-        highway: 'I-80',
-        state: 'CA',
-        location: { lat: 39.31, lng: -120.33 }, // Donner Pass
-        severity: 'major', // minor, moderate, major, critical
-        description: 'Westbound lanes closed due to spin-outs. Chain controls in effect.',
-        delay_minutes: 120,
-        start_time: new Date(),
-        expected_end: new Date(Date.now() + 4 * 60 * 60 * 1000) // +4 hours
-    },
-    {
-        _id: 'cond_2',
-        type: 'construction',
-        highway: 'I-5',
-        state: 'OR',
-        location: { lat: 42.1, lng: -122.6 }, // Siskiyou
-        severity: 'moderate',
-        description: 'Road work. Right lane closed. Wide load restriction > 12ft.',
-        delay_minutes: 20,
-        start_time: new Date(),
-        expected_end: new Date(Date.now() + 48 * 60 * 60 * 1000)
-    }
-];
 
-const MOCK_RESTRICTIONS = [
-    {
-        _id: 'rest_1',
-        highway: 'US-6',
-        state: 'CO',
-        restriction_type: 'height',
-        value: 13.5, // feet
-        unit: 'ft',
-        details: 'Low clearance bridge at Loveland Pass',
-        permanent: true,
-        location: { lat: 39.6, lng: -105.9 }
-    },
-    {
-        _id: 'rest_2',
-        highway: 'I-70',
-        state: 'CO',
-        restriction_type: 'hazmat',
-        value: 'explosives',
-        details: 'Eisenhower Tunnel - No Hazmat allowed. Use Loveland Pass.',
-        permanent: true,
-        location: { lat: 39.6, lng: -105.9 }
+async function queryData(collectionKey, wixCollectionName, options = {}) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        const result = await airtable.queryRecords(tableName, {
+            filterByFormula: options.filter || '',
+            maxRecords: options.limit || 100
+        });
+        return result.records || [];
     }
-];
+    let query = wixData.query(wixCollectionName || getWixCollectionName(collectionKey));
+    if (options.limit) {
+        query = query.limit(options.limit);
+    }
+    const result = await query.find({ suppressAuth: true });
+    return result.items;
+}
+
+async function insertData(collectionKey, wixCollectionName, data) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        const { _id, ...airtableData } = data;
+        return await airtable.createRecord(tableName, airtableData);
+    }
+    return await wixData.insert(wixCollectionName || getWixCollectionName(collectionKey), data, { suppressAuth: true });
+}
 
 // ============================================
 // SERVICE FUNCTIONS
@@ -85,13 +62,22 @@ export async function getRouteConditions(routePoints, options = {}) {
     if (!routePoints || routePoints.length === 0) return { success: false, error: 'No route provided' };
 
     try {
-        // MVP: Return static mock data if "route" is near our mock points
-        // In real app, we'd query DB using geo-intersection
+        // 1. Query DB for seeded conditions
+        let relevantConditions = await queryData('roadConditions', COLLECTIONS.CONDITIONS, { limit: 1000 });
 
-        const relevantConditions = MOCK_CONDITIONS.filter(cond => {
+        // 2. If empty, seed and re-query (or use seeded data directly implies logic in seed function)
+        // But seedRoadConditions returns { seeded, count } not data. So we re-query.
+        if (relevantConditions.length === 0) {
+            const seedResult = await seedRoadConditions();
+            if (seedResult.seeded) {
+                relevantConditions = await queryData('roadConditions', COLLECTIONS.CONDITIONS, { limit: 1000 });
+            }
+        }
+
+        // 3. Filter by route (Geo-intersection)
+        relevantConditions = relevantConditions.filter(cond => {
             // Simple proximity check (within 50 miles of any route point)
-            // Optimization: In real app, use geospatial query
-            // Optimization: In real app, use geospatial query
+            if (!cond.location || !cond.location.lat || !cond.location.lng) return false;
             return routePoints.some(pt => calculateDistance(pt.lat, pt.lng, cond.location.lat, cond.location.lng) < 50);
         });
 
@@ -120,11 +106,6 @@ export async function getRouteConditions(routePoints, options = {}) {
                 cond.alternate_routes = suggestAlternateRoutes(cond);
             }
         });
-
-
-
-        // Also fetch from DB for user-submitted reports
-        // const userReports = await queryData(COLLECTIONS.REPORTS, ...); // omitted for MVP
 
         return {
             success: true,
@@ -211,8 +192,17 @@ export async function getTruckRestrictions(routePoints, truckSpecs = {}) {
             }
         }
 
-        // 2. Mock Data (for other areas)
-        const mockRestrictions = MOCK_RESTRICTIONS.filter(rest => {
+        // 2. DB Data (seeded if empty)
+        let dbRestrictions = await queryData('truckRestrictions', COLLECTIONS.RESTRICTIONS, { limit: 1000 });
+        if (dbRestrictions.length === 0) {
+            const seedResult = await seedTruckRestrictions();
+            if (seedResult.seeded) {
+                dbRestrictions = await queryData('truckRestrictions', COLLECTIONS.RESTRICTIONS, { limit: 1000 });
+            }
+        }
+
+        const filteredDbRestrictions = dbRestrictions.filter(rest => {
+            if (!rest.location) return false;
             const isNear = routePoints.some(pt => calculateDistance(pt.lat, pt.lng, rest.location.lat, rest.location.lng) < 50);
             if (!isNear) return false;
 
@@ -223,7 +213,7 @@ export async function getTruckRestrictions(routePoints, truckSpecs = {}) {
             return false;
         });
 
-        const allRestrictions = [...liveRestrictions, ...mockRestrictions];
+        const allRestrictions = [...liveRestrictions, ...filteredDbRestrictions];
 
         return {
             success: true,
@@ -250,6 +240,8 @@ export async function getChainRequirements(routePoints) {
 
         // Mock Chain Control Areas check
         // In real app: Check intersection with chain control polygons from DOT
+        // Note: Keeping this logic hardcoded as it is "business logic" / "GIS logic"
+        // rather than data to be fetched, until we have a ChainAreas collection.
         const chainAreas = [
             { highway: 'I-80', state: 'CA', name: 'Donner Pass', latMin: 39.2, latMax: 39.4, lngMin: -120.6, lngMax: -120.0, level: 'R2' },
             { highway: 'I-5', state: 'CA', name: 'Siskiyou Pass', latMin: 41.9, latMax: 42.1, lngMin: -122.7, lngMax: -122.5, level: 'R1' },
@@ -330,14 +322,13 @@ export async function reportCondition(report) {
              }
         }
 
-        // In real app: wixData.insert(COLLECTIONS.REPORTS, record);
-        // For MVP: We will just push to a mock memory store or log
-        console.log('[RoadConditionService] Report submitted:', record);
+        const result = await insertData('driverConditionReports', COLLECTIONS.REPORTS, record);
+        console.log('[RoadConditionService] Report submitted:', result);
 
         // Check for duplicates/confirmations
         // If similar report exists within 1 mile and 30 mins, increment its verified_count instead of new record
         
-        return { success: true, reportId: 'mock_report_id_' + Date.now() };
+        return { success: true, reportId: result._id || result.id };
 
     } catch (error) {
         return { success: false, error: error.message };
@@ -385,9 +376,13 @@ function generateSummary(conditions) {
 
 // Haversine distance (miles)
 function calculateDistance(lat1, lng1, lat2, lng2) {
+    if (!lat1 || !lng1 || !lat2 || !lng2) return 0;
     const R = 3958.8; // miles
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 

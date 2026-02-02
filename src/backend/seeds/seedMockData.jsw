@@ -1,0 +1,258 @@
+import wixData from 'wix-data';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
+import * as airtable from 'backend/airtableClient';
+
+// ============================================
+// DUAL-SOURCE HELPERS
+// ============================================
+
+async function insertData(collectionKey, wixCollectionName, data) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        // Airtable doesn't support _id on creation usually, it generates its own 'id'.
+        // But some patterns map _id to a field. For seeding, we'll let Airtable gen ID
+        // or pass specific fields.
+        // If data has _id, remove it for Airtable creation to avoid error unless mapped
+        const { _id, ...airtableData } = data;
+        return await airtable.createRecord(tableName, airtableData);
+    }
+    return await wixData.insert(wixCollectionName || getWixCollectionName(collectionKey), data, { suppressAuth: true });
+}
+
+async function countData(collectionKey, wixCollectionName) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        // Efficient count not always available in generic client, doing max 1 check
+        const result = await airtable.queryRecords(tableName, { maxRecords: 1 });
+        return (result.records || []).length; // 0 or 1
+    }
+    const result = await wixData.query(wixCollectionName || getWixCollectionName(collectionKey)).limit(1).count({ suppressAuth: true });
+    return result;
+}
+
+// ============================================
+// DATA DEFINITIONS & GENERATORS
+// ============================================
+
+// --- Road Conditions ---
+const MOCK_CONDITIONS = [
+    {
+        type: 'closure', // closure, accident, construction, weather
+        highway: 'I-80',
+        state: 'CA',
+        location: { lat: 39.31, lng: -120.33 }, // Donner Pass
+        severity: 'major', // minor, moderate, major, critical
+        description: 'Westbound lanes closed due to spin-outs. Chain controls in effect.',
+        delay_minutes: 120,
+        start_time: new Date(),
+        expected_end: new Date(Date.now() + 4 * 60 * 60 * 1000) // +4 hours
+    },
+    {
+        type: 'construction',
+        highway: 'I-5',
+        state: 'OR',
+        location: { lat: 42.1, lng: -122.6 }, // Siskiyou
+        severity: 'moderate',
+        description: 'Road work. Right lane closed. Wide load restriction > 12ft.',
+        delay_minutes: 20,
+        start_time: new Date(),
+        expected_end: new Date(Date.now() + 48 * 60 * 60 * 1000)
+    }
+];
+
+// --- Truck Restrictions ---
+const MOCK_RESTRICTIONS = [
+    {
+        highway: 'US-6',
+        state: 'CO',
+        restriction_type: 'height',
+        value: 13.5, // feet
+        unit: 'ft',
+        details: 'Low clearance bridge at Loveland Pass',
+        permanent: true,
+        location: { lat: 39.6, lng: -105.9 }
+    },
+    {
+        highway: 'I-70',
+        state: 'CO',
+        restriction_type: 'hazmat',
+        value: 'explosives',
+        details: 'Eisenhower Tunnel - No Hazmat allowed. Use Loveland Pass.',
+        permanent: true,
+        location: { lat: 39.6, lng: -105.9 }
+    }
+];
+
+// --- Fuel Amenities ---
+function getRandomAmenities() {
+    const allAmenities = ['shower', 'restaurant', 'wifi', 'scales', 'def', 'truck_wash', 'atm', 'laundry'];
+    const count = 2 + Math.floor(Math.random() * 5);
+    const shuffled = allAmenities.sort(() => 0.5 - Math.random());
+    return shuffled.slice(0, count);
+}
+
+// --- Fuel Data Generator ---
+function generateMockFuelData(centerLat, centerLng, radius) {
+    const brands = ['Pilot', 'Flying J', 'Love\'s', 'TA', 'Petro', 'Sapp Bros', 'Kwik Trip', 'Casey\'s'];
+    const mockStations = [];
+
+    for (let i = 0; i < 15; i++) {
+        const latOffset = (Math.random() - 0.5) * (radius / 35);
+        const lngOffset = (Math.random() - 0.5) * (radius / 28);
+        const basePrice = 3.20 + Math.random() * 0.80;
+
+        mockStations.push({
+            station_id: `MOCK${1000 + i}`,
+            brand: brands[Math.floor(Math.random() * brands.length)],
+            name: `${brands[Math.floor(Math.random() * brands.length)]} #${100 + i}`,
+            location: {
+                lat: centerLat + latOffset,
+                lng: centerLng + lngOffset
+            },
+            address: {
+                street: `${1000 + i * 100} Interstate Dr`,
+                city: 'Memphis',
+                state: 'TN',
+                zip: '38118'
+            },
+            diesel_price: parseFloat(basePrice.toFixed(3)),
+            def_price: parseFloat((2.50 + Math.random() * 0.50).toFixed(3)),
+            card_discounts: {
+                comdata: parseFloat((0.04 + Math.random() * 0.04).toFixed(3)),
+                efs: parseFloat((0.03 + Math.random() * 0.04).toFixed(3)),
+                tcheck: parseFloat((0.02 + Math.random() * 0.03).toFixed(3)),
+                fleetone: parseFloat((0.03 + Math.random() * 0.035).toFixed(3))
+            },
+            amenities: getRandomAmenities(),
+            has_def: Math.random() > 0.2,
+            has_scales: Math.random() > 0.4,
+            has_truck_wash: Math.random() > 0.6,
+            price_updated_at: new Date(),
+            source: 'mock'
+        });
+    }
+
+    return mockStations;
+}
+
+// --- Driver Performance Generator ---
+function generateMockDrivers(carrierDot) {
+    const mock = [];
+
+    // 1. Critical Risk - The "Silence Signal"
+    mock.push({
+        driver_id: 'd_silent_01', carrier_dot: carrierDot, driver_name: 'David Ghost',
+        miles_driven: 2000, on_time_delivery_rate: 90, safety_incidents: 0, home_time_days: 3,
+        avg_weekly_pay: 1300, pay_volatility_index: 5,
+        app_sessions_last_7d: 1, app_sessions_prev_7d: 12, // HUGE DROP
+        dnps_score: 8
+    });
+
+    // 2. Critical Risk - Detractor (dNPS)
+    mock.push({
+        driver_id: 'd_nps_01', carrier_dot: carrierDot, driver_name: 'Angry Adam',
+        miles_driven: 3000, on_time_delivery_rate: 99, safety_incidents: 0, home_time_days: 6,
+        avg_weekly_pay: 1500, pay_volatility_index: 2,
+        app_sessions_last_7d: 10, app_sessions_prev_7d: 10,
+        dnps_score: 4 // DETRACTOR
+    });
+
+    // 3. High Risk - Pay Volatility
+    mock.push({
+        driver_id: 'd_pay_01', carrier_dot: carrierDot, driver_name: 'Sarah Volatile',
+        miles_driven: 2800, on_time_delivery_rate: 98, safety_incidents: 0, home_time_days: 5,
+        avg_weekly_pay: 1100, pay_volatility_index: 28,
+        app_sessions_last_7d: 8, app_sessions_prev_7d: 9,
+        dnps_score: 7
+    });
+
+    // 4-15. Normal Drivers
+    for (let i = 4; i <= 15; i++) {
+        mock.push({
+            driver_id: `d_norm_${i}`, carrier_dot: carrierDot, driver_name: `Driver ${i}`,
+            miles_driven: 2800 + (Math.random() * 500),
+            on_time_delivery_rate: 96 + (Math.random() * 4),
+            safety_incidents: 0,
+            home_time_days: 5 + Math.floor(Math.random() * 4),
+            avg_weekly_pay: 1300 + (Math.random() * 400),
+            pay_volatility_index: Math.floor(Math.random() * 10),
+            app_sessions_last_7d: 8 + Math.floor(Math.random() * 5),
+            app_sessions_prev_7d: 8 + Math.floor(Math.random() * 5),
+            dnps_score: 8 + Math.floor(Math.random() * 2)
+        });
+    }
+
+    return mock;
+}
+
+
+// ============================================
+// SEEDING FUNCTIONS
+// ============================================
+
+export async function seedRoadConditions() {
+    const key = 'roadConditions'; // Assuming we might add this to config, or default wix
+    const wixName = 'RoadConditions';
+
+    // Check if empty
+    const count = await countData(key, wixName);
+    if (count > 0) return { seeded: false, count };
+
+    console.log('[Seed] Seeding RoadConditions...');
+    for (const item of MOCK_CONDITIONS) {
+        await insertData(key, wixName, item);
+    }
+    return { seeded: true, count: MOCK_CONDITIONS.length };
+}
+
+export async function seedTruckRestrictions() {
+    const key = 'truckRestrictions';
+    const wixName = 'TruckRestrictions';
+
+    const count = await countData(key, wixName);
+    if (count > 0) return { seeded: false, count };
+
+    console.log('[Seed] Seeding TruckRestrictions...');
+    for (const item of MOCK_RESTRICTIONS) {
+        await insertData(key, wixName, item);
+    }
+    return { seeded: true, count: MOCK_RESTRICTIONS.length };
+}
+
+export async function seedFuelPrices(lat, lng, radius) {
+    const key = 'fuelPrices'; // Exists in configData.js
+    const wixName = 'FuelPrices';
+
+    // We don't check count because we might need to seed for this specific area
+    // logic in service calls this only if query returned 0.
+
+    const items = generateMockFuelData(lat, lng, radius);
+    console.log(`[Seed] Seeding ${items.length} FuelPrices for area ${lat},${lng}...`);
+
+    const seededItems = [];
+    for (const item of items) {
+        const res = await insertData(key, wixName, item);
+        seededItems.push(res);
+    }
+    return seededItems;
+}
+
+export async function seedDriverPerformance(carrierDot) {
+    const key = 'driverPerformance'; // Exists in configData.js
+    const wixName = 'DriverPerformance';
+
+    // Check if any data exists for this carrier
+    // Note: This logic assumes the service has already checked and found nothing,
+    // but we can double check or just insert.
+    // The service passed control here because it found nothing.
+
+    const items = generateMockDrivers(carrierDot);
+    console.log(`[Seed] Seeding ${items.length} DriverPerformance records for carrier ${carrierDot}...`);
+
+    const seededItems = [];
+    for (const item of items) {
+        const res = await insertData(key, wixName, item);
+        seededItems.push(res);
+    }
+    return seededItems;
+}
