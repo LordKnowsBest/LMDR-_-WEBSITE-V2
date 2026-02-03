@@ -7,10 +7,10 @@
 ## Phase 1: Data Model & Test Infrastructure
 
 ### 1.1 Test Fixtures & Utilities
-- [x] Task: Create `src/test/fixtures/drivers.js` with mock driver profiles (searchable, hidden, various qualifications)
-- [x] Task: Create `src/test/fixtures/preferences.js` with mock carrier hiring preferences
-- [x] Task: Create `src/test/fixtures/subscriptions.js` with mock subscription tiers (free, pro, enterprise, exhausted)
-- [x] Task: Extend `src/test/utils.js` with `createMockQueryWithFilters()` for advanced query simulation
+- [ ] Task: Create `src/test/fixtures/drivers.js` with mock driver profiles (searchable, hidden, various qualifications) (File missing)
+- [ ] Task: Create `src/test/fixtures/preferences.js` with mock carrier hiring preferences (File missing)
+- [ ] Task: Create `src/test/fixtures/subscriptions.js` with mock subscription tiers (free, pro, enterprise, exhausted) (File missing)
+- [ ] Task: Extend `src/test/utils.js` with `createMockQueryWithFilters()` for advanced query simulation (File missing)
 
 ### 1.2 Database Collections
 - [x] Task: Create `CarrierHiringPreferences` collection in Wix with schema from spec

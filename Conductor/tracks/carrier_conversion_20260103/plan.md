@@ -14,7 +14,7 @@ Optimize the carrier onboarding experience by transitioning from a lead capture 
 
 ## Phase 1: Lead Form & Redirection Logic
 - [ ] **Task:** Modify `src/backend/carrierLeadsService.jsw` to return the `leadId` and a unique `checkoutToken` upon successful submission.
-- [ ] **Task:** Update `src/public/_TEMPLATE_Carrier_Staffing_Form.html` PostMessage handler to receive the redirection URL.
+- [ ] **Task:** Update `src/public/utility/_TEMPLATE_Carrier_Staffing_Form.html` PostMessage handler to receive the redirection URL.
 - [ ] **Task:** Update Page Code for carrier landing pages to perform `wixLocation.to('/checkout?id=' + result.leadId)`.
 
 ## Phase 2: Stripe Backend Integration
@@ -28,14 +28,14 @@ Optimize the carrier onboarding experience by transitioning from a lead capture 
 - [ ] **Task:** Implement `src/pages/Checkout.kbyzk.js`.
     - [ ] Retrieve `leadId` from URL parameters.
     - [ ] Fetch lead details to personalize the checkout (e.g., "Ready to find your 5 Class A drivers, [Company Name]?").
-- [ ] **Task:** Create `src/public/STRIPE_PAYMENT_ELEMENT.html`.
+- [ ] **Task:** Create `src/public/STRIPE_PAYMENT_ELEMENT.html` (Missing).
     - [ ] Host Stripe Elements or redirect to Stripe Hosted Checkout.
     - [ ] Frame the payment as a "Refundable Activation Deposit".
 
 ## Phase 4: Post-Payment Fulfillment
 - [ ] **Task:** Update `carrierLeadsService.jsw` status to `activated_paid` when webhook confirms payment.
 - [ ] **Task:** Implement `src/backend/emailService.jsw` trigger for "Payment Received" email.
-- [ ] **Task:** Create a Success Page (`src/public/Payment_Success.html`) with:
+- [ ] **Task:** Create a Success Page (`src/public/Payment_Success.html`) (Missing) with:
     - [ ] Confirmation of search activation.
     - [ ] Calendly embed for onboarding.
 
