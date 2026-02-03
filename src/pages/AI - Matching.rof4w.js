@@ -65,6 +65,7 @@ const MESSAGE_REGISTRY = {
     'logFeatureInteraction', // Feature adoption tracking
     'getDriverApplications', // Fetch driver applications history
     'getMutualInterest', // Phase 1: Fetch mutual interests
+    'loginForApplication', // Trigger Wix login from application submit
     'ping' // Health check
   ],
   // Messages TO HTML that page code sends
@@ -269,6 +270,15 @@ async function handleHtmlMessage(msg) {
 
     case 'navigateToLogin':
       await handleNavigateToLogin();
+      break;
+
+    case 'loginForApplication':
+      // Reuse signup/login handler - mode passed from HTML determines behavior
+      if (msg.data?.mode === 'login') {
+        await handleNavigateToLogin();
+      } else {
+        await handleNavigateToSignup();
+      }
       break;
 
     case 'checkUserStatus': {
