@@ -14,6 +14,7 @@ import wixData from 'wix-data';
 import { v4 as uuidv4 } from 'uuid';
 import { usesAirtable, getAirtableTableName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
+import * as emailService from 'backend/emailService';
 
 // Collection keys for dual-source routing
 const COLLECTION_KEYS = {
@@ -694,20 +695,41 @@ export async function sendDocumentReminder(documentId) {
             };
         }
 
-        // Update reminder count
+        // Generate new upload token for the reminder (48h expiry)
+        const { token, expiry } = generateUploadToken(48);
+        const uploadPortalUrl = `https://lastmilecdl.com/document-upload?token=${token}`;
+
+        // Update reminder count and token
         const now = new Date();
         const updatedDoc = {
             ...docRequest,
             reminder_sent_count: currentReminderIndex + 1,
             last_reminder_date: now,
+            upload_token: token,
+            upload_token_expiry: expiry,
             _updatedDate: now
         };
 
         // Use dual-source routing for update
         await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, updatedDoc);
 
-        // TODO: Trigger email/SMS notification here
-        // In production, call emailService or SMS service
+        // Get driver profile to send email
+        try {
+            const driverProfile = await getRecord(COLLECTION_KEYS.driverProfiles, CONFIG.collections.driverProfiles, docRequest.driver_id);
+
+            if (driverProfile && driverProfile.wix_member_id) {
+                await emailService.sendDocumentReminderEmail(driverProfile.wix_member_id, {
+                    documentName: docRequest.display_name,
+                    uploadUrl: uploadPortalUrl,
+                    driverName: driverProfile.display_name || 'Driver'
+                });
+            } else {
+                console.warn(`[DocumentCollection] Cannot send reminder email: Driver profile or Wix ID not found for driver ${docRequest.driver_id}`);
+            }
+        } catch (emailError) {
+            console.error('[DocumentCollection] Error sending reminder email:', emailError);
+            // Continue execution, don't fail the reminder update
+        }
 
         console.log(`[DocumentCollection] Reminder #${currentReminderIndex + 1} sent for document ${documentId}`);
 
