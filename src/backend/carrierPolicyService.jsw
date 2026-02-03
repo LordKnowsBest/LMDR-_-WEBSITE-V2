@@ -1,0 +1,484 @@
+/**
+ * Carrier Policy Service - Policy Repository (Phase 2)
+ */
+
+import wixData from 'wix-data';
+import wixUsersBackend from 'wix-users-backend';
+import { mediaManager } from 'wix-media-backend';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
+import { getCarrierContextForCurrentUser } from 'backend/carrierAnnouncementsService';
+
+const COLLECTION_KEYS = {
+  policyDocuments: 'policyDocuments',
+  policyAcknowledgments: 'policyAcknowledgments',
+  driverProfiles: 'driverProfiles',
+  carrierAccounts: 'carrierAccounts'
+};
+
+const CONFIG = {
+  categories: ['handbook', 'safety', 'sop', 'compliance', 'hr'],
+  contentTypes: ['markdown', 'pdf', 'external_link'],
+  status: {
+    DRAFT: 'draft',
+    PUBLISHED: 'published',
+    ARCHIVED: 'archived'
+  }
+};
+
+function normalizeSlug(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+function normalizeTargetAudience(targetAudience) {
+  if (!targetAudience || typeof targetAudience !== 'object') {
+    return { type: 'all', segments: [] };
+  }
+  return {
+    type: targetAudience.type || 'all',
+    segments: Array.isArray(targetAudience.segments) ? targetAudience.segments : []
+  };
+}
+
+function segmentMatchesValue(value, operator, segmentValue) {
+  if (operator === 'equals') return value === segmentValue;
+  if (operator === 'greater_than') return Number(value) > Number(segmentValue);
+  if (operator === 'greater_than_or_equal') return Number(value) >= Number(segmentValue);
+  if (operator === 'less_than') return Number(value) < Number(segmentValue);
+  if (operator === 'less_than_or_equal') return Number(value) <= Number(segmentValue);
+  if (operator === 'contains') {
+    return String(value || '').toLowerCase().includes(String(segmentValue || '').toLowerCase());
+  }
+  if (operator === 'in' && Array.isArray(segmentValue)) {
+    if (Array.isArray(value)) {
+      return value.some(v => segmentValue.includes(v));
+    }
+    return segmentValue.includes(value);
+  }
+  return false;
+}
+
+function targetAudienceMatchesDriver(targetAudience, driverProfile) {
+  const normalized = normalizeTargetAudience(targetAudience);
+  if (normalized.type === 'all') return true;
+  if (!driverProfile) return false;
+  if (!normalized.segments.length) return true;
+
+  return normalized.segments.every(segment => {
+    if (!segment?.field) return true;
+    return segmentMatchesValue(driverProfile[segment.field], segment.operator || 'equals', segment.value);
+  });
+}
+
+async function getDriverProfile(driverId) {
+  if (!driverId) return null;
+  return await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
+}
+
+async function getCarrierContext() {
+  const ctx = await getCarrierContextForCurrentUser();
+  if (ctx.success) return ctx;
+
+  const user = wixUsersBackend.currentUser;
+  if (!user.loggedIn) return { success: false, error: 'User not logged in' };
+
+  try {
+    let carrierItems = [];
+    if (usesAirtable(COLLECTION_KEYS.carrierAccounts)) {
+      const filter = `{Owner} = '${user.id}'`;
+      const tableName = getAirtableTableName(COLLECTION_KEYS.carrierAccounts);
+      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
+      carrierItems = result.records || [];
+    } else {
+      const result = await wixData.query('Carriers')
+        .eq('_owner', user.id)
+        .limit(1)
+        .find({ suppressAuth: true });
+      carrierItems = result.items || [];
+    }
+
+    if (!carrierItems.length) return { success: false, error: 'No carrier profile found' };
+    const carrier = carrierItems[0];
+    const carrierId = carrier.dot_number || carrier['DOT Number'] || carrier.carrier_dot || carrier._id;
+
+    return { success: true, carrierId: String(carrierId) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function getAcknowledgment(driverId, policyId) {
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.policyAcknowledgments, {
+    filters: { driver_id: driverId, policy_id: policyId },
+    limit: 1,
+    suppressAuth: true
+  });
+  return result.success && result.items.length > 0 ? result.items[0] : null;
+}
+
+// ============================================================================
+// POLICY CRUD
+// ============================================================================
+
+export async function createPolicy(policyData = {}) {
+  const carrierId = policyData.carrier_id || policyData.carrierId;
+  if (!carrierId) return { success: false, error: 'carrier_id is required' };
+  if (!policyData.title) return { success: false, error: 'title is required' };
+
+  const category = policyData.category || 'handbook';
+  const contentType = policyData.content_type || 'markdown';
+  if (!CONFIG.categories.includes(category)) {
+    return { success: false, error: 'Invalid category' };
+  }
+  if (!CONFIG.contentTypes.includes(contentType)) {
+    return { success: false, error: 'Invalid content_type' };
+  }
+
+  const now = new Date();
+  const version = policyData.current_version || 1;
+  const record = {
+    carrier_id: carrierId,
+    title: String(policyData.title).trim(),
+    slug: policyData.slug || normalizeSlug(policyData.title),
+    category,
+    description: policyData.description || '',
+    content_type: contentType,
+    content: policyData.content || '',
+    external_url: policyData.external_url || '',
+    current_version: version,
+    version_history: Array.isArray(policyData.version_history) ? policyData.version_history : [],
+    requires_acknowledgment: Boolean(policyData.requires_acknowledgment),
+    acknowledgment_deadline: policyData.acknowledgment_deadline ? new Date(policyData.acknowledgment_deadline) : null,
+    target_audience: normalizeTargetAudience(policyData.target_audience),
+    is_mandatory: Boolean(policyData.is_mandatory),
+    status: policyData.status || CONFIG.status.DRAFT,
+    published_at: policyData.status === CONFIG.status.PUBLISHED ? now : null,
+    created_by: policyData.created_by || wixUsersBackend.currentUser.id || null,
+    created_at: now,
+    updated_at: now,
+    acknowledgment_count: 0,
+    total_required: policyData.total_required || null
+  };
+
+  const result = await dataAccess.insertRecord(COLLECTION_KEYS.policyDocuments, record, { suppressAuth: true });
+  if (!result.success) return { success: false, error: result.error || 'Failed to create policy' };
+  return { success: true, policy: result.record };
+}
+
+export async function updatePolicy(policyId, updates = {}) {
+  if (!policyId) return { success: false, error: 'policyId is required' };
+  const existing = await dataAccess.getRecord(COLLECTION_KEYS.policyDocuments, policyId, { suppressAuth: true });
+  if (!existing) return { success: false, error: 'Policy not found' };
+
+  if (existing.status === CONFIG.status.ARCHIVED) {
+    return { success: false, error: 'Archived policies cannot be edited' };
+  }
+
+  const changeSummary = updates.change_summary || updates.changeSummary || '';
+  const shouldIncrement = Boolean(updates.increment_version || updates.incrementVersion);
+
+  let nextVersion = existing.current_version || 1;
+  let versionHistory = Array.isArray(existing.version_history) ? [...existing.version_history] : [];
+
+  if (shouldIncrement) {
+    versionHistory.push({
+      version: nextVersion,
+      published_at: existing.published_at || existing.updated_at || new Date(),
+      change_summary: changeSummary,
+      content_snapshot: existing.content || ''
+    });
+    nextVersion += 1;
+  }
+
+  const updated = {
+    ...existing,
+    ...updates,
+    category: updates.category || existing.category,
+    content_type: updates.content_type || existing.content_type,
+    target_audience: updates.target_audience ? normalizeTargetAudience(updates.target_audience) : existing.target_audience,
+    current_version: nextVersion,
+    version_history: versionHistory,
+    updated_at: new Date()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.policyDocuments, updated, { suppressAuth: true });
+  if (!result.success) return { success: false, error: result.error || 'Failed to update policy' };
+  return { success: true, policy: result.record };
+}
+
+export async function publishPolicyVersion(policyId, changeSummary = '') {
+  if (!policyId) return { success: false, error: 'policyId is required' };
+  const existing = await dataAccess.getRecord(COLLECTION_KEYS.policyDocuments, policyId, { suppressAuth: true });
+  if (!existing) return { success: false, error: 'Policy not found' };
+
+  const versionHistory = Array.isArray(existing.version_history) ? [...existing.version_history] : [];
+  if (existing.status === CONFIG.status.PUBLISHED) {
+    return { success: true, policy: existing };
+  }
+
+  const now = new Date();
+  const updated = {
+    ...existing,
+    status: CONFIG.status.PUBLISHED,
+    published_at: now,
+    updated_at: now
+  };
+
+  if (changeSummary) {
+    versionHistory.push({
+      version: existing.current_version || 1,
+      published_at: now,
+      change_summary: changeSummary,
+      content_snapshot: existing.content || ''
+    });
+    updated.version_history = versionHistory;
+  }
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.policyDocuments, updated, { suppressAuth: true });
+  if (!result.success) return { success: false, error: result.error || 'Failed to publish policy' };
+  return { success: true, policy: result.record };
+}
+
+export async function archivePolicy(policyId) {
+  if (!policyId) return { success: false, error: 'policyId is required' };
+  const existing = await dataAccess.getRecord(COLLECTION_KEYS.policyDocuments, policyId, { suppressAuth: true });
+  if (!existing) return { success: false, error: 'Policy not found' };
+
+  const updated = {
+    ...existing,
+    status: CONFIG.status.ARCHIVED,
+    updated_at: new Date()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.policyDocuments, updated, { suppressAuth: true });
+  if (!result.success) return { success: false, error: result.error || 'Failed to archive policy' };
+  return { success: true, policy: result.record };
+}
+
+export async function uploadPolicyFile(base64Data, fileName, mimeType, carrierId = 'general') {
+  if (!base64Data || !fileName || !mimeType) {
+    return { success: false, error: 'base64Data, fileName, and mimeType are required' };
+  }
+
+  const base64Content = base64Data.split(',')[1];
+  const buffer = Buffer.from(base64Content, 'base64');
+  const uploadFolder = `/carrier-policies/${carrierId}/${Date.now()}`;
+
+  try {
+    const uploadResult = await mediaManager.upload(
+      uploadFolder,
+      buffer,
+      fileName,
+      {
+        mediaOptions: {
+          mimeType: mimeType,
+          mediaType: mimeType.startsWith('image/') ? 'image' : 'document'
+        }
+      }
+    );
+
+    return {
+      success: true,
+      fileUrl: uploadResult.fileUrl,
+      fileName: fileName
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// ACKNOWLEDGMENTS & COMPLIANCE
+// ============================================================================
+
+export async function setAcknowledgmentRequired(policyId, required, deadline = null) {
+  if (!policyId) return { success: false, error: 'policyId is required' };
+  const existing = await dataAccess.getRecord(COLLECTION_KEYS.policyDocuments, policyId, { suppressAuth: true });
+  if (!existing) return { success: false, error: 'Policy not found' };
+
+  const updated = {
+    ...existing,
+    requires_acknowledgment: Boolean(required),
+    acknowledgment_deadline: deadline ? new Date(deadline) : null,
+    updated_at: new Date()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.policyDocuments, updated, { suppressAuth: true });
+  if (!result.success) return { success: false, error: result.error || 'Failed to update acknowledgment settings' };
+  return { success: true, policy: result.record };
+}
+
+export async function setTargetAudience(policyId, targetAudience) {
+  if (!policyId) return { success: false, error: 'policyId is required' };
+  const existing = await dataAccess.getRecord(COLLECTION_KEYS.policyDocuments, policyId, { suppressAuth: true });
+  if (!existing) return { success: false, error: 'Policy not found' };
+
+  const updated = {
+    ...existing,
+    target_audience: normalizeTargetAudience(targetAudience),
+    updated_at: new Date()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.policyDocuments, updated, { suppressAuth: true });
+  if (!result.success) return { success: false, error: result.error || 'Failed to update audience' };
+  return { success: true, policy: result.record };
+}
+
+export async function getPoliciesForDriver(driverId, carrierId) {
+  if (!driverId || !carrierId) return { success: false, error: 'driverId and carrierId are required' };
+
+  const driverProfile = await getDriverProfile(driverId);
+  const policiesResult = await dataAccess.queryRecords(COLLECTION_KEYS.policyDocuments, {
+    filters: { carrier_id: carrierId, status: CONFIG.status.PUBLISHED },
+    sort: [{ field: 'published_at', direction: 'desc' }],
+    limit: 200,
+    suppressAuth: true
+  });
+
+  if (!policiesResult.success) {
+    return { success: false, error: policiesResult.error || 'Failed to fetch policies' };
+  }
+
+  const items = [];
+  for (const policy of policiesResult.items) {
+    if (!targetAudienceMatchesDriver(policy.target_audience, driverProfile)) continue;
+    const ack = await getAcknowledgment(driverId, policy._id);
+    items.push({
+      ...policy,
+      acknowledged: Boolean(ack),
+      acknowledged_at: ack?.acknowledged_at || null
+    });
+  }
+
+  return { success: true, policies: items };
+}
+
+export async function getPolicyContent(policyId) {
+  if (!policyId) return { success: false, error: 'policyId is required' };
+  const policy = await dataAccess.getRecord(COLLECTION_KEYS.policyDocuments, policyId, { suppressAuth: true });
+  if (!policy) return { success: false, error: 'Policy not found' };
+  return { success: true, policy };
+}
+
+export async function acknowledgePolicy(policyId, driverId, signatureType = 'checkbox', ipAddress = '', deviceInfo = '') {
+  if (!policyId || !driverId) {
+    return { success: false, error: 'policyId and driverId are required' };
+  }
+
+  const policy = await dataAccess.getRecord(COLLECTION_KEYS.policyDocuments, policyId, { suppressAuth: true });
+  if (!policy) return { success: false, error: 'Policy not found' };
+
+  const existing = await getAcknowledgment(driverId, policyId);
+  if (existing && existing.version_acknowledged === policy.current_version) {
+    return { success: true, acknowledgment: existing, alreadyAcknowledged: true };
+  }
+
+  const record = {
+    policy_id: policyId,
+    driver_id: driverId,
+    carrier_id: policy.carrier_id,
+    version_acknowledged: policy.current_version || 1,
+    acknowledged_at: new Date(),
+    signature_type: signatureType,
+    ip_address: ipAddress,
+    device_info: deviceInfo
+  };
+
+  const result = await dataAccess.insertRecord(COLLECTION_KEYS.policyAcknowledgments, record, { suppressAuth: true });
+  if (!result.success) return { success: false, error: result.error || 'Failed to acknowledge policy' };
+
+  const count = Number(policy.acknowledgment_count || 0) + 1;
+  await dataAccess.updateRecord(COLLECTION_KEYS.policyDocuments, {
+    ...policy,
+    acknowledgment_count: count,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  return { success: true, acknowledgment: result.record };
+}
+
+export async function getAcknowledgmentHistory(driverId) {
+  if (!driverId) return { success: false, error: 'driverId is required' };
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.policyAcknowledgments, {
+    filters: { driver_id: driverId },
+    sort: [{ field: 'acknowledged_at', direction: 'desc' }],
+    limit: 200,
+    suppressAuth: true
+  });
+
+  if (!result.success) return { success: false, error: result.error || 'Failed to fetch acknowledgments' };
+  return { success: true, acknowledgments: result.items };
+}
+
+export async function getComplianceStatus(carrierId) {
+  if (!carrierId) return { success: false, error: 'carrierId is required' };
+
+  const policiesResult = await dataAccess.queryRecords(COLLECTION_KEYS.policyDocuments, {
+    filters: { carrier_id: carrierId, status: CONFIG.status.PUBLISHED, requires_acknowledgment: true },
+    limit: 200,
+    suppressAuth: true
+  });
+
+  if (!policiesResult.success) {
+    return { success: false, error: policiesResult.error || 'Failed to fetch policies' };
+  }
+
+  const policies = policiesResult.items;
+  const totals = [];
+
+  for (const policy of policies) {
+    const totalRequired = Number(policy.total_required || 0);
+    const acknowledgments = await dataAccess.countRecords(COLLECTION_KEYS.policyAcknowledgments, {
+      policy_id: policy._id
+    }, { suppressAuth: true });
+
+    const total = totalRequired || acknowledgments;
+    const completion = total > 0 ? Math.round((acknowledgments / total) * 100) : 0;
+
+    totals.push({
+      policyId: policy._id,
+      title: policy.title,
+      totalRequired: total,
+      acknowledged: acknowledgments,
+      completionRate: completion
+    });
+  }
+
+  return { success: true, policies: totals };
+}
+
+export async function getAcknowledgmentList(policyId, status = 'all') {
+  if (!policyId) return { success: false, error: 'policyId is required' };
+  const acknowledgments = await dataAccess.queryRecords(COLLECTION_KEYS.policyAcknowledgments, {
+    filters: { policy_id: policyId },
+    limit: 500,
+    suppressAuth: true
+  });
+
+  if (!acknowledgments.success) {
+    return { success: false, error: acknowledgments.error || 'Failed to fetch acknowledgments' };
+  }
+
+  const items = acknowledgments.items || [];
+  if (status === 'completed') return { success: true, acknowledgments: items };
+  return { success: true, acknowledgments: items };
+}
+
+export async function getDriverPolicyStatus(driverId, carrierId) {
+  return await getPoliciesForDriver(driverId, carrierId);
+}
+
+export async function exportComplianceReport(carrierId) {
+  if (!carrierId) return { success: false, error: 'carrierId is required' };
+  const status = await getComplianceStatus(carrierId);
+  return { success: status.success, data: status.policies || [], format: 'json' };
+}
+
+export async function sendReminders() {
+  return { success: true, message: 'Reminder scheduling handled by jobs config' };
+}

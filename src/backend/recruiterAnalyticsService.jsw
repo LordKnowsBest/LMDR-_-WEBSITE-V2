@@ -1,0 +1,1108 @@
+/**
+ * Recruiter Analytics Service
+ * Handles source attribution, recruiting spend, funnel analytics, and hiring forecasts.
+ * 
+ * Reference: Conductor/tracks/recruiter_analytics_20260120/spec.md
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+import { v4 as uuidv4 } from 'uuid'; // Assuming uuid is available, or use Wix util
+
+const COLLECTIONS = {
+    ATTRIBUTION: 'sourceAttribution',
+    SPEND: 'recruitingSpend',
+    FUNNEL: 'funnelEvents',
+    INTEL: 'competitorIntel',
+    FORECASTS: 'hiringForecasts'
+};
+
+// ============================================================================
+// COST-PER-HIRE ANALYTICS
+// ============================================================================
+
+/**
+ * Record recruiting spend
+ * @param {Object} spendData - Spend record data
+ * @returns {Promise<Object>} { success, spendId }
+ */
+export async function recordRecruitingSpend(spendData) {
+    try {
+        if (!spendData.carrier_dot || !spendData.spend_amount) {
+            return { success: false, error: 'Missing required fields' };
+        }
+
+        // Calculate metrics if provided
+        let cpa = 0;
+        let cph = 0;
+
+        if (spendData.applications > 0) {
+            cpa = Math.round((spendData.spend_amount / spendData.applications) * 100) / 100;
+        }
+
+        if (spendData.hires > 0) {
+            cph = Math.round((spendData.spend_amount / spendData.hires) * 100) / 100;
+        }
+
+        const record = {
+            ...spendData,
+            cost_per_application: cpa,
+            cost_per_hire: cph,
+            currency: spendData.currency || 'USD',
+            import_method: spendData.import_method || 'manual'
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTIONS.SPEND, record);
+        return { success: true, spendId: result.record._id };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] recordRecruitingSpend error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Bulk import spend from CSV/Array
+ * @param {string} carrierDot - Carrier DOT
+ * @param {Array} spendRecords - Array of spend data objects
+ * @returns {Promise<Object>} { success, importedCount, errors }
+ */
+export async function bulkImportSpend(carrierDot, spendRecords) {
+    try {
+        if (!carrierDot || !Array.isArray(spendRecords)) {
+            return { success: false, error: 'Invalid input' };
+        }
+
+        const validRecords = [];
+        const errors = [];
+
+        spendRecords.forEach((row, index) => {
+            if (!row.spend_amount) {
+                errors.push({ row: index, error: 'Missing spend amount' });
+                return;
+            }
+
+            let cpa = 0;
+            let cph = 0;
+            const apps = row.applications || 0;
+            const hires = row.hires || 0;
+            const spend = row.spend_amount;
+
+            if (apps > 0) cpa = Math.round((spend / apps) * 100) / 100;
+            if (hires > 0) cph = Math.round((spend / hires) * 100) / 100;
+
+            validRecords.push({
+                carrier_dot: carrierDot,
+                recruiter_id: row.recruiter_id, // Optional
+                period_start: row.period_start ? new Date(row.period_start) : new Date(),
+                period_end: row.period_end ? new Date(row.period_end) : new Date(),
+                channel: row.channel || 'other',
+                campaign_name: row.campaign_name || '',
+                spend_amount: spend,
+                currency: row.currency || 'USD',
+                impressions: row.impressions || 0,
+                clicks: row.clicks || 0,
+                applications: apps,
+                hires: hires,
+                cost_per_application: cpa,
+                cost_per_hire: cph,
+                import_method: 'bulk_import',
+                notes: row.notes || ''
+            });
+        });
+
+        if (validRecords.length > 0) {
+            await dataAccess.bulkInsert(COLLECTIONS.SPEND, validRecords);
+        }
+
+        return { success: true, importedCount: validRecords.length, errors };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] bulkImportSpend error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Update hire count for a spend record (recalculates CPH)
+ * @param {string} spendId - Spend record ID
+ * @param {number} hires - New hire count
+ * @returns {Promise<Object>} { success, updatedRecord }
+ */
+export async function updateSpendHires(spendId, hires) {
+    try {
+        const record = await dataAccess.getRecord(COLLECTIONS.SPEND, spendId);
+        if (!record) return { success: false, error: 'Record not found' };
+
+        const spend = record.spend_amount || 0;
+        const cph = hires > 0 ? Math.round((spend / hires) * 100) / 100 : 0;
+
+        const updates = {
+            _id: spendId,
+            hires: hires,
+            cost_per_hire: cph
+        };
+
+        const result = await dataAccess.updateRecord(COLLECTIONS.SPEND, updates);
+        return { success: true, updatedRecord: result.record };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] updateSpendHires error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get spend vs hires trend
+ * @param {string} carrierDot - Carrier DOT
+ * @param {number} months - Number of months to look back (default: 6)
+ * @returns {Promise<Object>} { success, trends: [] }
+ */
+export async function getSpendTrend(carrierDot, months = 6) {
+    try {
+        const endDate = new Date();
+        const startDate = new Date();
+        startDate.setMonth(startDate.getMonth() - months);
+
+        const filters = {
+            carrier_dot: carrierDot,
+            period_start: { ge: startDate, le: endDate }
+        };
+
+        const records = await dataAccess.getAllRecords(COLLECTIONS.SPEND, { filters });
+
+        // Aggregate by Month (YYYY-MM)
+        const monthlyData = {};
+
+        // Initialize months to ensure zero-filling
+        for (let i = 0; i < months; i++) {
+            const d = new Date(startDate);
+            d.setMonth(d.getMonth() + i);
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            monthlyData[key] = { month: key, spend: 0, hires: 0 };
+        }
+
+        records.forEach(rec => {
+            if (!rec.period_start) return;
+            const d = new Date(rec.period_start);
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            
+            if (monthlyData[key]) {
+                monthlyData[key].spend += (rec.spend_amount || 0);
+                monthlyData[key].hires += (rec.hires || 0);
+            }
+        });
+
+        // Calculate CPH and format
+        const trends = Object.values(monthlyData).map(m => {
+            const spendDollars = m.spend / 100;
+            return {
+                month: m.month,
+                spend: spendDollars,
+                hires: m.hires,
+                cph: m.hires > 0 ? Math.round(spendDollars / m.hires) : 0
+            };
+        }).sort((a, b) => a.month.localeCompare(b.month));
+
+        return { success: true, trends };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getSpendTrend error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Calculate cost-per-hire by channel
+ * @param {string} carrierDot - Carrier DOT
+ * @param {Object} dateRange - { start, end }
+ * @returns {Promise<Object>} { byChannel: { channel: { spend, hires, cph } } }
+ */
+export async function calculateCostPerHire(carrierDot, dateRange) {
+    try {
+        // 1. Get Spend Data
+        const spendFilters = { carrier_dot: carrierDot };
+        if (dateRange && dateRange.start && dateRange.end) {
+            spendFilters.period_start = { ge: dateRange.start };
+            spendFilters.period_end = { le: dateRange.end };
+        }
+
+        const spendRecords = await dataAccess.getAllRecords(COLLECTIONS.SPEND, { filters: spendFilters });
+
+        // 2. Get Attribution Data (for actual hires verification if needed, or use manual input)
+        // For now, we aggregate the spend records which contain the manual hire counts OR
+        // we could query attribution to fill in blanks. 
+        // Strategy: Use spend records as primary source for COST, but verify HIRES via attribution if missing.
+        
+        const byChannel = {};
+
+        spendRecords.forEach(rec => {
+            const channel = rec.channel || 'other';
+            if (!byChannel[channel]) {
+                byChannel[channel] = { spend: 0, hires: 0, applications: 0, cph: 0 };
+            }
+            
+            byChannel[channel].spend += (rec.spend_amount || 0);
+            byChannel[channel].hires += (rec.hires || 0);
+            byChannel[channel].applications += (rec.applications || 0);
+        });
+
+        // Calculate aggregates
+        Object.keys(byChannel).forEach(channel => {
+            const data = byChannel[channel];
+            // Convert cents to dollars for display
+            const spendDollars = data.spend / 100;
+            data.cph = data.hires > 0 ? Math.round(spendDollars / data.hires) : 0;
+            data.cpa = data.applications > 0 ? Math.round(spendDollars / data.applications) : 0;
+            data.spendDollars = spendDollars;
+        });
+
+        return { success: true, byChannel };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] calculateCostPerHire error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get channel ROI comparison
+ * @param {string} carrierDot - Carrier DOT
+ * @param {Object} dateRange - { start, end }
+ * @returns {Promise<Object>} { channels: [] }
+ */
+export async function getChannelROI(carrierDot, dateRange) {
+    try {
+        const cphResult = await calculateCostPerHire(carrierDot, dateRange);
+        if (!cphResult.success) return cphResult;
+
+        const channels = Object.entries(cphResult.byChannel).map(([name, data]) => {
+            return {
+                name,
+                spend: data.spendDollars,
+                hires: data.hires,
+                cph: data.cph,
+                roi_score: calculateRoiScore(data.cph, data.hires)
+            };
+        });
+
+        // Sort by ROI score desc
+        channels.sort((a, b) => b.roi_score - a.roi_score);
+
+        return { success: true, channels };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getChannelROI error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Simple ROI scoring algorithm (0-100)
+// Lower CPH = Higher Score
+// Higher Volume = Higher Score (weighting efficiency + scale)
+function calculateRoiScore(cph, hires) {
+    if (hires === 0) return 0;
+    if (cph === 0) return 100; // Free hires!
+
+    // Baseline CPH target: $500
+    // If CPH is 500, score is 50.
+    // If CPH is 250, score is 75.
+    // If CPH is 1000, score is 25.
+    
+    let score = 100 - (cph / 20); // $2000 CPH = 0 score
+    
+    // Volume bonus (up to 20 pts)
+    const volumeBonus = Math.min(hires, 20);
+    
+    score += volumeBonus;
+    
+    return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+// ============================================================================
+// FUNNEL ANALYTICS
+// ============================================================================
+
+const STAGES = {
+    LEAD: 'lead',
+    SCREENING: 'screening',
+    PHONE_SCREEN: 'phone_screen',
+    APPLICATION: 'application',
+    INTERVIEW: 'interview',
+    OFFER: 'offer',
+    HIRED: 'hired',
+    DROPPED: 'dropped'
+};
+
+const STAGE_ORDER = {
+    [STAGES.LEAD]: 1,
+    [STAGES.SCREENING]: 2,
+    [STAGES.PHONE_SCREEN]: 3,
+    [STAGES.APPLICATION]: 4,
+    [STAGES.INTERVIEW]: 5,
+    [STAGES.OFFER]: 6,
+    [STAGES.HIRED]: 7,
+    [STAGES.DROPPED]: 99
+};
+
+export { STAGES };
+
+/**
+ * Record pipeline stage change
+ * @param {string} driverId - Driver ID
+ * @param {string} carrierDot - Carrier DOT
+ * @param {string} toStage - New stage
+ * @param {string} [dropReason] - If dropping, reason
+ * @returns {Promise<Object>} { success, eventId }
+ */
+export async function recordStageChange(driverId, carrierDot, toStage, dropReason = null) {
+    try {
+        const now = new Date();
+
+        // 1. Find open event for this driver+carrier (where exited_at is null)
+        const filters = {
+            driver_id: driverId,
+            carrier_dot: carrierDot,
+            exited_at: null // Active stage
+        };
+
+        // We need to fetch it to close it
+        // Note: dataAccess doesn't support 'null' filter easily in all cases, 
+        // so we might need to query sorted by date and check last one.
+        const recentEvents = await dataAccess.queryRecords(COLLECTIONS.FUNNEL, {
+            filters: { driver_id: driverId, carrier_dot: carrierDot },
+            sort: [{ field: 'entered_at', direction: 'desc' }],
+            limit: 1
+        });
+
+        let fromStage = null;
+        let previousEvent = null;
+
+        if (recentEvents.items.length > 0) {
+            previousEvent = recentEvents.items[0];
+            fromStage = previousEvent.to_stage;
+            
+            // If strictly moving forward, we close the previous one
+            // If we are just updating metadata on same stage, we might update? 
+            // Assumption: This function is called on TRANSITION.
+            
+            if (fromStage !== toStage) {
+                // Close previous event
+                const enteredAt = new Date(previousEvent.entered_at);
+                const timeInStageMs = now - enteredAt;
+                const timeInStageHours = timeInStageMs / (1000 * 60 * 60);
+
+                await dataAccess.updateRecord(COLLECTIONS.FUNNEL, {
+                    _id: previousEvent._id,
+                    exited_at: now,
+                    time_in_stage_hours: parseFloat(timeInStageHours.toFixed(2))
+                });
+            } else {
+                // Same stage? Maybe just return success or update metadata
+                return { success: true, message: 'Already in stage', eventId: previousEvent._id };
+            }
+        }
+
+        // 2. Get Source Attribution ID to link
+        let sourceAttributionId = null;
+        const attribution = await dataAccess.findByField(COLLECTIONS.ATTRIBUTION, 'driver_id', driverId);
+        if (attribution) sourceAttributionId = attribution._id;
+
+        // 3. Create new event
+        const isConversion = toStage === STAGES.HIRED;
+        const newEvent = {
+            driver_id: driverId,
+            carrier_dot: carrierDot,
+            from_stage: fromStage,
+            to_stage: toStage,
+            stage_order: STAGE_ORDER[toStage] || 0,
+            entered_at: now,
+            exited_at: null, // Open
+            drop_reason: dropReason,
+            source_attribution_id: sourceAttributionId,
+            is_conversion: isConversion,
+            event_metadata: {}
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTIONS.FUNNEL, newEvent);
+
+        // If hired, ensure we update attribution hire_date
+        if (isConversion) {
+            await recordHireAttribution(driverId, carrierDot, 'first_touch'); // Defaulting model
+        }
+
+        return { success: true, eventId: result.record._id };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] recordStageChange error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get funnel metrics for carrier
+ * @param {string} carrierDot - Carrier DOT
+ * @param {Object} dateRange - { start, end }
+ * @returns {Promise<Object>} { stages: [], conversions: [], dropoffs: [] }
+ */
+export async function getFunnelMetrics(carrierDot, dateRange) {
+    try {
+        const filters = { carrier_dot: carrierDot };
+        
+        if (dateRange && dateRange.start && dateRange.end) {
+            filters.entered_at = {
+                ge: dateRange.start,
+                le: dateRange.end
+            };
+        }
+
+        const events = await dataAccess.getAllRecords(COLLECTIONS.FUNNEL, { filters });
+        
+        // Aggregate by stage
+        const stageCounts = {};
+        const stageOrderMap = {}; // To sort response
+
+        // Initialize counts
+        Object.values(STAGES).forEach(stage => {
+            if (stage !== STAGES.DROPPED) {
+                stageCounts[stage] = 0;
+                stageOrderMap[stage] = STAGE_ORDER[stage];
+            }
+        });
+
+        events.forEach(e => {
+            if (e.to_stage && stageCounts.hasOwnProperty(e.to_stage)) {
+                stageCounts[e.to_stage]++;
+            }
+        });
+
+        // Convert to array for chart
+        const stages = Object.entries(stageCounts)
+            .map(([stage, count]) => ({
+                stage,
+                count,
+                order: stageOrderMap[stage]
+            }))
+            .sort((a, b) => a.order - b.order);
+
+        // Calculate conversion rates (step-to-step)
+        // Note: Simple calculation based on snapshot counts. 
+        // For strict cohort analysis we'd track specific driver IDs through steps.
+        const conversions = [];
+        for (let i = 0; i < stages.length - 1; i++) {
+            const current = stages[i];
+            const next = stages[i + 1];
+            const rate = current.count > 0 ? (next.count / current.count) * 100 : 0;
+            conversions.push({
+                from: current.stage,
+                to: next.stage,
+                rate: parseFloat(rate.toFixed(1))
+            });
+        }
+
+        return { success: true, stages, conversions };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getFunnelMetrics error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get bottleneck analysis
+ * @param {string} carrierDot - Carrier DOT
+ * @param {Object} dateRange - { start, end }
+ * @returns {Promise<Object>} { bottlenecks: [] }
+ */
+export async function getBottleneckAnalysis(carrierDot, dateRange) {
+    try {
+        // 1. Get metrics to find drop-offs
+        const metrics = await getFunnelMetrics(carrierDot, dateRange);
+        if (!metrics.success) return metrics;
+
+        const bottlenecks = [];
+
+        // Analysis Rules:
+        // - Conversion rate < 50% between major stages is a warning
+        // - Time in stage > industry benchmark (mocked for now)
+
+        metrics.conversions.forEach(conv => {
+            if (conv.rate < 50 && conv.from !== STAGES.LEAD) { // Leads often have low conversion
+                bottlenecks.push({
+                    stage: conv.from,
+                    dropRate: (100 - conv.rate).toFixed(1) + '%',
+                    recommendation: `High drop-off from ${conv.from}. Review qualification criteria.`
+                });
+            }
+        });
+
+        return { success: true, bottlenecks };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getBottleneckAnalysis error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Record a driver touchpoint (call on every page visit with UTM)
+ * @param {string} driverId - Driver ID (or null for anonymous)
+ * @param {Object} utmParams - { source, medium, campaign, content, term }
+ * @param {string} pageUrl - Current page URL
+ * @param {string} [sessionId] - Anonymous session ID (if driverId not known)
+ * @returns {Promise<Object>} { success, touchpointId }
+ */
+export async function recordTouchpoint(driverId, utmParams, pageUrl, sessionId) {
+    try {
+        if (!driverId && !sessionId) {
+            return { success: false, error: 'Must provide driverId or sessionId' };
+        }
+
+        // 1. Identify the user
+        const lookupField = driverId ? 'driver_id' : 'session_id';
+        const lookupValue = driverId || sessionId;
+
+        // 2. Get existing record
+        let attribution = await dataAccess.findByField(COLLECTIONS.ATTRIBUTION, lookupField, lookupValue);
+        
+        const now = new Date();
+        const touchpoint = {
+            source: utmParams.source || 'direct',
+            medium: utmParams.medium || 'none',
+            campaign: utmParams.campaign || '',
+            content: utmParams.content || '',
+            term: utmParams.term || '',
+            url: pageUrl,
+            date: now
+        };
+
+        if (!attribution) {
+            // Create new record
+            const newRecord = {
+                driver_id: driverId,
+                session_id: sessionId,
+                first_touch_source: touchpoint.source,
+                first_touch_date: now,
+                last_touch_source: touchpoint.source,
+                last_touch_date: now,
+                touchpoint_count: 1,
+                touchpoint_history: [touchpoint],
+                attribution_model: 'first_touch', // Default
+                utm_source: touchpoint.source, // Current/Last
+                utm_medium: touchpoint.medium,
+                utm_campaign: touchpoint.campaign,
+                utm_term: touchpoint.term,
+                utm_content: touchpoint.content
+            };
+            
+            await dataAccess.insertRecord(COLLECTIONS.ATTRIBUTION, newRecord);
+        } else {
+            // Update existing
+            const history = attribution.touchpoint_history || [];
+            history.push(touchpoint);
+
+            const updates = {
+                _id: attribution._id,
+                last_touch_source: touchpoint.source,
+                last_touch_date: now,
+                touchpoint_count: history.length,
+                touchpoint_history: history,
+                // Update current UTMs to reflect last touch
+                utm_source: touchpoint.source,
+                utm_medium: touchpoint.medium,
+                utm_campaign: touchpoint.campaign,
+                utm_term: touchpoint.term,
+                utm_content: touchpoint.content
+            };
+
+            await dataAccess.updateRecord(COLLECTIONS.ATTRIBUTION, updates);
+        }
+
+        return { success: true };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] recordTouchpoint error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Convert session to driver attribution (call on registration)
+ * @param {string} sessionId - Anonymous session ID
+ * @param {string} driverId - New driver ID
+ * @returns {Promise<Object>} { success, attributionId }
+ */
+export async function convertSessionToDriver(sessionId, driverId) {
+    try {
+        if (!sessionId || !driverId) return { success: false, error: 'Missing IDs' };
+
+        const attribution = await dataAccess.findByField(COLLECTIONS.ATTRIBUTION, 'session_id', sessionId);
+
+        if (!attribution) {
+            // No anonymous history, creates a fresh record handled by next recordTouchpoint or here
+            // We can just create one now if we want
+            return { success: false, error: 'No session attribution found' };
+        }
+
+        // Update with driver ID and clear/keep session
+        const updates = {
+            _id: attribution._id,
+            driver_id: driverId,
+            conversion_date: new Date()
+        };
+
+        await dataAccess.updateRecord(COLLECTIONS.ATTRIBUTION, updates);
+        return { success: true, attributionId: attribution._id };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] convertSessionToDriver error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Record hire and attribute to source
+ * @param {string} driverId - Driver ID
+ * @param {string} carrierDot - Hiring carrier
+ * @param {string} attributionModel - 'first_touch' | 'last_touch'
+ * @returns {Promise<Object>} { success, attributedSource }
+ */
+export async function recordHireAttribution(driverId, carrierDot, attributionModel = 'first_touch') {
+    try {
+        const attribution = await dataAccess.findByField(COLLECTIONS.ATTRIBUTION, 'driver_id', driverId);
+
+        if (!attribution) return { success: false, error: 'No attribution record found for driver' };
+
+        const updates = {
+            _id: attribution._id,
+            hire_date: new Date(),
+            carrier_dot: carrierDot,
+            attribution_model: attributionModel
+        };
+
+        await dataAccess.updateRecord(COLLECTIONS.ATTRIBUTION, updates);
+
+        const attributedSource = attributionModel === 'last_touch' 
+            ? attribution.last_touch_source 
+            : attribution.first_touch_source;
+
+        return { success: true, attributedSource };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] recordHireAttribution error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get attribution breakdown for carrier
+ * @param {string} carrierDot - Carrier DOT
+ * @param {Object} dateRange - { start, end }
+ * @param {string} metric - 'applications' | 'hires'
+ * @returns {Promise<Object>} { bySource: {}, byMedium: {}, byCampaign: {} }
+ */
+export async function getAttributionBreakdown(carrierDot, dateRange, metric = 'applications') {
+    try {
+        // Query filters
+        const filters = {};
+        
+        // Time filter
+        if (dateRange && dateRange.start && dateRange.end) {
+            const dateField = metric === 'hires' ? 'hire_date' : 'conversion_date';
+            filters[dateField] = {
+                ge: dateRange.start,
+                le: dateRange.end
+            };
+        }
+
+        // If filtering by carrier (for hires), add that
+        // Note: For 'applications', carrier linkage might be in FunnelEvents, not SourceAttribution directly 
+        // unless SourceAttribution stores 'applied_to_carriers' (array) which we don't have yet.
+        // For Phase 1, we assume 'hires' links to carrier_dot in SourceAttribution.
+        // For 'applications', we might need to look at FunnelEvents in Phase 2. 
+        // For now, let's assume this function handles 'hires' (where carrier_dot is on the record)
+        // OR we return global stats if carrierDot is null (admin view).
+        
+        if (metric === 'hires' && carrierDot) {
+            filters.carrier_dot = carrierDot;
+        }
+
+        const records = await dataAccess.getAllRecords(COLLECTIONS.ATTRIBUTION, { filters });
+
+        // Aggregate
+        const bySource = {};
+        const byMedium = {};
+        const byCampaign = {};
+
+        records.forEach(rec => {
+            // Determine source based on model
+            const model = rec.attribution_model || 'first_touch';
+            const source = model === 'last_touch' ? rec.last_touch_source : rec.first_touch_source;
+            const medium = rec.utm_medium || 'none';
+            const campaign = rec.utm_campaign || 'none';
+
+            bySource[source] = (bySource[source] || 0) + 1;
+            byMedium[medium] = (byMedium[medium] || 0) + 1;
+            byCampaign[campaign] = (byCampaign[campaign] || 0) + 1;
+        });
+
+        return {
+            success: true,
+            bySource,
+            byMedium,
+            byCampaign,
+            total: records.length
+        };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getAttributionBreakdown error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// COMPETITOR INTELLIGENCE
+// ============================================================================
+
+/**
+ * Add competitor intel record
+ * @param {Object} intelData - Intel record data
+ * @returns {Promise<Object>} { success, intelId }
+ */
+export async function addCompetitorIntel(intelData) {
+    try {
+        if (!intelData.competitor_name) {
+            return { success: false, error: 'Competitor name is required' };
+        }
+
+        const record = {
+            ...intelData,
+            intel_date: new Date(),
+            source_type: intelData.source_type || 'manual_entry',
+            verified: intelData.verified || false
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTIONS.INTEL, record);
+        return { success: true, intelId: result.record._id };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] addCompetitorIntel error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Update competitor intel record
+ * @param {string} intelId - Record ID
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<Object>} { success, updatedRecord }
+ */
+export async function updateCompetitorIntel(intelId, updates) {
+    try {
+        if (!intelId) return { success: false, error: 'Missing intel ID' };
+
+        // Prevent updating critical metadata manually if needed, but for now allow all
+        const recordUpdates = {
+            ...updates,
+            _id: intelId,
+            _updatedDate: new Date()
+        };
+
+        const result = await dataAccess.updateRecord(COLLECTIONS.INTEL, recordUpdates);
+        return { success: true, updatedRecord: result.record };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] updateCompetitorIntel error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Verify competitor intel
+ * @param {string} intelId - Record ID
+ * @param {string} verifierId - Member ID of verifier
+ * @returns {Promise<Object>} { success }
+ */
+export async function verifyCompetitorIntel(intelId, verifierId) {
+    try {
+        if (!intelId || !verifierId) return { success: false, error: 'Missing ID or Verifier' };
+
+        const updates = {
+            _id: intelId,
+            verified: true,
+            verified_by: verifierId,
+            _updatedDate: new Date()
+        };
+
+        await dataAccess.updateRecord(COLLECTIONS.INTEL, updates);
+        return { success: true };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] verifyCompetitorIntel error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get competitor comparison for region
+ * @param {string} region - Geographic region (e.g., 'Southeast', 'National')
+ * @param {string} jobType - OTR, regional, local
+ * @returns {Promise<Object>} { competitors: [] }
+ */
+export async function getCompetitorComparison(region, jobType) {
+    try {
+        const filters = {};
+        if (region) filters.region = region;
+        if (jobType) filters.job_type = jobType;
+
+        const records = await dataAccess.getAllRecords(COLLECTIONS.INTEL, { filters });
+
+        // Format for UI
+        const competitors = records.map(rec => ({
+            id: rec._id,
+            name: rec.competitor_name,
+            cpmRange: rec.cpm_min && rec.cpm_max ? `$${rec.cpm_min}-${rec.cpm_max}` : (rec.cpm_max ? `$${rec.cpm_max}` : '--'),
+            cpmAvg: rec.cpm_max ? (rec.cpm_min + rec.cpm_max) / 2 : 0,
+            weeklyPay: rec.weekly_max ? `$${rec.weekly_max}` : '--',
+            signOn: rec.sign_on_bonus ? `$${rec.sign_on_bonus.toLocaleString()}` : '--',
+            homeTime: rec.home_time || '--',
+            benefits: rec.benefits_summary || '--',
+            equipment: rec.equipment_age || '--',
+            verified: rec.verified
+        }));
+
+        return { success: true, competitors };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getCompetitorComparison error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get market pay benchmarks
+ * @param {string} region - Geographic region
+ * @param {string} jobType - Job type
+ * @returns {Promise<Object>} { min, max, avg, median, percentiles }
+ */
+export async function getPayBenchmarks(region, jobType) {
+    try {
+        const { competitors } = await getCompetitorComparison(region, jobType);
+        
+        // Extract CPM values (using max or avg)
+        const cpms = competitors
+            .map(c => c.cpmAvg)
+            .filter(v => v > 0)
+            .sort((a, b) => a - b);
+
+        if (cpms.length === 0) {
+            return { success: true, min: 0, max: 0, avg: 0, median: 0, percentiles: { p25: 0, p75: 0 } };
+        }
+
+        const min = cpms[0];
+        const max = cpms[cpms.length - 1];
+        const avg = cpms.reduce((a, b) => a + b, 0) / cpms.length;
+        
+        // Percentiles
+        const p25Index = Math.floor(cpms.length * 0.25);
+        const medianIndex = Math.floor(cpms.length * 0.5);
+        const p75Index = Math.floor(cpms.length * 0.75);
+
+        return {
+            success: true,
+            min: parseFloat(min.toFixed(2)),
+            max: parseFloat(max.toFixed(2)),
+            avg: parseFloat(avg.toFixed(2)),
+            median: parseFloat(cpms[medianIndex].toFixed(2)),
+            percentiles: {
+                p25: parseFloat(cpms[p25Index].toFixed(2)),
+                p75: parseFloat(cpms[p75Index].toFixed(2))
+            },
+            sampleSize: cpms.length
+        };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getPayBenchmarks error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Trigger competitor scrape job (admin only)
+ * @param {Array} urls - URLs to scrape
+ * @returns {Promise<Object>} { success, jobId }
+ */
+export async function triggerCompetitorScrape(urls) {
+    // Placeholder for AI scraper integration
+    // In production this would queue a job for the scheduler
+    console.log('[RecruiterAnalytics] Scrape requested for:', urls);
+    
+    // Simulate job ID
+    const jobId = 'job_' + Date.now();
+    return { success: true, jobId, message: 'Scrape job queued' };
+}
+
+// ============================================================================
+// PREDICTIVE HIRING (ML-BASED)
+// ============================================================================
+
+/**
+ * Generate hiring forecast for carrier
+ * @param {string} carrierDot - Carrier DOT
+ * @param {number} monthsAhead - How many months to forecast
+ * @returns {Promise<Object>} { forecasts: [], alerts: [] }
+ */
+export async function generateHiringForecast(carrierDot, monthsAhead = 6) {
+    try {
+        // 1. Build Feature Vector
+        const features = await buildFeatureVector(carrierDot);
+        
+        // 2. Call ML Model (Simulated for now)
+        // In production, this would call Claude/Gemini via aiRouterService
+        const prediction = simulateMLForecast(features, monthsAhead);
+
+        // 3. Store Forecast
+        const record = {
+            carrier_dot: carrierDot,
+            forecast_date: new Date(),
+            forecast_period_start: new Date(),
+            forecast_period_end: new Date(new Date().setMonth(new Date().getMonth() + monthsAhead)),
+            predicted_hires_needed: prediction.totalHires,
+            confidence_level: prediction.confidence,
+            drivers_at_risk: features.turnover_risk_count,
+            growth_hires: prediction.growthHires,
+            replacement_hires: prediction.replacementHires,
+            seasonal_factor: features.seasonal_factor,
+            model_version: 'v1.0-sim',
+            model_inputs: features,
+            alert_level: prediction.alertLevel,
+            alert_message: prediction.alertMessage,
+            recommended_action: prediction.recommendation,
+            ramp_start_date: prediction.rampStartDate
+        };
+
+        await dataAccess.insertRecord(COLLECTIONS.FORECASTS, record);
+
+        return { success: true, forecast: record };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] generateHiringForecast error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get current forecast and alerts
+ * @param {string} carrierDot - Carrier DOT
+ * @returns {Promise<Object>} { current: {}, alerts: [] }
+ */
+export async function getHiringForecast(carrierDot) {
+    try {
+        // Get latest forecast
+        const result = await dataAccess.queryRecords(COLLECTIONS.FORECASTS, {
+            filters: { carrier_dot: carrierDot },
+            sort: [{ field: 'forecast_date', direction: 'desc' }],
+            limit: 1
+        });
+
+        if (result.items.length === 0) {
+            return { success: false, error: 'No forecast found' };
+        }
+
+        const forecast = result.items[0];
+        
+        // Get risk analysis
+        const risk = await getTurnoverRiskAnalysis(carrierDot);
+
+        return {
+            success: true,
+            current: forecast,
+            riskAnalysis: risk
+        };
+
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getHiringForecast error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get turnover risk analysis
+ * @param {string} carrierDot - Carrier DOT
+ * @returns {Promise<Object>} { atRisk: [], riskFactors: [] }
+ */
+export async function getTurnoverRiskAnalysis(carrierDot) {
+    try {
+        // Query latest forecast to get consistent risk numbers
+        const result = await dataAccess.queryRecords(COLLECTIONS.FORECASTS, {
+            filters: { carrier_dot: carrierDot },
+            sort: [{ field: 'forecast_date', direction: 'desc' }],
+            limit: 1
+        });
+
+        let atRiskCount = 0;
+        if (result.items.length > 0) {
+            atRiskCount = result.items[0].drivers_at_risk || 0;
+        } else {
+            // Fallback if no forecast exists yet (should be seeded)
+            atRiskCount = 5; 
+        }
+
+        // In a real scenario, we'd query DriverProfiles for individual risk scores
+        // For now, we simulate the breakdown based on the aggregate count
+        return {
+            atRiskCount: atRiskCount,
+            fleetSize: 150, // Could be queried from Carrier profile
+            riskPercentage: Math.round((atRiskCount / 150) * 1000) / 10,
+            topRiskFactors: [
+                { factor: 'Tenure < 6 months', count: Math.ceil(atRiskCount * 0.5), severity: 'high' },
+                { factor: 'Below market pay', count: Math.floor(atRiskCount * 0.3), severity: 'medium' },
+                { factor: 'Recent negative feedback', count: Math.floor(atRiskCount * 0.2), severity: 'medium' }
+            ],
+            atRiskDrivers: [] // PII restricted in this view
+        };
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getTurnoverRiskAnalysis error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// --- HELPER FUNCTIONS ---
+
+async function buildFeatureVector(carrierDot) {
+    // Gather data points
+    const turnoverRate = await calculateTurnoverRate(carrierDot, 12);
+    const payComp = await getPayCompetitiveness(carrierDot);
+    
+    return {
+        turnover_rate_12mo: turnoverRate,
+        pay_vs_market: payComp,
+        seasonal_factor: 1.2, // Mock spring hiring season
+        fleet_size: 150, // Mock
+        turnover_risk_count: 8
+    };
+}
+
+async function calculateTurnoverRate(carrierDot, months) {
+    return 0.15; // Mock 15%
+}
+
+async function getPayCompetitiveness(carrierDot) {
+    return 0.95; // 5% below market (mock)
+}
+
+function simulateMLForecast(features, months) {
+    const replacement = Math.ceil(features.fleet_size * features.turnover_rate_12mo * (months/12));
+    const growth = Math.ceil(features.fleet_size * 0.05); // 5% growth target
+    const total = replacement + growth;
+    
+    return {
+        totalHires: total,
+        replacementHires: replacement,
+        growthHires: growth,
+        confidence: 0.85,
+        alertLevel: 'warning',
+        alertMessage: `Predicted hiring need of ${total} drivers over next ${months} months.`,
+        recommendation: 'Increase job posting budget by 20% starting Feb 15.',
+        rampStartDate: new Date(new Date().setDate(new Date().getDate() + 15))
+    };
+}
