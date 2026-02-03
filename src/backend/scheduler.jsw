@@ -1,4 +1,4 @@
-import wixData from 'wix-data';
+// import wixData from 'wix-data'; // Removed - using dataAccess
 import { enrichCarrier } from 'backend/aiEnrichment';
 import { scanSocialMedia } from 'backend/socialScanner';
 import {
@@ -7,67 +7,18 @@ import {
   sendAbandonmentEmail3,
   markEmailSent
 } from 'backend/abandonmentEmailService';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
-
-// ============================================================================
-// COLLECTION KEYS FOR DUAL-SOURCE ROUTING
-// ============================================================================
-
-const COLLECTION_KEYS = {
-    carriers: 'carriers',
-    enrichments: 'carrierEnrichments',
-    checkoutAbandonment: 'checkoutAbandonment'
-};
-
-// ============================================================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.sort) {
-        query = options.sortDir === 'asc' ? query.ascending(options.sort) : query.descending(options.sort);
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
+// import { usesAirtable, getAirtableTableName } from 'backend/configData'; // Not needed if using dataAccess
+// import * as airtable from 'backend/airtableClient'; // Not needed if using dataAccess
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================================================
 // CONFIGURATION - THE SILENT NIGHT SHIFT
 // ============================================================================
 
 const CONFIG = {
-  carriersCollection: 'Carriers',
-  enrichmentsCollection: 'CarrierEnrichments',
+  // Use configData.js keys
+  carriersKey: 'carriers',
+  enrichmentsKey: 'carrierEnrichments',
   
   // EXECUTION LIMITS
   // We reduce batch size to 3 because "High Value" carriers take longer to scan.
@@ -100,12 +51,13 @@ export async function runEnrichmentBatch() {
   try {
     // 1. Get potential targets (Carriers that exist)
     // We sort by 'combined_score' descending to prioritize your best inventory first
-    const carrierResult = await wixData.query(CONFIG.carriersCollection)
-      .descending('combined_score') 
-      .limit(60) // Fetch a pool of candidates (larger than batch to find unenriched ones)
-      .find();
+    const carrierResult = await dataAccess.queryRecords(CONFIG.carriersKey, {
+      sort: [{ field: 'combined_score', direction: 'desc' }],
+      limit: 60, // Fetch a pool of candidates
+      suppressAuth: true
+    });
       
-    if (carrierResult.items.length === 0) {
+    if (!carrierResult.success || carrierResult.items.length === 0) {
       console.log('⏰ SCHEDULER: No carriers found in database.');
       return { status: 'empty' };
     }
@@ -214,14 +166,15 @@ async function filterForUnenriched(carriers) {
 
   try {
     // Query existing enrichments for these DOTs
-    const existingResult = await wixData.query(CONFIG.enrichmentsCollection)
-        .hasSome('dot_number', dotNumbers)
-        .limit(100)
-        .find();
+    const existingResult = await dataAccess.queryRecords(CONFIG.enrichmentsKey, {
+        filters: { dot_number: dotNumbers },
+        limit: 100,
+        suppressAuth: true
+    });
         
     // Create a map of existing enrichments
     const enrichmentMap = {};
-    existingResult.items.forEach(item => {
+    (existingResult.items || []).forEach(item => {
         enrichmentMap[item.dot_number] = item;
     });
 
@@ -251,7 +204,7 @@ async function filterForUnenriched(carriers) {
 // ============================================================================
 
 const ABANDONMENT_CONFIG = {
-  collection: 'CheckoutAbandonment',
+  collectionKey: 'checkoutAbandonment', // camelCase key
 
   // Timing thresholds (in days)
   email2DelayDays: 3,  // Send email 2 after 3 days
@@ -287,12 +240,17 @@ export async function processAbandonmentFollowUps() {
     // We look for records where:
     // - recovered is false (not yet converted)
     // - email2Sent is false OR email3Sent is false
-    const result = await wixData.query(ABANDONMENT_CONFIG.collection)
-      .eq('recovered', false)
-      .limit(50)  // Get a pool to filter from
-      .find({ suppressAuth: true });
+    // Note: Airtable filters might need specific handling if boolean fields are strings, but dataAccess handles basic filters.
+    // However, complex OR logic might need separate queries if not supported well.
+    // Here we query for recovered=false, and filter in memory since we fetch 50 anyway.
 
-    if (result.items.length === 0) {
+    const result = await dataAccess.queryRecords(ABANDONMENT_CONFIG.collectionKey, {
+      filters: { recovered: false },
+      limit: 50,
+      suppressAuth: true
+    });
+
+    if (!result.success || result.items.length === 0) {
       console.log('📧 SCHEDULER: No pending abandonments found.');
       return { success: true, processed: 0, message: 'No pending abandonments' };
     }
@@ -308,7 +266,7 @@ export async function processAbandonmentFollowUps() {
         break;
       }
 
-      // Skip if already recovered
+      // Skip if already recovered (should be filtered by query but good double check)
       if (record.recovered) {
         skippedRecovered++;
         continue;
@@ -407,13 +365,13 @@ export async function recordCheckoutAbandonment(email, planType, sessionId, addi
 
   try {
     // Check for existing abandonment with same email and session
-    const existing = await wixData.query(ABANDONMENT_CONFIG.collection)
-      .eq('email', email)
-      .eq('sessionId', sessionId)
-      .limit(1)
-      .find({ suppressAuth: true });
+    const existing = await dataAccess.queryRecords(ABANDONMENT_CONFIG.collectionKey, {
+      filters: { email: email, sessionId: sessionId },
+      limit: 1,
+      suppressAuth: true
+    });
 
-    if (existing.items.length > 0) {
+    if (existing.success && existing.items.length > 0) {
       console.log(`📧 Abandonment already recorded for session ${sessionId}`);
       return {
         success: true,
@@ -440,11 +398,16 @@ export async function recordCheckoutAbandonment(email, planType, sessionId, addi
       email3SentAt: null
     };
 
-    const insertResult = await wixData.insert(ABANDONMENT_CONFIG.collection, abandonmentRecord, {
+    const insertResult = await dataAccess.insertRecord(ABANDONMENT_CONFIG.collectionKey, abandonmentRecord, {
       suppressAuth: true
     });
 
-    console.log(`📧 Abandonment recorded with ID: ${insertResult._id}`);
+    if (!insertResult.success) {
+        throw new Error(insertResult.error);
+    }
+
+    const insertedId = insertResult.record._id;
+    console.log(`📧 Abandonment recorded with ID: ${insertedId}`);
 
     // Send immediate email (Email 1)
     const emailData = {
@@ -457,7 +420,7 @@ export async function recordCheckoutAbandonment(email, planType, sessionId, addi
     const emailResult = await sendAbandonmentEmail1(emailData);
 
     if (emailResult.success) {
-      await markEmailSent(insertResult._id, 1);
+      await markEmailSent(insertedId, 1);
       console.log(`📧 Immediate abandonment email sent to ${email}`);
     } else {
       console.warn(`⚠️ Failed to send immediate email: ${emailResult.error}`);
@@ -465,7 +428,7 @@ export async function recordCheckoutAbandonment(email, planType, sessionId, addi
 
     return {
       success: true,
-      recordId: insertResult._id,
+      recordId: insertedId,
       emailSent: emailResult.success
     };
 
@@ -490,24 +453,24 @@ export async function recordCheckoutAbandonment(email, planType, sessionId, addi
  */
 export async function markAbandonmentRecovered(email, sessionId = null) {
   try {
-    let query = wixData.query(ABANDONMENT_CONFIG.collection)
-      .eq('email', email)
-      .eq('recovered', false);
-
+    const filters = { email: email, recovered: false };
     if (sessionId) {
-      query = query.eq('sessionId', sessionId);
+      filters.sessionId = sessionId;
     }
 
-    const result = await query.find({ suppressAuth: true });
+    const result = await dataAccess.queryRecords(ABANDONMENT_CONFIG.collectionKey, {
+      filters: filters,
+      suppressAuth: true
+    });
 
-    if (result.items.length === 0) {
+    if (!result.success || result.items.length === 0) {
       return { success: true, updated: 0 };
     }
 
     let updatedCount = 0;
     for (const record of result.items) {
-      await wixData.update(ABANDONMENT_CONFIG.collection, {
-        ...record,
+      await dataAccess.updateRecord(ABANDONMENT_CONFIG.collectionKey, {
+        _id: record._id,
         recovered: true,
         recoveredAt: new Date()
       }, { suppressAuth: true });

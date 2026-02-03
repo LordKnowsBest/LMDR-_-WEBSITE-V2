@@ -1,9 +1,10 @@
 
-import wixData from 'wix-data';
+// import wixData from 'wix-data'; // Removed - ensuring all data access goes through dual-source layer
 // import { checkEnrichmentQueue } from 'backend/scheduler'; // Hypothetical - we'll simulate or use wix-data
 import { log } from 'backend/observabilityService';
 import { currentUser } from 'wix-users-backend';
 import { getProviderStatus } from 'backend/aiRouterService'; // Use real AI service check
+import * as dataAccess from 'backend/dataAccess';
 
 /**
  * Service to provide system health insights to the Recruiter Console.
@@ -97,8 +98,8 @@ export async function getRecruiterHealthStatus(carrierDot) {
 async function checkDatabaseLatency() {
     const start = Date.now();
     try {
-        // Lightweight query
-        await wixData.query('CarrierHiringPreferences').limit(1).find();
+        // Lightweight query using dataAccess (routes to Airtable if configured)
+        await dataAccess.queryRecords('carrierHiringPreferences', { limit: 1 });
         const duration = Date.now() - start;
         return {
             name: 'Database',
@@ -120,23 +121,27 @@ async function checkEnrichmentStatus() {
     // Check if there are "pending" jobs older than X minutes?
     // For now, we'll return healthy as we don't have direct access to job queue depth here easily
     // without a heavy query.
-    // Instead we can check if the 'AutoEnrichmentLog' has recent success entries.
+    // Instead we can check if the 'carrierEnrichments' has recent success entries.
     try {
-        const recentSuccess = await wixData.query('AutoEnrichmentLog')
-            .eq('status', 'complete')
-            .descending('_createdDate')
-            .limit(1)
-            .find();
+        const recentSuccess = await dataAccess.queryRecords('carrierEnrichments', {
+            sort: [{ field: 'enriched_date', direction: 'desc' }],
+            limit: 1
+        });
         
         let msg = 'Operational';
-        if (recentSuccess.items.length > 0) {
-            const lastTime = recentSuccess.items[0]._createdDate;
-            const diffMinutes = (Date.now() - new Date(lastTime).getTime()) / 1000 / 60;
-            if (diffMinutes > 60) {
-                // Not necessarily bad if no one added carriers, but worth noting
-                msg = 'Idle (No recent activity)';
-            } else {
-                msg = 'Active & Processing';
+        if (recentSuccess.success && recentSuccess.items.length > 0) {
+            const lastTime = recentSuccess.items[0].enriched_date;
+            // Handle Airtable string date or JS Date object
+            const lastDate = lastTime instanceof Date ? lastTime : new Date(lastTime);
+
+            if (!isNaN(lastDate.getTime())) {
+                const diffMinutes = (Date.now() - lastDate.getTime()) / 1000 / 60;
+                if (diffMinutes > 60) {
+                    // Not necessarily bad if no one added carriers, but worth noting
+                    msg = 'Idle (No recent activity)';
+                } else {
+                    msg = 'Active & Processing';
+                }
             }
         }
 
