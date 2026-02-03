@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+DRIVER POLICIES (LMDR)
+================================================================================
+PostMessage protocol (HTML -> Wix page code):
+- { type: 'driverPoliciesReady' }
+- { type: 'getDriverPolicies', data: { driverId, carrierId } }
+- { type: 'getPolicyContent', data: { policyId } }
+- { type: 'acknowledgePolicy', data: { policyId, driverId, signatureType, ipAddress, deviceInfo } }
+
+Wix -> HTML responses:
+- { type: 'driverPoliciesData', data: { success, policies, error } }
+- { type: 'policyContentData', data: { success, policy, error } }
+- { type: 'policyAcknowledgeResult', data: { success, acknowledgment, alreadyAcknowledged, error } }
+- { type: 'driverContext', data: { driverId, carrierId } }
+================================================================================
+-->
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Driver Policies | LMDR</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'sans-serif'] },
+          colors: {
+            lmdr: {
+              dark: '#0f172a',
+              blue: '#2563eb',
+              yellow: '#fbbf24',
+              canvas: '#f8fafc'
+            }
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .thin-scroll::-webkit-scrollbar { width: 6px; }
+    .thin-scroll::-webkit-scrollbar-thumb { background-color: rgba(37, 99, 235, 0.4); border-radius: 999px; }
+    .pill { border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 600; }
+    .modal { opacity: 0; pointer-events: none; transition: opacity 0.2s ease; }
+    .modal.active { opacity: 1; pointer-events: auto; }
+  </style>
+</head>
+<body class="h-full bg-lmdr-canvas text-slate-900">
+  <div class="min-h-screen p-4 md:p-6">
+    <header class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div class="flex items-center gap-4">
+        <div class="h-12 w-12 rounded-2xl bg-lmdr-blue text-white flex items-center justify-center font-black">LM</div>
+        <div>
+          <h1 class="text-2xl md:text-3xl font-bold text-lmdr-dark">Policies & Acknowledgments</h1>
+          <p class="text-sm text-slate-500">Review required documents and acknowledge when needed.</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="px-3 py-2 rounded-lg bg-white border border-slate-200 text-sm" onclick="refreshPolicies()">
+          <i class="fa-solid fa-rotate-right mr-2"></i>Refresh
+        </button>
+      </div>
+    </header>
+
+    <section class="mt-6 grid lg:grid-cols-[1.4fr_1fr] gap-4">
+      <div class="space-y-4">
+        <div class="bg-white rounded-2xl border border-slate-200 p-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-lg font-semibold">Action Required</h2>
+              <p class="text-xs text-slate-500">Policies waiting for your acknowledgment.</p>
+            </div>
+            <span class="text-sm text-slate-400" id="requiredCount">--</span>
+          </div>
+          <div class="mt-3 space-y-2" id="requiredList">
+            <div class="p-3 rounded-xl border border-dashed border-slate-200 text-sm text-slate-500">No pending items.</div>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl border border-slate-200 p-4">
+          <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <h2 class="text-lg font-semibold">All Policies</h2>
+            <div class="flex items-center gap-2">
+              <select id="statusFilter" class="text-sm border border-slate-200 rounded-lg px-3 py-2" onchange="applyFilters()">
+                <option value="all">All</option>
+                <option value="required">Action required</option>
+                <option value="acknowledged">Acknowledged</option>
+              </select>
+            </div>
+          </div>
+          <div id="policyList" class="mt-4 space-y-3 max-h-[420px] overflow-y-auto thin-scroll">
+            <div class="p-4 rounded-xl border border-slate-200 bg-slate-50 animate-pulse">
+              <div class="h-4 w-40 bg-slate-200 rounded"></div>
+              <div class="h-3 w-64 bg-slate-200 rounded mt-2"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <aside class="bg-white rounded-2xl border border-slate-200 p-4 flex flex-col" id="detailPanel">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold uppercase tracking-widest text-slate-400">Policy Detail</h3>
+          <button class="text-xs text-slate-400" onclick="clearSelection()">Clear</button>
+        </div>
+        <div class="mt-4 space-y-3" id="policyDetail">
+          <div class="text-sm text-slate-500">Select a policy to view details.</div>
+        </div>
+      </aside>
+    </section>
+  </div>
+
+  <div id="policyModal" class="modal fixed inset-0 bg-black/50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl max-w-2xl w-full p-6">
+      <div class="flex items-center justify-between">
+        <h2 class="text-xl font-semibold" id="modalTitle">Policy</h2>
+        <button class="text-slate-400" onclick="closeModal()"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="mt-4 space-y-4">
+        <div class="text-xs uppercase tracking-widest text-slate-400" id="modalCategory">Category</div>
+        <div id="modalContent" class="text-sm text-slate-700 whitespace-pre-wrap"></div>
+        <div id="modalLink" class="hidden text-sm text-lmdr-blue underline"></div>
+      </div>
+      <div class="mt-6 flex items-center justify-between">
+        <label class="flex items-center gap-2 text-sm text-slate-600" id="ackCheckbox">
+          <input type="checkbox" class="h-4 w-4" id="ackConfirm" /> I have read and acknowledge this policy.
+        </label>
+        <button class="px-4 py-2 rounded-lg bg-lmdr-blue text-white text-sm" onclick="submitAcknowledgment()">Acknowledge</button>
+      </div>
+      <div class="mt-3 text-xs text-slate-400" id="ackStatus"></div>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      policies: [],
+      filtered: [],
+      selectedPolicy: null,
+      driverId: null,
+      carrierId: null
+    };
+
+    function postToParent(type, data) {
+      window.parent.postMessage({ type, data }, '*');
+    }
+
+    function refreshPolicies() {
+      if (!state.driverId || !state.carrierId) return;
+      postToParent('getDriverPolicies', { driverId: state.driverId, carrierId: state.carrierId });
+    }
+
+    function applyFilters() {
+      const statusFilter = document.getElementById('statusFilter').value;
+      state.filtered = state.policies.filter(policy => {
+        if (statusFilter === 'required') return policy.requires_acknowledgment && !policy.acknowledged;
+        if (statusFilter === 'acknowledged') return policy.acknowledged;
+        return true;
+      });
+      renderPolicyList();
+    }
+
+    function renderRequiredList() {
+      const required = state.policies.filter(p => p.requires_acknowledgment && !p.acknowledged);
+      document.getElementById('requiredCount').textContent = `${required.length} pending`;
+      const container = document.getElementById('requiredList');
+      if (!required.length) {
+        container.innerHTML = '<div class="p-3 rounded-xl border border-dashed border-slate-200 text-sm text-slate-500">No pending items.</div>';
+        return;
+      }
+      container.innerHTML = required.map(policy => {
+        const deadline = policy.acknowledgment_deadline ? new Date(policy.acknowledgment_deadline).toLocaleDateString() : 'No deadline';
+        return `
+          <div class="p-3 rounded-xl border border-slate-200 flex items-center justify-between">
+            <div>
+              <div class="text-sm font-semibold">${policy.title || 'Untitled Policy'}</div>
+              <div class="text-xs text-slate-500">Deadline: ${deadline}</div>
+            </div>
+            <button class="text-xs text-lmdr-blue" onclick="openPolicy('${policy._id}')">Review</button>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderPolicyList() {
+      const list = document.getElementById('policyList');
+      if (!state.filtered.length) {
+        list.innerHTML = '<div class="p-6 rounded-xl border border-dashed border-slate-200 text-sm text-slate-500">No policies match your filter.</div>';
+        return;
+      }
+      list.innerHTML = state.filtered.map(policy => {
+        const statusBadge = policy.acknowledged
+          ? '<span class="pill bg-emerald-100 text-emerald-700">Acknowledged</span>'
+          : policy.requires_acknowledgment
+            ? '<span class="pill bg-amber-100 text-amber-700">Action Required</span>'
+            : '<span class="pill bg-slate-100 text-slate-600">Optional</span>';
+        const updated = policy.updated_at ? new Date(policy.updated_at).toLocaleDateString() : '';
+        return `
+          <div class="p-4 rounded-xl border border-slate-200 hover:border-lmdr-blue cursor-pointer" onclick="openPolicy('${policy._id}')">
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="text-sm font-semibold">${policy.title || 'Untitled Policy'}</div>
+                <div class="text-xs text-slate-500">Updated ${updated}</div>
+              </div>
+              ${statusBadge}
+            </div>
+            <p class="text-xs text-slate-500 mt-2">${policy.description || 'No description provided.'}</p>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderPolicyDetail(policy) {
+      const detail = document.getElementById('policyDetail');
+      if (!policy) {
+        detail.innerHTML = '<div class="text-sm text-slate-500">Select a policy to view details.</div>';
+        return;
+      }
+      const deadline = policy.acknowledgment_deadline ? new Date(policy.acknowledgment_deadline).toLocaleDateString() : 'No deadline';
+      detail.innerHTML = `
+        <div>
+          <div class="text-lg font-semibold">${policy.title || 'Untitled Policy'}</div>
+          <div class="text-xs text-slate-500">Category: ${policy.category || 'general'}</div>
+        </div>
+        <div class="text-sm text-slate-600">${policy.description || 'No description provided.'}</div>
+        <div class="text-xs text-slate-500">Deadline: ${deadline}</div>
+        <button class="mt-2 px-3 py-2 rounded-lg bg-lmdr-blue text-white text-sm" onclick="openModal()">View Full Policy</button>
+      `;
+    }
+
+    function openPolicy(policyId) {
+      const policy = state.policies.find(p => p._id === policyId);
+      if (!policy) return;
+      state.selectedPolicy = policy;
+      renderPolicyDetail(policy);
+      postToParent('getPolicyContent', { policyId });
+      openModal();
+    }
+
+    function clearSelection() {
+      state.selectedPolicy = null;
+      renderPolicyDetail(null);
+    }
+
+    function openModal() {
+      const modal = document.getElementById('policyModal');
+      if (!state.selectedPolicy) return;
+      modal.classList.add('active');
+      updateModalContent(state.selectedPolicy);
+    }
+
+    function closeModal() {
+      document.getElementById('policyModal').classList.remove('active');
+      document.getElementById('ackConfirm').checked = false;
+      document.getElementById('ackStatus').textContent = '';
+    }
+
+    function updateModalContent(policy) {
+      document.getElementById('modalTitle').textContent = policy.title || 'Policy';
+      document.getElementById('modalCategory').textContent = (policy.category || 'general').toUpperCase();
+      const contentEl = document.getElementById('modalContent');
+      const linkEl = document.getElementById('modalLink');
+      contentEl.textContent = '';
+      linkEl.classList.add('hidden');
+
+      if (policy.content_type === 'pdf' && policy.content) {
+        linkEl.textContent = 'Open PDF';
+        linkEl.onclick = () => window.open(policy.content, '_blank');
+        linkEl.classList.remove('hidden');
+      } else if (policy.content_type === 'external_link' && policy.external_url) {
+        linkEl.textContent = 'Open Link';
+        linkEl.onclick = () => window.open(policy.external_url, '_blank');
+        linkEl.classList.remove('hidden');
+      } else {
+        contentEl.textContent = policy.content || 'No content available.';
+      }
+
+      const ackCheckbox = document.getElementById('ackCheckbox');
+      if (policy.requires_acknowledgment && !policy.acknowledged) {
+        ackCheckbox.classList.remove('hidden');
+      } else {
+        ackCheckbox.classList.add('hidden');
+      }
+    }
+
+    function submitAcknowledgment() {
+      if (!state.selectedPolicy) return;
+      if (state.selectedPolicy.requires_acknowledgment && !document.getElementById('ackConfirm').checked) {
+        document.getElementById('ackStatus').textContent = 'Please confirm acknowledgment.';
+        return;
+      }
+      postToParent('acknowledgePolicy', {
+        policyId: state.selectedPolicy._id,
+        driverId: state.driverId,
+        signatureType: 'checkbox',
+        deviceInfo: 'web'
+      });
+    }
+
+    window.addEventListener('message', event => {
+      const { type, data } = event.data || {};
+      if (type === 'driverPoliciesData') {
+        state.policies = data?.policies || [];
+        state.filtered = [...state.policies];
+        renderRequiredList();
+        applyFilters();
+      }
+      if (type === 'policyContentData' && data?.policy && state.selectedPolicy) {
+        state.selectedPolicy = { ...state.selectedPolicy, ...data.policy };
+        updateModalContent(state.selectedPolicy);
+      }
+      if (type === 'policyAcknowledgeResult') {
+        document.getElementById('ackStatus').textContent = data?.success ? 'Acknowledgment saved.' : (data?.error || 'Unable to acknowledge.');
+        if (data?.success && state.selectedPolicy) {
+          state.selectedPolicy.acknowledged = true;
+          renderRequiredList();
+          applyFilters();
+        }
+      }
+      if (type === 'driverContext') {
+        state.driverId = data?.driverId || state.driverId;
+        state.carrierId = data?.carrierId || state.carrierId;
+        refreshPolicies();
+      }
+    });
+
+    postToParent('driverPoliciesReady');
+  </script>
+</body>
+</html>

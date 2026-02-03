@@ -342,16 +342,31 @@ describe('Recruiter Analytics Service', () => {
     });
 
     // ============================================================================
-    // COMPETITOR INTEL
+    // COMPETITOR INTELLIGENCE
     // ============================================================================
     describe('Competitor Intel', () => {
+        test('addCompetitorIntel should validate and insert record', async () => {
+            dataAccess.insertRecord.mockResolvedValue({ record: { _id: 'intel1' } });
+
+            const result = await addCompetitorIntel({
+                competitor_name: 'New Carrier',
+                cpm_max: 0.60
+            });
+
+            expect(result.success).toBe(true);
+            expect(dataAccess.insertRecord).toHaveBeenCalled();
+            const call = dataAccess.insertRecord.mock.calls[0][1];
+            expect(call.competitor_name).toBe('New Carrier');
+            expect(call.source_type).toBe('manual_entry');
+        });
+
         test('getCompetitorComparison should format data', async () => {
             dataAccess.getAllRecords.mockResolvedValue([
                 { 
                     _id: '1', 
                     competitor_name: 'Test Carrier', 
-                    cpm_min: 50, 
-                    cpm_max: 60,
+                    cpm_min: 0.50, 
+                    cpm_max: 0.60,
                     sign_on_bonus: 5000
                 }
             ]);
@@ -360,8 +375,29 @@ describe('Recruiter Analytics Service', () => {
             
             expect(result.success).toBe(true);
             expect(result.competitors[0].name).toBe('Test Carrier');
-            expect(result.competitors[0].cpmRange).toBe('$50-60');
+            // Check formatting logic from service
+            // 0.50 -> $0.5-0.6 (if formatted that way) or raw values depending on service
+            // Service formats as `${rec.cpm_min}-${rec.cpm_max}`
+            expect(result.competitors[0].cpmRange).toBe('$0.5-0.6'); 
             expect(result.competitors[0].signOn).toBe('$5,000');
+        });
+
+        test('getPayBenchmarks should calculate percentiles', async () => {
+            // 3 competitors with avg CPM: 0.50, 0.60, 0.70
+            dataAccess.getAllRecords.mockResolvedValue([
+                { competitor_name: 'C1', cpm_min: 0.50, cpm_max: 0.50 },
+                { competitor_name: 'C2', cpm_min: 0.60, cpm_max: 0.60 },
+                { competitor_name: 'C3', cpm_min: 0.70, cpm_max: 0.70 }
+            ]);
+
+            const result = await require('backend/recruiterAnalyticsService').getPayBenchmarks('National', 'OTR');
+
+            expect(result.success).toBe(true);
+            expect(result.min).toBe(0.50);
+            expect(result.max).toBe(0.70);
+            expect(result.avg).toBe(0.60);
+            expect(result.percentiles.p50).toBeUndefined(); // Service returns median/p25/p75 usually
+            expect(result.median).toBe(0.60);
         });
     });
 
@@ -381,6 +417,19 @@ describe('Recruiter Analytics Service', () => {
             const call = dataAccess.insertRecord.mock.calls[0][1];
             expect(call.predicted_hires_needed).toBeGreaterThan(0);
             expect(call.confidence_level).toBeGreaterThan(0);
+        });
+
+        test('getTurnoverRiskAnalysis should return risk metrics', async () => {
+            // Mock forecast for risk count
+            dataAccess.queryRecords.mockResolvedValue({
+                items: [{ drivers_at_risk: 10 }]
+            });
+
+            const { getTurnoverRiskAnalysis } = require('backend/recruiterAnalyticsService');
+            const result = await getTurnoverRiskAnalysis('DOT123');
+
+            expect(result.atRiskCount).toBe(10);
+            expect(result.topRiskFactors.length).toBeGreaterThan(0);
         });
     });
 

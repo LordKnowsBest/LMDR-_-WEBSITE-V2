@@ -7,6 +7,36 @@ import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
 import { getUnreadCount } from 'backend/messaging';
 import { updateLastActive } from 'backend/memberService';
+import {
+    createAnnouncement,
+    updateAnnouncement,
+    publishAnnouncement,
+    scheduleAnnouncement,
+    archiveAnnouncement,
+    uploadAttachment,
+    previewRecipients,
+    markAnnouncementRead,
+    getAnnouncementStats,
+    getReadReceipts,
+    getUnreadDrivers,
+    getAnnouncementsForDriver,
+    addComment,
+    getAnnouncementsForCarrier,
+    getCarrierContextForCurrentUser
+} from 'backend/carrierAnnouncementsService';
+import {
+    createPolicy,
+    updatePolicy,
+    publishPolicyVersion,
+    archivePolicy,
+    uploadPolicyFile,
+    getComplianceStatus,
+    getPoliciesForDriver,
+    getPolicyContent,
+    acknowledgePolicy,
+    getPoliciesForCarrier
+} from 'backend/carrierPolicyService';
+import { getOrCreateDriverProfile } from 'backend/driverProfiles';
 
 $w.onReady(async function () {
     await updateAuthState();
@@ -145,13 +175,243 @@ function setupSidebarNavigation() {
                         } else {
                             console.warn('[MasterPage] Unknown page:', msg.data.page);
                         }
+                        return;
                     }
+
+                    handleCarrierCommunicationMessage(htmlComponent, msg);
                 });
             }
         } catch (e) {
             // HTML component doesn't exist on this page - skip silently
         }
     });
+}
+
+// ============================================================================
+// CARRIER COMMUNICATION BRIDGE (Announcements + Policies)
+// ============================================================================
+
+function getCarrierIdFromQuery() {
+    const query = wixLocation.query || {};
+    return query.carrierId || query.carrier_id || query.dot_number || query.carrierDot || null;
+}
+
+function sendHtmlMessage(htmlComponent, type, data) {
+    try {
+        htmlComponent.postMessage({ type, data });
+    } catch (err) {
+        // Silent fail - HTML component might not be ready
+    }
+}
+
+async function getDriverContext() {
+    const profileResult = await getOrCreateDriverProfile();
+    const driverId = profileResult?.profile?._id || null;
+    return {
+        success: profileResult?.success || false,
+        driverId,
+        carrierId: getCarrierIdFromQuery()
+    };
+}
+
+async function getCarrierContext() {
+    const ctx = await getCarrierContextForCurrentUser();
+    if (ctx.success) return ctx;
+    const fallbackCarrierId = getCarrierIdFromQuery();
+    if (fallbackCarrierId) {
+        return { success: true, carrierId: fallbackCarrierId };
+    }
+    return ctx;
+}
+
+async function handleCarrierCommunicationMessage(htmlComponent, msg) {
+    try {
+        switch (msg.type) {
+            // Carrier announcements
+            case 'carrierAnnouncementsReady': {
+                const ctx = await getCarrierContext();
+                sendHtmlMessage(htmlComponent, 'carrierContext', { carrierId: ctx.carrierId || null, error: ctx.error });
+                break;
+            }
+            case 'getCarrierAnnouncements': {
+                const payload = msg.data || {};
+                const ctx = await getCarrierContext();
+                const result = await getAnnouncementsForCarrier(payload.carrierId || ctx.carrierId, {
+                    status: payload.status,
+                    limit: payload.limit,
+                    offset: payload.offset
+                });
+                sendHtmlMessage(htmlComponent, 'carrierAnnouncementsData', result);
+                break;
+            }
+            case 'createAnnouncement': {
+                const result = await createAnnouncement(msg.data || {});
+                sendHtmlMessage(htmlComponent, 'announcementActionResult', result);
+                break;
+            }
+            case 'updateAnnouncement': {
+                const result = await updateAnnouncement(msg.data?.announcementId, msg.data?.updates || {});
+                sendHtmlMessage(htmlComponent, 'announcementActionResult', result);
+                break;
+            }
+            case 'publishAnnouncement': {
+                const result = await publishAnnouncement(msg.data?.announcementId);
+                sendHtmlMessage(htmlComponent, 'announcementActionResult', result);
+                break;
+            }
+            case 'scheduleAnnouncement': {
+                const result = await scheduleAnnouncement(msg.data?.announcementId, msg.data?.scheduledAt);
+                sendHtmlMessage(htmlComponent, 'announcementActionResult', result);
+                break;
+            }
+            case 'archiveAnnouncement': {
+                const result = await archiveAnnouncement(msg.data?.announcementId);
+                sendHtmlMessage(htmlComponent, 'announcementActionResult', result);
+                break;
+            }
+            case 'previewRecipients': {
+                const payload = msg.data || {};
+                const result = await previewRecipients(payload.carrierId, payload.targetAudience);
+                sendHtmlMessage(htmlComponent, 'recipientPreviewResult', result);
+                break;
+            }
+            case 'uploadAnnouncementAttachment': {
+                const payload = msg.data || {};
+                const result = await uploadAttachment(payload.base64Data, payload.fileName, payload.mimeType, payload.carrierId);
+                sendHtmlMessage(htmlComponent, 'announcementAttachmentResult', result);
+                break;
+            }
+            case 'getAnnouncementStats': {
+                const result = await getAnnouncementStats(msg.data?.announcementId);
+                sendHtmlMessage(htmlComponent, 'announcementStatsData', result);
+                break;
+            }
+            case 'getReadReceipts': {
+                const payload = msg.data || {};
+                const result = await getReadReceipts(payload.announcementId, payload.limit, payload.offset);
+                sendHtmlMessage(htmlComponent, 'announcementReadReceiptsData', result);
+                break;
+            }
+            case 'getUnreadDrivers': {
+                const payload = msg.data || {};
+                const result = await getUnreadDrivers(payload.announcementId, payload.carrierId, payload.limit, payload.offset);
+                sendHtmlMessage(htmlComponent, 'announcementUnreadDriversData', result);
+                break;
+            }
+
+            // Driver announcements
+            case 'driverAnnouncementsReady': {
+                const ctx = await getDriverContext();
+                sendHtmlMessage(htmlComponent, 'driverContext', { driverId: ctx.driverId, carrierId: ctx.carrierId });
+                break;
+            }
+            case 'getDriverAnnouncements': {
+                const payload = msg.data || {};
+                const result = await getAnnouncementsForDriver(payload.driverId, payload.carrierId, {
+                    limit: payload.limit,
+                    offset: payload.offset
+                });
+                sendHtmlMessage(htmlComponent, 'driverAnnouncementsData', result);
+                break;
+            }
+            case 'markAnnouncementRead': {
+                const payload = msg.data || {};
+                const result = await markAnnouncementRead(payload.announcementId, payload.driverId, payload.deviceType, payload.timeSpentSeconds);
+                sendHtmlMessage(htmlComponent, 'announcementReadResult', result);
+                break;
+            }
+            case 'addAnnouncementComment': {
+                const payload = msg.data || {};
+                const result = await addComment(payload.announcementId, payload.driverId, payload.commentText);
+                sendHtmlMessage(htmlComponent, 'announcementCommentResult', result);
+                break;
+            }
+
+            // Carrier policies
+            case 'carrierPoliciesReady': {
+                const ctx = await getCarrierContext();
+                sendHtmlMessage(htmlComponent, 'carrierContext', { carrierId: ctx.carrierId || null, error: ctx.error });
+                break;
+            }
+            case 'getCarrierPolicies': {
+                const payload = msg.data || {};
+                const ctx = await getCarrierContext();
+                const result = await getPoliciesForCarrier(payload.carrierId || ctx.carrierId, {
+                    status: payload.status,
+                    limit: payload.limit,
+                    offset: payload.offset,
+                    category: payload.category
+                });
+                sendHtmlMessage(htmlComponent, 'carrierPoliciesData', result);
+                break;
+            }
+            case 'createPolicy': {
+                const result = await createPolicy(msg.data || {});
+                sendHtmlMessage(htmlComponent, 'policyActionResult', result);
+                break;
+            }
+            case 'updatePolicy': {
+                const result = await updatePolicy(msg.data?.policyId, msg.data?.updates || {});
+                sendHtmlMessage(htmlComponent, 'policyActionResult', result);
+                break;
+            }
+            case 'publishPolicyVersion': {
+                const result = await publishPolicyVersion(msg.data?.policyId, msg.data?.changeSummary || '');
+                sendHtmlMessage(htmlComponent, 'policyActionResult', result);
+                break;
+            }
+            case 'archivePolicy': {
+                const result = await archivePolicy(msg.data?.policyId);
+                sendHtmlMessage(htmlComponent, 'policyActionResult', result);
+                break;
+            }
+            case 'uploadPolicyFile': {
+                const payload = msg.data || {};
+                const result = await uploadPolicyFile(payload.base64Data, payload.fileName, payload.mimeType, payload.carrierId);
+                sendHtmlMessage(htmlComponent, 'policyUploadResult', result);
+                break;
+            }
+            case 'getComplianceStatus': {
+                const result = await getComplianceStatus(msg.data?.carrierId);
+                sendHtmlMessage(htmlComponent, 'complianceStatusData', result);
+                break;
+            }
+
+            // Driver policies
+            case 'driverPoliciesReady': {
+                const ctx = await getDriverContext();
+                sendHtmlMessage(htmlComponent, 'driverContext', { driverId: ctx.driverId, carrierId: ctx.carrierId });
+                break;
+            }
+            case 'getDriverPolicies': {
+                const payload = msg.data || {};
+                const result = await getPoliciesForDriver(payload.driverId, payload.carrierId);
+                sendHtmlMessage(htmlComponent, 'driverPoliciesData', result);
+                break;
+            }
+            case 'getPolicyContent': {
+                const result = await getPolicyContent(msg.data?.policyId);
+                sendHtmlMessage(htmlComponent, 'policyContentData', result);
+                break;
+            }
+            case 'acknowledgePolicy': {
+                const payload = msg.data || {};
+                const result = await acknowledgePolicy(
+                    payload.policyId,
+                    payload.driverId,
+                    payload.signatureType,
+                    payload.ipAddress,
+                    payload.deviceInfo
+                );
+                sendHtmlMessage(htmlComponent, 'policyAcknowledgeResult', result);
+                break;
+            }
+            default:
+                break;
+        }
+    } catch (err) {
+        console.error('[MasterPage] Communication bridge error:', err);
+    }
 }
 
 // ============================================================================
