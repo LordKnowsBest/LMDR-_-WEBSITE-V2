@@ -2,6 +2,8 @@ import wixData from 'wix-data';
 import wixAuth from 'wix-auth';
 import { usesAirtable, getAirtableTableName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
+import { sendComplianceNotification } from 'backend/emailService';
+import { getProfileById } from 'backend/driverProfiles';
 
 // Collection Names
 const COMPLIANCE_EVENTS_COLLECTION = 'ComplianceEvents';
@@ -520,7 +522,44 @@ async function createComplianceAlert(event, reminderType) {
   
   await wixData.insert(COMPLIANCE_ALERTS_COLLECTION, alert, { suppressAuth: true });
   
-  // TODO: Send email via emailService
+  // Determine recipient
+  let recipientId = null;
+  let driverName = '';
+  let dashboardUrl = 'https://www.lastmiledr.app/carrier/compliance';
+
+  if (event.driver_id) {
+    try {
+      const profile = await getProfileById(event.driver_id);
+      if (profile && (profile.wix_member_id || profile._owner)) {
+        recipientId = profile.wix_member_id || profile._owner;
+        driverName = profile.display_name || 'Driver';
+        dashboardUrl = 'https://www.lastmiledr.app/driver-dashboard';
+      }
+    } catch (err) {
+      console.error('Error fetching driver profile for notification:', err);
+    }
+  } else if (event.assigned_to) {
+    recipientId = event.assigned_to;
+    driverName = 'N/A';
+  }
+
+  // Send email if recipient found
+  if (recipientId) {
+    const notificationData = {
+      type: reminderType,
+      eventTitle: event.title,
+      dueDate: new Date(event.due_date).toLocaleDateString('en-US'),
+      driverName: driverName,
+      dashboardUrl: dashboardUrl
+    };
+
+    const emailResult = await sendComplianceNotification(recipientId, notificationData);
+    if (!emailResult.success) {
+      console.error('Failed to send compliance notification:', emailResult.error);
+    } else {
+      console.log(`Sent compliance notification to ${recipientId}`);
+    }
+  }
 }
 
 /**
