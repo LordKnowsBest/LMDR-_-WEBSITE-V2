@@ -118,13 +118,13 @@ A crowdsourced database of trucker-friendly pet amenities. Quick to build, high 
 - [x] Task: Implement `getLocationById()` with reviews included
 - [x] Task: Implement `submitLocation()` with required field validation
 - [x] Task: Implement `updateLocation()` with author-only permission
-- [ ] Task: Implement `verifyLocation()` for admin verification flow
+- [x] Task: Implement `verifyLocation()` for admin verification flow
 - [x] Task: Implement `getReviewsByLocation()` with pagination
 - [x] Task: Implement `submitReview()` with rating validation (1-5)
-- [ ] Task: Implement `markReviewHelpful()` with duplicate prevention
-- [ ] Task: Implement `reportReview()` for inappropriate content
-- [ ] Task: Implement `getTopRatedLocations()` by state aggregation
-- [ ] Task: Implement `getRecentlyAdded()` for discovery feed
+- [x] Task: Implement `markReviewHelpful()` with duplicate prevention
+- [x] Task: Implement `reportReview()` for inappropriate content
+- [x] Task: Implement `getTopRatedLocations()` by state aggregation
+- [x] Task: Implement `getRecentlyAdded()` for discovery feed
 
 ### 2.3 Pet-Friendly UI - Search
 - [x] Task: Create `PET_FRIENDLY.html` in `src/public/driver/`
@@ -144,43 +144,43 @@ A crowdsourced database of trucker-friendly pet amenities. Quick to build, high 
 ### 2.5 Pet-Friendly UI - Location Detail
 - [x] Task: Create location detail modal/page
 - [x] Task: Display full location info with all amenities
-- [ ] Task: Show photo gallery (user-submitted)
-- [ ] Task: Build reviews list with pagination
-- [ ] Task: Add "Write Review" form with rating stars
-- [ ] Task: Implement photo upload for reviews
-- [ ] Task: Add "Confirm Amenities" checklist in review form
+- [x] Task: Show photo gallery (user-submitted)
+- [x] Task: Build reviews list with pagination
+- [x] Task: Add "Write Review" form with rating stars
+- [x] Task: Implement photo upload for reviews
+- [x] Task: Add "Confirm Amenities" checklist in review form
 
 ### 2.6 Pet-Friendly UI - Add Location
 - [x] Task: Create "Add New Location" modal
-- [ ] Task: Build address input with autocomplete (Google Places API optional)
+- [x] Task: Build address input with autocomplete (Google Places API optional)
 - [x] Task: Add location type selector
 - [x] Task: Create amenity multi-select checkboxes
 - [x] Task: Add pet policy selector (dogs welcome, leash required, etc.)
-- [ ] Task: Implement photo upload for location
+- [x] Task: Implement photo upload for location
 - [x] Task: Add notes/description textarea
 - [x] Task: Show "Pending Verification" message after submission
 
 ### 2.7 Admin Verification
-- [ ] Task: Add pet locations to admin moderation queue
-- [ ] Task: Build verification checklist UI for admins
-- [ ] Task: Implement bulk verify action for multiple locations
-- [ ] Task: Add "Featured Location" toggle for admin curation
+- [x] Task: Add pet locations to admin moderation queue
+- [x] Task: Build verification checklist UI for admins
+- [x] Task: Implement bulk verify action for multiple locations
+- [x] Task: Add "Featured Location" toggle for admin curation
 
 ### 2.8 Wix Integration
-- [ ] Task: Create "Pet-Friendly Stops" page in Wix Editor
-- [ ] Task: Add HTML component and connect to PET_FRIENDLY.html
-- [ ] Task: Set up postMessage bridge for backend calls
-- [ ] Task: Add page to driver dashboard navigation
-- [ ] Task: Award reputation points for location submissions
+- [x] Task: Create "Pet-Friendly Stops" page in Wix Editor
+- [x] Task: Add HTML component and connect to PET_FRIENDLY.html
+- [x] Task: Set up postMessage bridge for backend calls
+- [x] Task: Add page to driver dashboard navigation
+- [x] Task: Award reputation points for location submissions
 
 ### 2.9 Testing - Pet-Friendly
-- [ ] Task: Write unit tests for `petFriendlyService.jsw` search functions
-- [ ] Task: Test geo proximity calculations with known coordinates
-- [ ] Task: Test filter combinations (amenities + type + radius)
-- [ ] Task: Test review submission with edge cases (empty text, rating bounds)
-- [ ] Task: Manual test: full flow from search to review submission
-- [ ] Task: Manual test: admin verification workflow
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Pet-Friendly Database'
+- [x] Task: Write unit tests for `petFriendlyService.jsw` search functions
+- [x] Task: Test geo proximity calculations with known coordinates
+- [x] Task: Test filter combinations (amenities + type + radius)
+- [x] Task: Test review submission with edge cases (empty text, rating bounds)
+- [ ] Manual test: full flow from search to review submission
+- [ ] Manual test: admin verification workflow
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Pet-Friendly Database'
 
 ---
 
@@ -189,44 +189,44 @@ A crowdsourced database of trucker-friendly pet amenities. Quick to build, high 
 A curated content hub for driver wellness with community-contributed tips.
 
 ### 3.1 Backend Collections
-- [ ] Task: Create `HealthResources` collection with schema from spec
-- [ ] Task: Create `HealthTips` collection for community submissions
-- [ ] Task: Seed initial content: 10 exercise articles, 10 nutrition guides, 5 mental health resources
+- [x] Task: Create `HealthResources` collection with schema from spec
+- [x] Task: Create `HealthTips` collection for community submissions
+- [x] Task: Seed initial content: 10 exercise articles, 10 nutrition guides, 5 mental health resources
 - [ ] Task: Add telemedicine partner data (TruckerDoc, MedExpress, etc.)
 
 ### 3.2 Health Service Backend
-- [ ] Task: Create `healthService.jsw` for resource management
-- [ ] Task: Implement `getResourcesByCategory()` with pagination
-- [ ] Task: Implement `getResourceBySlug()` for single article view
-- [ ] Task: Implement `getFeaturedResources()` for homepage highlights
+- [x] Task: Create `healthService.jsw` for resource management
+- [x] Task: Implement `getResourcesByCategory()` with pagination
+- [x] Task: Implement `getResourceBySlug()` for single article view
+- [x] Task: Implement `getFeaturedResources()` for homepage highlights
 - [ ] Task: Implement `searchResources()` with full-text search
-- [ ] Task: Implement `markResourceHelpful()` for user ratings
-- [ ] Task: Implement `submitTip()` for community contributions
-- [ ] Task: Implement `getApprovedTips()` with category filter
+- [x] Task: Implement `markResourceHelpful()` for user ratings
+- [x] Task: Implement `submitTip()` for community contributions
+- [x] Task: Implement `getApprovedTips()` with category filter
 - [ ] Task: Implement `getTipsByAuthor()` for user's submissions
-- [ ] Task: Implement `moderateTip()` for admin approval workflow
+- [x] Task: Implement `moderateTip()` for admin approval workflow
 
 ### 3.3 Health UI - Hub Page
-- [ ] Task: Create `HEALTH_WELLNESS.html` in `src/public/driver/`
-- [ ] Task: Build category tabs (Exercise, Nutrition, Mental Health, Sleep, Telemedicine)
-- [ ] Task: Create featured content hero section
-- [ ] Task: Build resource card grid with thumbnails
-- [ ] Task: Add community tips section with "Add Tip" button
-- [ ] Task: Create telemedicine partners section with referral links
+- [x] Task: Create `HEALTH_WELLNESS.html` in `src/public/driver/`
+- [x] Task: Build category tabs (Exercise, Nutrition, Mental Health, Sleep, Telemedicine)
+- [x] Task: Create featured content hero section
+- [x] Task: Build resource card grid with thumbnails
+- [x] Task: Add community tips section with "Add Tip" button
+- [x] Task: Create telemedicine partners section with referral links
 
 ### 3.4 Health UI - Article View
-- [ ] Task: Build article detail view with markdown rendering
+- [x] Task: Build article detail view with markdown rendering
 - [ ] Task: Add video embed support for video content
-- [ ] Task: Implement "Mark Helpful" button with count display
+- [x] Task: Implement "Mark Helpful" button with count display
 - [ ] Task: Add social share buttons (optional)
 - [ ] Task: Show related resources sidebar
-- [ ] Task: Add "Back to Hub" navigation
+- [x] Task: Add "Back to Hub" navigation
 
 ### 3.5 Health UI - Community Tips
-- [ ] Task: Build tips list component with voting
-- [ ] Task: Create "Submit Tip" modal with category selector
+- [x] Task: Build tips list component with voting
+- [x] Task: Create "Submit Tip" modal with category selector
 - [ ] Task: Add character counter for tip text (500 max)
-- [ ] Task: Show submission status badge (pending/approved)
+- [x] Task: Show submission status badge (pending/approved)
 - [ ] Task: Display author reputation badges on tips
 
 ### 3.6 Content Management
@@ -239,8 +239,8 @@ A curated content hub for driver wellness with community-contributed tips.
 
 ### 3.7 Wix Integration
 - [ ] Task: Create "Health & Wellness" page in Wix Editor
-- [ ] Task: Add HTML component and connect to HEALTH_WELLNESS.html
-- [ ] Task: Set up postMessage bridge for backend calls
+- [x] Task: Add HTML component and connect to HEALTH_WELLNESS.html
+- [x] Task: Set up postMessage bridge for backend calls
 - [ ] Task: Add page to driver dashboard navigation
 - [ ] Task: Award reputation points for approved tips
 - [ ] Task: Track resource views in analytics

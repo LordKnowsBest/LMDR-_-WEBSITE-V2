@@ -12,8 +12,12 @@
 // ============================================================================
 
 import wixData from 'wix-data';
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
 import { usesAirtable, getAirtableTableName } from 'backend/config';
 import * as airtable from 'backend/airtableClient';
+import { getCarrierSafetyData } from 'backend/fmcsaService';
+import { logAIOperation, startTrace, endTrace } from 'backend/observabilityService';
 
 // ============================================================================
 // COLLECTION KEYS
@@ -35,6 +39,21 @@ const COLLECTIONS = {
 // ============================================================================
 
 const CACHE_TTL_DAYS = 7; // Research briefs cached for 7 days
+
+const LLM_CONFIG = {
+  claudeModel: 'claude-sonnet-4-20250514',
+  claudeSecret: 'CLAUDE_API_KEY',
+  claudeEndpoint: 'https://api.anthropic.com/v1/messages',
+  claudeTimeoutMs: 30000,
+  maxTokens: 1500
+};
+
+const SEGMENT_TONE = {
+  enterprise: 'ROI-focused, data-driven, executive language.',
+  mid_market: 'Balanced efficiency and cost savings. Emphasize scalability.',
+  regional: 'Practical, relationship-focused. Emphasize local knowledge and quick fills.',
+  owner_operator: 'Direct, simple, speed-focused. Fast onboarding, minimal paperwork.'
+};
 
 // ============================================================================
 // DUAL-SOURCE HELPERS
@@ -98,13 +117,25 @@ async function findByField(collectionKey, fieldName, value) {
  * @returns {Promise<{success: boolean, brief?: Object, cached?: boolean, error?: string}>}
  */
 export async function generateBrief(accountId, forceRefresh = false) {
+  const trace = await startTrace('b2b-research-brief', {
+    accountId,
+    forceRefresh,
+    tags: ['b2b', 'research-brief']
+  }).catch(() => ({ traceId: null }));
+  const traceId = trace.traceId;
+  const startTime = Date.now();
+
   try {
-    if (!accountId) return { success: false, error: 'Account ID is required' };
+    if (!accountId) {
+      await endTrace(traceId, 'failed', { reason: 'missing_account_id' }).catch(() => {});
+      return { success: false, error: 'Account ID is required' };
+    }
 
     // Check cache first (unless force refresh)
     if (!forceRefresh) {
       const cached = await getCachedBrief(accountId);
       if (cached) {
+        await endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime }).catch(() => {});
         return { success: true, brief: cached, cached: true };
       }
     }
@@ -113,33 +144,54 @@ export async function generateBrief(accountId, forceRefresh = false) {
     const accounts = await findByField(COLLECTIONS.accounts, '_id', accountId);
     const account = accounts && accounts.length > 0 ? accounts[0] : null;
     if (!account) {
+      await endTrace(traceId, 'failed', { reason: 'account_not_found' }).catch(() => {});
       return { success: false, error: 'Account not found' };
     }
 
     const carrierDot = account.carrier_dot;
 
-    // Gather intelligence from multiple sources in parallel
+    // Gather intelligence from 7 sources in parallel (FMCSA live added as 7th)
     const [
       carrierData,
       enrichmentData,
       safetyData,
       signalData,
       hiringData,
-      contactData
+      contactData,
+      fmcsaData
     ] = await Promise.all([
       getCarrierProfile(carrierDot),
       getEnrichmentData(carrierDot),
       getSafetyProfile(carrierDot),
       getSignalProfile(carrierDot),
       getHiringSignals(carrierDot),
-      getAccountContacts(accountId)
+      getAccountContacts(accountId),
+      fetchLiveFMCSA(carrierDot)
     ]);
 
-    // Assemble the brief
-    const highlights = buildHighlights(carrierData, enrichmentData, safetyData, signalData, hiringData);
-    const talkTrack = buildTalkTrack(account, signalData, hiringData);
-    const nextSteps = buildNextSteps(account, signalData, hiringData, contactData);
-    const sources = buildSources(carrierData, enrichmentData, safetyData, hiringData);
+    let highlights, talkTrack, nextSteps, sources, confidence, generatedBy;
+
+    // Try LLM-powered brief generation, fall back to templates on failure
+    try {
+      const llmResult = await generateLLMBrief(
+        account, carrierData, enrichmentData, safetyData,
+        signalData, hiringData, contactData, fmcsaData, traceId
+      );
+      highlights = llmResult.highlights;
+      talkTrack = llmResult.talk_track;
+      nextSteps = llmResult.next_steps;
+      sources = llmResult.sources;
+      confidence = llmResult.confidence;
+      generatedBy = 'llm_claude';
+    } catch (llmError) {
+      console.warn('LLM brief generation failed, using template fallback:', llmError.message);
+      highlights = buildHighlights(carrierData, enrichmentData, safetyData, signalData, hiringData);
+      talkTrack = buildTalkTrack(account, signalData, hiringData);
+      nextSteps = buildNextSteps(account, signalData, hiringData, contactData);
+      sources = buildSources(carrierData, enrichmentData, safetyData, hiringData);
+      confidence = 'low';
+      generatedBy = 'template_fallback';
+    }
 
     const brief = {
       account_id: accountId,
@@ -154,12 +206,13 @@ export async function generateBrief(accountId, forceRefresh = false) {
         match_score: signalData.signal_score || 0,
         driver_count: signalData.driver_count_high_match || 0,
         top_regions: signalData.top_regions || '',
-        fleet_size: carrierData.fleet_size || 0,
-        safety_rating: safetyData.rating || 'unknown'
+        fleet_size: fmcsaData.total_drivers || carrierData.fleet_size || 0,
+        safety_rating: fmcsaData.safety_rating || safetyData.rating || 'unknown'
       }),
-      recommendations: nextSteps.map(s => s.text).join('; '),
-      generated_at: new Date().toISOString(),
-      generated_by: 'research_agent'
+      recommendations: nextSteps.map(s => s.text || s).join('; '),
+      confidence,
+      generated_by: generatedBy,
+      generated_at: new Date().toISOString()
     };
 
     // Save/update the brief
@@ -171,9 +224,17 @@ export async function generateBrief(accountId, forceRefresh = false) {
       saved = await insertData(COLLECTIONS.research, brief);
     }
 
+    await endTrace(traceId, 'completed', {
+      fromCache: false,
+      elapsed: Date.now() - startTime,
+      generatedBy,
+      confidence
+    }).catch(() => {});
+
     return { success: true, brief: saved, cached: false };
   } catch (error) {
     console.error('Error generating research brief:', error);
+    await endTrace(traceId, 'failed', { error: error.message, elapsed: Date.now() - startTime }).catch(() => {});
     return { success: false, error: error.message || 'Failed to generate brief' };
   }
 }
@@ -199,6 +260,8 @@ export async function getBrief(accountId) {
     try { brief.next_steps = JSON.parse(brief.next_steps || '[]'); } catch (e) { brief.next_steps = []; }
     try { brief.sources = JSON.parse(brief.sources || '[]'); } catch (e) { brief.sources = []; }
     try { brief.signals = JSON.parse(brief.signals || '{}'); } catch (e) { brief.signals = {}; }
+    brief.confidence = brief.confidence || 'medium';
+    brief.generated_by = brief.generated_by || 'research_agent';
 
     return { success: true, brief };
   } catch (error) {
@@ -486,6 +549,250 @@ function buildSources(carrier, enrichment, safety, hiring) {
 }
 
 // ============================================================================
+// LLM BRIEF GENERATION
+// ============================================================================
+
+/**
+ * Fetch live FMCSA data for a carrier. Returns {} on failure so Promise.all never rejects.
+ */
+async function fetchLiveFMCSA(carrierDot) {
+  if (!carrierDot) return {};
+  try {
+    const data = await getCarrierSafetyData(carrierDot);
+    if (!data || data.error) return {};
+    return {
+      legal_name: data.legal_name || '',
+      total_drivers: data.total_drivers || 0,
+      total_power_units: data.total_power_units || 0,
+      safety_rating: data.safety_rating || 'NOT RATED',
+      basics: data.basics || {},
+      has_basic_alerts: data.has_basic_alerts || false,
+      inspections: data.inspections || {},
+      crashes: data.crashes || {},
+      operating_status: data.operating_status || '',
+      source: 'FMCSA Live API'
+    };
+  } catch (err) {
+    console.warn('Live FMCSA fetch failed:', err.message);
+    return {};
+  }
+}
+
+/**
+ * Extract text content from Claude Messages API response
+ */
+function extractClaudeText(data) {
+  if (!data || !data.content || !Array.isArray(data.content)) return '';
+  return data.content
+    .filter(block => block.type === 'text')
+    .map(block => block.text)
+    .join('\n')
+    .trim();
+}
+
+/**
+ * Build system + user prompts for research brief generation
+ */
+function buildResearchPrompt(account, carrier, enrichment, safety, signal, hiring, contacts, fmcsa) {
+  const segment = account.segment || 'mid_market';
+  const tone = SEGMENT_TONE[segment] || SEGMENT_TONE.mid_market;
+
+  // Build BASIC alerts summary for compliance talking points
+  let basicAlertsList = '';
+  if (fmcsa.has_basic_alerts && fmcsa.basics) {
+    const alerts = Object.entries(fmcsa.basics)
+      .filter(([, v]) => v && v.alert)
+      .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v.percentile}th percentile (ALERT)`)
+      .join(', ');
+    if (alerts) basicAlertsList = alerts;
+  }
+
+  const systemPrompt = `You are a B2B Intelligence Analyst for LMDR (Last Mile Driver Recruiting). You generate research briefs that help business development reps prepare for carrier outreach.
+
+RULES:
+1. FMCSA data is verified government data — treat it as ground truth. Never contradict FMCSA figures.
+2. Tone: ${tone}
+3. Segment: ${segment}
+${basicAlertsList ? `4. This carrier has BASIC ALERTS (${basicAlertsList}). Include compliance-focused talking points about how LMDR\'s pre-screened drivers can help improve safety scores.` : '4. No BASIC alerts detected.'}
+5. Confidence scoring: "high" = 4+ data sources with verified data, "medium" = some data gaps, "low" = sparse data.
+6. Output ONLY valid JSON. No markdown, no explanation, no wrapping.`;
+
+  const userPrompt = `Generate a research brief for this carrier account using the data below.
+
+=== ACCOUNT CONTEXT ===
+Name: ${account.carrier_name || 'Unknown'}
+DOT: ${account.carrier_dot || 'N/A'}
+Segment: ${segment}
+Status: ${account.status || 'unknown'}
+
+=== CARRIER PROFILE ===
+Legal Name: ${carrier.legal_name || 'Unknown'}
+Location: ${carrier.city ? carrier.city + ', ' : ''}${carrier.state || 'Unknown'}
+Fleet Size: ${carrier.fleet_size || 'Unknown'} drivers
+Power Units: ${carrier.total_power_units || 'Unknown'}
+Operation Type: ${carrier.operation_type || 'Unknown'}
+
+=== FMCSA SAFETY DATA ===
+Safety Rating: ${fmcsa.safety_rating || safety.rating || 'Unknown'}
+Operating Status: ${fmcsa.operating_status || 'Unknown'}
+Total Drivers: ${fmcsa.total_drivers || carrier.fleet_size || 'Unknown'}
+Total Power Units: ${fmcsa.total_power_units || carrier.total_power_units || 'Unknown'}
+BASIC Scores: ${fmcsa.basics ? JSON.stringify(fmcsa.basics) : 'No data'}
+Has BASIC Alerts: ${fmcsa.has_basic_alerts ? 'YES' : 'No'}
+Inspections: ${fmcsa.inspections ? JSON.stringify(fmcsa.inspections) : 'No data'}
+Crashes: ${fmcsa.crashes ? JSON.stringify(fmcsa.crashes) : 'No data'}
+
+=== MATCH SIGNALS ===
+Match Score: ${signal.signal_score || 'N/A'}
+High-Match Drivers: ${signal.driver_count_high_match || 'N/A'}
+Top Regions: ${signal.top_regions || 'N/A'}
+Equipment: ${signal.equipment_types || 'N/A'}
+
+=== HIRING SIGNALS ===
+Active Hiring: ${hiring.active ? 'Yes' : 'No'}
+Regions: ${hiring.regions || 'N/A'}
+Equipment Types: ${hiring.equipment_types || 'N/A'}
+Experience Min: ${hiring.experience_min || 'N/A'}
+
+=== AI ENRICHMENT DATA ===
+Pay Range: ${enrichment.pay_range || 'N/A'}
+Benefits: ${enrichment.benefits_summary || 'N/A'}
+Driver Sentiment: ${enrichment.driver_sentiment || 'N/A'}
+Social Media: ${enrichment.social_media_summary || 'N/A'}
+
+=== CONTACTS ON FILE ===
+Count: ${Array.isArray(contacts) ? contacts.length : 0}
+${Array.isArray(contacts) && contacts.length > 0 ? `Primary: ${contacts[0].name || 'Unknown'} (${contacts[0].role || contacts[0].title || 'Unknown role'})` : 'No contacts on file'}
+
+=== REQUIRED OUTPUT FORMAT ===
+{
+  "highlights": ["5-7 bullet strings, most important first"],
+  "talk_track": "3-5 sentences, segment-appropriate tone, data-specific, end with CTA",
+  "next_steps": [{"text": "action description", "type": "call|email|proposal|sequence|research|admin", "priority": 1}],
+  "confidence": "high|medium|low",
+  "sources": ["list of data sources that contributed to this brief"]
+}`;
+
+  return { systemPrompt, userPrompt };
+}
+
+/**
+ * Parse and validate Claude's research brief JSON response
+ * Throws on failure to trigger template fallback
+ */
+function parseResearchBriefResponse(responseText) {
+  if (!responseText) throw new Error('Empty response from Claude');
+
+  // Strip markdown code fences if present
+  let cleaned = responseText.trim();
+  cleaned = cleaned.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+
+  // Try to extract JSON object
+  const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('No JSON object found in response');
+
+  const parsed = JSON.parse(jsonMatch[0]);
+
+  // Validate required fields
+  if (!parsed.highlights || !Array.isArray(parsed.highlights)) {
+    parsed.highlights = [parsed.highlights || 'Brief generated with limited data.'];
+  }
+  if (!parsed.talk_track || typeof parsed.talk_track !== 'string') {
+    throw new Error('Missing talk_track in response');
+  }
+  if (!parsed.next_steps || !Array.isArray(parsed.next_steps)) {
+    parsed.next_steps = [];
+  }
+  // Normalize next_steps to ensure each has required fields
+  parsed.next_steps = parsed.next_steps.map((step, i) => ({
+    text: step.text || String(step),
+    type: step.type || 'research',
+    priority: step.priority || i + 1
+  }));
+
+  parsed.confidence = ['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : 'medium';
+  parsed.sources = Array.isArray(parsed.sources) ? parsed.sources : [];
+
+  return parsed;
+}
+
+/**
+ * Core LLM engine — calls Claude to generate a research brief.
+ * Follows the same fetch + Promise.race pattern as aiEnrichment.jsw.
+ * Throws on failure so caller can fall back to templates.
+ */
+async function generateLLMBrief(account, carrier, enrichment, safety, signal, hiring, contacts, fmcsa, traceId) {
+  const startTime = Date.now();
+  const apiKey = await getSecret(LLM_CONFIG.claudeSecret);
+
+  const { systemPrompt, userPrompt } = buildResearchPrompt(account, carrier, enrichment, safety, signal, hiring, contacts, fmcsa);
+
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Claude timeout')), LLM_CONFIG.claudeTimeoutMs);
+  });
+
+  const fetchPromise = fetch(LLM_CONFIG.claudeEndpoint, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: LLM_CONFIG.claudeModel,
+      max_tokens: LLM_CONFIG.maxTokens,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
+    })
+  });
+
+  try {
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+    const latencyMs = Date.now() - startTime;
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => 'unknown');
+      throw new Error(`Claude API ${response.status}: ${errorBody}`);
+    }
+
+    const data = await response.json();
+    const responseText = extractClaudeText(data);
+    const usage = data.usage || {};
+
+    // Log successful AI operation
+    await logAIOperation({
+      source: 'b2b-research-agent',
+      operation: 'research-brief',
+      functionId: 'research-brief-llm',
+      provider: 'anthropic',
+      model: LLM_CONFIG.claudeModel,
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      totalTokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
+      latencyMs,
+      traceId
+    }).catch(err => console.warn('AI log failed:', err.message));
+
+    return parseResearchBriefResponse(responseText);
+  } catch (error) {
+    const latencyMs = Date.now() - startTime;
+    // Log failed AI operation
+    await logAIOperation({
+      source: 'b2b-research-agent',
+      operation: 'research-brief',
+      functionId: 'research-brief-llm',
+      provider: 'anthropic',
+      model: LLM_CONFIG.claudeModel,
+      latencyMs,
+      error: error.message,
+      traceId
+    }).catch(err => console.warn('AI error log failed:', err.message));
+
+    throw error; // Re-throw to trigger template fallback
+  }
+}
+
+// ============================================================================
 // CACHE MANAGEMENT
 // ============================================================================
 
@@ -510,6 +817,8 @@ async function getCachedBrief(accountId) {
       try { brief.next_steps = JSON.parse(brief.next_steps || '[]'); } catch (e) { brief.next_steps = []; }
       try { brief.sources = JSON.parse(brief.sources || '[]'); } catch (e) { brief.sources = []; }
       try { brief.signals = JSON.parse(brief.signals || '{}'); } catch (e) { brief.signals = {}; }
+      brief.confidence = brief.confidence || 'medium';
+      brief.generated_by = brief.generated_by || 'research_agent';
       return brief;
     }
 

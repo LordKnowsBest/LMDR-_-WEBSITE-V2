@@ -1,0 +1,194 @@
+/**
+ * Health Service
+ *
+ * Backend logic for the Trucker Health & Wellness hub.
+ * Handles resource content, community tips, and helpfulness tracking.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+import { awardDriverXP } from 'backend/gamificationService';
+import wixUsersBackend from 'wix-users-backend';
+
+// Collection Keys (from config.jsw)
+const COLLECTIONS = {
+  RESOURCES: 'healthResources',
+  TIPS: 'healthTips'
+};
+
+// =============================================================================
+// CONTENT RETRIEVAL
+// =============================================================================
+
+/**
+ * Get resources by category
+ * @param {string} category
+ * @param {object} options - { limit, skip, featuredOnly }
+ */
+export async function getResourcesByCategory(category, options = {}) {
+  try {
+    const filters = {};
+    if (category && category !== 'all') filters.category = category;
+    if (options.featuredOnly) filters.is_featured = true;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.RESOURCES, {
+      filters,
+      limit: options.limit || 20,
+      skip: options.skip || 0,
+      sort: [{ field: 'created_at', direction: 'desc' }]
+    });
+
+    return result;
+  } catch (error) {
+    console.error('getResourcesByCategory error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get resource by slug
+ * @param {string} slug
+ */
+export async function getResourceBySlug(slug) {
+  try {
+    const resource = await dataAccess.findByField(COLLECTIONS.RESOURCES, 'slug', slug);
+    if (!resource) throw new Error('Resource not found');
+
+    // Increment view count (fire and forget)
+    incrementViewCount(resource._id, resource.view_count);
+
+    return resource;
+  } catch (error) {
+    console.error('getResourceBySlug error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get featured resources for homepage
+ */
+export async function getFeaturedResources() {
+  return getResourcesByCategory(null, { featuredOnly: true, limit: 3 });
+}
+
+/**
+ * Mark a resource as helpful
+ * @param {string} resourceId
+ */
+export async function markResourceHelpful(resourceId) {
+  try {
+    const resource = await dataAccess.getRecord(COLLECTIONS.RESOURCES, resourceId);
+    if (!resource) throw new Error('Resource not found');
+
+    await dataAccess.updateRecord(COLLECTIONS.RESOURCES, {
+        _id: resourceId,
+        helpful_count: (resource.helpful_count || 0) + 1
+    });
+
+    return { success: true };
+  } catch (error) {
+    console.error('markResourceHelpful error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// COMMUNITY TIPS
+// =============================================================================
+
+/**
+ * Submit a community tip
+ * @param {object} tipData - { category, title, tip_text }
+ */
+export async function submitTip(tipData) {
+  try {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) throw new Error('Unauthorized');
+
+    const tip = {
+      author_id: currentUser.id,
+      category: tipData.category,
+      title: tipData.title,
+      tip_text: tipData.tip_text,
+      helpful_count: 0,
+      status: 'pending',
+      created_at: new Date()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.TIPS, tip);
+    return result;
+  } catch (error) {
+    console.error('submitTip error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get approved tips for display
+ * @param {string} category
+ */
+export async function getApprovedTips(category) {
+  try {
+    const filters = { status: 'approved' };
+    if (category && category !== 'all') filters.category = category;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.TIPS, {
+      filters,
+      limit: 50,
+      sort: [{ field: 'helpful_count', direction: 'desc' }]
+    });
+
+    return result.items;
+  } catch (error) {
+    console.error('getApprovedTips error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Moderate a tip (Admin)
+ * @param {string} tipId
+ * @param {string} action - 'approve' or 'reject'
+ */
+export async function moderateTip(tipId, action) {
+  try {
+    // TODO: Add admin check
+    
+    const updates = {
+      _id: tipId,
+      status: action === 'approve' ? 'approved' : 'rejected',
+      approved_at: new Date()
+    };
+
+    const result = await dataAccess.updateRecord(COLLECTIONS.TIPS, updates);
+
+    if (action === 'approve') {
+        const tip = await dataAccess.getRecord(COLLECTIONS.TIPS, tipId);
+        // Award XP to author
+        if (tip && tip.author_id) {
+            await awardDriverXP(tip.author_id, 'health_tip_approved', { source: 'health_hub' });
+        }
+    }
+
+    return result;
+  } catch (error) {
+    console.error('moderateTip error:', error);
+    throw error;
+  }
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+async function incrementViewCount(id, currentCount) {
+    try {
+        await dataAccess.updateRecord(COLLECTIONS.RESOURCES, {
+            _id: id,
+            view_count: (currentCount || 0) + 1
+        });
+    } catch (e) {
+        console.warn('Failed to increment view count', e);
+    }
+}

@@ -1,9 +1,9 @@
 # Track: B2B Business Development Suite - Carrier Acquisition
 
 **Track ID:** `b2b_business_development_suite_20260128`
-**Status:** Complete
+**Status:** In Progress (Phase 9 complete, Phases 10-16 planned)
 **Priority:** Critical
-**Completed:** 2026-02-02
+**Last Updated:** 2026-02-02
 
 ---
 
@@ -18,10 +18,11 @@ This track delivers a complete B2B business development workspace that turns dri
 | Backend services | 8 `.jsw` files |
 | Frontend panels | 8 HTML files |
 | Airtable tables | 21 tables |
-| Bridge actions | 45+ routed actions |
+| Bridge actions | 46+ routed actions |
 | Security roles | 4-tier hierarchy |
 | Test coverage | 146 tests passing |
-| Phases completed | 7/7 |
+| Scheduled jobs | 1 (nightly signal batch) |
+| Phases completed | 9/16 |
 
 ---
 
@@ -94,7 +95,7 @@ Driver Match Engine → Match Signals → Prospect Lists → Outreach Sequences
 | `b2bPipelineService.jsw` | ~600 | Opportunities, stages, forecast, automation, playbooks |
 | `b2bSequenceService.jsw` | ~680 | Sequences, steps, outreach records, throttling, compliance |
 | `b2bAnalyticsService.jsw` | ~500 | KPIs, snapshots, attribution, CPA, competitor intel |
-| `b2bResearchAgentService.jsw` | ~300 | AI research briefs, caching, source aggregation |
+| `b2bResearchAgentService.jsw` | ~830 | AI research briefs, LLM-powered generation (Claude API), template fallback, FMCSA live data, caching, observability |
 
 ### Frontend HTML Panels (`src/public/admin/`)
 
@@ -176,6 +177,7 @@ window.parent.postMessage({ action: 'actionName', key1: value1, key2: value2 }, 
 | `getSignal` | `signalLoaded` | `carrierDot` | viewer |
 | `generateSignal` | `signalGenerated` | `carrierDot`, `matchData` | rep |
 | `generateBatchSignals` | `batchSignalsGenerated` | batch params | rep |
+| `getSignalSpikes` | `signalSpikesLoaded` | `days` | viewer |
 
 #### Pipeline & Opportunities
 
@@ -432,7 +434,141 @@ To grant B2B access to team members:
 
 ---
 
-## 8. Dependencies
+## 8. Autonomous Signal Prospecting (Phase 8)
+
+Nightly autonomous pipeline that generates signals, stores snapshots, detects spikes, auto-creates accounts, enriches via FMCSA, and updates the dashboard.
+
+### Nightly Batch (`runB2BSignalBatch`)
+
+Runs at **3 AM UTC** daily via `jobs.config`. Orchestrator flow:
+
+1. `generateBatchSignals({ limit: 25, minDriverCount: 3 })` — score carriers
+2. For each signal: `storeSignalSnapshot()` (idempotent daily) + auto-create account if score ≥ 55 + FMCSA enrich new accounts
+3. `detectSignalSpikes()` — compare current vs 7-day-old snapshots, flag >20% increases as urgent
+
+### New Functions in `b2bMatchSignalService.jsw`
+
+| Function | Exported | Purpose |
+|----------|----------|---------|
+| `storeSignalSnapshot(signal)` | No | Writes signal record with `snapshot_date` field, idempotent per carrier+date |
+| `detectSignalSpikes(options)` | Yes | Week-over-week comparison, returns array of spikes with `increase_percent` |
+| `enrichAccountFromFMCSA(carrierDot, account)` | No | Calls `getCarrierSafetyData()` to populate fleet_size, segment, region, safety tags |
+| `runB2BSignalBatch()` | Yes | Nightly orchestrator: score → snapshot → auto-create → enrich → spike detect |
+
+### BATCH_CONFIG
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `batchSize` | 3 | Carriers per micro-batch (Airtable rate limit safety) |
+| `delayBetweenBatchMs` | 2000 | Pause between micro-batches |
+| `scoreThreshold` | 55 | Minimum score to auto-create account |
+| `minDriverCount` | 3 | Minimum high-match drivers to qualify |
+| `spikeThresholdPercent` | 20 | Week-over-week increase to flag as urgent |
+| `maxProcessPerRun` | 25 | Total carriers per nightly run (~33s budget) |
+
+### Enhanced `getTopProspects()`
+
+Rewrote in `b2bAccountService.jsw` to fetch target/prospecting accounts, merge live signal data (score, driver count, urgency, confidence), add `is_new_this_week` flag, and sort by `signal_score` descending.
+
+### Dashboard Rendering Updates
+
+- Urgency red pulse dot for `urgency === 'high'` (spike-detected carriers)
+- Blue "NEW" badge for `is_new_this_week` auto-created accounts
+- Driver match count in prospect card subtitle
+- "AI Score" label under color-coded score badge
+- "Ranked by AI signal score" header subtitle
+
+### Bug Fixes (discovered during Phase 8)
+
+- Fixed 38 `result.data` references in bridge `routeAction()` to use correct service return keys
+- Fixed `captureLead` case: `accountResult.data` → `accountResult.account`
+- Fixed dashboard `VALID_ACTIONS` to match bridge response names (`topProspectsLoaded`, `kpisLoaded`, etc.)
+
+---
+
+## 9. LLM-Powered Research Briefs (Phase 9)
+
+Replaced template-based brief assembly with Claude API calls that generate structured, segment-personalized research briefs from 7 data sources. Existing template functions serve as automatic fallback.
+
+### Architecture
+
+```
+generateBrief(accountId)
+  ├─ cache check → return if fresh (7-day TTL)
+  ├─ Promise.all([6 existing sources + FMCSA live])  // each catches own errors
+  ├─ try: generateLLMBrief() → Claude API (30s timeout)
+  │   ├─ success: parse JSON → {highlights, talk_track, next_steps, confidence, sources}
+  │   └─ fail: throw
+  └─ catch: log error → buildHighlights + buildTalkTrack + buildNextSteps + buildSources
+            set generated_by='template_fallback', confidence='low'
+```
+
+### New Functions in `b2bResearchAgentService.jsw`
+
+| Function | Purpose |
+|----------|---------|
+| `fetchLiveFMCSA(carrierDot)` | Wraps `getCarrierSafetyData()` with safe try/catch; returns `{}` on failure so `Promise.all` never rejects |
+| `extractClaudeText(data)` | Extracts text from Claude Messages API response (`data.content[].text`) |
+| `buildResearchPrompt(...)` | Builds `{systemPrompt, userPrompt}` with all 7 data sources, segment tone, BASIC alert compliance guidance |
+| `parseResearchBriefResponse(text)` | Strips markdown fences, extracts/validates JSON, normalizes to brief schema |
+| `generateLLMBrief(...)` | Core Claude API caller — `fetch` + `Promise.race` timeout (30s), full observability logging |
+
+### LLM Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Model | `claude-sonnet-4-20250514` |
+| Endpoint | `https://api.anthropic.com/v1/messages` |
+| Timeout | 30,000ms |
+| Max Tokens | 1,500 |
+| Secret | `CLAUDE_API_KEY` (via `wix-secrets-backend`) |
+
+### Segment Tone Guide
+
+| Segment | Tone |
+|---------|------|
+| `enterprise` | ROI-focused, data-driven, executive language |
+| `mid_market` | Balanced efficiency and cost savings, scalability |
+| `regional` | Practical, relationship-focused, local knowledge |
+| `owner_operator` | Direct, simple, speed-focused, minimal paperwork |
+
+### Brief Output Schema
+
+```json
+{
+  "highlights": ["5-7 bullets, most important first"],
+  "talk_track": "3-5 sentences, segment tone, data-specific, CTA at end",
+  "next_steps": [{"text": "string", "type": "call|email|proposal|sequence|research|admin", "priority": 1}],
+  "confidence": "high|medium|low",
+  "sources": ["data sources used"]
+}
+```
+
+### Confidence Rules
+
+| Level | Criteria |
+|-------|----------|
+| `high` | 4+ data sources with verified data |
+| `medium` | Some data gaps |
+| `low` | Sparse data, or template fallback |
+
+### Frontend Updates (`B2B_RESEARCH_PANEL.html`)
+
+- **Confidence badge** — Color-coded (green/amber/red) with icon in header area
+- **Generated-by badge** — "AI-Powered" (blue) for `llm_claude`, "Template" (grey) for `template_fallback`
+- **Copy button** — On Talk Track section; `navigator.clipboard` primary, `execCommand('copy')` fallback for Wix iframes
+- **Source count badge** — Shows number of data sources contributed to the brief
+
+### Observability
+
+- `startTrace('b2b-research-brief', ...)` / `endTrace()` on every `generateBrief()` call
+- `logAIOperation()` on success: source=b2b-research-agent, function=research-brief-llm, provider=anthropic, token counts, latency
+- `logAIOperation()` on failure: same fields + error message
+- All logging is non-blocking (`.catch()` on log calls)
+
+---
+
+## 10. Dependencies
 
 | Track | Purpose | Status |
 |-------|---------|--------|
@@ -442,7 +578,7 @@ To grant B2B access to team members:
 
 ---
 
-## 9. Configuration
+## 11. Configuration
 
 ### config.jsw Registrations
 
@@ -482,3 +618,11 @@ All route to Airtable via the `v2_` prefix passthrough in `airtableClient.jsw`.
 
 - Cache TTL: 7 days
 - Force refresh available via `forceRefresh: true` parameter
+- Briefs include `confidence` (high/medium/low) and `generated_by` (llm_claude/template_fallback) fields
+- LLM generation via Claude API with 30s timeout; automatic template fallback on failure
+
+### Scheduled Jobs
+
+| Job | Function | Schedule | File |
+|-----|----------|----------|------|
+| Signal Prospecting Batch | `runB2BSignalBatch` | `0 3 * * *` (3 AM UTC daily) | `b2bMatchSignalService.jsw` |

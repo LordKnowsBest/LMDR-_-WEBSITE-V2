@@ -69,6 +69,7 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **forumService.jsw** - Driver community forums backend handling categories, threads, posts, and view tracking
 - **moderationService.jsw** - Content moderation system with automated filtering, user reporting, and admin review queue
 - **reputationService.jsw** - Bridge service connecting community actions (posts, likes, answers) to the gamification engine
+- **petFriendlyService.jsw** - Pet-friendly location search (geo-radius), submission, and review management
 
 **Public Services:**
 - **publicStatsService.jsw** - Public-facing platform statistics for homepage and landing pages (driver count, active carriers, hires)
@@ -122,6 +123,8 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - `ForumThreads` - Discussion topics with author and stats
 - `ForumPosts` - Individual posts and replies
 - `ForumReports` - Moderation queue for flagged content
+- `PetFriendlyLocations` - Crowdsourced pet-friendly stops with geo-data
+- `PetFriendlyReviews` - Driver reviews and amenity verification
 
 **Reviews & Testimonials:**
 - `CarrierReviews`, `CarrierTestimonials`, `DriverTestimonials`

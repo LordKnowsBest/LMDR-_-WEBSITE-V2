@@ -193,3 +193,15 @@ Supplementary docs are auto-injected by hooks when editing relevant files. They 
 - **Key Method:** `getRecruiterHealthStatus(carrierDot)`
 - **Features:** 30s Caching, Aggregated Status ('operational'|'degraded'|'outage').
 
+### Pet Friendly Service
+**File:** `src/backend/petFriendlyService.jsw`
+- **Purpose:** Manages crowdsourced pet-friendly locations and reviews.
+- **Key Methods:** `searchLocations(filters)`, `submitLocation(data)`, `submitReview(locationId, reviewData)`
+- **Features:** Proximity search, amenity filtering, automatic rating aggregation.
+
+### Health Service
+**File:** `src/backend/healthService.jsw`
+- **Purpose:** Manages trucker health content and community tips.
+- **Key Methods:** `getResourcesByCategory(cat)`, `submitTip(data)`, `getApprovedTips(cat)`
+- **Features:** Content categorization, community submission moderation, helpfulness tracking.
+
