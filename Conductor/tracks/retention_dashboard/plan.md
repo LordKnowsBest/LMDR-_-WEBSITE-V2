@@ -47,7 +47,7 @@ Stores historical risk assessments to track trends over time.
 
 ### 3.3 Frontend Components
 
-#### `src/public/Recruiter_Retention_Dashboard.html`
+#### `src/public/recruiter/Recruiter_Retention_Dashboard.html`
 *   **Fleet Overview**: Top-level stats (Avg Retention, High Risk Count).
 *   **"At Risk" Watchlist**: Table of drivers with High/Critical risk scores.
 *   **Driver Detail View**: Charts showing miles/pay trends vs risk.
@@ -63,7 +63,7 @@ Stores historical risk assessments to track trends over time.
 - [x] Create a scheduled job (optional) or on-demand function to refresh risk scores daily.
 
 ### Step 3: UI Implementation
-- [x] Create `src/public/Recruiter_Retention_Dashboard.html`.
+- [x] Create `src/public/recruiter/Recruiter_Retention_Dashboard.html`.
 - [x] Implement visualizations (using Chart.js or simple CSS bars) for:
     -   Retention Risk Distribution (Pie Chart).
     -   Top Risk Factors (Bar Chart).
@@ -80,7 +80,7 @@ Stores historical risk assessments to track trends over time.
 
 ### Manual Verification
 1.  **Seed Data**: Run a script to generate 10 drivers with varying performance stats.
-2.  **View Dashboard**: Open `Recruiter_Retention_Dashboard.html` via the Wix Editor "Preview" or standardized test harness.
+2.  **View Dashboard**: Open `src/public/recruiter/Recruiter_Retention_Dashboard.html` via the Wix Editor "Preview" or standardized test harness.
 3.  **Check Predictions**:
     *   Find a driver with "Safety Incidents > 2".
     *   Verify they appear in the "High Risk" list.

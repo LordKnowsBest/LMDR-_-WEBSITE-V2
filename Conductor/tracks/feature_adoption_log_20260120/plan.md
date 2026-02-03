@@ -1160,7 +1160,7 @@ async function submitApplication() {
 
 ### 7.3 Instrumenting Recruiter Pipeline
 
-**File:** `src/public/recruiter/RecruiterPipeline.html` (or page code)
+**File:** `src/public/recruiter/Recruiter_Pipeline_Page.html` (or page code)
 
 ```javascript
 // Track pipeline view

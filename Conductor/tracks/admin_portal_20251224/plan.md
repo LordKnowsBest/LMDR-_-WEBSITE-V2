@@ -4,7 +4,7 @@
 
 ### 1.1 Portal Structure
 - [x] Task: Create Admin Portal page in Wix Editor (`Admin-Portal`)
-- [x] Task: Build collapsible sidebar navigation component (`ADMIN_SIDEBAR.html`)
+- [x] Task: Build collapsible sidebar navigation component (`src/public/utility/SETTINGS_SIDEBAR.html`)
 - [x] Task: Build header bar with search, notifications, and profile menu
 - [x] Task: Implement dark theme CSS following admin design tokens
 - [x] Task: Create responsive layout breakpoints (desktop-first, tablet support)
