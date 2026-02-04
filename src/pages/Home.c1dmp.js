@@ -111,7 +111,7 @@ async function loadPlatformStats() {
     // If there's an HTML stats component, send data to it
     try {
       const htmlStats = $w('#homeStatsHtml');
-      if (htmlStats && htmlStats.postMessage) {
+      if (htmlStats.rendered && htmlStats.postMessage) {
         htmlStats.postMessage({ type: 'platformStats', stats });
       }
     } catch (e) {
@@ -132,15 +132,15 @@ async function loadFeaturedCarriers() {
     const carriers = await getFeaturedCarriers(8);
 
     const repeater = $w('#featuredCarriersRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = carriers;
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#carrierName')) $item('#carrierName').text = itemData.name;
-          if ($item('#carrierLocation')) $item('#carrierLocation').text = itemData.location;
-          if ($item('#carrierTagline')) $item('#carrierTagline').text = itemData.tagline;
-          if ($item('#carrierLogo') && itemData.logo) {
+          if ($item('#carrierName').rendered) $item('#carrierName').text = itemData.name;
+          if ($item('#carrierLocation').rendered) $item('#carrierLocation').text = itemData.location;
+          if ($item('#carrierTagline').rendered) $item('#carrierTagline').text = itemData.tagline;
+          if ($item('#carrierLogo').rendered && itemData.logo) {
             $item('#carrierLogo').src = itemData.logo;
           }
         } catch (e) {
@@ -152,7 +152,7 @@ async function loadFeaturedCarriers() {
     // If there's an HTML carousel component
     try {
       const htmlCarousel = $w('#featuredCarriersHtml');
-      if (htmlCarousel && htmlCarousel.postMessage) {
+      if (htmlCarousel.rendered && htmlCarousel.postMessage) {
         htmlCarousel.postMessage({ type: 'carriers', data: carriers });
       }
     } catch (e) {
@@ -173,7 +173,7 @@ async function loadRecentPlacements() {
     const hires = await getRecentHires(5);
 
     const repeater = $w('#recentHiresRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = hires.map((h, i) => ({
         _id: `hire-${i}`,
         ...h
@@ -181,15 +181,15 @@ async function loadRecentPlacements() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#hireLocation')) $item('#hireLocation').text = itemData.location;
-          if ($item('#hireDaysAgo')) {
+          if ($item('#hireLocation').rendered) $item('#hireLocation').text = itemData.location;
+          if ($item('#hireDaysAgo').rendered) {
             $item('#hireDaysAgo').text = itemData.daysAgo === 0
               ? 'Today'
               : itemData.daysAgo === 1
                 ? '1 day ago'
                 : `${itemData.daysAgo} days ago`;
           }
-          if ($item('#hireType')) $item('#hireType').text = itemData.operationType;
+          if ($item('#hireType').rendered) $item('#hireType').text = itemData.operationType;
         } catch (e) {
           // Element may not exist
         }
@@ -199,7 +199,7 @@ async function loadRecentPlacements() {
     // If there's an HTML ticker component
     try {
       const htmlTicker = $w('#recentHiresHtml');
-      if (htmlTicker && htmlTicker.postMessage) {
+      if (htmlTicker.rendered && htmlTicker.postMessage) {
         htmlTicker.postMessage({ type: 'recentHires', hires });
       }
     } catch (e) {

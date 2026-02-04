@@ -59,7 +59,7 @@ async function loadRegionalJobs() {
         const jobs = await getJobsByOperationType('Regional', 8);
         regionalJobs = jobs;
 
-        if ($w('#regionalJobsRepeater')) {
+        if ($w('#regionalJobsRepeater').rendered) {
             if (jobs.length > 0) {
                 $w('#regionalJobsRepeater').data = jobs;
                 $w('#regionalJobsRepeater').onItemReady(($item, itemData) => {
@@ -153,7 +153,7 @@ async function loadHomeTimeStats() {
     };
 
     // Update individual stat elements if they exist
-    if ($w('#homeTimeStats')) {
+    if ($w('#homeTimeStats').rendered) {
         // If it's a container, update child elements
         updateStatElement('#homeNightlyValue', stats.homeNightly.value);
         updateStatElement('#homeNightlyLabel', stats.homeNightly.label);
@@ -166,7 +166,7 @@ async function loadHomeTimeStats() {
     }
 
     // If there's a stats repeater instead
-    if ($w('#homeTimeStatsRepeater')) {
+    if ($w('#homeTimeStatsRepeater').rendered) {
         const statsArray = Object.values(stats).map((stat, index) => ({
             _id: `stat_${index}`,
             ...stat
@@ -231,7 +231,7 @@ async function loadWorkLifeBalance() {
         }
     ];
 
-    if ($w('#workLifeRepeater')) {
+    if ($w('#workLifeRepeater').rendered) {
         $w('#workLifeRepeater').data = benefits;
         $w('#workLifeRepeater').onItemReady(($item, itemData) => {
             if ($item('#benefitTitle')) $item('#benefitTitle').text = itemData.title;
@@ -303,7 +303,7 @@ async function loadRegionalRoutes() {
         }
     ];
 
-    if ($w('#routesRepeater')) {
+    if ($w('#routesRepeater').rendered) {
         $w('#routesRepeater').data = routes;
         $w('#routesRepeater').onItemReady(($item, itemData) => {
             if ($item('#routeRegion')) $item('#routeRegion').text = itemData.region;
@@ -329,7 +329,7 @@ async function loadRegionalRoutes() {
  * Update Regional statistics display
  */
 function updateRegionalStats(jobs) {
-    if ($w('#regionalStatsText')) {
+    if ($w('#regionalStatsText').rendered) {
         const homeNightlyCount = jobs.filter(j =>
             j.homeTime && j.homeTime.toLowerCase().includes('daily') ||
             j.homeTime && j.homeTime.toLowerCase().includes('nightly')
@@ -338,7 +338,7 @@ function updateRegionalStats(jobs) {
         $w('#regionalStatsText').text = `${jobs.length} Regional positions | ${homeNightlyCount} Home Nightly`;
     }
 
-    if ($w('#totalRegionalJobs')) {
+    if ($w('#totalRegionalJobs').rendered) {
         $w('#totalRegionalJobs').text = jobs.length.toString();
     }
 }
@@ -348,7 +348,7 @@ function updateRegionalStats(jobs) {
  */
 function updateStatElement(selector, value) {
     try {
-        if ($w(selector)) {
+        if ($w(selector).rendered) {
             $w(selector).text = value;
         }
     } catch (e) {
@@ -361,29 +361,29 @@ function updateStatElement(selector, value) {
  */
 function setupEventHandlers() {
     // Main CTA button
-    if ($w('#applyRegionalBtn')) {
+    if ($w('#applyRegionalBtn').rendered) {
         $w('#applyRegionalBtn').onClick(() => {
             wixLocation.to('/apply-for-cdl-driving-jobs?type=Regional');
         });
     }
 
     // Alternative CTA buttons
-    if ($w('#applyNowButton')) {
+    if ($w('#applyNowButton').rendered) {
         $w('#applyNowButton').onClick(() => {
             wixLocation.to('/apply-for-cdl-driving-jobs?type=Regional');
         });
     }
 
     // Filter buttons
-    if ($w('#filterHomeNightly')) {
+    if ($w('#filterHomeNightly').rendered) {
         $w('#filterHomeNightly').onClick(() => filterByHomeTime('daily'));
     }
 
-    if ($w('#filterHomeWeekly')) {
+    if ($w('#filterHomeWeekly').rendered) {
         $w('#filterHomeWeekly').onClick(() => filterByHomeTime('weekly'));
     }
 
-    if ($w('#filterWeekendsOff')) {
+    if ($w('#filterWeekendsOff').rendered) {
         $w('#filterWeekendsOff').onClick(() => filterByHomeTime('weekends'));
     }
 }
@@ -420,7 +420,7 @@ function filterByHomeTime(preference) {
             break;
     }
 
-    if ($w('#regionalJobsRepeater')) {
+    if ($w('#regionalJobsRepeater').rendered) {
         $w('#regionalJobsRepeater').data = filtered.length > 0 ? filtered : regionalJobs;
     }
 }
@@ -446,7 +446,7 @@ function filterJobsByRegion(region) {
         return states.includes(jobState);
     });
 
-    if ($w('#regionalJobsRepeater')) {
+    if ($w('#regionalJobsRepeater').rendered) {
         $w('#regionalJobsRepeater').data = filtered.length > 0 ? filtered : regionalJobs;
     }
 }
@@ -457,7 +457,7 @@ function filterJobsByRegion(region) {
 function showLoadingState(loading) {
     isLoading = loading;
 
-    if ($w('#loadingIndicator')) {
+    if ($w('#loadingIndicator').rendered) {
         loading ? $w('#loadingIndicator').show() : $w('#loadingIndicator').hide();
     }
 }

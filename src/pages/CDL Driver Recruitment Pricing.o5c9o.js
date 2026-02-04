@@ -88,16 +88,16 @@ async function loadPricingTiers() {
     repeater.onItemReady(($item, itemData) => {
       try {
         // Basic tier info
-        if ($item('#tierName')) $item('#tierName').text = itemData.name;
-        if ($item('#tierPrice')) $item('#tierPrice').text = itemData.price;
-        if ($item('#tierSubtext')) $item('#tierSubtext').text = itemData.priceSubtext || '';
-        if ($item('#tierDescription')) $item('#tierDescription').text = itemData.description || '';
+        if ($item('#tierName').rendered) $item('#tierName').text = itemData.name;
+        if ($item('#tierPrice').rendered) $item('#tierPrice').text = itemData.price;
+        if ($item('#tierSubtext').rendered) $item('#tierSubtext').text = itemData.priceSubtext || '';
+        if ($item('#tierDescription').rendered) $item('#tierDescription').text = itemData.description || '';
 
         // Popular badge
         if (itemData.isPopular) {
           try {
             const badge = $item('#popularBadge');
-            if (badge) {
+            if (badge.rendered) {
               if (itemData.badgeText) {
                 badge.text = itemData.badgeText;
               }
@@ -110,7 +110,7 @@ async function loadPricingTiers() {
           // Highlight popular tier container
           try {
             const tierContainer = $item('#tierContainer');
-            if (tierContainer && tierContainer.style) {
+            if (tierContainer.rendered && tierContainer.style) {
               tierContainer.style.borderColor = '#4A90D9';
               tierContainer.style.borderWidth = '3px';
             }
@@ -120,7 +120,7 @@ async function loadPricingTiers() {
         } else {
           try {
             const badge = $item('#popularBadge');
-            if (badge && badge.hide) badge.hide();
+            if (badge.rendered && badge.hide) badge.hide();
           } catch (e) {
             // Element may not exist
           }
@@ -129,7 +129,7 @@ async function loadPricingTiers() {
         // CTA button
         try {
           const ctaBtn = $item('#tierCtaBtn');
-          if (ctaBtn) {
+          if (ctaBtn.rendered) {
             ctaBtn.label = itemData.ctaText;
             ctaBtn.onClick(() => {
               // Track pricing CTA click
@@ -144,7 +144,7 @@ async function loadPricingTiers() {
         // Features list repeater
         try {
           const featuresRepeater = $item('#tierFeaturesRepeater');
-          if (featuresRepeater && itemData.features.length > 0) {
+          if (featuresRepeater.rendered && itemData.features.length > 0) {
             featuresRepeater.data = itemData.features.map((feature, i) => ({
               _id: `feature-${i}`,
               text: feature
@@ -168,7 +168,7 @@ async function loadPricingTiers() {
           // Features repeater may not exist - try text list
           try {
             const featuresList = $item('#tierFeaturesList');
-            if (featuresList) {
+            if (featuresList.rendered) {
               featuresList.text = itemData.features.join('\n');
             }
           } catch (e2) {
@@ -457,7 +457,7 @@ async function loadPricingFaqs() {
     // Send to HTML accordion component
     try {
       const htmlComponent = $w('#faqAccordionHtml');
-      if (htmlComponent && typeof htmlComponent.postMessage === 'function') {
+      if (htmlComponent.rendered && typeof htmlComponent.postMessage === 'function') {
         htmlComponent.postMessage({
           type: 'faqData',
           data: faqs
@@ -470,7 +470,7 @@ async function loadPricingFaqs() {
     // Also try native Wix repeater
     try {
       const faqRepeater = $w('#faqRepeater');
-      if (faqRepeater && faqRepeater.data !== undefined) {
+      if (faqRepeater.rendered && faqRepeater.data !== undefined) {
         faqRepeater.data = faqs.map((faq, index) => ({
           _id: `faq-${index}`,
           question: faq.question,
@@ -480,19 +480,19 @@ async function loadPricingFaqs() {
 
         faqRepeater.onItemReady(($item, itemData) => {
           try {
-            if ($item('#faqQuestion')) $item('#faqQuestion').text = itemData.question;
-            if ($item('#faqAnswer')) {
+            if ($item('#faqQuestion').rendered) $item('#faqQuestion').text = itemData.question;
+            if ($item('#faqAnswer').rendered) {
               $item('#faqAnswer').text = itemData.answer;
               $item('#faqAnswer').collapse();
             }
 
             // Toggle FAQ accordion
             const toggleBtn = $item('#faqToggleBtn') || $item('#faqQuestion');
-            if (toggleBtn && toggleBtn.onClick) {
+            if (toggleBtn.rendered && toggleBtn.onClick) {
               toggleBtn.onClick(() => {
                 try {
                   const answer = $item('#faqAnswer');
-                  if (answer) {
+                  if (answer.rendered) {
                     if (answer.collapsed) {
                       answer.expand();
                     } else {
@@ -601,7 +601,7 @@ $w.onReady(() => {
   // Get Started CTA
   try {
     const getStartedBtn = $w('#getStartedBtn');
-    if (getStartedBtn) {
+    if (getStartedBtn.rendered) {
       getStartedBtn.onClick(() => {
         trackPricingClick('Get Started Hero');
         wixLocation.to('/carrier-welcome');
@@ -614,7 +614,7 @@ $w.onReady(() => {
   // Contact Sales CTA
   try {
     const contactSalesBtn = $w('#contactSalesBtn');
-    if (contactSalesBtn) {
+    if (contactSalesBtn.rendered) {
       contactSalesBtn.onClick(() => {
         trackPricingClick('Contact Sales');
         wixLocation.to('/contact');
@@ -627,7 +627,7 @@ $w.onReady(() => {
   // Schedule Demo CTA
   try {
     const scheduleDemoBtn = $w('#scheduleDemoBtn');
-    if (scheduleDemoBtn) {
+    if (scheduleDemoBtn.rendered) {
       scheduleDemoBtn.onClick(() => {
         trackPricingClick('Schedule Demo');
         wixLocation.to('/schedule-demo');
@@ -665,7 +665,7 @@ function initPricingWidgetForm() {
     }
   }
 
-  if (!htmlComponent) {
+  if (!htmlComponent.rendered) {
     console.log('No HTML component found for pricing widget form');
     return;
   }
@@ -762,7 +762,7 @@ function initSubscriptionHandlers() {
     }
   }
 
-  if (!htmlComponent) {
+  if (!htmlComponent.rendered) {
     console.log('No HTML component found for subscription handlers');
     return;
   }

@@ -49,7 +49,7 @@ async function loadLastMileJobs() {
     }
 
     const repeater = $w('#lastMileJobsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = jobs.map(job => ({
         _id: job._id,
         carrierName: job.carrierName,
@@ -63,18 +63,18 @@ async function loadLastMileJobs() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#jobCarrierName')) $item('#jobCarrierName').text = itemData.carrierName;
-          if ($item('#jobPayRange')) $item('#jobPayRange').text = itemData.payRange;
-          if ($item('#jobLocation')) $item('#jobLocation').text = itemData.location;
-          if ($item('#jobHomeTime')) $item('#jobHomeTime').text = itemData.homeTime;
-          if ($item('#jobBenefits')) $item('#jobBenefits').text = itemData.benefits;
-          if ($item('#jobFleetSize')) $item('#jobFleetSize').text = itemData.fleetSize;
-          if ($item('#jobOperationType')) $item('#jobOperationType').text = itemData.operationType;
+          if ($item('#jobCarrierName').rendered) $item('#jobCarrierName').text = itemData.carrierName;
+          if ($item('#jobPayRange').rendered) $item('#jobPayRange').text = itemData.payRange;
+          if ($item('#jobLocation').rendered) $item('#jobLocation').text = itemData.location;
+          if ($item('#jobHomeTime').rendered) $item('#jobHomeTime').text = itemData.homeTime;
+          if ($item('#jobBenefits').rendered) $item('#jobBenefits').text = itemData.benefits;
+          if ($item('#jobFleetSize').rendered) $item('#jobFleetSize').text = itemData.fleetSize;
+          if ($item('#jobOperationType').rendered) $item('#jobOperationType').text = itemData.operationType;
 
           // Apply button
           try {
             const applyBtn = $item('#jobApplyBtn');
-            if (applyBtn) {
+            if (applyBtn.rendered) {
               applyBtn.onClick(() => {
                 wixLocation.to(`/driver-jobs/${itemData._id}`);
               });
@@ -107,7 +107,7 @@ async function loadLastMilePartners() {
     // If we have partners with logos, use them
     if (partners.length > 0) {
       const repeater = $w('#partnersRepeater');
-      if (repeater && repeater.data !== undefined) {
+      if (repeater.rendered && repeater.data !== undefined) {
         repeater.data = partners.map(p => ({
           _id: p._id,
           name: p.name,
@@ -116,11 +116,11 @@ async function loadLastMilePartners() {
 
         repeater.onItemReady(($item, itemData) => {
           try {
-            if ($item('#partnerLogo') && itemData.logoUrl) {
+            if ($item('#partnerLogo').rendered && itemData.logoUrl) {
               $item('#partnerLogo').src = itemData.logoUrl;
               $item('#partnerLogo').alt = itemData.name;
             }
-            if ($item('#partnerName')) {
+            if ($item('#partnerName').rendered) {
               $item('#partnerName').text = itemData.name;
             }
           } catch (e) {
@@ -154,7 +154,7 @@ function showDefaultPartners() {
 
   try {
     const repeater = $w('#partnersRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = defaultPartners.map((p, i) => ({
         _id: `default-${i}`,
         name: p.name,
@@ -163,8 +163,8 @@ function showDefaultPartners() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#partnerName')) $item('#partnerName').text = itemData.name;
-          if ($item('#partnerCategory')) $item('#partnerCategory').text = itemData.category;
+          if ($item('#partnerName').rendered) $item('#partnerName').text = itemData.name;
+          if ($item('#partnerCategory').rendered) $item('#partnerCategory').text = itemData.category;
         } catch (e) {
           // Element may not exist
         }
@@ -210,7 +210,7 @@ async function loadScheduleFlexibility() {
 
   try {
     const repeater = $w('#scheduleOptions');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = scheduleOptions.map((opt, i) => ({
         _id: `schedule-${i}`,
         ...opt
@@ -218,9 +218,9 @@ async function loadScheduleFlexibility() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#scheduleTitle')) $item('#scheduleTitle').text = itemData.title;
-          if ($item('#scheduleHours')) $item('#scheduleHours').text = itemData.hours;
-          if ($item('#scheduleDescription')) $item('#scheduleDescription').text = itemData.description;
+          if ($item('#scheduleTitle').rendered) $item('#scheduleTitle').text = itemData.title;
+          if ($item('#scheduleHours').rendered) $item('#scheduleHours').text = itemData.hours;
+          if ($item('#scheduleDescription').rendered) $item('#scheduleDescription').text = itemData.description;
         } catch (e) {
           // Element may not exist
         }
@@ -239,7 +239,7 @@ async function loadScheduleFlexibility() {
 async function loadEarningsCalculator() {
   try {
     const htmlComponent = $w('#earningsCalculatorHtml');
-    if (htmlComponent && htmlComponent.postMessage) {
+    if (htmlComponent.rendered && htmlComponent.postMessage) {
       // Send calculator configuration
       htmlComponent.postMessage({
         type: 'calculatorConfig',
@@ -335,7 +335,7 @@ async function loadLocalBenefits() {
 
   try {
     const repeater = $w('#benefitsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = benefits.map((b, i) => ({
         _id: `benefit-${i}`,
         ...b
@@ -343,8 +343,8 @@ async function loadLocalBenefits() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#benefitTitle')) $item('#benefitTitle').text = itemData.title;
-          if ($item('#benefitDescription')) $item('#benefitDescription').text = itemData.description;
+          if ($item('#benefitTitle').rendered) $item('#benefitTitle').text = itemData.title;
+          if ($item('#benefitDescription').rendered) $item('#benefitDescription').text = itemData.description;
         } catch (e) {
           // Element may not exist
         }
@@ -362,7 +362,7 @@ function setupEventHandlers() {
   // Apply Now CTA button
   try {
     const applyBtn = $w('#applyNowBtn');
-    if (applyBtn) {
+    if (applyBtn.rendered) {
       applyBtn.onClick(() => {
         wixLocation.to('/quick-apply');
       });
@@ -374,7 +374,7 @@ function setupEventHandlers() {
   // Browse All Jobs button
   try {
     const browseBtn = $w('#browseJobsBtn');
-    if (browseBtn) {
+    if (browseBtn.rendered) {
       browseBtn.onClick(() => {
         wixLocation.to('/driver-opportunities?type=last-mile');
       });
@@ -386,9 +386,11 @@ function setupEventHandlers() {
   // Contact form submission
   try {
     const contactForm = $w('#contactForm');
-    if (contactForm) {
+    if (contactForm.rendered) {
       contactForm.onSubmit(() => {
-        $w('#thankYouMessage').show();
+        if ($w('#thankYouMessage').rendered) {
+          $w('#thankYouMessage').show();
+        }
       });
     }
   } catch (e) {
@@ -402,7 +404,7 @@ function setupEventHandlers() {
 function hideJobsSection() {
   try {
     const section = $w('#jobsSection');
-    if (section && section.collapse) {
+    if (section.rendered && section.collapse) {
       section.collapse();
     }
   } catch (e) {
@@ -438,7 +440,7 @@ function initCarrierStaffingForm() {
       }
     }
 
-    if (!htmlComponent) {
+    if (!htmlComponent.rendered) {
       console.log('[StaffingForm] No HTML component found - form may be standalone');
       return;
     }

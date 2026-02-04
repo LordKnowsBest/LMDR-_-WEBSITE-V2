@@ -53,7 +53,7 @@ async function loadComplianceOverview() {
     // Set main content HTML if available
     try {
       const contentHtml = $w('#complianceContent');
-      if (contentHtml && contentHtml.postMessage && guide.contentHtml) {
+      if (contentHtml.rendered && contentHtml.postMessage && guide.contentHtml) {
         contentHtml.postMessage({
           type: 'complianceContent',
           data: guide.contentHtml
@@ -106,7 +106,7 @@ async function loadRegulationsSummary() {
     }
 
     const htmlAccordion = $w('#regulationsAccordion');
-    if (htmlAccordion && htmlAccordion.postMessage) {
+    if (htmlAccordion.rendered && htmlAccordion.postMessage) {
       htmlAccordion.postMessage({
         type: 'regulationsData',
         data: guide.regulations.map(reg => ({
@@ -138,7 +138,7 @@ function showDefaultRegulations() {
 
   try {
     const htmlAccordion = $w('#regulationsAccordion');
-    if (htmlAccordion && htmlAccordion.postMessage) {
+    if (htmlAccordion.rendered && htmlAccordion.postMessage) {
       htmlAccordion.postMessage({
         type: 'regulationsData',
         data: defaultRegs
@@ -158,7 +158,7 @@ async function loadChecklistDownload() {
     const guide = await getComplianceGuide('dot-driver-hiring');
 
     const downloadBtn = $w('#downloadBtn');
-    if (downloadBtn) {
+    if (downloadBtn.rendered) {
       if (guide && guide.checklistPdfUrl) {
         downloadBtn.link = guide.checklistPdfUrl;
         downloadBtn.target = '_blank';
@@ -191,7 +191,7 @@ async function loadComplianceFaqs() {
       // Hide FAQ section if no data
       try {
         const section = $w('#faqSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -199,7 +199,7 @@ async function loadComplianceFaqs() {
     }
 
     const htmlFaq = $w('#faqAccordionHtml');
-    if (htmlFaq && htmlFaq.postMessage) {
+    if (htmlFaq.rendered && htmlFaq.postMessage) {
       htmlFaq.postMessage({
         type: 'faqData',
         data: faqs.map(faq => ({
@@ -213,7 +213,7 @@ async function loadComplianceFaqs() {
     console.error('Failed to load compliance FAQs:', err);
     try {
       const section = $w('#faqSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }
@@ -236,7 +236,7 @@ async function loadRelatedGuides() {
     if (relatedGuides.length === 0) {
       try {
         const section = $w('#relatedGuidesSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -244,7 +244,7 @@ async function loadRelatedGuides() {
     }
 
     const repeater = $w('#relatedGuidesRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = relatedGuides.map(guide => ({
         _id: guide._id || guide.slug,
         title: guide.title,
@@ -255,14 +255,14 @@ async function loadRelatedGuides() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#guideTitle')) $item('#guideTitle').text = itemData.title;
-          if ($item('#guideExcerpt')) $item('#guideExcerpt').text = itemData.excerpt;
-          if ($item('#guideThumbnail') && itemData.thumbnailUrl) {
+          if ($item('#guideTitle').rendered) $item('#guideTitle').text = itemData.title;
+          if ($item('#guideExcerpt').rendered) $item('#guideExcerpt').text = itemData.excerpt;
+          if ($item('#guideThumbnail').rendered && itemData.thumbnailUrl) {
             $item('#guideThumbnail').src = itemData.thumbnailUrl;
           }
 
           const guideLink = $item('#guideLink');
-          if (guideLink) {
+          if (guideLink.rendered) {
             guideLink.onClick(() => {
               import('wix-location').then(wixLocation => {
                 wixLocation.to(itemData.url);
@@ -279,7 +279,7 @@ async function loadRelatedGuides() {
     console.error('Failed to load related guides:', err);
     try {
       const section = $w('#relatedGuidesSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }

@@ -648,7 +648,7 @@ $w.onReady(async () => {
         try {
           const htmlComponent = $w('#html4');
           
-          if (htmlComponent && typeof htmlComponent.postMessage === 'function') {
+          if (htmlComponent.rendered && typeof htmlComponent.postMessage === 'function') {
             htmlComponent.postMessage(jobData);
             console.log('✅ postMessage sent successfully to #html4');
           } else {

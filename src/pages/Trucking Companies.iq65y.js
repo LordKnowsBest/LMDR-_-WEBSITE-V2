@@ -36,7 +36,7 @@ function setupCarrierFormHandler() {
   possibleIds.forEach(htmlId => {
     try {
       const htmlComponent = $w(htmlId);
-      if (htmlComponent && htmlComponent.onMessage) {
+      if (htmlComponent.rendered && htmlComponent.onMessage) {
         console.log(`[VELO] ✅ Found HTML component: ${htmlId}`);
 
         // Listen for form ready signal and submissions
@@ -156,7 +156,7 @@ async function loadCarrierStats() {
     Object.entries(statElements).forEach(([selector, value]) => {
       try {
         const element = $w(selector);
-        if (element && element.text !== undefined) {
+        if (element.rendered && element.text !== undefined) {
           element.text = value;
         }
       } catch (e) {
@@ -167,7 +167,7 @@ async function loadCarrierStats() {
     // Send to HTML stats component if exists
     try {
       const htmlStats = $w('#carrierStatsHtml');
-      if (htmlStats && htmlStats.postMessage) {
+      if (htmlStats.rendered && htmlStats.postMessage) {
         htmlStats.postMessage({ type: 'carrierStats', stats });
       }
     } catch (e) {
@@ -195,7 +195,7 @@ async function loadCarrierTestimonials() {
       // Hide testimonials section if no data
       try {
         const section = $w('#carrierTestimonialsSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -203,7 +203,7 @@ async function loadCarrierTestimonials() {
     }
 
     const repeater = $w('#carrierTestimonialsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = result.items.map(t => ({
         _id: t._id,
         quote: t.testimonial_text,
@@ -217,12 +217,12 @@ async function loadCarrierTestimonials() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#testimonialQuote')) $item('#testimonialQuote').text = `"${itemData.quote}"`;
-          if ($item('#testimonialCompany')) $item('#testimonialCompany').text = itemData.companyName;
-          if ($item('#testimonialContact')) $item('#testimonialContact').text = itemData.contactName;
-          if ($item('#testimonialTitle')) $item('#testimonialTitle').text = itemData.contactTitle;
-          if ($item('#testimonialHires')) $item('#testimonialHires').text = `${itemData.hiresCount} hires`;
-          if ($item('#testimonialLogo') && itemData.logoUrl) {
+          if ($item('#testimonialQuote').rendered) $item('#testimonialQuote').text = `"${itemData.quote}"`;
+          if ($item('#testimonialCompany').rendered) $item('#testimonialCompany').text = itemData.companyName;
+          if ($item('#testimonialContact').rendered) $item('#testimonialContact').text = itemData.contactName;
+          if ($item('#testimonialTitle').rendered) $item('#testimonialTitle').text = itemData.contactTitle;
+          if ($item('#testimonialHires').rendered) $item('#testimonialHires').text = `${itemData.hiresCount} hires`;
+          if ($item('#testimonialLogo').rendered && itemData.logoUrl) {
             $item('#testimonialLogo').src = itemData.logoUrl;
           }
         } catch (e) {
@@ -236,7 +236,7 @@ async function loadCarrierTestimonials() {
     console.log('CarrierTestimonials collection not found or empty');
     try {
       const section = $w('#carrierTestimonialsSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }

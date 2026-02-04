@@ -53,7 +53,7 @@ $w.onReady(async function () {
 async function loadUrgencyBanner() {
   try {
     const banner = $w('#urgencyBanner');
-    if (!banner) return;
+    if (!banner.rendered) return;
 
     // Get current urgent opportunities count
     const urgentJobs = await getPremiumOpportunities(10);
@@ -138,7 +138,7 @@ function updateCountdown(deadline) {
     clearInterval(countdownInterval);
     try {
       const timerElement = $w('#countdownTimer');
-      if (timerElement && timerElement.text !== undefined) {
+      if (timerElement.rendered && timerElement.text !== undefined) {
         timerElement.text = 'Application deadline passed';
       }
     } catch (e) {
@@ -155,7 +155,7 @@ function updateCountdown(deadline) {
 
   try {
     const timerElement = $w('#countdownTimer');
-    if (timerElement && timerElement.text !== undefined) {
+    if (timerElement.rendered && timerElement.text !== undefined) {
       timerElement.text = timeString;
     }
   } catch (e) {
@@ -187,7 +187,7 @@ function updateCountdown(deadline) {
 function sendCountdownToHtml(deadline) {
   try {
     const htmlComponent = $w('#rapidResponseHtml');
-    if (htmlComponent && typeof htmlComponent.postMessage === 'function') {
+    if (htmlComponent.rendered && typeof htmlComponent.postMessage === 'function') {
       htmlComponent.postMessage({
         type: 'countdown',
         deadline: deadline.toISOString(),
@@ -333,7 +333,7 @@ function displayJobDetails(job) {
   if (job.signOnBonus) {
     try {
       const bonusBadge = $w('#signOnBonusBadge');
-      if (bonusBadge) {
+      if (bonusBadge.rendered) {
         bonusBadge.text = `$${job.signOnBonus.toLocaleString()} Sign-On Bonus!`;
         bonusBadge.show();
       }
@@ -346,7 +346,7 @@ function displayJobDetails(job) {
   if (job.logoUrl) {
     try {
       const logo = $w('#companyLogo');
-      if (logo && logo.src !== undefined) {
+      if (logo.rendered && logo.src !== undefined) {
         logo.src = job.logoUrl;
         logo.show();
       }
@@ -358,7 +358,7 @@ function displayJobDetails(job) {
   // Show job details section
   try {
     const section = $w('#jobDetailsSection');
-    if (section && section.show) section.show();
+    if (section.rendered && section.show) section.show();
   } catch (e) {
     // Section may not exist
   }
@@ -373,7 +373,7 @@ function displayJobDetails(job) {
 function sendJobToHtml(job) {
   try {
     const htmlComponent = $w('#rapidResponseHtml');
-    if (htmlComponent && typeof htmlComponent.postMessage === 'function') {
+    if (htmlComponent.rendered && typeof htmlComponent.postMessage === 'function') {
       htmlComponent.postMessage({
         type: 'jobDetails',
         job: job
@@ -390,10 +390,10 @@ function sendJobToHtml(job) {
 function showNoJobMessage() {
   try {
     const section = $w('#jobDetailsSection');
-    if (section && section.collapse) section.collapse();
+    if (section.rendered && section.collapse) section.collapse();
 
     const noJobMessage = $w('#noJobMessage');
-    if (noJobMessage && noJobMessage.show) noJobMessage.show();
+    if (noJobMessage.rendered && noJobMessage.show) noJobMessage.show();
   } catch (e) {
     // Elements may not exist
   }
@@ -462,16 +462,16 @@ function displaySimilarJobs(jobs) {
 
     repeater.onItemReady(($item, itemData) => {
       try {
-        if ($item('#similarJobCarrier')) $item('#similarJobCarrier').text = itemData.carrierName;
-        if ($item('#similarJobPay')) $item('#similarJobPay').text = itemData.payRange;
-        if ($item('#similarJobLocation')) $item('#similarJobLocation').text = itemData.location;
-        if ($item('#similarJobType')) $item('#similarJobType').text = itemData.operationType;
+        if ($item('#similarJobCarrier').rendered) $item('#similarJobCarrier').text = itemData.carrierName;
+        if ($item('#similarJobPay').rendered) $item('#similarJobPay').text = itemData.payRange;
+        if ($item('#similarJobLocation').rendered) $item('#similarJobLocation').text = itemData.location;
+        if ($item('#similarJobType').rendered) $item('#similarJobType').text = itemData.operationType;
 
         // Urgency badge
         if (itemData.urgencyLevel === 'high' || itemData.signOnBonus) {
           try {
             const urgencyBadge = $item('#urgencyBadge');
-            if (urgencyBadge) {
+            if (urgencyBadge.rendered) {
               urgencyBadge.text = itemData.signOnBonus ? 'Bonus!' : 'Urgent';
               urgencyBadge.show();
             }
@@ -483,7 +483,7 @@ function displaySimilarJobs(jobs) {
         // View job button
         try {
           const viewBtn = $item('#viewJobBtn');
-          if (viewBtn) {
+          if (viewBtn.rendered) {
             viewBtn.onClick(() => {
               wixLocation.to(`/rapid-response-job-description?id=${itemData._id}`);
             });
@@ -495,7 +495,7 @@ function displaySimilarJobs(jobs) {
         // Quick apply button for similar jobs
         try {
           const quickApplyBtn = $item('#similarQuickApplyBtn');
-          if (quickApplyBtn) {
+          if (quickApplyBtn.rendered) {
             quickApplyBtn.onClick(() => {
               handleQuickApply(itemData._id);
             });
@@ -520,7 +520,7 @@ function displaySimilarJobs(jobs) {
 function hideSimilarJobsSection() {
   try {
     const section = $w('#similarJobsSection');
-    if (section && section.collapse) section.collapse();
+    if (section.rendered && section.collapse) section.collapse();
   } catch (e) {
     // Section may not exist
   }
@@ -537,7 +537,7 @@ function hideSimilarJobsSection() {
 async function loadQuickApplyCta() {
   try {
     const quickApplyBtn = $w('#quickApplyBtn');
-    if (!quickApplyBtn) return;
+    if (!quickApplyBtn.rendered) return;
 
     const user = wixUsers.currentUser;
     const isLoggedIn = user.loggedIn;
@@ -567,7 +567,7 @@ async function loadQuickApplyCta() {
     // Secondary apply button (full application)
     try {
       const fullApplyBtn = $w('#fullApplyBtn');
-      if (fullApplyBtn) {
+      if (fullApplyBtn.rendered) {
         fullApplyBtn.onClick(() => {
           wixLocation.to('/apply-for-cdl-driving-jobs');
         });
@@ -600,7 +600,7 @@ async function handleQuickApply(jobId) {
     // Show loading state
     try {
       const quickApplyBtn = $w('#quickApplyBtn');
-      if (quickApplyBtn) {
+      if (quickApplyBtn.rendered) {
         quickApplyBtn.label = 'Applying...';
         quickApplyBtn.disable();
       }
@@ -637,12 +637,12 @@ async function handleQuickApply(jobId) {
     // Show success message
     try {
       const quickApplyBtn = $w('#quickApplyBtn');
-      if (quickApplyBtn) {
+      if (quickApplyBtn.rendered) {
         quickApplyBtn.label = 'Applied!';
       }
 
       const successMessage = $w('#applySuccessMessage');
-      if (successMessage) {
+      if (successMessage.rendered) {
         successMessage.show();
       }
     } catch (e) {
@@ -663,7 +663,7 @@ async function handleQuickApply(jobId) {
     // Reset button and show error
     try {
       const quickApplyBtn = $w('#quickApplyBtn');
-      if (quickApplyBtn) {
+      if (quickApplyBtn.rendered) {
         quickApplyBtn.label = 'Quick Apply Now';
         quickApplyBtn.enable();
       }

@@ -260,7 +260,7 @@ async function loadProfileSection(profileResult) {
         const profile = profileResult.success ? profileResult.profile : null;
 
         // Update display name
-        if ($w('#displayName')) {
+        if ($w('#displayName').rendered) {
             try {
                 $w('#displayName').text = profile?.display_name || 'Welcome, Driver';
             } catch (e) {
@@ -269,7 +269,7 @@ async function loadProfileSection(profileResult) {
         }
 
         // Update email
-        if ($w('#memberEmail')) {
+        if ($w('#memberEmail').rendered) {
             try {
                 $w('#memberEmail').text = profile?.email || '';
             } catch (e) {
@@ -280,7 +280,7 @@ async function loadProfileSection(profileResult) {
         // Update profile completeness
         const completeness = profile?.profile_completeness_score || 0;
 
-        if ($w('#profileCompletenessText')) {
+        if ($w('#profileCompletenessText').rendered) {
             try {
                 $w('#profileCompletenessText').text = `${completeness}% Complete`;
             } catch (e) {
@@ -288,7 +288,7 @@ async function loadProfileSection(profileResult) {
             }
         }
 
-        if ($w('#profileCompletenessBar')) {
+        if ($w('#profileCompletenessBar').rendered) {
             try {
                 // Assuming this is a progress bar element
                 $w('#profileCompletenessBar').value = completeness;
@@ -336,7 +336,7 @@ async function loadApplicationsSection(applicationsResult) {
         ).length;
 
         // Update counts
-        if ($w('#activeApplicationsCount')) {
+        if ($w('#activeApplicationsCount').rendered) {
             try {
                 $w('#activeApplicationsCount').text = String(activeCount);
             } catch (e) {
@@ -344,7 +344,7 @@ async function loadApplicationsSection(applicationsResult) {
             }
         }
 
-        if ($w('#totalApplicationsCount')) {
+        if ($w('#totalApplicationsCount').rendered) {
             try {
                 $w('#totalApplicationsCount').text = String(totalCount);
             } catch (e) {
@@ -353,7 +353,7 @@ async function loadApplicationsSection(applicationsResult) {
         }
 
         // Populate applications repeater
-        if ($w('#applicationsRepeater')) {
+        if ($w('#applicationsRepeater').rendered) {
             try {
                 const recentApplications = applications.slice(0, 5);
 
@@ -425,7 +425,7 @@ async function loadNotificationsSection(notifications, unreadResult) {
         const unreadCount = unreadResult.success ? unreadResult.count : 0;
 
         // Update unread badge
-        if ($w('#unreadBadge')) {
+        if ($w('#unreadBadge').rendered) {
             try {
                 if (unreadCount > 0) {
                     $w('#unreadBadge').text = String(unreadCount);
@@ -439,7 +439,7 @@ async function loadNotificationsSection(notifications, unreadResult) {
         }
 
         // Populate notifications repeater
-        if ($w('#notificationsRepeater')) {
+        if ($w('#notificationsRepeater').rendered) {
             try {
                 if (notifications && notifications.length > 0) {
                     $w('#notificationsRepeater').data = notifications.map(notif => ({
@@ -523,7 +523,7 @@ function setupNotificationItem($item, itemData) {
 async function loadQuickActions(quickActions, profile) {
     try {
         // Populate quick actions repeater
-        if ($w('#quickActionsRepeater')) {
+        if ($w('#quickActionsRepeater').rendered) {
             try {
                 if (quickActions && quickActions.length > 0) {
                     $w('#quickActionsRepeater').data = quickActions.map((action, index) => ({
@@ -591,7 +591,7 @@ function setupQuickActionItem($item, itemData) {
 
 function setupStaticButtons(profile) {
     // Find Matches button
-    if ($w('#findMatchesBtn')) {
+    if ($w('#findMatchesBtn').rendered) {
         try {
             $w('#findMatchesBtn').onClick(() => {
                 wixLocation.to(CONFIG.matchingPageUrl);
@@ -602,7 +602,7 @@ function setupStaticButtons(profile) {
     }
 
     // Edit Profile button
-    if ($w('#editProfileBtn')) {
+    if ($w('#editProfileBtn').rendered) {
         try {
             $w('#editProfileBtn').onClick(() => {
                 wixLocation.to(CONFIG.profilePageUrl);
@@ -613,7 +613,7 @@ function setupStaticButtons(profile) {
     }
 
     // View Applications button
-    if ($w('#viewApplicationsBtn')) {
+    if ($w('#viewApplicationsBtn').rendered) {
         try {
             $w('#viewApplicationsBtn').onClick(() => {
                 wixLocation.to(CONFIG.driverDashboardUrl);
