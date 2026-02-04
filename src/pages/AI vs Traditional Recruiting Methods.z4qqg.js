@@ -40,7 +40,7 @@ function setupCarrierFormHandler() {
   possibleIds.forEach(htmlId => {
     try {
       const htmlComponent = $w(htmlId);
-      if (htmlComponent && htmlComponent.onMessage) {
+      if (htmlComponent.rendered && htmlComponent.onMessage) {
         console.log(`[VELO] ✅ Found HTML component: ${htmlId}`);
 
         // Listen for form ready signal and submissions
@@ -120,7 +120,7 @@ async function loadComparisonData() {
     Object.entries(headerElements).forEach(([selector, value]) => {
       try {
         const element = $w(selector);
-        if (element && element.text !== undefined && value) {
+        if (element.rendered && element.text !== undefined && value) {
           element.text = value;
         }
       } catch (e) {
@@ -130,7 +130,7 @@ async function loadComparisonData() {
 
     // Send comparison data to HTML table
     const htmlTable = $w('#comparisonTableHtml');
-    if (htmlTable && htmlTable.postMessage && comparison.comparisonPoints) {
+    if (htmlTable.rendered && htmlTable.postMessage && comparison.comparisonPoints) {
       htmlTable.postMessage({
         type: 'comparisonData',
         data: {
@@ -164,7 +164,7 @@ function showDefaultComparison() {
   Object.entries(defaults).forEach(([selector, value]) => {
     try {
       const element = $w(selector);
-      if (element && element.text !== undefined) {
+      if (element.rendered && element.text !== undefined) {
         element.text = value;
       }
     } catch (e) {
@@ -186,7 +186,7 @@ function showDefaultComparison() {
 
   try {
     const htmlTable = $w('#comparisonTableHtml');
-    if (htmlTable && htmlTable.postMessage) {
+    if (htmlTable.rendered && htmlTable.postMessage) {
       htmlTable.postMessage({ type: 'comparisonData', data: defaultData });
     }
   } catch (e) {
@@ -208,7 +208,7 @@ async function loadMetricsComparison() {
     }
 
     const repeater = $w('#metricsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = comparison.metrics.map((metric, index) => ({
         _id: metric._id || `metric-${index}`,
         label: metric.label,
@@ -221,12 +221,12 @@ async function loadMetricsComparison() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#metricLabel')) $item('#metricLabel').text = itemData.label;
-          if ($item('#traditionalValue')) $item('#traditionalValue').text = itemData.traditionalValue;
-          if ($item('#aiValue')) $item('#aiValue').text = itemData.aiValue;
-          if ($item('#improvementBadge')) $item('#improvementBadge').text = itemData.improvement;
-          if ($item('#metricDescription')) $item('#metricDescription').text = itemData.description;
-          if ($item('#metricIcon') && itemData.iconUrl) {
+          if ($item('#metricLabel').rendered) $item('#metricLabel').text = itemData.label;
+          if ($item('#traditionalValue').rendered) $item('#traditionalValue').text = itemData.traditionalValue;
+          if ($item('#aiValue').rendered) $item('#aiValue').text = itemData.aiValue;
+          if ($item('#improvementBadge').rendered) $item('#improvementBadge').text = itemData.improvement;
+          if ($item('#metricDescription').rendered) $item('#metricDescription').text = itemData.description;
+          if ($item('#metricIcon').rendered && itemData.iconUrl) {
             $item('#metricIcon').src = itemData.iconUrl;
           }
         } catch (e) {
@@ -253,7 +253,7 @@ function showDefaultMetrics() {
 
   try {
     const repeater = $w('#metricsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = defaultMetrics.map((m, i) => ({ _id: `metric-${i}`, ...m }));
     }
   } catch (e) {
@@ -272,7 +272,7 @@ async function loadCaseStudies() {
     if (!comparison || !comparison.caseStudies || comparison.caseStudies.length === 0) {
       try {
         const section = $w('#caseStudiesSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -280,7 +280,7 @@ async function loadCaseStudies() {
     }
 
     const repeater = $w('#caseStudiesRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = comparison.caseStudies.map(study => ({
         _id: study._id || study.companyName,
         companyName: study.companyName,
@@ -296,14 +296,14 @@ async function loadCaseStudies() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#csCompany')) $item('#csCompany').text = itemData.companyName;
-          if ($item('#csFleetSize')) $item('#csFleetSize').text = `Fleet: ${itemData.fleetSize} trucks`;
-          if ($item('#csChallenge')) $item('#csChallenge').text = itemData.challenge;
-          if ($item('#csSolution')) $item('#csSolution').text = itemData.solution;
-          if ($item('#csResults')) $item('#csResults').text = itemData.results;
-          if ($item('#csQuote')) $item('#csQuote').text = `"${itemData.quote}"`;
-          if ($item('#csAuthor')) $item('#csAuthor').text = `- ${itemData.author}, ${itemData.authorTitle}`;
-          if ($item('#csLogo') && itemData.logoUrl) {
+          if ($item('#csCompany').rendered) $item('#csCompany').text = itemData.companyName;
+          if ($item('#csFleetSize').rendered) $item('#csFleetSize').text = `Fleet: ${itemData.fleetSize} trucks`;
+          if ($item('#csChallenge').rendered) $item('#csChallenge').text = itemData.challenge;
+          if ($item('#csSolution').rendered) $item('#csSolution').text = itemData.solution;
+          if ($item('#csResults').rendered) $item('#csResults').text = itemData.results;
+          if ($item('#csQuote').rendered) $item('#csQuote').text = `"${itemData.quote}"`;
+          if ($item('#csAuthor').rendered) $item('#csAuthor').text = `- ${itemData.author}, ${itemData.authorTitle}`;
+          if ($item('#csLogo').rendered && itemData.logoUrl) {
             $item('#csLogo').src = itemData.logoUrl;
           }
         } catch (e) {
@@ -316,7 +316,7 @@ async function loadCaseStudies() {
     console.error('Failed to load case studies:', err);
     try {
       const section = $w('#caseStudiesSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }
@@ -348,7 +348,7 @@ async function loadPlatformStats() {
     Object.entries(statElements).forEach(([selector, value]) => {
       try {
         const element = $w(selector);
-        if (element && element.text !== undefined) {
+        if (element.rendered && element.text !== undefined) {
           element.text = value;
         }
       } catch (e) {
@@ -378,7 +378,7 @@ function showDefaultPlatformStats() {
   Object.entries(defaults).forEach(([selector, value]) => {
     try {
       const element = $w(selector);
-      if (element && element.text !== undefined) {
+      if (element.rendered && element.text !== undefined) {
         element.text = value;
       }
     } catch (e) {
@@ -394,7 +394,7 @@ function showDefaultPlatformStats() {
 function initComparisonChart() {
   try {
     const chartHtml = $w('#comparisonChartHtml');
-    if (chartHtml && chartHtml.postMessage) {
+    if (chartHtml.rendered && chartHtml.postMessage) {
       chartHtml.postMessage({
         type: 'initChart',
         data: {

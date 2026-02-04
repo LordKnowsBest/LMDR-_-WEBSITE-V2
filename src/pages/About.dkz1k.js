@@ -34,7 +34,7 @@ async function loadImpactStats() {
     // Send to HTML component if exists
     try {
       const htmlStats = $w('#impactStatsHtml');
-      if (htmlStats && htmlStats.postMessage) {
+      if (htmlStats.rendered && htmlStats.postMessage) {
         htmlStats.postMessage({
           type: 'impactStats',
           data: {
@@ -102,7 +102,7 @@ async function loadTeamMembers() {
       // Hide team section if no data
       try {
         const section = $w('#teamSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -110,7 +110,7 @@ async function loadTeamMembers() {
     }
 
     const repeater = $w('#teamRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = result.items.map(member => ({
         _id: member._id,
         name: member.full_name,
@@ -123,10 +123,10 @@ async function loadTeamMembers() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#memberName')) $item('#memberName').text = itemData.name;
-          if ($item('#memberTitle')) $item('#memberTitle').text = itemData.title;
-          if ($item('#memberBio')) $item('#memberBio').text = itemData.bio;
-          if ($item('#memberPhoto') && itemData.photoUrl) {
+          if ($item('#memberName').rendered) $item('#memberName').text = itemData.name;
+          if ($item('#memberTitle').rendered) $item('#memberTitle').text = itemData.title;
+          if ($item('#memberBio').rendered) $item('#memberBio').text = itemData.bio;
+          if ($item('#memberPhoto').rendered && itemData.photoUrl) {
             $item('#memberPhoto').src = itemData.photoUrl;
           }
 
@@ -134,7 +134,7 @@ async function loadTeamMembers() {
           if (itemData.linkedIn) {
             try {
               const linkedInLink = $item('#linkedInLink');
-              if (linkedInLink) {
+              if (linkedInLink.rendered) {
                 linkedInLink.link = itemData.linkedIn;
                 linkedInLink.show();
               }
@@ -153,7 +153,7 @@ async function loadTeamMembers() {
     console.log('TeamMembers collection not found');
     try {
       const section = $w('#teamSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }
@@ -175,7 +175,7 @@ async function loadCompanyMilestones() {
       // Hide timeline section if no data
       try {
         const section = $w('#milestonesSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -185,7 +185,7 @@ async function loadCompanyMilestones() {
     // Send to HTML timeline component
     try {
       const htmlTimeline = $w('#timelineHtml');
-      if (htmlTimeline && htmlTimeline.postMessage) {
+      if (htmlTimeline.rendered && htmlTimeline.postMessage) {
         htmlTimeline.postMessage({
           type: 'milestones',
           data: result.items.map(m => ({
@@ -205,7 +205,7 @@ async function loadCompanyMilestones() {
     console.log('CompanyMilestones collection not found');
     try {
       const section = $w('#milestonesSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }
@@ -224,7 +224,7 @@ async function loadPartnerLogos() {
       // Hide partner logos section if no data
       try {
         const section = $w('#partnersSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -232,16 +232,16 @@ async function loadPartnerLogos() {
     }
 
     const repeater = $w('#partnerLogosRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = logos;
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#partnerLogo') && itemData.logoUrl) {
+          if ($item('#partnerLogo').rendered && itemData.logoUrl) {
             $item('#partnerLogo').src = itemData.logoUrl;
             $item('#partnerLogo').alt = itemData.name;
           }
-          if ($item('#partnerName')) {
+          if ($item('#partnerName').rendered) {
             $item('#partnerName').text = itemData.name;
           }
         } catch (e) {

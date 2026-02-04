@@ -250,7 +250,7 @@ $w.onReady(async function () {
 
   const htmlComponent = $w('#htmlRecruiterDashboard');
 
-  if (!htmlComponent) {
+  if (!htmlComponent.rendered) {
     console.error('HTML component #htmlRecruiterDashboard not found');
     return;
   }
@@ -264,7 +264,7 @@ $w.onReady(async function () {
   // Add an HTML component with ID #gamificationHtml pointing to public/recruiter/RECRUITER_GAMIFICATION.html
   try {
     const gamificationWidget = $w('#gamificationHtml');
-    if (gamificationWidget && typeof gamificationWidget.onMessage === 'function') {
+    if (gamificationWidget.rendered && typeof gamificationWidget.onMessage === 'function') {
       setupRecruiterGamification(gamificationWidget);
       console.log('🎮 Recruiter gamification widget initialized');
     }

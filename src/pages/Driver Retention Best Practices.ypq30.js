@@ -130,7 +130,7 @@ async function loadGuideContent() {
     // Load content sections into HTML component
     try {
       const contentHtml = $w('#guideContent');
-      if (contentHtml && contentHtml.postMessage && guide.sections) {
+      if (contentHtml.rendered && contentHtml.postMessage && guide.sections) {
 
         // Send guide content
         contentHtml.postMessage({
@@ -216,7 +216,7 @@ async function loadRetentionStats() {
     // Send stats to HTML component for visualization
     try {
       const statsHtml = $w('#retentionStats');
-      if (statsHtml && statsHtml.postMessage) {
+      if (statsHtml.rendered && statsHtml.postMessage) {
         statsHtml.postMessage({
           type: 'retentionStats',
           data: stats
@@ -271,7 +271,7 @@ async function loadActionableSteps() {
     }
 
     const repeater = $w('#stepsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = guide.actionableSteps.map((step, index) => ({
         _id: step._id || `step-${index}`,
         stepNumber: index + 1,
@@ -285,12 +285,12 @@ async function loadActionableSteps() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#stepNumber')) $item('#stepNumber').text = String(itemData.stepNumber);
-          if ($item('#stepTitle')) $item('#stepTitle').text = itemData.title;
-          if ($item('#stepDescription')) $item('#stepDescription').text = itemData.description;
-          if ($item('#stepImpact')) $item('#stepImpact').text = `Impact: ${itemData.impact}`;
-          if ($item('#stepDifficulty')) $item('#stepDifficulty').text = `Difficulty: ${itemData.difficulty}`;
-          if ($item('#stepTimeframe')) $item('#stepTimeframe').text = itemData.timeframe;
+          if ($item('#stepNumber').rendered) $item('#stepNumber').text = String(itemData.stepNumber);
+          if ($item('#stepTitle').rendered) $item('#stepTitle').text = itemData.title;
+          if ($item('#stepDescription').rendered) $item('#stepDescription').text = itemData.description;
+          if ($item('#stepImpact').rendered) $item('#stepImpact').text = `Impact: ${itemData.impact}`;
+          if ($item('#stepDifficulty').rendered) $item('#stepDifficulty').text = `Difficulty: ${itemData.difficulty}`;
+          if ($item('#stepTimeframe').rendered) $item('#stepTimeframe').text = itemData.timeframe;
         } catch (e) {
           // Element may not exist
         }
@@ -317,7 +317,7 @@ function showDefaultActionableSteps() {
 
   try {
     const repeater = $w('#stepsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = defaultSteps.map((step, i) => ({
         _id: `step-${i}`,
         stepNumber: i + 1,
@@ -340,7 +340,7 @@ async function loadDownloadableResources() {
     if (!guide || !guide.resources || guide.resources.length === 0) {
       try {
         const section = $w('#resourcesSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -348,7 +348,7 @@ async function loadDownloadableResources() {
     }
 
     const repeater = $w('#resourcesRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = guide.resources.map((resource, index) => ({
         _id: resource._id || `resource-${index}`,
         title: resource.title,
@@ -361,16 +361,16 @@ async function loadDownloadableResources() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#resourceTitle')) $item('#resourceTitle').text = itemData.title;
-          if ($item('#resourceDescription')) $item('#resourceDescription').text = itemData.description;
-          if ($item('#resourceType')) $item('#resourceType').text = itemData.fileType;
-          if ($item('#resourceSize')) $item('#resourceSize').text = itemData.fileSize;
-          if ($item('#resourceIcon') && itemData.iconUrl) {
+          if ($item('#resourceTitle').rendered) $item('#resourceTitle').text = itemData.title;
+          if ($item('#resourceDescription').rendered) $item('#resourceDescription').text = itemData.description;
+          if ($item('#resourceType').rendered) $item('#resourceType').text = itemData.fileType;
+          if ($item('#resourceSize').rendered) $item('#resourceSize').text = itemData.fileSize;
+          if ($item('#resourceIcon').rendered && itemData.iconUrl) {
             $item('#resourceIcon').src = itemData.iconUrl;
           }
 
           const downloadBtn = $item('#resourceDownloadBtn');
-          if (downloadBtn && itemData.downloadUrl) {
+          if (downloadBtn.rendered && itemData.downloadUrl) {
             downloadBtn.link = itemData.downloadUrl;
             downloadBtn.target = '_blank';
           }
@@ -384,7 +384,7 @@ async function loadDownloadableResources() {
     console.error('Failed to load downloadable resources:', err);
     try {
       const section = $w('#resourcesSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }
@@ -407,7 +407,7 @@ async function loadRelatedGuides() {
     if (faqs && faqs.length > 0) {
       try {
         const faqHtml = $w('#faqAccordionHtml');
-        if (faqHtml && faqHtml.postMessage) {
+        if (faqHtml.rendered && faqHtml.postMessage) {
           faqHtml.postMessage({
             type: 'faqData',
             data: faqs.map(faq => ({
@@ -427,7 +427,7 @@ async function loadRelatedGuides() {
     if (relatedGuides.length === 0) {
       try {
         const section = $w('#relatedGuidesSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -435,7 +435,7 @@ async function loadRelatedGuides() {
     }
 
     const repeater = $w('#relatedGuidesRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = relatedGuides.slice(0, 3).map(related => ({
         _id: related._id || related.slug,
         title: related.title,
@@ -446,14 +446,14 @@ async function loadRelatedGuides() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#relatedTitle')) $item('#relatedTitle').text = itemData.title;
-          if ($item('#relatedExcerpt')) $item('#relatedExcerpt').text = itemData.excerpt;
-          if ($item('#relatedThumbnail') && itemData.thumbnailUrl) {
+          if ($item('#relatedTitle').rendered) $item('#relatedTitle').text = itemData.title;
+          if ($item('#relatedExcerpt').rendered) $item('#relatedExcerpt').text = itemData.excerpt;
+          if ($item('#relatedThumbnail').rendered && itemData.thumbnailUrl) {
             $item('#relatedThumbnail').src = itemData.thumbnailUrl;
           }
 
           const guideLink = $item('#relatedLink');
-          if (guideLink) {
+          if (guideLink.rendered) {
             guideLink.onClick(() => {
               import('wix-location').then(wixLocation => {
                 wixLocation.to(itemData.url);
@@ -470,7 +470,7 @@ async function loadRelatedGuides() {
     console.error('Failed to load related guides:', err);
     try {
       const section = $w('#relatedGuidesSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }

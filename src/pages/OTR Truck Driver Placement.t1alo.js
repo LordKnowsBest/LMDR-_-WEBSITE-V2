@@ -60,7 +60,7 @@ async function loadOtrJobs() {
         const jobs = await getJobsByOperationType('OTR', 8);
         otrJobs = jobs;
 
-        if ($w('#otrJobsRepeater')) {
+        if ($w('#otrJobsRepeater').rendered) {
             if (jobs.length > 0) {
                 $w('#otrJobsRepeater').data = jobs;
                 $w('#otrJobsRepeater').onItemReady(($item, itemData) => {
@@ -180,7 +180,7 @@ async function loadOtrBenefits() {
         }
     ];
 
-    if ($w('#otrBenefitsRepeater')) {
+    if ($w('#otrBenefitsRepeater').rendered) {
         $w('#otrBenefitsRepeater').data = benefits;
         $w('#otrBenefitsRepeater').onItemReady(($item, itemData) => {
             if ($item('#benefitTitle')) $item('#benefitTitle').text = itemData.title;
@@ -222,7 +222,7 @@ async function loadEquipmentShowcase() {
         }
     ];
 
-    if ($w('#equipmentRepeater')) {
+    if ($w('#equipmentRepeater').rendered) {
         $w('#equipmentRepeater').data = equipment;
         $w('#equipmentRepeater').onItemReady(($item, itemData) => {
             if ($item('#equipmentName')) $item('#equipmentName').text = itemData.name;
@@ -273,7 +273,7 @@ async function loadOtrTestimonials() {
         }
     ];
 
-    if ($w('#otrTestimonialsRepeater')) {
+    if ($w('#otrTestimonialsRepeater').rendered) {
         $w('#otrTestimonialsRepeater').data = testimonials;
         $w('#otrTestimonialsRepeater').onItemReady(($item, itemData) => {
             if ($item('#testimonialName')) $item('#testimonialName').text = itemData.name;
@@ -289,12 +289,12 @@ async function loadOtrTestimonials() {
  * Update OTR statistics display
  */
 function updateOtrStats(jobs) {
-    if ($w('#otrStatsText')) {
+    if ($w('#otrStatsText').rendered) {
         const avgPay = calculateAveragePay(jobs);
         $w('#otrStatsText').text = `${jobs.length} OTR positions | Avg ${avgPay}/mile`;
     }
 
-    if ($w('#totalOtrJobs')) {
+    if ($w('#totalOtrJobs').rendered) {
         $w('#totalOtrJobs').text = jobs.length.toString();
     }
 }
@@ -304,18 +304,18 @@ function updateOtrStats(jobs) {
  */
 function setupEventHandlers() {
     // Main CTA button
-    if ($w('#applyNowButton')) {
+    if ($w('#applyNowButton').rendered) {
         $w('#applyNowButton').onClick(() => {
             wixLocation.to('/apply-for-cdl-driving-jobs?type=OTR');
         });
     }
 
     // Filter buttons if present
-    if ($w('#filterHighMiles')) {
+    if ($w('#filterHighMiles').rendered) {
         $w('#filterHighMiles').onClick(() => filterJobsByMiles(3000));
     }
 
-    if ($w('#filterTopPay')) {
+    if ($w('#filterTopPay').rendered) {
         $w('#filterTopPay').onClick(() => filterJobsByPay(0.60));
     }
 }
@@ -336,7 +336,7 @@ function filterJobsByMiles(minMiles) {
         return avgMiles >= minMiles;
     });
 
-    if ($w('#otrJobsRepeater')) {
+    if ($w('#otrJobsRepeater').rendered) {
         $w('#otrJobsRepeater').data = filtered.length > 0 ? filtered : otrJobs;
     }
 }
@@ -350,7 +350,7 @@ function filterJobsByPay(minPay) {
         return pay >= minPay;
     });
 
-    if ($w('#otrJobsRepeater')) {
+    if ($w('#otrJobsRepeater').rendered) {
         $w('#otrJobsRepeater').data = filtered.length > 0 ? filtered : otrJobs;
     }
 }
@@ -361,7 +361,7 @@ function filterJobsByPay(minPay) {
 function showLoadingState(loading) {
     isLoading = loading;
 
-    if ($w('#loadingIndicator')) {
+    if ($w('#loadingIndicator').rendered) {
         loading ? $w('#loadingIndicator').show() : $w('#loadingIndicator').hide();
     }
 }
