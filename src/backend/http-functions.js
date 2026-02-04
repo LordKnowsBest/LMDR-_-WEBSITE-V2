@@ -11,8 +11,11 @@ import {
   updateSubscriptionStatus,
   recordBillingEvent,
   isEventProcessed,
-  logStripeEvent
+  logStripeEvent,
+  updatePaymentStatus
 } from 'backend/stripeService';
+import { updateLeadStatus } from 'backend/carrierLeadsService';
+import { sendPaymentReceivedEmail } from 'backend/emailService';
 import {
   trackAbandonedCheckout,
   markCheckoutRecovered
@@ -346,6 +349,36 @@ async function handleCheckoutCompleted(session) {
   await recordBillingEvent(carrierDot, 'checkout_completed', {
     description: `Checkout session ${session.id} completed`
   });
+
+  // Fulfilment: Update Carrier Lead status and Payment status
+  // 1. Update CarrierPayment status if this was a payment session
+  try {
+    if (session.mode === 'payment' && session.payment_status === 'paid') {
+      await updatePaymentStatus(session.id, 'completed', {
+        paymentIntentId: session.payment_intent,
+        amount: session.amount_total,
+        currency: session.currency
+      });
+    }
+  } catch (e) { console.error('Error updating payment status', e); }
+
+  // 2. Update Carrier Lead Status
+  const leadId = session.metadata?.leadId; // Ensure we passed this in metadata
+  if (leadId) {
+    // Update status to activated_paid
+    await updateLeadStatus(leadId, 'activated_paid',
+      `Payment received: ${(session.amount_total / 100).toFixed(2)} ${session.currency.toUpperCase()}`);
+
+    // Send receipt email
+    if (customerEmail) {
+      await sendPaymentReceivedEmail(customerEmail, {
+        amount: `$${(session.amount_total / 100).toFixed(2)}`,
+        description: 'Driver Placement Deposit',
+        transactionId: session.payment_intent,
+        date: new Date().toLocaleDateString()
+      });
+    }
+  }
 
   // Mark any pending abandonment as recovered
   if (customerEmail) {

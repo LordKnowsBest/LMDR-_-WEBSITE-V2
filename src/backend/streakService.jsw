@@ -15,6 +15,7 @@ import * as airtable from 'backend/airtableClient';
 import { getStreakMultiplier, DRIVER_XP_ACTIONS } from 'backend/gamificationConfig';
 import { awardDriverXP, logGamificationEvent } from 'backend/gamificationService';
 import { checkStreakAchievements } from 'backend/achievementService';
+import { chunkArray } from 'backend/utils/arrayUtils';
 
 // =============================================================================
 // CONSTANTS
@@ -497,7 +498,7 @@ export async function getStreaksAtRisk() {
 /**
  * Process daily streak updates (called by scheduled job at midnight)
  * Breaks streaks for users who didn't log in yesterday
- * @returns {object} { processed, streaks_broken, freezes_used }
+ * @returns {object} { processed, streaks_broken, freezes_used, errors }
  */
 export async function processExpiredStreaks() {
   try {
@@ -513,62 +514,98 @@ export async function processExpiredStreaks() {
       limit: 1000
     });
 
+    console.log(`[processExpiredStreaks] Starting: ${records.length} records`);
+
     let streaksBroken = 0;
     let freezesUsed = 0;
+    let processed = 0;
+    const errors = [];
 
-    for (const record of records) {
-      const freezesAvailable = record['Streak Freeze Available'] || 0;
-      const daysSinceLogin = getDaysSinceUTC(record['Last Login Date']);
+    // Cache table name ONCE before loop
+    const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
 
-      if (daysSinceLogin === 2 && freezesAvailable > 0) {
-        // Auto-use freeze
-        const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
-        await airtable.updateRecord(
-          progressionTable,
-          record.id,
-          {
-            'Streak Freeze Available': freezesAvailable - 1,
-            'Updated At': new Date().toISOString()
-          }
-        );
-        freezesUsed++;
+    // Chunk and process in parallel (20 per chunk - update + log per item)
+    const chunks = chunkArray(records, 20);
 
-        await logGamificationEvent(record['Driver ID'], 'driver', {
-          eventType: 'streak_freeze_auto_used',
-          action: 'auto_streak_freeze',
-          metadata: {
-            streakPreserved: record['Streak Days'],
-            freezesRemaining: freezesAvailable - 1
-          }
-        });
-      } else if (daysSinceLogin > 2 || (daysSinceLogin === 2 && freezesAvailable === 0)) {
-        // Break the streak
-        const progressionTable2 = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
-        await airtable.updateRecord(
-          progressionTable2,
-          record.id,
-          {
-            'Streak Days': 0,
-            'Updated At': new Date().toISOString()
-          }
-        );
-        streaksBroken++;
+    for (const chunk of chunks) {
+      const results = await Promise.all(
+        chunk.map(async (record) => {
+          try {
+            const freezesAvailable = record['Streak Freeze Available'] || 0;
+            const daysSinceLogin = getDaysSinceUTC(record['Last Login Date']);
 
-        await logGamificationEvent(record['Driver ID'], 'driver', {
-          eventType: 'streak_broken',
-          action: 'streak_expired',
-          metadata: {
-            previousStreak: record['Streak Days'],
-            daysSinceLogin
+            if (daysSinceLogin === 2 && freezesAvailable > 0) {
+              // Auto-use freeze
+              await airtable.updateRecord(
+                progressionTable,
+                record.id,
+                {
+                  'Streak Freeze Available': freezesAvailable - 1,
+                  'Updated At': new Date().toISOString()
+                }
+              );
+
+              await logGamificationEvent(record['Driver ID'], 'driver', {
+                eventType: 'streak_freeze_auto_used',
+                action: 'auto_streak_freeze',
+                metadata: {
+                  streakPreserved: record['Streak Days'],
+                  freezesRemaining: freezesAvailable - 1
+                }
+              });
+
+              return { success: true, freezeUsed: true };
+            } else if (daysSinceLogin > 2 || (daysSinceLogin === 2 && freezesAvailable === 0)) {
+              // Break the streak
+              await airtable.updateRecord(
+                progressionTable,
+                record.id,
+                {
+                  'Streak Days': 0,
+                  'Updated At': new Date().toISOString()
+                }
+              );
+
+              await logGamificationEvent(record['Driver ID'], 'driver', {
+                eventType: 'streak_broken',
+                action: 'streak_expired',
+                metadata: {
+                  previousStreak: record['Streak Days'],
+                  daysSinceLogin
+                }
+              });
+
+              return { success: true, streakBroken: true };
+            }
+
+            return { success: true, noAction: true };
+          } catch (error) {
+            return { success: false, id: record.id, error: error.message };
           }
-        });
+        })
+      );
+
+      for (const r of results) {
+        processed++;
+        if (r.success) {
+          if (r.freezeUsed) freezesUsed++;
+          if (r.streakBroken) streaksBroken++;
+        } else {
+          errors.push(r);
+        }
       }
+
+      // Rate limit between chunks (200ms = 5 req/sec)
+      await new Promise(r => setTimeout(r, 200));
     }
+
+    console.log(`[processExpiredStreaks] Complete: ${processed} processed, ${streaksBroken} broken, ${freezesUsed} freezes used, ${errors.length} errors`);
 
     return {
       processed: records.length,
       streaks_broken: streaksBroken,
-      freezes_used: freezesUsed
+      freezes_used: freezesUsed,
+      errors: errors.length
     };
   } catch (error) {
     console.error('processExpiredStreaks error:', error);
@@ -579,7 +616,7 @@ export async function processExpiredStreaks() {
 /**
  * Grant monthly streak freezes to all active drivers
  * Called on the 1st of each month
- * @returns {object} { processed, freezes_granted }
+ * @returns {object} { processed, freezes_granted, errors }
  */
 export async function grantMonthlyFreezes() {
   try {
@@ -588,34 +625,67 @@ export async function grantMonthlyFreezes() {
       limit: 5000
     });
 
-    let freezesGranted = 0;
+    console.log(`[grantMonthlyFreezes] Starting: ${records.length} records`);
+
     const maxFreezes = 3;
+    const errors = [];
+    let freezesGranted = 0;
+    let processed = 0;
 
-    for (const record of records) {
+    // Cache table name ONCE before loop
+    const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
+
+    // Filter records that need updates
+    const needsUpdate = records.filter(record => {
       const currentFreezes = record['Streak Freeze Available'] || 0;
+      return currentFreezes < maxFreezes;
+    });
 
-      if (currentFreezes < maxFreezes) {
-        const newTotal = Math.min(currentFreezes + 1, maxFreezes);
+    // Chunk and process in parallel (50 per chunk for simple updates)
+    const chunks = chunkArray(needsUpdate, 50);
 
-        const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
-        await airtable.updateRecord(
-          progressionTable,
-          record.id,
-          {
-            'Streak Freeze Available': newTotal,
-            'Updated At': new Date().toISOString()
+    for (const chunk of chunks) {
+      const results = await Promise.all(
+        chunk.map(async (record) => {
+          try {
+            const currentFreezes = record['Streak Freeze Available'] || 0;
+            const newTotal = Math.min(currentFreezes + 1, maxFreezes);
+
+            await airtable.updateRecord(
+              progressionTable,
+              record.id,
+              {
+                'Streak Freeze Available': newTotal,
+                'Updated At': new Date().toISOString()
+              }
+            );
+
+            return { success: true, granted: newTotal > currentFreezes };
+          } catch (error) {
+            return { success: false, id: record.id, error: error.message };
           }
-        );
+        })
+      );
 
-        if (newTotal > currentFreezes) {
-          freezesGranted++;
+      for (const r of results) {
+        processed++;
+        if (r.success) {
+          if (r.granted) freezesGranted++;
+        } else {
+          errors.push(r);
         }
       }
+
+      // Rate limit between chunks (200ms = 5 req/sec)
+      await new Promise(r => setTimeout(r, 200));
     }
+
+    console.log(`[grantMonthlyFreezes] Complete: ${processed} processed, ${freezesGranted} granted, ${errors.length} errors`);
 
     return {
       processed: records.length,
-      freezes_granted: freezesGranted
+      freezes_granted: freezesGranted,
+      errors: errors.length
     };
   } catch (error) {
     console.error('grantMonthlyFreezes error:', error);

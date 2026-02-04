@@ -30,20 +30,20 @@ async function loadJobHighlights() {
     const jobs = await getTopJobOpportunities(6);
 
     const repeater = $w('#jobHighlightsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = jobs;
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#carrierName')) $item('#carrierName').text = itemData.carrierName;
-          if ($item('#jobPayRange')) $item('#jobPayRange').text = itemData.payRange;
-          if ($item('#jobLocation')) $item('#jobLocation').text = itemData.location;
-          if ($item('#jobType')) $item('#jobType').text = itemData.operationType;
-          if ($item('#jobBenefits')) $item('#jobBenefits').text = itemData.benefits;
+          if ($item('#carrierName').rendered) $item('#carrierName').text = itemData.carrierName;
+          if ($item('#jobPayRange').rendered) $item('#jobPayRange').text = itemData.payRange;
+          if ($item('#jobLocation').rendered) $item('#jobLocation').text = itemData.location;
+          if ($item('#jobType').rendered) $item('#jobType').text = itemData.operationType;
+          if ($item('#jobBenefits').rendered) $item('#jobBenefits').text = itemData.benefits;
 
           // Set up click handler to navigate to matching
           const learnMoreBtn = $item('#learnMoreBtn');
-          if (learnMoreBtn) {
+          if (learnMoreBtn.rendered) {
             learnMoreBtn.onClick(() => {
               wixLocation.to(`/ai-matching?carrier=${itemData._id}`);
             });
@@ -57,7 +57,7 @@ async function loadJobHighlights() {
     // Send to HTML component if exists
     try {
       const htmlJobs = $w('#jobsFeedHtml');
-      if (htmlJobs && htmlJobs.postMessage) {
+      if (htmlJobs.rendered && htmlJobs.postMessage) {
         htmlJobs.postMessage({ type: 'jobsData', jobs });
       }
     } catch (e) {
@@ -87,7 +87,7 @@ async function loadDriverTestimonials() {
       // Hide testimonials section if no data
       try {
         const section = $w('#testimonialsSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -95,7 +95,7 @@ async function loadDriverTestimonials() {
     }
 
     const repeater = $w('#testimonialsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = result.items.map(t => ({
         _id: t._id,
         quote: t.testimonial_text,
@@ -107,11 +107,11 @@ async function loadDriverTestimonials() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#testimonialQuote')) $item('#testimonialQuote').text = `"${itemData.quote}"`;
-          if ($item('#testimonialName')) $item('#testimonialName').text = itemData.driverName;
-          if ($item('#testimonialExp')) $item('#testimonialExp').text = `${itemData.yearsExperience} years experience`;
-          if ($item('#testimonialType')) $item('#testimonialType').text = itemData.operationType;
-          if ($item('#testimonialPhoto') && itemData.photoUrl) {
+          if ($item('#testimonialQuote').rendered) $item('#testimonialQuote').text = `"${itemData.quote}"`;
+          if ($item('#testimonialName').rendered) $item('#testimonialName').text = itemData.driverName;
+          if ($item('#testimonialExp').rendered) $item('#testimonialExp').text = `${itemData.yearsExperience} years experience`;
+          if ($item('#testimonialType').rendered) $item('#testimonialType').text = itemData.operationType;
+          if ($item('#testimonialPhoto').rendered && itemData.photoUrl) {
             $item('#testimonialPhoto').src = itemData.photoUrl;
           }
         } catch (e) {
@@ -125,7 +125,7 @@ async function loadDriverTestimonials() {
     console.log('DriverTestimonials collection not found or empty');
     try {
       const section = $w('#testimonialsSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }
@@ -146,7 +146,7 @@ async function loadLocationBasedJobs() {
       // Hide location section if no state provided
       try {
         const section = $w('#locationJobsSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -158,7 +158,7 @@ async function loadLocationBasedJobs() {
     if (jobs.length === 0) {
       try {
         const section = $w('#locationJobsSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -168,20 +168,20 @@ async function loadLocationBasedJobs() {
     // Update section title
     try {
       const title = $w('#locationTitle');
-      if (title) title.text = `Jobs in ${userState}`;
+      if (title.rendered) title.text = `Jobs in ${userState}`;
     } catch (e) {
       // Element may not exist
     }
 
     const repeater = $w('#locationJobsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = jobs;
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#locJobCarrier')) $item('#locJobCarrier').text = itemData.carrierName;
-          if ($item('#locJobPay')) $item('#locJobPay').text = itemData.payRange;
-          if ($item('#locJobType')) $item('#locJobType').text = itemData.operationType;
+          if ($item('#locJobCarrier').rendered) $item('#locJobCarrier').text = itemData.carrierName;
+          if ($item('#locJobPay').rendered) $item('#locJobPay').text = itemData.payRange;
+          if ($item('#locJobType').rendered) $item('#locJobType').text = itemData.operationType;
         } catch (e) {
           // Element may not exist
         }
@@ -204,7 +204,7 @@ async function loadRecentHiresTicker() {
     // Send to HTML ticker component
     try {
       const htmlTicker = $w('#hireTicker');
-      if (htmlTicker && htmlTicker.postMessage) {
+      if (htmlTicker.rendered && htmlTicker.postMessage) {
         htmlTicker.postMessage({ type: 'recentHires', hires });
       }
     } catch (e) {
@@ -222,7 +222,7 @@ async function loadRecentHiresTicker() {
 function setupHtmlMessageHandlers() {
   try {
     const htmlJobs = $w('#jobsFeedHtml');
-    if (htmlJobs && htmlJobs.onMessage) {
+    if (htmlJobs.rendered && htmlJobs.onMessage) {
       htmlJobs.onMessage((event) => {
         if (event.data.type === 'navigateToMatching') {
           const carrierId = event.data.data?.preselectedCarrier;

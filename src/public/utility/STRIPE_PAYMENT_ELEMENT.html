@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Checkout</title>
+    <script src="https://js.stripe.com/v3/"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        lmdr: {
+                            blue: '#2563eb',
+                            dark: '#0f172a',
+                            success: '#10b981',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 3px solid #fff;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body class="bg-gray-50 flex items-center justify-center min-h-screen p-4">
+
+    <div class="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+        <!-- Header -->
+        <div class="bg-lmdr-dark p-6 text-white text-center relative overflow-hidden">
+            <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-400 to-indigo-500"></div>
+            <h2 class="text-xl font-bold mb-1">Activation Deposit</h2>
+            <p class="text-blue-200 text-sm">Secure Payment via Stripe</p>
+        </div>
+
+        <div class="p-8">
+            <!-- Order Summary -->
+            <div id="orderSummary" class="mb-8 p-4 bg-blue-50 rounded-xl border border-blue-100">
+                <div class="flex justify-between items-center mb-2">
+                    <span class="text-gray-600">Service</span>
+                    <span class="font-semibold text-gray-800">Driver Placement Deposit</span>
+                </div>
+                <div class="flex justify-between items-center mb-2">
+                    <span class="text-gray-600">Quantity</span>
+                    <span class="font-semibold text-gray-800" id="driverCountDisplay">--</span>
+                </div>
+                <div class="border-t border-blue-200 my-2 pt-2 flex justify-between items-center">
+                    <span class="font-bold text-lmdr-dark">Total Due Today</span>
+                    <span class="font-bold text-2xl text-lmdr-blue" id="totalAmountDisplay">$--</span>
+                </div>
+                <p class="text-xs text-gray-500 mt-2 text-center">
+                    <i class="fa-solid fa-shield-halved mr-1"></i>
+                    100% Refundable if we don't present qualified drivers within 7 days.
+                </p>
+            </div>
+
+            <!-- Loading State -->
+            <div id="loadingState" class="text-center py-8">
+                <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-lmdr-blue mb-2"></div>
+                <p class="text-gray-500 text-sm">Initializing secure checkout...</p>
+            </div>
+
+            <!-- Error State -->
+            <div id="errorState" class="hidden text-center py-6">
+                <div class="text-red-500 text-4xl mb-3"><i class="fa-solid fa-circle-xmark"></i></div>
+                <h3 class="font-bold text-gray-800 mb-2">Something went wrong</h3>
+                <p class="text-gray-600 text-sm mb-4" id="errorMessage">Could not load payment information.</p>
+                <button id="retryBtn" class="text-lmdr-blue font-semibold hover:underline">Try Again</button>
+            </div>
+
+            <!-- Checkout Button -->
+            <button id="checkoutBtn"
+                class="hidden w-full bg-lmdr-blue hover:bg-blue-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-2 group">
+                <span>Pay Deposit & Start Search</span>
+                <i class="fa-solid fa-arrow-right group-hover:translate-x-1 transition-transform"></i>
+            </button>
+
+            <p class="text-center text-xs text-gray-400 mt-4">
+                <i class="fa-solid fa-lock mr-1"></i>
+                Payments processed securely by Stripe. SSL Encrypted.
+            </p>
+        </div>
+    </div>
+
+    <script>
+            (function () {
+                const DEBUG = true;
+
+                // UI Elements
+                const loadingState = document.getElementById('loadingState');
+                const errorState = document.getElementById('errorState');
+                const errorMessage = document.getElementById('errorMessage');
+                const checkoutBtn = document.getElementById('checkoutBtn');
+                const retryBtn = document.getElementById('retryBtn');
+                const driverCountDisplay = document.getElementById('driverCountDisplay');
+                const totalAmountDisplay = document.getElementById('totalAmountDisplay');
+
+                let stripe = null;
+                let setupData = null;
+
+                // Initialize Stripe
+                // Note: Publishable key should be passed from Velo or hardcoded if safe (Client-side key is public)
+                // We will wait for Velo to send the key and session config
+
+                function log(...args) {
+                    if (DEBUG) console.log('[StripeCheckout]', ...args);
+                }
+
+                // Message Handler
+                window.addEventListener('message', async function (event) {
+                    const msg = event.data;
+                    if (!msg || !msg.type) return;
+
+                    log('Received:', msg.type, msg.data);
+
+                    if (msg.type === 'initCheckout') {
+                        handleInitCheckout(msg.data);
+                    }
+                });
+
+                // Initialize Checkout Logic
+                async function handleInitCheckout(data) {
+                    try {
+                        setupData = data;
+
+                        if (!data.publishableKey) {
+                            throw new Error('Missing Stripe API Key');
+                        }
+
+                        stripe = Stripe(data.publishableKey);
+
+                        // Update UI
+                        driverCountDisplay.textContent = data.driverCount || '1';
+                        totalAmountDisplay.textContent = data.formattedAmount || '$100.00';
+
+                        loadingState.classList.add('hidden');
+                        checkoutBtn.classList.remove('hidden');
+
+                        // Add click handler
+                        checkoutBtn.onclick = handleCheckoutClick;
+
+                    } catch (error) {
+                        showError(error.message);
+                    }
+                }
+
+                // Handle Checkout Click - Redirect to Stripe Hosted Checkout
+                async function handleCheckoutClick() {
+                    if (!stripe || !setupData || !setupData.sessionId) {
+                        showError('Checkout session is invalid. Please refresh.');
+                        return;
+                    }
+
+                    checkoutBtn.disabled = true;
+                    checkoutBtn.innerHTML = '<div class="spinner"></div> Processing...';
+
+                    const { error } = await stripe.redirectToCheckout({
+                        sessionId: setupData.sessionId
+                    });
+
+                    if (error) {
+                        showError(error.message);
+                        checkoutBtn.disabled = false;
+                        checkoutBtn.innerHTML = 'Pay Deposit & Start Search <i class="fa-solid fa-arrow-right ml-2"></i>';
+                    }
+                }
+
+                function showError(msg) {
+                    loadingState.classList.add('hidden');
+                    checkoutBtn.classList.add('hidden');
+                    errorState.classList.remove('hidden');
+                    errorMessage.textContent = msg;
+                }
+
+                retryBtn.onclick = () => window.location.reload();
+
+                // Notify Velo we are ready
+                window.parent.postMessage({ type: 'checkoutReady' }, '*');
+            })();
+    </script>
+</body>
+
+</html>

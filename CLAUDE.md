@@ -156,15 +156,85 @@ Use the same inline config as `src/public/landing/Homepage.HTML` and remove:
 
 Always use this site ID. Never prompt the user to select a site.
 
-## UI Safety Pattern
+## Batch Processing Pattern (Required)
 
-When interacting with UI elements in Velo, always check for existence:
+**CRITICAL:** All batch operations must use chunked parallel processing to prevent timeouts.
+
+**Import:** `import { chunkArray } from 'backend/utils/arrayUtils';`
+
+**Pattern:**
+```javascript
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+// 1. Cache table name ONCE before loop
+const tableName = await getAirtableTableName(COLLECTION_KEY);
+
+// 2. Filter valid items
+const validItems = items.filter(item => item.requiredField);
+
+// 3. Chunk and process in parallel
+const chunks = chunkArray(validItems, 10);
+
+for (const chunk of chunks) {
+  const results = await Promise.all(
+    chunk.map(async (item) => {
+      try {
+        await airtable.updateRecord(tableName, item.id, { /* fields */ });
+        return { success: true };
+      } catch (error) {
+        return { success: false, id: item.id, error: error.message };
+      }
+    })
+  );
+
+  // 4. Rate limit between chunks (200ms = 5 req/sec)
+  await new Promise(r => setTimeout(r, 200));
+}
+```
+
+| Operation | Chunk Size | Rationale |
+|-----------|------------|-----------|
+| Airtable CRUD | 10 | API rate limit |
+| Notifications | 10 | Rate balance |
+| Email sending | 5 | Provider limits |
+| Simple updates | 50 | High volume, low complexity |
+
+## UI Safety Pattern (Enforced by Hook)
+
+When interacting with UI elements in Velo, always check for existence before accessing properties or methods.
+
+A PostToolUse hook (`enforce-selector-safety.ps1`) blocks any Write/Edit to page code (`src/pages/*.js`) that uses `$w('#elementId')` without a safety check.
+
+**Accepted patterns:**
 
 ```javascript
+// Option 1: Use .rendered check (preferred)
 const element = $w('#optionalElement');
 if (element.rendered) {
     element.text = "Value";
 }
+
+// Option 2: Check element && property exists
+const el = $w('#myButton');
+if (el && el.onClick) {
+    el.onClick(() => { /* handler */ });
+}
+
+// Option 3: Wrap in try-catch
+try {
+    $w('#optionalElement').postMessage(data);
+} catch (e) {
+    // Element may not exist on page
+}
+```
+
+**Blocked patterns:**
+
+```javascript
+// WRONG - No existence check
+$w('#submitButton').onClick(() => { });
+$w('#statusText').text = "Loading...";
+$w('#html1').postMessage({ type: 'init' });
 ```
 
 ## Context Documents
@@ -204,4 +274,45 @@ Supplementary docs are auto-injected by hooks when editing relevant files. They 
 - **Purpose:** Manages trucker health content and community tips.
 - **Key Methods:** `getResourcesByCategory(cat)`, `submitTip(data)`, `getApprovedTips(cat)`
 - **Features:** Content categorization, community submission moderation, helpfulness tracking.
+
+## Page Code Wiring (Priority 1)
+
+All 9 Priority 1 pages follow a shared wiring pattern connecting Wix page code to HTML iframe components via `postMessage`.
+
+### Page Reference Table
+
+| Page File | Backend Service(s) | HTML File | Notes |
+|-----------|-------------------|-----------|-------|
+| `ADMIN_DASHBOARD.svo6l.js` | `admin_dashboard_service`, `featureAdoptionService` | `admin/ADMIN_DASHBOARD.html` | Multi-component (all 6 IDs), navigation via `wixLocation` |
+| `ADMIN_DRIVERS.uo7vb.js` | `admin_service` | `admin/ADMIN_DRIVERS.html` | Single-component (first found), bulk ops, CSV export |
+| `ADMIN_CARRIERS.qa2w1.js` | `carrierAdminService` | `admin/ADMIN_CARRIERS.html` | Multi-component, FMCSA external link, enrichment refresh |
+| `ADMIN_OBSERVABILITY.c8pf9.js` | `observabilityService` | `admin/ADMIN_OBSERVABILITY.html` | Single-component, sends initial data bundle on ready |
+| `ADMIN_MATCHES.gqhdo.js` | `admin_match_service` | `admin/ADMIN_MATCHES.html` | Single-component, interest tracking, trend analytics |
+| `ADMIN_AI_ROUTER.cqkgi.js` | `aiRouterService` | `admin/ADMIN_AI_ROUTER.html` | Multi-component, provider testing, config CRUD |
+| `RECRUITER_ONBOARDING_DASHBOARD.gebww.js` | `onboardingWorkflowService`, `documentCollectionService`, `recruiter_service` | `recruiter/RECRUITER_ONBOARDING_DASHBOARD.html` | Uses `type` key (not `action`), auth check via `wix-users`, message registry validation |
+| `B2B_DASHBOARD.i5csc.js` | `b2bBridgeService` | `admin/B2B_DASHBOARD.html` | Unified bridge pattern (`handleB2BAction`), navigation to account detail |
+| `B2B_ACCOUNT_DETAIL.f31mi.js` | `b2bAccountService`, `b2bMatchSignalService`, `b2bPipelineService`, `b2bActivityService`, `b2bResearchAgentService` | `admin/B2B_ACCOUNT_DETAIL.html` | Reads `accountId` from URL query, auto-refreshes timeline after actions |
+
+### Common Wiring Pattern
+
+All pages follow this structure:
+
+1. **Component Discovery** -- Iterate `HTML_COMPONENT_IDS` (`#html1`..`#html5`, `#htmlEmbed1`) inside try-catch, check `typeof el.onMessage === 'function'`.
+2. **Message Listener** -- Call `component.onMessage(async (event) => routeMessage(component, event?.data))`.
+3. **Init Signal** -- Send `{ action: 'init' }` to tell the HTML the bridge is ready.
+4. **Message Router** -- A `switch` on `message.action` dispatches to async handler functions.
+5. **Safe Send** -- A `safeSend` / `sendMessage` / `postToComponent` helper wraps `postMessage` in try-catch to guard against detached elements.
+
+### Message Type Conventions
+
+All pages (except Recruiter Onboarding) use an **action-based protocol**:
+
+| Direction | Shape | Example |
+|-----------|-------|---------|
+| Velo -> HTML | `{ action: '<verb>', payload }` | `{ action: 'driversLoaded', payload: { drivers, totalCount } }` |
+| HTML -> Velo | `{ action: '<verb>', ...params }` | `{ action: 'getDrivers', filters, page, pageSize }` |
+| Error (any) | `{ action: 'actionError', message }` | `{ action: 'actionError', message: 'Failed to load' }` |
+| Success (any) | `{ action: 'actionSuccess', message }` | `{ action: 'actionSuccess', message: 'Driver verified' }` |
+
+**Exception:** `RECRUITER_ONBOARDING_DASHBOARD` uses `{ type, data, timestamp }` envelope instead of `{ action, payload }`, and validates messages against a `MESSAGE_REGISTRY` object.
 

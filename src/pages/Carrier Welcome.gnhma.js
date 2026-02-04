@@ -68,7 +68,7 @@ $w.onReady(async function () {
 function updateWelcomeElements(ctx) {
   try {
     const title = $w('#welcomeTitle');
-    if (title) {
+    if (title.rendered) {
       if (ctx.companyName) {
         title.text = `Welcome, ${ctx.companyName}!`;
       } else if (ctx.memberName) {
@@ -81,7 +81,7 @@ function updateWelcomeElements(ctx) {
 
   try {
     const subtitle = $w('#welcomeSubtitle');
-    if (subtitle) {
+    if (subtitle.rendered) {
       const planLabel = ctx.plan === 'enterprise' ? 'Enterprise' : 'Pro';
       subtitle.text = `Your ${planLabel} subscription is active. Let's set up your account.`;
     }
@@ -89,14 +89,14 @@ function updateWelcomeElements(ctx) {
 
   try {
     const location = $w('#carrierLocation');
-    if (location && ctx.city && ctx.state) {
+    if (location.rendered && ctx.city && ctx.state) {
       location.text = `${ctx.city}, ${ctx.state}`;
     }
   } catch (e) { /* Element may not exist */ }
 
   try {
     const fleetSize = $w('#fleetSizeDisplay');
-    if (fleetSize && ctx.fleetSize) {
+    if (fleetSize.rendered && ctx.fleetSize) {
       fleetSize.text = `${ctx.fleetSize} trucks`;
     }
   } catch (e) { /* Element may not exist */ }
@@ -112,7 +112,7 @@ function broadcastToHtmlComponents(carrierContext) {
   for (const id of possibleIds) {
     try {
       const component = $w(id);
-      if (component && typeof component.onMessage === 'function') {
+      if (component.rendered && typeof component.onMessage === 'function') {
         htmlComponents.push({ id, component });
         console.log(`Carrier welcome handler attached to ${id}`);
       }

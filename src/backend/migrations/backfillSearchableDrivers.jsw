@@ -14,6 +14,7 @@
 // ============================================================================
 
 import wixData from 'wix-data';
+import { chunkArray } from 'backend/utils/arrayUtils';
 
 const CONFIG = {
   collection: 'DriverProfiles',
@@ -25,7 +26,7 @@ const CONFIG = {
  * @returns {Object} Migration results with counts
  */
 export async function runBackfillMigration() {
-  console.log('🔄 Starting driver searchability backfill migration...');
+  console.log('[runBackfillMigration] Starting driver searchability backfill migration...');
 
   const results = {
     scanned: 0,
@@ -49,38 +50,55 @@ export async function runBackfillMigration() {
         .limit(CONFIG.batchSize)
         .find({ suppressAuth: true });
 
-      console.log(`📦 Processing batch: ${batch.items.length} profiles (offset: ${skip})`);
+      console.log(`[runBackfillMigration] Processing batch: ${batch.items.length} profiles (offset: ${skip})`);
       results.scanned += batch.items.length;
 
-      for (const profile of batch.items) {
-        try {
-          // Only update if is_searchable is not already true
-          if (profile.is_searchable === true && profile.visibility_level === 'full') {
-            results.skipped++;
-            continue;
+      // Filter profiles that need updating
+      const needsUpdate = batch.items.filter(profile =>
+        !(profile.is_searchable === true && profile.visibility_level === 'full')
+      );
+
+      const alreadySearchable = batch.items.length - needsUpdate.length;
+      results.skipped += alreadySearchable;
+
+      // Chunk and process in parallel (10 per chunk for Wix data updates)
+      const chunks = chunkArray(needsUpdate, 10);
+
+      for (const chunk of chunks) {
+        const chunkResults = await Promise.all(
+          chunk.map(async (profile) => {
+            try {
+              // Update the profile with searchability fields
+              const updatedProfile = {
+                ...profile,
+                is_searchable: true,
+                visibility_level: 'full',
+                updated_date: new Date(),
+                migration_note: 'Backfilled by backfillSearchableDrivers migration'
+              };
+
+              await wixData.update(CONFIG.collection, updatedProfile, { suppressAuth: true });
+              return { success: true, id: profile._id };
+            } catch (updateError) {
+              return {
+                success: false,
+                profileId: profile._id,
+                error: updateError.message
+              };
+            }
+          })
+        );
+
+        for (const r of chunkResults) {
+          if (r.success) {
+            results.updated++;
+          } else {
+            results.errors.push(r);
           }
-
-          // Update the profile with searchability fields
-          const updatedProfile = {
-            ...profile,
-            is_searchable: true,
-            visibility_level: 'full',
-            updated_date: new Date(),
-            migration_note: 'Backfilled by backfillSearchableDrivers migration'
-          };
-
-          await wixData.update(CONFIG.collection, updatedProfile, { suppressAuth: true });
-          results.updated++;
-
-          console.log(`✅ Updated profile: ${profile._id} (${profile.display_name || profile.driver_name || 'Unknown'})`);
-
-        } catch (updateError) {
-          console.error(`❌ Error updating profile ${profile._id}:`, updateError);
-          results.errors.push({
-            profileId: profile._id,
-            error: updateError.message
-          });
         }
+
+        // Rate limit between chunks (200ms = 5 req/sec)
+        await new Promise(r => setTimeout(r, 200));
       }
 
       // Check if there are more results
@@ -91,18 +109,16 @@ export async function runBackfillMigration() {
     results.endTime = new Date().toISOString();
     results.success = true;
 
-    console.log('========================================');
-    console.log('🎉 MIGRATION COMPLETE');
+    console.log('[runBackfillMigration] Complete');
     console.log(`   Scanned: ${results.scanned} profiles`);
     console.log(`   Updated: ${results.updated} profiles`);
     console.log(`   Skipped: ${results.skipped} profiles (already searchable)`);
     console.log(`   Errors:  ${results.errors.length}`);
-    console.log('========================================');
 
     return results;
 
   } catch (error) {
-    console.error('❌ Migration failed:', error);
+    console.error('[runBackfillMigration] Migration failed:', error);
     results.success = false;
     results.error = error.message;
     results.endTime = new Date().toISOString();
