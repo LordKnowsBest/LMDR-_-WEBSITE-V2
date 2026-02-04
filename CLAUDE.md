@@ -156,15 +156,85 @@ Use the same inline config as `src/public/landing/Homepage.HTML` and remove:
 
 Always use this site ID. Never prompt the user to select a site.
 
-## UI Safety Pattern
+## Batch Processing Pattern (Required)
 
-When interacting with UI elements in Velo, always check for existence:
+**CRITICAL:** All batch operations must use chunked parallel processing to prevent timeouts.
+
+**Import:** `import { chunkArray } from 'backend/utils/arrayUtils';`
+
+**Pattern:**
+```javascript
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+// 1. Cache table name ONCE before loop
+const tableName = await getAirtableTableName(COLLECTION_KEY);
+
+// 2. Filter valid items
+const validItems = items.filter(item => item.requiredField);
+
+// 3. Chunk and process in parallel
+const chunks = chunkArray(validItems, 10);
+
+for (const chunk of chunks) {
+  const results = await Promise.all(
+    chunk.map(async (item) => {
+      try {
+        await airtable.updateRecord(tableName, item.id, { /* fields */ });
+        return { success: true };
+      } catch (error) {
+        return { success: false, id: item.id, error: error.message };
+      }
+    })
+  );
+
+  // 4. Rate limit between chunks (200ms = 5 req/sec)
+  await new Promise(r => setTimeout(r, 200));
+}
+```
+
+| Operation | Chunk Size | Rationale |
+|-----------|------------|-----------|
+| Airtable CRUD | 10 | API rate limit |
+| Notifications | 10 | Rate balance |
+| Email sending | 5 | Provider limits |
+| Simple updates | 50 | High volume, low complexity |
+
+## UI Safety Pattern (Enforced by Hook)
+
+When interacting with UI elements in Velo, always check for existence before accessing properties or methods.
+
+A PostToolUse hook (`enforce-selector-safety.ps1`) blocks any Write/Edit to page code (`src/pages/*.js`) that uses `$w('#elementId')` without a safety check.
+
+**Accepted patterns:**
 
 ```javascript
+// Option 1: Use .rendered check (preferred)
 const element = $w('#optionalElement');
 if (element.rendered) {
     element.text = "Value";
 }
+
+// Option 2: Check element && property exists
+const el = $w('#myButton');
+if (el && el.onClick) {
+    el.onClick(() => { /* handler */ });
+}
+
+// Option 3: Wrap in try-catch
+try {
+    $w('#optionalElement').postMessage(data);
+} catch (e) {
+    // Element may not exist on page
+}
+```
+
+**Blocked patterns:**
+
+```javascript
+// WRONG - No existence check
+$w('#submitButton').onClick(() => { });
+$w('#statusText').text = "Loading...";
+$w('#html1').postMessage({ type: 'init' });
 ```
 
 ## Context Documents

@@ -13,6 +13,7 @@ import { getAirtableTableName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
 import { createNotification } from 'backend/memberService';
 import { logGamificationEvent, awardRecruiterPoints } from 'backend/gamificationService';
+import { chunkArray } from 'backend/utils/arrayUtils';
 
 // =============================================================================
 // COLLECTION KEYS (Airtable-only)
@@ -801,7 +802,7 @@ export async function getRecruiterBadgeSummary(recruiterId) {
 
 /**
  * Recalculate badges for all recruiters (scheduled job)
- * @returns {object} { processed, badges_awarded, tier_upgrades }
+ * @returns {object} { processed, badges_awarded, tier_upgrades, errors }
  */
 export async function batchRecalculateBadges() {
   try {
@@ -809,26 +810,57 @@ export async function batchRecalculateBadges() {
       limit: 1000
     });
 
+    console.log(`[batchRecalculateBadges] Starting: ${recruiters.length} recruiters`);
+
     let processed = 0;
     let totalBadgesAwarded = 0;
     let totalTierUpgrades = 0;
+    const errors = [];
 
-    for (const recruiter of recruiters) {
-      const recruiterId = recruiter['Recruiter ID'];
-      if (!recruiterId) continue;
+    // Filter recruiters with valid IDs
+    const validRecruiters = recruiters.filter(r => r['Recruiter ID']);
 
-      const result = await recalculateRecruiterBadges(recruiterId);
-      totalBadgesAwarded += result.new_badges.length;
-      totalTierUpgrades += result.tier_upgrades.length;
-      processed++;
+    // Chunk and process in parallel (10 per chunk - complex recalc internally)
+    const chunks = chunkArray(validRecruiters, 10);
+
+    for (const chunk of chunks) {
+      const results = await Promise.all(
+        chunk.map(async (recruiter) => {
+          try {
+            const recruiterId = recruiter['Recruiter ID'];
+            const result = await recalculateRecruiterBadges(recruiterId);
+            return {
+              success: true,
+              badgesAwarded: result.new_badges.length,
+              tierUpgrades: result.tier_upgrades.length
+            };
+          } catch (error) {
+            return { success: false, id: recruiter['Recruiter ID'], error: error.message };
+          }
+        })
+      );
+
+      for (const r of results) {
+        processed++;
+        if (r.success) {
+          totalBadgesAwarded += r.badgesAwarded;
+          totalTierUpgrades += r.tierUpgrades;
+        } else {
+          errors.push(r);
+        }
+      }
+
+      // Rate limit between chunks (200ms = 5 req/sec)
+      await new Promise(r => setTimeout(r, 200));
     }
 
-    console.log(`✅ Badge recalculation complete: ${processed} recruiters, ${totalBadgesAwarded} new badges, ${totalTierUpgrades} tier upgrades`);
+    console.log(`[batchRecalculateBadges] Complete: ${processed} recruiters, ${totalBadgesAwarded} new badges, ${totalTierUpgrades} tier upgrades, ${errors.length} errors`);
 
     return {
       processed,
       badges_awarded: totalBadgesAwarded,
-      tier_upgrades: totalTierUpgrades
+      tier_upgrades: totalTierUpgrades,
+      errors: errors.length
     };
   } catch (error) {
     console.error('batchRecalculateBadges error:', error);

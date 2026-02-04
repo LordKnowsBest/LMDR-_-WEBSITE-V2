@@ -9,6 +9,7 @@
 import wixData from 'wix-data';
 import { getPublicStats, getFeaturedCarriers, getRecentHires } from 'backend/publicStatsService';
 import { submitCarrierStaffingRequest } from 'backend/carrierLeadsService';
+import wixLocation from 'wix-location';
 
 $w.onReady(async function () {
   // Initialize carrier staffing form handler
@@ -56,6 +57,14 @@ function initCarrierStaffingForm() {
                 type: 'staffingRequestResult',
                 data: result
               });
+
+              // Redirect to checkout
+              if (result.success && result.leadId) {
+                console.log('[VELO] 🔀 Redirecting to checkout...');
+                setTimeout(() => {
+                  wixLocation.to(`/checkout?id=${result.leadId}`);
+                }, 1500);
+              }
             } catch (error) {
               console.error('[VELO] Submission error:', error);
               htmlComponent.postMessage({

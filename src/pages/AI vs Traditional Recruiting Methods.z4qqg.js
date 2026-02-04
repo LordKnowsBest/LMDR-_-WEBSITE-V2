@@ -9,6 +9,7 @@
 import { getIndustryComparison } from 'backend/contentService';
 import { getCarrierPlatformStats } from 'backend/publicStatsService';
 import { submitCarrierStaffingRequest } from 'backend/carrierLeadsService';
+import wixLocation from 'wix-location';
 
 $w.onReady(async function () {
   console.log('[VELO] ✅ AI vs Traditional page onReady fired');
@@ -74,6 +75,14 @@ function setupCarrierFormHandler() {
                 leadId: result?.leadId || result?._id || 'unknown'
               });
               console.log('[VELO] 📤 Sent success response to form');
+
+              // Redirect to checkout
+              if (result.success && result.leadId) {
+                console.log('[VELO] 🔀 Redirecting to checkout...');
+                setTimeout(() => {
+                  wixLocation.to(`/checkout?id=${result.leadId}`);
+                }, 1500);
+              }
 
             } catch (error) {
               console.error('[VELO] ❌ Backend error:', error.message);

@@ -13,34 +13,35 @@ Optimize the carrier onboarding experience by transitioning from a lead capture 
 ---
 
 ## Phase 1: Lead Form & Redirection Logic
-- [ ] **Task:** Modify `src/backend/carrierLeadsService.jsw` to return the `leadId` and a unique `checkoutToken` upon successful submission.
-- [ ] **Task:** Update `src/public/utility/_TEMPLATE_Carrier_Staffing_Form.html` PostMessage handler to receive the redirection URL.
-- [ ] **Task:** Update Page Code for carrier landing pages to perform `wixLocation.to('/checkout?id=' + result.leadId)`.
+- [x] **Task:** Modify `src/backend/carrierLeadsService.jsw` to return the `leadId` and a unique `checkoutToken` upon successful submission.
+- [x] **Task:** Update `src/public/utility/_TEMPLATE_Carrier_Staffing_Form.html` PostMessage handler to receive the redirection URL.
+- [x] **Task:** Update Page Code for carrier landing pages to perform `wixLocation.to('/checkout?id=' + result.leadId)`.
 
 ## Phase 2: Stripe Backend Integration
-- [ ] **Task:** Create `src/backend/stripeService.jsw`.
-    - [ ] `createCheckoutSession(leadId, amount)`: Generate a Stripe Checkout URL or Payment Intent.
-    - [ ] `handleWebhook(event)`: Listen for `checkout.session.completed` or `payment_intent.succeeded`.
-- [ ] **Task:** Add `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` to Wix Secrets Manager.
-- [ ] **Task:** Create a new collection `CarrierPayments` to track deposit status, linked to `carrierStaffingRequests`.
+- [x] **Task:** Create `src/backend/stripeService.jsw`.
+    - [x] `createCheckoutSession(leadId, amount)`: Generate a Stripe Checkout URL or Payment Intent.
+    - [x] `handleWebhook(event)`: Listen for `checkout.session.completed` or `payment_intent.succeeded`.
+- [x] **Task:** Add `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` to Wix Secrets Manager.
+- [x] **Task:** Create a new collection `CarrierPayments` to track deposit status, linked to `carrierStaffingRequests`.
 
 ## Phase 3: Checkout UI (The "Deposit" Page)
-- [ ] **Task:** Implement `src/pages/Checkout.kbyzk.js`.
-    - [ ] Retrieve `leadId` from URL parameters.
-    - [ ] Fetch lead details to personalize the checkout (e.g., "Ready to find your 5 Class A drivers, [Company Name]?").
-- [ ] **Task:** Create `src/public/STRIPE_PAYMENT_ELEMENT.html` (Missing).
-    - [ ] Host Stripe Elements or redirect to Stripe Hosted Checkout.
-    - [ ] Frame the payment as a "Refundable Activation Deposit".
+- [x] **Task:** Implement `src/pages/Checkout.kbyzk.js`.
+    - [x] Retrieve `leadId` from URL parameters.
+    - [x] Fetch lead details to personalize the checkout (e.g., "Ready to find your 5 Class A drivers, [Company Name]?").
+- [x] **Task:** Create `src/public/STRIPE_PAYMENT_ELEMENT.html` (Missing).
+    - [x] Host Stripe Elements or redirect to Stripe Hosted Checkout.
+    - [x] Frame the payment as a "Refundable Activation Deposit".
 
 ## Phase 4: Post-Payment Fulfillment
-- [ ] **Task:** Update `carrierLeadsService.jsw` status to `activated_paid` when webhook confirms payment.
-- [ ] **Task:** Implement `src/backend/emailService.jsw` trigger for "Payment Received" email.
-- [ ] **Task:** Create a Success Page (`src/public/Payment_Success.html`) (Missing) with:
-    - [ ] Confirmation of search activation.
-    - [ ] Calendly embed for onboarding.
+- [x] **Task:** Update `carrierLeadsService.jsw` status to `activated_paid` when webhook confirms payment.
+- [x] **Task:** Implement `src/backend/emailService.jsw` trigger for "Payment Received" email.
+- [x] **Task:** Create a Success Page (`src/public/Payment_Success.html`) (Missing) with:
+    - [x] Confirmation of search activation.
+    - [x] Calendly embed for onboarding.
 
 ## Phase 5: Verification & Analytics
-- [ ] **Task:** Set up conversion tracking (Google Analytics/Facebook Pixel) for `lead_submitted` vs `deposit_paid`.
+- [x] **Task:** Set up conversion tracking (Google Analytics/Facebook Pixel) for `lead_submitted` vs `deposit_paid`.
+- [x] **Task:** Verify full flow (Lead Form -> Checkout -> Success -> Database Update).
 - [ ] **Task:** Test end-to-end flow in Stripe Test Mode.
 
 ---

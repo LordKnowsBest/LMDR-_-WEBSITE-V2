@@ -14,6 +14,7 @@ import { getAirtableTableName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
 import { createNotification } from 'backend/memberService';
 import { awardDriverXP, awardRecruiterPoints, logGamificationEvent } from 'backend/gamificationService';
+import { chunkArray } from 'backend/utils/arrayUtils';
 
 // =============================================================================
 // COLLECTION KEYS (Airtable-only)
@@ -161,19 +162,36 @@ export async function getActiveChallenges(userId, userType) {
     const challenges = [];
     const now = new Date();
 
+    // Separate expired and active challenges
+    const expiredRecords = [];
+    const activeRecords = [];
+
     for (const record of records) {
       const challenge = normalizeUserChallenge(record);
-
-      // Check if expired
       if (challenge.expiresAt && new Date(challenge.expiresAt) < now) {
-        // Mark as expired
-        await updateData(collectionKey, record.id, {
-          'Status': CHALLENGE_STATUS.EXPIRED,
-          'Expired At': now.toISOString()
-        });
-        continue;
+        expiredRecords.push({ record, challenge });
+      } else {
+        activeRecords.push({ record, challenge });
       }
+    }
 
+    // Process expired challenges in parallel (chunks of 20)
+    if (expiredRecords.length > 0) {
+      const chunks = chunkArray(expiredRecords, 20);
+      for (const chunk of chunks) {
+        await Promise.all(
+          chunk.map(({ record }) =>
+            updateData(collectionKey, record.id, {
+              'Status': CHALLENGE_STATUS.EXPIRED,
+              'Expired At': now.toISOString()
+            }).catch(() => null) // Swallow errors for cleanup
+          )
+        );
+      }
+    }
+
+    // Process active challenges (no DB calls, just calculations)
+    for (const { challenge } of activeRecords) {
       // Calculate progress percentage
       challenge.progressPercent = challenge.targetValue > 0
         ? Math.min(100, Math.round((challenge.currentValue / challenge.targetValue) * 100))
@@ -716,7 +734,7 @@ export async function getChallengeHistory(userId, userType, options = {}) {
 
 /**
  * Process expired challenges (called by scheduled job)
- * @returns {object} { processed, expired }
+ * @returns {object} { processed, expired, errors }
  */
 export async function processExpiredChallenges() {
   try {
@@ -724,8 +742,11 @@ export async function processExpiredChallenges() {
     const results = {
       processed: 0,
       expired: 0,
-      notified: 0
+      notified: 0,
+      errors: 0
     };
+
+    console.log('[processExpiredChallenges] Starting');
 
     // Process for both user types
     for (const userType of ['driver', 'recruiter']) {
@@ -737,33 +758,58 @@ export async function processExpiredChallenges() {
         limit: 500
       });
 
-      for (const challenge of expiredChallenges) {
-        results.processed++;
-
+      // Filter to only truly expired challenges
+      const trulyExpired = expiredChallenges.filter(challenge => {
         const expiresAt = new Date(challenge['Expires At']);
-        if (expiresAt <= now) {
-          // Mark as expired
-          await updateData(collectionKey, challenge.id, {
-            'Status': CHALLENGE_STATUS.EXPIRED,
-            'Expired At': now.toISOString(),
-            'Updated At': now.toISOString()
-          });
+        return expiresAt <= now;
+      });
 
-          results.expired++;
+      results.processed += expiredChallenges.length;
 
-          // Send expiration notification
-          await createNotification(
-            challenge['User ID'],
-            'challenge_expired',
-            `Challenge Expired: ${challenge['Challenge Name']}`,
-            `Your challenge "${challenge['Challenge Name']}" has expired. Better luck next time!`,
-            userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
-          );
+      // Chunk and process in parallel (10 per chunk - update + notification)
+      const chunks = chunkArray(trulyExpired, 10);
+
+      for (const chunk of chunks) {
+        const chunkResults = await Promise.all(
+          chunk.map(async (challenge) => {
+            try {
+              // Mark as expired
+              await updateData(collectionKey, challenge.id, {
+                'Status': CHALLENGE_STATUS.EXPIRED,
+                'Expired At': now.toISOString(),
+                'Updated At': now.toISOString()
+              });
+
+              // Send expiration notification
+              await createNotification(
+                challenge['User ID'],
+                'challenge_expired',
+                `Challenge Expired: ${challenge['Challenge Name']}`,
+                `Your challenge "${challenge['Challenge Name']}" has expired. Better luck next time!`,
+                userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
+              );
+
+              return { success: true };
+            } catch (error) {
+              return { success: false, id: challenge.id, error: error.message };
+            }
+          })
+        );
+
+        for (const r of chunkResults) {
+          if (r.success) {
+            results.expired++;
+          } else {
+            results.errors++;
+          }
         }
+
+        // Rate limit between chunks (200ms = 5 req/sec)
+        await new Promise(r => setTimeout(r, 200));
       }
     }
 
-    console.log(`✅ Challenge expiration processed: ${results.processed} checked, ${results.expired} expired`);
+    console.log(`[processExpiredChallenges] Complete: ${results.processed} checked, ${results.expired} expired, ${results.errors} errors`);
     return results;
   } catch (error) {
     console.error('processExpiredChallenges error:', error);
@@ -773,7 +819,7 @@ export async function processExpiredChallenges() {
 
 /**
  * Send reminders for challenges expiring soon
- * @returns {object} { processed, reminded }
+ * @returns {object} { processed, reminded, errors }
  */
 export async function sendExpiringChallengeReminders() {
   try {
@@ -781,8 +827,11 @@ export async function sendExpiringChallengeReminders() {
     const twoHoursFromNow = new Date(now.getTime() + 2 * 60 * 60 * 1000);
     const results = {
       processed: 0,
-      reminded: 0
+      reminded: 0,
+      errors: 0
     };
+
+    console.log('[sendExpiringChallengeReminders] Starting');
 
     for (const userType of ['driver', 'recruiter']) {
       const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
@@ -793,36 +842,62 @@ export async function sendExpiringChallengeReminders() {
         limit: 500
       });
 
-      for (const challenge of expiringChallenges) {
-        results.processed++;
-
+      // Filter to only challenges expiring within the window
+      const needsReminder = expiringChallenges.filter(challenge => {
         const expiresAt = new Date(challenge['Expires At']);
-        if (expiresAt > now && expiresAt <= twoHoursFromNow) {
-          const currentValue = challenge['Current Value'] || 0;
-          const targetValue = challenge['Target Value'] || 1;
-          const progressPercent = Math.round((currentValue / targetValue) * 100);
-          const timeRemaining = formatTimeRemaining(expiresAt - now);
+        return expiresAt > now && expiresAt <= twoHoursFromNow;
+      });
 
-          await createNotification(
-            challenge['User ID'],
-            'challenge_expiring',
-            `Challenge Expiring Soon!`,
-            `Your challenge "${challenge['Challenge Name']}" expires in ${timeRemaining}! You're ${progressPercent}% complete.`,
-            userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
-          );
+      results.processed += expiringChallenges.length;
 
-          // Mark reminder as sent
-          await updateData(collectionKey, challenge.id, {
-            'Reminder Sent': 'Yes',
-            'Updated At': now.toISOString()
-          });
+      // Chunk and process in parallel (10 per chunk - notification + update)
+      const chunks = chunkArray(needsReminder, 10);
 
-          results.reminded++;
+      for (const chunk of chunks) {
+        const chunkResults = await Promise.all(
+          chunk.map(async (challenge) => {
+            try {
+              const currentValue = challenge['Current Value'] || 0;
+              const targetValue = challenge['Target Value'] || 1;
+              const progressPercent = Math.round((currentValue / targetValue) * 100);
+              const expiresAt = new Date(challenge['Expires At']);
+              const timeRemaining = formatTimeRemaining(expiresAt - now);
+
+              await createNotification(
+                challenge['User ID'],
+                'challenge_expiring',
+                `Challenge Expiring Soon!`,
+                `Your challenge "${challenge['Challenge Name']}" expires in ${timeRemaining}! You're ${progressPercent}% complete.`,
+                userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
+              );
+
+              // Mark reminder as sent
+              await updateData(collectionKey, challenge.id, {
+                'Reminder Sent': 'Yes',
+                'Updated At': now.toISOString()
+              });
+
+              return { success: true };
+            } catch (error) {
+              return { success: false, id: challenge.id, error: error.message };
+            }
+          })
+        );
+
+        for (const r of chunkResults) {
+          if (r.success) {
+            results.reminded++;
+          } else {
+            results.errors++;
+          }
         }
+
+        // Rate limit between chunks (200ms = 5 req/sec)
+        await new Promise(r => setTimeout(r, 200));
       }
     }
 
-    console.log(`✅ Challenge reminders: ${results.processed} checked, ${results.reminded} reminded`);
+    console.log(`[sendExpiringChallengeReminders] Complete: ${results.processed} checked, ${results.reminded} reminded, ${results.errors} errors`);
     return results;
   } catch (error) {
     console.error('sendExpiringChallengeReminders error:', error);

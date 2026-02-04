@@ -9,6 +9,7 @@
 
 import { createNotification } from 'backend/memberService';
 import { getStreakStatus, getStreaksAtRisk } from 'backend/streakService';
+import { chunkArray } from 'backend/utils/arrayUtils';
 
 // =============================================================================
 // NOTIFICATION TYPES
@@ -209,32 +210,49 @@ export async function sendStreakFreezeGrantedNotification(driverId, newTotal) {
 /**
  * Send streak at risk notifications to all drivers who haven't logged in today
  * Called by scheduled job around 8pm
- * @returns {object} { sent, failed }
+ * @returns {object} { sent, failed, total }
  */
 export async function sendBatchStreakAtRiskNotifications() {
   try {
     const atRiskDrivers = await getStreaksAtRisk();
 
+    console.log(`[sendBatchStreakAtRiskNotifications] Starting: ${atRiskDrivers.length} drivers`);
+
     let sent = 0;
     let failed = 0;
 
-    for (const driver of atRiskDrivers) {
-      try {
-        const result = await sendStreakAtRiskNotification(
-          driver.driverId,
-          driver.streakDays,
-          driver.freezesAvailable
-        );
+    // Chunk and process in parallel (10 per chunk - notification sending)
+    const chunks = chunkArray(atRiskDrivers, 10);
 
-        if (result.success) {
+    for (const chunk of chunks) {
+      const results = await Promise.all(
+        chunk.map(async (driver) => {
+          try {
+            const result = await sendStreakAtRiskNotification(
+              driver.driverId,
+              driver.streakDays,
+              driver.freezesAvailable
+            );
+            return { success: result.success };
+          } catch (err) {
+            return { success: false };
+          }
+        })
+      );
+
+      for (const r of results) {
+        if (r.success) {
           sent++;
         } else {
           failed++;
         }
-      } catch (err) {
-        failed++;
       }
+
+      // Rate limit between chunks (200ms = 5 req/sec)
+      await new Promise(r => setTimeout(r, 200));
     }
+
+    console.log(`[sendBatchStreakAtRiskNotifications] Complete: ${sent} sent, ${failed} failed`);
 
     return { sent, failed, total: atRiskDrivers.length };
   } catch (error) {

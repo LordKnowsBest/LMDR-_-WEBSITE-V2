@@ -473,6 +473,14 @@ function initCarrierStaffingForm() {
             data: result
           });
 
+          // Redirect to checkout
+          if (result.success && result.leadId) {
+            console.log('[StaffingForm] Redirecting to checkout...');
+            setTimeout(() => {
+              wixLocation.to(`/checkout?id=${result.leadId}`);
+            }, 1500);
+          }
+
         } catch (error) {
           console.error('[StaffingForm] Submission error:', error);
 

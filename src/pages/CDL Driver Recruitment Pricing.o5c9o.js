@@ -693,6 +693,14 @@ function initPricingWidgetForm() {
         // Track successful submission
         if (result.success) {
           trackPricingClick('Staffing Form Submitted');
+
+          // Redirect to checkout
+          if (result.leadId) {
+            console.log('Redirecting to checkout...');
+            setTimeout(() => {
+              wixLocation.to(`/checkout?id=${result.leadId}`);
+            }, 1500);
+          }
         }
       } catch (error) {
         console.error('Error submitting staffing request:', error);
