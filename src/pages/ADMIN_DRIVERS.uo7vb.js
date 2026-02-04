@@ -22,6 +22,17 @@ import {
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
+/**
+ * Safely send a postMessage to the HTML component
+ */
+function safeSend(component, data) {
+    try {
+        component.postMessage(data);
+    } catch (err) {
+        console.error('ADMIN_DRIVERS: safeSend failed:', err);
+    }
+}
+
 $w.onReady(function () {
     const component = findHtmlComponent();
     if (!component) {
@@ -36,7 +47,7 @@ $w.onReady(function () {
     });
 
     // Send init signal so the HTML can request its initial data
-    component.postMessage({ action: 'init' });
+    safeSend(component, { action: 'init' });
 });
 
 /**
@@ -62,7 +73,7 @@ function findHtmlComponent() {
 async function routeMessage(component, msg) {
     switch (msg.action) {
         case 'ping':
-            component.postMessage({ action: 'pong', timestamp: Date.now() });
+            safeSend(component, { action: 'pong', timestamp: Date.now() });
             break;
 
         case 'getDrivers':
@@ -133,7 +144,7 @@ async function handleGetDrivers(component, msg) {
             sortDirection: msg.sortDirection || 'desc'
         });
 
-        component.postMessage({
+        safeSend(component, {
             action: 'driversLoaded',
             payload: {
                 drivers: result.drivers,
@@ -143,7 +154,7 @@ async function handleGetDrivers(component, msg) {
         });
     } catch (error) {
         console.error('ADMIN_DRIVERS: getDrivers error:', error);
-        component.postMessage({
+        safeSend(component, {
             action: 'actionError',
             message: 'Failed to load drivers. Please try again.'
         });
@@ -157,7 +168,7 @@ async function handleGetStats(component) {
     try {
         const stats = await getDriverStats();
 
-        component.postMessage({
+        safeSend(component, {
             action: 'statsLoaded',
             payload: stats
         });
@@ -174,13 +185,13 @@ async function handleGetDriverDetail(component, msg) {
     try {
         const driver = await getDriverDetail(msg.driverId);
 
-        component.postMessage({
+        safeSend(component, {
             action: 'driverDetail',
             payload: driver
         });
     } catch (error) {
         console.error('ADMIN_DRIVERS: getDriverDetail error:', error);
-        component.postMessage({
+        safeSend(component, {
             action: 'actionError',
             message: 'Failed to load driver details.'
         });
@@ -194,13 +205,13 @@ async function handleVerifyDriver(component, msg) {
     try {
         await verifyDriver(msg.driverId);
 
-        component.postMessage({
+        safeSend(component, {
             action: 'actionSuccess',
             message: 'Driver verified successfully.'
         });
     } catch (error) {
         console.error('ADMIN_DRIVERS: verifyDriver error:', error);
-        component.postMessage({
+        safeSend(component, {
             action: 'actionError',
             message: 'Failed to verify driver.'
         });
@@ -214,13 +225,13 @@ async function handleSuspendDriver(component, msg) {
     try {
         await suspendDriver(msg.driverId, msg.reason || '');
 
-        component.postMessage({
+        safeSend(component, {
             action: 'actionSuccess',
             message: 'Driver suspended successfully.'
         });
     } catch (error) {
         console.error('ADMIN_DRIVERS: suspendDriver error:', error);
-        component.postMessage({
+        safeSend(component, {
             action: 'actionError',
             message: 'Failed to suspend driver.'
         });
@@ -234,7 +245,7 @@ async function handleBulkAction(component, msg, actionType) {
     try {
         const driverIds = msg.driverIds || [];
         if (driverIds.length === 0) {
-            component.postMessage({
+            safeSend(component, {
                 action: 'actionError',
                 message: 'No drivers selected for bulk action.'
             });
@@ -244,13 +255,13 @@ async function handleBulkAction(component, msg, actionType) {
         const result = await bulkUpdateDrivers(driverIds, actionType);
 
         const label = actionType === 'verify' ? 'verified' : 'suspended';
-        component.postMessage({
+        safeSend(component, {
             action: 'actionSuccess',
             message: `${result.success} driver(s) ${label} successfully.${result.failed > 0 ? ` ${result.failed} failed.` : ''}`
         });
     } catch (error) {
         console.error('ADMIN_DRIVERS: bulkAction error:', error);
-        component.postMessage({
+        safeSend(component, {
             action: 'actionError',
             message: `Bulk ${actionType} failed. Please try again.`
         });
@@ -264,7 +275,7 @@ async function handleExportDrivers(component, msg) {
     try {
         const csv = await exportDriversCSV(msg.filters || {});
 
-        component.postMessage({
+        safeSend(component, {
             action: 'exportReady',
             payload: {
                 csv: csv,
@@ -273,7 +284,7 @@ async function handleExportDrivers(component, msg) {
         });
     } catch (error) {
         console.error('ADMIN_DRIVERS: exportDrivers error:', error);
-        component.postMessage({
+        safeSend(component, {
             action: 'actionError',
             message: 'Failed to export drivers.'
         });
@@ -287,7 +298,7 @@ async function handleRevealEmail(component, msg) {
     try {
         const driver = await getDriverDetail(msg.driverId);
 
-        component.postMessage({
+        safeSend(component, {
             action: 'emailRevealed',
             payload: {
                 driverId: msg.driverId,
@@ -296,7 +307,7 @@ async function handleRevealEmail(component, msg) {
         });
     } catch (error) {
         console.error('ADMIN_DRIVERS: revealEmail error:', error);
-        component.postMessage({
+        safeSend(component, {
             action: 'actionError',
             message: 'Failed to reveal email.'
         });

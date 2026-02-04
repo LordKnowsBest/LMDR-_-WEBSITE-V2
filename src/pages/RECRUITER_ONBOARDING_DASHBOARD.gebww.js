@@ -52,6 +52,7 @@ const MESSAGE_REGISTRY = {
     'cancelWorkflow',
     'putOnHold',
     'resumeWorkflow',
+    'markStarted',
     'navigateTo'
   ],
   outbound: [
@@ -188,6 +189,10 @@ async function routeMessage(component, message) {
 
       case 'resumeWorkflow':
         await handleResumeWorkflow(message.data, component);
+        break;
+
+      case 'markStarted':
+        await handleMarkStarted(message.data, component);
         break;
 
       case 'navigateTo':
@@ -682,6 +687,44 @@ async function handleResumeWorkflow(data, component) {
     console.error('handleResumeWorkflow error:', error);
     sendToHtml(component, 'actionResult', {
       action: 'resumeWorkflow',
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+// ============================================================================
+// HANDLER: Mark Started
+// ============================================================================
+
+async function handleMarkStarted(data, component) {
+  const { workflowId } = data || {};
+
+  if (!workflowId) {
+    sendToHtml(component, 'actionResult', {
+      action: 'markStarted',
+      success: false,
+      error: 'Workflow ID is required'
+    });
+    return;
+  }
+
+  try {
+    const result = await updateWorkflowStatus(workflowId, 'in_progress', {
+      note: 'Started by recruiter',
+      startDate: new Date().toISOString()
+    });
+
+    sendToHtml(component, 'actionResult', {
+      action: 'markStarted',
+      success: result.success,
+      workflowId,
+      error: result.error?.message || result.error
+    });
+  } catch (error) {
+    console.error('handleMarkStarted error:', error);
+    sendToHtml(component, 'actionResult', {
+      action: 'markStarted',
       success: false,
       error: error.message
     });
