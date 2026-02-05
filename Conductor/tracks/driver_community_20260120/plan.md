@@ -192,18 +192,18 @@ A curated content hub for driver wellness with community-contributed tips.
 - [x] Task: Create `HealthResources` collection with schema from spec
 - [x] Task: Create `HealthTips` collection for community submissions
 - [x] Task: Seed initial content: 10 exercise articles, 10 nutrition guides, 5 mental health resources
-- [ ] Task: Add telemedicine partner data (TruckerDoc, MedExpress, etc.)
+- [x] Task: Add telemedicine partner data (TruckerDoc, MedExpress, etc.)
 
 ### 3.2 Health Service Backend
 - [x] Task: Create `healthService.jsw` for resource management
 - [x] Task: Implement `getResourcesByCategory()` with pagination
 - [x] Task: Implement `getResourceBySlug()` for single article view
 - [x] Task: Implement `getFeaturedResources()` for homepage highlights
-- [ ] Task: Implement `searchResources()` with full-text search
+- [x] Task: Implement `searchResources()` with full-text search
 - [x] Task: Implement `markResourceHelpful()` for user ratings
 - [x] Task: Implement `submitTip()` for community contributions
 - [x] Task: Implement `getApprovedTips()` with category filter
-- [ ] Task: Implement `getTipsByAuthor()` for user's submissions
+- [x] Task: Implement `getTipsByAuthor()` for user's submissions
 - [x] Task: Implement `moderateTip()` for admin approval workflow
 
 ### 3.3 Health UI - Hub Page
@@ -216,25 +216,25 @@ A curated content hub for driver wellness with community-contributed tips.
 
 ### 3.4 Health UI - Article View
 - [x] Task: Build article detail view with markdown rendering
-- [ ] Task: Add video embed support for video content
+- [x] Task: Add video embed support for video content
 - [x] Task: Implement "Mark Helpful" button with count display
-- [ ] Task: Add social share buttons (optional)
-- [ ] Task: Show related resources sidebar
+- [x] Task: Add social share buttons (optional)
+- [x] Task: Show related resources sidebar
 - [x] Task: Add "Back to Hub" navigation
 
 ### 3.5 Health UI - Community Tips
 - [x] Task: Build tips list component with voting
 - [x] Task: Create "Submit Tip" modal with category selector
-- [ ] Task: Add character counter for tip text (500 max)
+- [x] Task: Add character counter for tip text (500 max)
 - [x] Task: Show submission status badge (pending/approved)
 - [ ] Task: Display author reputation badges on tips
 
 ### 3.6 Content Management
-- [ ] Task: Create `ADMIN_HEALTH_CONTENT.html` for content management
-- [ ] Task: Build resource CRUD interface for admins
-- [ ] Task: Add rich text editor for article content
-- [ ] Task: Implement tip moderation queue
-- [ ] Task: Add "Feature" toggle for homepage highlights
+- [x] Task: Create `ADMIN_HEALTH_CONTENT.html` for content management
+- [x] Task: Build resource CRUD interface for admins
+- [x] Task: Add rich text editor for article content
+- [x] Task: Implement tip moderation queue
+- [x] Task: Add "Feature" toggle for homepage highlights
 - [ ] Task: Create content scheduling (publish date)
 
 ### 3.7 Wix Integration
@@ -242,14 +242,14 @@ A curated content hub for driver wellness with community-contributed tips.
 - [x] Task: Add HTML component and connect to HEALTH_WELLNESS.html
 - [x] Task: Set up postMessage bridge for backend calls
 - [ ] Task: Add page to driver dashboard navigation
-- [ ] Task: Award reputation points for approved tips
-- [ ] Task: Track resource views in analytics
+- [x] Task: Award reputation points for approved tips
+- [x] Task: Track resource views in analytics
 
 ### 3.8 Testing - Health Resources
-- [ ] Task: Write unit tests for `healthService.jsw` functions
-- [ ] Task: Test category filtering and pagination
-- [ ] Task: Test tip submission and moderation flow
-- [ ] Task: Test helpful count increment with duplicate prevention
+- [x] Task: Write unit tests for `healthService.jsw` functions
+- [x] Task: Test category filtering and pagination
+- [x] Task: Test tip submission and moderation flow
+- [x] Task: Test helpful count increment with duplicate prevention
 - [ ] Task: Manual test: browse all categories and view articles
 - [ ] Task: Manual test: submit and moderate community tip
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Health Resources'
