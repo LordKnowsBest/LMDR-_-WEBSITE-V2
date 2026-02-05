@@ -1,16 +1,16 @@
 /**
- * CARRIER_DOCUMENT_VAULT Page Code
- * Bridges CARRIER_DOCUMENT_VAULT.html with documentVaultService.
+ * CARRIER_COMPLIANCE_CALENDAR Page Code
+ * Bridges CARRIER_COMPLIANCE_CALENDAR.html with complianceCalendarService.
  *
  * HTML uses dual-key pattern: { type, action, data }
- * HTML sends: vaultReady, getDocuments, uploadDocument, navigateTo
- * HTML expects: setDocuments
+ * HTML sends: calendarReady, getComplianceData, createComplianceEvent, navigateTo
+ * HTML expects: setComplianceData, eventCreated
  */
 
 import {
-    getDocuments,
-    uploadDocument
-} from 'backend/documentVaultService';
+    getComplianceEvents,
+    createComplianceEvent
+} from 'backend/complianceCalendarService';
 
 import wixLocationFrontend from 'wix-location-frontend';
 
@@ -20,14 +20,14 @@ function safeSend(component, data) {
     try {
         component.postMessage(data);
     } catch (err) {
-        console.error('CARRIER_DOCUMENT_VAULT: safeSend failed:', err);
+        console.error('CARRIER_COMPLIANCE_CALENDAR: safeSend failed:', err);
     }
 }
 
 $w.onReady(function () {
     const component = findHtmlComponent();
     if (!component) {
-        console.warn('CARRIER_DOCUMENT_VAULT: No HTML component found');
+        console.warn('CARRIER_COMPLIANCE_CALENDAR: No HTML component found');
         return;
     }
 
@@ -56,40 +56,42 @@ function findHtmlComponent() {
 
 async function routeMessage(component, msg) {
     switch (msg.type) {
-        case 'vaultReady':
-        case 'getDocuments':
-            await handleGetDocuments(component);
+        case 'calendarReady':
+        case 'getComplianceData':
+            await handleGetComplianceData(component, msg);
             break;
-        case 'uploadDocument':
-            await handleUploadDocument(component, msg);
+        case 'createComplianceEvent':
+            await handleCreateEvent(component, msg);
             break;
         case 'navigateTo':
             handleNavigateTo(msg);
             break;
         default:
-            console.warn('CARRIER_DOCUMENT_VAULT: Unknown type:', msg.type);
+            console.warn('CARRIER_COMPLIANCE_CALENDAR: Unknown type:', msg.type);
     }
 }
 
-async function handleGetDocuments(component) {
-    try {
-        const docs = await getDocuments();
-        safeSend(component, { type: 'setDocuments', data: docs });
-    } catch (error) {
-        console.error('CARRIER_DOCUMENT_VAULT: getDocuments error:', error);
-        safeSend(component, { type: 'setDocuments', data: [] });
-    }
-}
-
-async function handleUploadDocument(component, msg) {
+async function handleGetComplianceData(component, msg) {
     try {
         const data = msg.data || {};
-        await uploadDocument(data);
-        // Refresh the list
-        const docs = await getDocuments();
-        safeSend(component, { type: 'setDocuments', data: docs });
+        const events = await getComplianceEvents({
+            start: data.start,
+            end: data.end
+        });
+        safeSend(component, { type: 'setComplianceData', data: events });
     } catch (error) {
-        console.error('CARRIER_DOCUMENT_VAULT: uploadDocument error:', error);
+        console.error('CARRIER_COMPLIANCE_CALENDAR: getComplianceData error:', error);
+        safeSend(component, { type: 'setComplianceData', data: [] });
+    }
+}
+
+async function handleCreateEvent(component, msg) {
+    try {
+        const data = msg.data || {};
+        const result = await createComplianceEvent(data);
+        safeSend(component, { type: 'eventCreated', data: result });
+    } catch (error) {
+        console.error('CARRIER_COMPLIANCE_CALENDAR: createComplianceEvent error:', error);
     }
 }
 

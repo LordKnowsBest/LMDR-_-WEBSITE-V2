@@ -264,7 +264,7 @@ describe('ADMIN_AI_ROUTER Page Code', () => {
         });
 
         test('sends init postMessage to discovered components', () => {
-            expect(sourceCode).toContain("component.postMessage({ action: 'init' })");
+            expect(sourceCode).toContain("safeSend(component, { action: 'init' })");
         });
     });
 

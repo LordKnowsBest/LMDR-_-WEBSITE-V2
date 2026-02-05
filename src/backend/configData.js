@@ -224,7 +224,18 @@ export const DATA_SOURCE = {
   b2bCompetitorIntel: 'airtable',
   b2bCallCampaigns: 'airtable',
   b2bPlaybooks: 'airtable',
-  b2bValueProps: 'airtable'
+  b2bValueProps: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Carrier Fleet Dashboard
+  // -------------------------------------------------------------------------
+  fleetDrivers: 'airtable',
+  equipmentAssets: 'airtable',
+  equipmentAssignments: 'airtable',
+  driverScores: 'airtable',
+  capacityPlans: 'airtable',
+  eldConnections: 'airtable',
+  driverLocations: 'airtable'
 };
 
 // =============================================================================
@@ -426,7 +437,16 @@ export const WIX_COLLECTION_NAMES = {
   b2bCompetitorIntel: 'B2BCompetitorIntel',
   b2bCallCampaigns: 'B2BCallCampaigns',
   b2bPlaybooks: 'B2BPlaybooks',
-  b2bValueProps: 'B2BValueProps'
+  b2bValueProps: 'B2BValueProps',
+
+  // Carrier Fleet Dashboard
+  fleetDrivers: 'FleetDrivers',
+  equipmentAssets: 'EquipmentAssets',
+  equipmentAssignments: 'EquipmentAssignments',
+  driverScores: 'DriverScores',
+  capacityPlans: 'CapacityPlans',
+  eldConnections: 'ELDConnections',
+  driverLocations: 'DriverLocations'
 };
 
 // =============================================================================
@@ -602,7 +622,16 @@ export const AIRTABLE_TABLE_NAMES = {
   b2bCompetitorIntel: 'v2_B2B Competitor Intel',
   b2bCallCampaigns: 'v2_B2B Call Campaigns',
   b2bPlaybooks: 'v2_B2B Playbooks',
-  b2bValueProps: 'v2_B2B Value Props'
+  b2bValueProps: 'v2_B2B Value Props',
+
+  // Carrier Fleet Dashboard
+  fleetDrivers: 'v2_Fleet Drivers',
+  equipmentAssets: 'v2_Equipment Assets',
+  equipmentAssignments: 'v2_Equipment Assignments',
+  driverScores: 'v2_Driver Scores',
+  capacityPlans: 'v2_Capacity Plans',
+  eldConnections: 'v2_ELD Connections',
+  driverLocations: 'v2_Driver Locations'
 };
 
 // =============================================================================

@@ -14,6 +14,7 @@ import { mediaManager } from 'wix-media-backend';
 import { currentMember } from 'wix-members-backend';
 import wixUsersBackend from 'wix-users-backend';
 import * as dataAccess from 'backend/dataAccess';
+import { createNotification } from 'backend/memberService';
 
 const COLLECTION_KEYS = {
   announcements: 'carrierAnnouncements',
@@ -278,8 +279,33 @@ async function archiveExpiredAnnouncement(announcement) {
 }
 
 async function triggerAnnouncementNotifications(announcement) {
-  // Placeholder for future email/push integration
-  return { success: true, message: 'Notification trigger queued', announcementId: announcement?._id };
+  if (!announcement?._id || !announcement?.carrier_id) {
+    return { success: false, error: 'Invalid announcement payload' };
+  }
+
+  const targetDrivers = await getRecipientDrivers(announcement.target_audience, announcement.carrier_id);
+  let notified = 0;
+
+  for (const driver of targetDrivers) {
+    const memberId = driver.wix_member_id || driver._owner || driver.member_id || null;
+    if (!memberId) continue;
+    const preview = stripHtml(announcement.content).slice(0, 140);
+    const title = announcement.priority === 'urgent'
+      ? `URGENT: ${announcement.title}`
+      : announcement.title;
+
+    const result = await createNotification(
+      memberId,
+      'announcement',
+      title,
+      preview,
+      '/driver-announcements'
+    );
+
+    if (result?.success) notified += 1;
+  }
+
+  return { success: true, notifiedCount: notified, announcementId: announcement._id };
 }
 
 // ============================================================================
@@ -532,7 +558,19 @@ export async function markAnnouncementRead(announcementId, driverId, deviceType 
     suppressAuth: true
   });
 
+  const normalizedTimeSpent = Number.isFinite(Number(timeSpentSeconds)) ? Math.max(0, Number(timeSpentSeconds)) : null;
+
   if (existing.success && existing.items.length > 0) {
+    const receipt = existing.items[0];
+    if (normalizedTimeSpent !== null && Number(receipt.time_spent_seconds || 0) < normalizedTimeSpent) {
+      const updateResult = await dataAccess.updateRecord(COLLECTION_KEYS.readReceipts, {
+        ...receipt,
+        time_spent_seconds: normalizedTimeSpent
+      }, { suppressAuth: true });
+      if (updateResult.success) {
+        return { success: true, alreadyRead: true, timeSpentUpdated: true };
+      }
+    }
     return { success: true, alreadyRead: true };
   }
 
@@ -547,7 +585,7 @@ export async function markAnnouncementRead(announcementId, driverId, deviceType 
     carrier_id: announcement.carrier_id,
     read_at: new Date(),
     device_type: deviceType,
-    time_spent_seconds: timeSpentSeconds
+    time_spent_seconds: normalizedTimeSpent
   };
 
   const insertResult = await dataAccess.insertRecord(COLLECTION_KEYS.readReceipts, receipt, { suppressAuth: true });
@@ -571,9 +609,10 @@ export async function getAnnouncementStats(announcementId) {
   const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
   if (!announcement) return { success: false, error: 'Announcement not found' };
 
-  const reads = await dataAccess.countRecords(COLLECTION_KEYS.readReceipts, {
-    announcement_id: announcementId
-  }, { suppressAuth: true });
+  const receipts = await dataAccess.getAllRecords(COLLECTION_KEYS.readReceipts, {
+    filters: { announcement_id: announcementId },
+    suppressAuth: true
+  });
 
   let totalRecipients = announcement.total_recipients;
   if (!totalRecipients) {
@@ -581,15 +620,25 @@ export async function getAnnouncementStats(announcementId) {
     totalRecipients = preview.total || 0;
   }
 
-  const readRate = totalRecipients > 0 ? Math.round((reads / totalRecipients) * 100) : 0;
+  const readCount = receipts.length;
+  const readRate = totalRecipients > 0 ? Math.round((readCount / totalRecipients) * 100) : 0;
+  const timeSpentSamples = receipts
+    .map(r => Number(r.time_spent_seconds))
+    .filter(v => Number.isFinite(v) && v >= 0);
+  const totalTimeSpentSeconds = timeSpentSamples.reduce((sum, v) => sum + v, 0);
+  const avgTimeSpentSeconds = timeSpentSamples.length
+    ? Math.round((totalTimeSpentSeconds / timeSpentSamples.length) * 10) / 10
+    : 0;
 
   return {
     success: true,
     stats: {
       announcementId,
-      readCount: reads,
+      readCount,
       totalRecipients,
-      readRate
+      readRate,
+      totalTimeSpentSeconds,
+      avgTimeSpentSeconds
     }
   };
 }
@@ -747,4 +796,134 @@ export async function getAnnouncementsForCarrier(carrierId, options = {}) {
   }
 
   return { success: true, announcements: items, totalCount: result.totalCount || items.length };
+}
+
+
+export async function getAnnouncementComments(announcementId, includeHidden = false) {
+  if (!announcementId) return { success: false, error: 'announcementId is required' };
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.comments, {
+    filters: { announcement_id: announcementId },
+    sort: [{ field: 'created_at', direction: 'desc' }],
+    limit: 500,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to fetch comments' };
+  }
+
+  const comments = includeHidden ? result.items : result.items.filter(c => !c.is_hidden);
+  return { success: true, comments };
+}
+
+export async function setCommentVisibility(commentId, hidden = true) {
+  if (!commentId) return { success: false, error: 'commentId is required' };
+  const existing = await dataAccess.getRecord(COLLECTION_KEYS.comments, commentId, { suppressAuth: true });
+  if (!existing) return { success: false, error: 'Comment not found' };
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEYS.comments, {
+    ...existing,
+    is_hidden: !!hidden
+  }, { suppressAuth: true });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to update comment visibility' };
+  }
+
+  return { success: true, comment: result.record };
+}
+
+export async function sendReminderToUnreadDrivers(announcementId, carrierId) {
+  if (!announcementId || !carrierId) {
+    return { success: false, error: 'announcementId and carrierId are required' };
+  }
+
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) {
+    return { success: false, error: 'Announcement not found' };
+  }
+
+  const unreadResult = await getUnreadDrivers(announcementId, carrierId, 10000, 0);
+  if (!unreadResult.success) {
+    return unreadResult;
+  }
+
+  let remindersSent = 0;
+  for (const driver of unreadResult.drivers) {
+    const memberId = driver.wix_member_id || driver._owner || driver.member_id || null;
+    if (!memberId) continue;
+    const result = await createNotification(
+      memberId,
+      'announcement_reminder',
+      `Reminder: ${announcement.title}`,
+      'You have an unread company announcement.',
+      '/driver-announcements'
+    );
+    if (result?.success) remindersSent += 1;
+  }
+
+  return {
+    success: true,
+    announcementId,
+    unreadCount: unreadResult.totalCount || 0,
+    remindersSent
+  };
+}
+
+export async function getAnnouncementDetail(announcementId, carrierId, options = {}) {
+  if (!announcementId || !carrierId) {
+    return { success: false, error: 'announcementId and carrierId are required' };
+  }
+
+  const announcement = await dataAccess.getRecord(COLLECTION_KEYS.announcements, announcementId, { suppressAuth: true });
+  if (!announcement) {
+    return { success: false, error: 'Announcement not found' };
+  }
+
+  const stats = await getAnnouncementStats(announcementId);
+  const receipts = await getReadReceipts(announcementId, options.limit || 50, options.offset || 0);
+  const unread = await getUnreadDrivers(announcementId, carrierId, options.limit || 50, options.offset || 0);
+  const comments = await getAnnouncementComments(announcementId, !!options.includeHiddenComments);
+
+  return {
+    success: true,
+    announcement,
+    stats: stats.success ? stats.stats : null,
+    readReceipts: receipts.success ? receipts.receipts : [],
+    unreadDrivers: unread.success ? unread.drivers : [],
+    comments: comments.success ? comments.comments : [],
+    readTotalCount: receipts.totalCount || 0,
+    unreadTotalCount: unread.totalCount || 0
+  };
+}
+
+
+
+export async function processAnnouncementDigests() {
+  const now = new Date();
+  const since = new Date(now.getTime() - (24 * 60 * 60 * 1000));
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.announcements, {
+    filters: { status: CONFIG.status.PUBLISHED, published_at: { gte: since.toISOString() } },
+    limit: 500,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to fetch recent announcements' };
+  }
+
+  const byCarrier = {};
+  for (const item of result.items || []) {
+    const key = item.carrier_id || 'unknown';
+    if (!byCarrier[key]) byCarrier[key] = [];
+    byCarrier[key].push(item);
+  }
+
+  return {
+    success: true,
+    processedAt: now,
+    carrierCount: Object.keys(byCarrier).length,
+    announcementCount: (result.items || []).length,
+    groups: byCarrier
+  };
 }

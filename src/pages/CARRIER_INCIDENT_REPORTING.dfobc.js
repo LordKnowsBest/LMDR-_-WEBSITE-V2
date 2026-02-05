@@ -1,16 +1,16 @@
 /**
- * CARRIER_DOCUMENT_VAULT Page Code
- * Bridges CARRIER_DOCUMENT_VAULT.html with documentVaultService.
+ * CARRIER_INCIDENT_REPORTING Page Code
+ * Bridges CARRIER_INCIDENT_REPORTING.html with incidentService.
  *
  * HTML uses dual-key pattern: { type, action, data }
- * HTML sends: vaultReady, getDocuments, uploadDocument, navigateTo
- * HTML expects: setDocuments
+ * HTML sends: incidentsReady, getIncidents, createIncidentReport, navigateTo
+ * HTML expects: setIncidents
  */
 
 import {
-    getDocuments,
-    uploadDocument
-} from 'backend/documentVaultService';
+    getIncidents,
+    createIncident
+} from 'backend/incidentService';
 
 import wixLocationFrontend from 'wix-location-frontend';
 
@@ -20,14 +20,14 @@ function safeSend(component, data) {
     try {
         component.postMessage(data);
     } catch (err) {
-        console.error('CARRIER_DOCUMENT_VAULT: safeSend failed:', err);
+        console.error('CARRIER_INCIDENT_REPORTING: safeSend failed:', err);
     }
 }
 
 $w.onReady(function () {
     const component = findHtmlComponent();
     if (!component) {
-        console.warn('CARRIER_DOCUMENT_VAULT: No HTML component found');
+        console.warn('CARRIER_INCIDENT_REPORTING: No HTML component found');
         return;
     }
 
@@ -56,40 +56,40 @@ function findHtmlComponent() {
 
 async function routeMessage(component, msg) {
     switch (msg.type) {
-        case 'vaultReady':
-        case 'getDocuments':
-            await handleGetDocuments(component);
+        case 'incidentsReady':
+        case 'getIncidents':
+            await handleGetIncidents(component);
             break;
-        case 'uploadDocument':
-            await handleUploadDocument(component, msg);
+        case 'createIncidentReport':
+            await handleCreateIncident(component, msg);
             break;
         case 'navigateTo':
             handleNavigateTo(msg);
             break;
         default:
-            console.warn('CARRIER_DOCUMENT_VAULT: Unknown type:', msg.type);
+            console.warn('CARRIER_INCIDENT_REPORTING: Unknown type:', msg.type);
     }
 }
 
-async function handleGetDocuments(component) {
+async function handleGetIncidents(component) {
     try {
-        const docs = await getDocuments();
-        safeSend(component, { type: 'setDocuments', data: docs });
+        const incidents = await getIncidents();
+        safeSend(component, { type: 'setIncidents', data: incidents });
     } catch (error) {
-        console.error('CARRIER_DOCUMENT_VAULT: getDocuments error:', error);
-        safeSend(component, { type: 'setDocuments', data: [] });
+        console.error('CARRIER_INCIDENT_REPORTING: getIncidents error:', error);
+        safeSend(component, { type: 'setIncidents', data: [] });
     }
 }
 
-async function handleUploadDocument(component, msg) {
+async function handleCreateIncident(component, msg) {
     try {
         const data = msg.data || {};
-        await uploadDocument(data);
+        await createIncident(data);
         // Refresh the list
-        const docs = await getDocuments();
-        safeSend(component, { type: 'setDocuments', data: docs });
+        const incidents = await getIncidents();
+        safeSend(component, { type: 'setIncidents', data: incidents });
     } catch (error) {
-        console.error('CARRIER_DOCUMENT_VAULT: uploadDocument error:', error);
+        console.error('CARRIER_INCIDENT_REPORTING: createIncident error:', error);
     }
 }
 

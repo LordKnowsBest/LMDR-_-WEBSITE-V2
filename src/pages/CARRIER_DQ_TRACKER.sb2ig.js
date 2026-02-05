@@ -1,16 +1,16 @@
 /**
- * CARRIER_DOCUMENT_VAULT Page Code
- * Bridges CARRIER_DOCUMENT_VAULT.html with documentVaultService.
+ * CARRIER_DQ_TRACKER Page Code
+ * Bridges CARRIER_DQ_TRACKER.html with dqFileService.
  *
  * HTML uses dual-key pattern: { type, action, data }
- * HTML sends: vaultReady, getDocuments, uploadDocument, navigateTo
- * HTML expects: setDocuments
+ * HTML sends: dqTrackerReady, getDQFiles, generateAuditReport, navigateTo
+ * HTML expects: setDQFiles
  */
 
 import {
-    getDocuments,
-    uploadDocument
-} from 'backend/documentVaultService';
+    getDQFiles,
+    generateAuditReport
+} from 'backend/dqFileService';
 
 import wixLocationFrontend from 'wix-location-frontend';
 
@@ -20,14 +20,14 @@ function safeSend(component, data) {
     try {
         component.postMessage(data);
     } catch (err) {
-        console.error('CARRIER_DOCUMENT_VAULT: safeSend failed:', err);
+        console.error('CARRIER_DQ_TRACKER: safeSend failed:', err);
     }
 }
 
 $w.onReady(function () {
     const component = findHtmlComponent();
     if (!component) {
-        console.warn('CARRIER_DOCUMENT_VAULT: No HTML component found');
+        console.warn('CARRIER_DQ_TRACKER: No HTML component found');
         return;
     }
 
@@ -56,40 +56,38 @@ function findHtmlComponent() {
 
 async function routeMessage(component, msg) {
     switch (msg.type) {
-        case 'vaultReady':
-        case 'getDocuments':
-            await handleGetDocuments(component);
+        case 'dqTrackerReady':
+        case 'getDQFiles':
+            await handleGetDQFiles(component);
             break;
-        case 'uploadDocument':
-            await handleUploadDocument(component, msg);
+        case 'generateAuditReport':
+            await handleGenerateReport(component, msg);
             break;
         case 'navigateTo':
             handleNavigateTo(msg);
             break;
         default:
-            console.warn('CARRIER_DOCUMENT_VAULT: Unknown type:', msg.type);
+            console.warn('CARRIER_DQ_TRACKER: Unknown type:', msg.type);
     }
 }
 
-async function handleGetDocuments(component) {
+async function handleGetDQFiles(component) {
     try {
-        const docs = await getDocuments();
-        safeSend(component, { type: 'setDocuments', data: docs });
+        const files = await getDQFiles();
+        safeSend(component, { type: 'setDQFiles', data: files });
     } catch (error) {
-        console.error('CARRIER_DOCUMENT_VAULT: getDocuments error:', error);
-        safeSend(component, { type: 'setDocuments', data: [] });
+        console.error('CARRIER_DQ_TRACKER: getDQFiles error:', error);
+        safeSend(component, { type: 'setDQFiles', data: [] });
     }
 }
 
-async function handleUploadDocument(component, msg) {
+async function handleGenerateReport(component, msg) {
     try {
         const data = msg.data || {};
-        await uploadDocument(data);
-        // Refresh the list
-        const docs = await getDocuments();
-        safeSend(component, { type: 'setDocuments', data: docs });
+        if (!data.dqFileId) return;
+        await generateAuditReport(data.dqFileId);
     } catch (error) {
-        console.error('CARRIER_DOCUMENT_VAULT: uploadDocument error:', error);
+        console.error('CARRIER_DQ_TRACKER: generateAuditReport error:', error);
     }
 }
 

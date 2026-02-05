@@ -18,11 +18,12 @@ module.exports = {
   // Test file patterns
   testMatch: [
     '**/*.test.js',
-    '**/*.spec.js'
+    '**/*.spec.js',
+    '**/*.test.mjs'
   ],
 
   // Module file extensions (include .jsw for Wix modules)
-  moduleFileExtensions: ['js', 'jsw', 'json', 'node'],
+  moduleFileExtensions: ['js', 'jsw', 'mjs', 'json', 'node'],
 
   // Module name mapping for Wix imports
   moduleNameMapper: {

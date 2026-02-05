@@ -12,7 +12,10 @@ import {
   previewRecipients,
   uploadAttachment,
   getAnnouncementsForCarrier,
-  getCarrierContextForCurrentUser
+  getCarrierContextForCurrentUser,
+  getAnnouncementDetail,
+  sendReminderToUnreadDrivers,
+  setCommentVisibility
 } from 'backend/carrierAnnouncementsService.jsw';
 
 // ============================================================================
@@ -36,14 +39,20 @@ const MESSAGE_REGISTRY = {
     'scheduleAnnouncement',
     'archiveAnnouncement',
     'previewRecipients',
-    'uploadAnnouncementAttachment'
+    'uploadAnnouncementAttachment',
+    'getAnnouncementDetail',
+    'sendAnnouncementReminder',
+    'setAnnouncementCommentVisibility'
   ],
   outbound: [
     'carrierAnnouncementsData',
     'announcementActionResult',
     'recipientPreviewResult',
     'announcementAttachmentResult',
-    'carrierContext'
+    'carrierContext',
+    'announcementDetailData',
+    'announcementReminderResult',
+    'announcementCommentModerationResult'
   ]
 };
 
@@ -145,6 +154,18 @@ async function handleMessage(msg) {
 
     case 'uploadAnnouncementAttachment':
       await handleUploadAttachment(msg.data);
+      break;
+
+    case 'getAnnouncementDetail':
+      await handleGetAnnouncementDetail(msg.data);
+      break;
+
+    case 'sendAnnouncementReminder':
+      await handleSendAnnouncementReminder(msg.data);
+      break;
+
+    case 'setAnnouncementCommentVisibility':
+      await handleSetCommentVisibility(msg.data);
       break;
 
     default:
@@ -334,3 +355,61 @@ function sendToHtml(type, data) {
     console.error('Error sending to HTML:', error);
   }
 }
+
+
+async function handleGetAnnouncementDetail(data) {
+  try {
+    const announcementId = data?.announcementId;
+    const cid = data?.carrierId || carrierId;
+    if (!announcementId || !cid) {
+      sendToHtml('announcementDetailData', { success: false, error: 'Missing announcementId or carrierId' });
+      return;
+    }
+
+    const result = await getAnnouncementDetail(announcementId, cid, {
+      limit: data?.limit || 50,
+      offset: data?.offset || 0,
+      includeHiddenComments: !!data?.includeHiddenComments
+    });
+
+    sendToHtml('announcementDetailData', result);
+  } catch (error) {
+    console.error('Error fetching announcement detail:', error);
+    sendToHtml('announcementDetailData', { success: false, error: error.message });
+  }
+}
+
+async function handleSendAnnouncementReminder(data) {
+  try {
+    const announcementId = data?.announcementId;
+    const cid = data?.carrierId || carrierId;
+    if (!announcementId || !cid) {
+      sendToHtml('announcementReminderResult', { success: false, error: 'Missing announcementId or carrierId' });
+      return;
+    }
+
+    const result = await sendReminderToUnreadDrivers(announcementId, cid);
+    sendToHtml('announcementReminderResult', result);
+  } catch (error) {
+    console.error('Error sending reminder:', error);
+    sendToHtml('announcementReminderResult', { success: false, error: error.message });
+  }
+}
+
+async function handleSetCommentVisibility(data) {
+  try {
+    const commentId = data?.commentId;
+    const hidden = !!data?.hidden;
+    if (!commentId) {
+      sendToHtml('announcementCommentModerationResult', { success: false, error: 'Missing commentId' });
+      return;
+    }
+
+    const result = await setCommentVisibility(commentId, hidden);
+    sendToHtml('announcementCommentModerationResult', result);
+  } catch (error) {
+    console.error('Error moderating comment:', error);
+    sendToHtml('announcementCommentModerationResult', { success: false, error: error.message });
+  }
+}
+

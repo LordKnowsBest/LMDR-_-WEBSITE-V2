@@ -322,12 +322,20 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Business Impact: Every paying carrier ($149-$499/mo) hits this flow. Broken post-checkout = immediate churn.*
 *Phases: 5 (Post-Checkout Onboarding → Unified Carrier Identity → Compliance Page Bridges → Navigation System → Retention/Analytics Wiring)*
 
-### [ ] Track: Carrier Fleet Dashboard
+## [x] Track: Carrier Fleet Dashboard
 *Link: [./tracks/carrier_fleet_dashboard_20260120/](./tracks/carrier_fleet_dashboard_20260120/)*
 *Depends on: carrier_conversion_20260103, carrier_utility_expansion_20260120*
 *Priority: High*
-*Status: Planned*
+*Status: Complete*
 *Goal: Fleet operations visibility - Driver Roster, Equipment Assignment, Driver Scorecard, Real-Time Location, Capacity Planning.*
+*Completed Services:*
+- *fleetService.jsw, equipmentService.jsw, driverScorecardService.jsw, capacityPlanningService.jsw, eldIntegrationService.jsw*
+- *fleetJobs.jsw (3 new scheduled jobs)*
+*Completed UI:*
+- *CARRIER_FLEET_DASHBOARD.html, DRIVER_ROSTER.html, EQUIPMENT_MANAGER.html, DRIVER_SCORECARD.html, CAPACITY_PLANNER.html, FLEET_MAP.html*
+- *Unified page code bridge (CARRIER_FLEET_DASHBOARD.unified.js)*
+*Data:*
+- *7 new collections routed to Airtable via config.jsw (FleetDrivers, EquipmentAssets, EquipmentAssignments, DriverScores, CapacityPlans, ELDConnections, DriverLocations)*
 
 ### [/] Track: Carrier Compliance
 *Link: [./tracks/carrier_compliance_20260120/](./tracks/carrier_compliance_20260120/)*
