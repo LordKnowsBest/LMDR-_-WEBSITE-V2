@@ -18,7 +18,7 @@
 | **Status** | Single select | Lead status | "new", "contacted", "qualified", "converted", or "closed" |
 | **Submitted Date** | Date | When request was submitted | Date values (YYYY-MM-DD) |
 | **Legacy Wix ID** | Single line text | Original Wix _id for migration reference | Any text string |
-| **Driver Types** | Single line text | Driver types needed (JSON array as string) | Any text string |
+| **Driver Types** | Single line text | Driver types needed (JSON array as string) | Any text strin
 | **Linked Carrier ID** | Single line text | Reference to Carriers table (Wix _id) | Any text string |
 | **Last Updated** | Date | Last update timestamp | Date values (YYYY-MM-DD) |
 | **Source** | Single line text | Lead source identifier | Any text string |

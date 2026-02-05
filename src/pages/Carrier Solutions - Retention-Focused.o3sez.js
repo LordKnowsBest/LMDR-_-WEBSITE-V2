@@ -39,7 +39,7 @@ async function loadPricingTiers() {
     }
 
     const repeater = $w('#pricingRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = result.items.map(tier => ({
         _id: tier._id,
         name: tier.tier_name,
@@ -55,16 +55,16 @@ async function loadPricingTiers() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#tierName')) $item('#tierName').text = itemData.name;
-          if ($item('#tierPrice')) $item('#tierPrice').text = itemData.price;
-          if ($item('#tierSubtext')) $item('#tierSubtext').text = itemData.priceSubtext;
-          if ($item('#tierDescription')) $item('#tierDescription').text = itemData.description;
+          if ($item('#tierName').rendered) $item('#tierName').text = itemData.name;
+          if ($item('#tierPrice').rendered) $item('#tierPrice').text = itemData.price;
+          if ($item('#tierSubtext').rendered) $item('#tierSubtext').text = itemData.priceSubtext;
+          if ($item('#tierDescription').rendered) $item('#tierDescription').text = itemData.description;
 
           // Popular badge
           if (itemData.isPopular && itemData.badgeText) {
             try {
               const badge = $item('#popularBadge');
-              if (badge) {
+              if (badge.rendered) {
                 badge.text = itemData.badgeText;
                 badge.show();
               }
@@ -76,7 +76,7 @@ async function loadPricingTiers() {
           // CTA button
           try {
             const ctaBtn = $item('#tierCtaBtn');
-            if (ctaBtn) {
+            if (ctaBtn.rendered) {
               ctaBtn.label = itemData.ctaText;
               ctaBtn.onClick(() => {
                 wixLocation.to(itemData.ctaLink);
@@ -89,7 +89,7 @@ async function loadPricingTiers() {
           // Features list
           try {
             const featuresRepeater = $item('#tierFeaturesRepeater');
-            if (featuresRepeater && itemData.features.length > 0) {
+            if (featuresRepeater.rendered && itemData.features.length > 0) {
               featuresRepeater.data = itemData.features.map((f, i) => ({
                 _id: `feature-${i}`,
                 text: f
@@ -154,7 +154,7 @@ async function loadServiceFeatures() {
       // Hide feature matrix if no data
       try {
         const section = $w('#featureMatrixSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -179,7 +179,7 @@ async function loadServiceFeatures() {
     // Send to HTML comparison table
     try {
       const htmlMatrix = $w('#featureMatrixHtml');
-      if (htmlMatrix && htmlMatrix.postMessage) {
+      if (htmlMatrix.rendered && htmlMatrix.postMessage) {
         htmlMatrix.postMessage({
           type: 'featureMatrix',
           data: grouped
@@ -213,7 +213,7 @@ async function loadCaseStudies() {
       // Hide case studies section if no data
       try {
         const section = $w('#caseStudiesSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -221,7 +221,7 @@ async function loadCaseStudies() {
     }
 
     const repeater = $w('#caseStudiesRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = result.items.map(study => ({
         _id: study._id,
         title: study.title,
@@ -239,17 +239,17 @@ async function loadCaseStudies() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#csTitle')) $item('#csTitle').text = itemData.title;
-          if ($item('#csCompany')) $item('#csCompany').text = itemData.companyName;
-          if ($item('#csLogo') && itemData.logoUrl) {
+          if ($item('#csTitle').rendered) $item('#csTitle').text = itemData.title;
+          if ($item('#csCompany').rendered) $item('#csCompany').text = itemData.companyName;
+          if ($item('#csLogo').rendered && itemData.logoUrl) {
             $item('#csLogo').src = itemData.logoUrl;
           }
-          if ($item('#csChallenge')) $item('#csChallenge').text = itemData.challenge;
-          if ($item('#csResult')) $item('#csResult').text = itemData.result;
-          if ($item('#csMetricValue')) $item('#csMetricValue').text = itemData.keyMetricValue;
-          if ($item('#csMetricLabel')) $item('#csMetricLabel').text = itemData.keyMetric;
-          if ($item('#csQuote')) $item('#csQuote').text = `"${itemData.testimonialQuote}"`;
-          if ($item('#csAuthor')) {
+          if ($item('#csChallenge').rendered) $item('#csChallenge').text = itemData.challenge;
+          if ($item('#csResult').rendered) $item('#csResult').text = itemData.result;
+          if ($item('#csMetricValue').rendered) $item('#csMetricValue').text = itemData.keyMetricValue;
+          if ($item('#csMetricLabel').rendered) $item('#csMetricLabel').text = itemData.keyMetric;
+          if ($item('#csQuote').rendered) $item('#csQuote').text = `"${itemData.testimonialQuote}"`;
+          if ($item('#csAuthor').rendered) {
             $item('#csAuthor').text = `— ${itemData.testimonialAuthor}, ${itemData.testimonialTitle}`;
           }
 
@@ -257,7 +257,7 @@ async function loadCaseStudies() {
           if (itemData.fullStudyUrl) {
             try {
               const readMoreBtn = $item('#csReadMore');
-              if (readMoreBtn) {
+              if (readMoreBtn.rendered) {
                 readMoreBtn.onClick(() => {
                   wixLocation.to(itemData.fullStudyUrl);
                 });
@@ -277,7 +277,7 @@ async function loadCaseStudies() {
     console.log('CaseStudies collection not found');
     try {
       const section = $w('#caseStudiesSection');
-      if (section && section.collapse) section.collapse();
+      if (section.rendered && section.collapse) section.collapse();
     } catch (e) {
       // Section may not exist
     }
@@ -301,7 +301,7 @@ async function loadFAQs() {
       // Hide FAQ section if no data
       try {
         const section = $w('#faqSection');
-        if (section && section.collapse) section.collapse();
+        if (section.rendered && section.collapse) section.collapse();
       } catch (e) {
         // Section may not exist
       }
@@ -311,7 +311,7 @@ async function loadFAQs() {
     // Send to HTML accordion component
     try {
       const htmlFaq = $w('#faqAccordionHtml');
-      if (htmlFaq && htmlFaq.postMessage) {
+      if (htmlFaq.rendered && htmlFaq.postMessage) {
         htmlFaq.postMessage({
           type: 'faqData',
           data: result.items.map(faq => ({

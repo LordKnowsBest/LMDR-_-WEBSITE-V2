@@ -61,6 +61,16 @@ function generateSlug(title) {
         .replace(/^-+|-+$/g, '');
 }
 
+async function checkDeletePermission(currentUser, post, isAdmin) {
+    if (!currentUser.loggedIn) throw new Error('Unauthorized');
+    if (post.authorId !== currentUser.id) {
+        if (!isAdmin) {
+            throw new Error('Permission denied');
+        }
+    }
+    return true;
+}
+
 // =============================================================================
 // TEST SUITES
 // =============================================================================
@@ -98,6 +108,30 @@ describe('Forum Service Logic', () => {
       expect(generateSlug('Hello World')).toBe('hello-world');
       expect(generateSlug('Testing Spec!al Chars')).toBe('testing-spec-al-chars');
       expect(generateSlug('---Trim Ends---')).toBe('trim-ends');
+    });
+  });
+
+  describe('authorization logic', () => {
+    const post = { id: 'p1', authorId: 'user1' };
+
+    it('should allow author to delete', async () => {
+      const user = { loggedIn: true, id: 'user1' };
+      await expect(checkDeletePermission(user, post, false)).resolves.toBe(true);
+    });
+
+    it('should allow admin to delete', async () => {
+      const user = { loggedIn: true, id: 'admin1' };
+      await expect(checkDeletePermission(user, post, true)).resolves.toBe(true);
+    });
+
+    it('should deny non-author non-admin', async () => {
+      const user = { loggedIn: true, id: 'user2' };
+      await expect(checkDeletePermission(user, post, false)).rejects.toThrow('Permission denied');
+    });
+
+    it('should deny not logged in users', async () => {
+      const user = { loggedIn: false };
+      await expect(checkDeletePermission(user, post, false)).rejects.toThrow('Unauthorized');
     });
   });
 });

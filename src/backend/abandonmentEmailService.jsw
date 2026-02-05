@@ -18,6 +18,7 @@ import { triggeredEmails, contacts } from 'wix-crm-backend';
 import wixData from 'wix-data';
 import { usesAirtable, getAirtableTableName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
+import { chunkArray } from 'backend/utils/arrayUtils';
 
 // Collection keys for dual-source routing
 const COLLECTION_KEYS = {
@@ -376,21 +377,34 @@ export async function processAbandonmentEmails() {
 
     console.log(`[AbandonmentEmail] Processing ${abandonments.items.length} abandonments`);
 
-    for (const abandonment of abandonments.items) {
-      const result = await processAbandonmentRecord(abandonment);
+    // Chunk and process in parallel (5 per chunk - email rate limits)
+    const chunks = chunkArray(abandonments.items, 5);
 
-      if (result.emailSent === 1) stats.email1Sent++;
-      else if (result.emailSent === 2) stats.email2Sent++;
-      else if (result.emailSent === 3) stats.email3Sent++;
-      else if (result.skipped) stats.skipped++;
+    for (const chunk of chunks) {
+      const results = await Promise.all(
+        chunk.map(async (abandonment) => {
+          try {
+            return await processAbandonmentRecord(abandonment);
+          } catch (error) {
+            return { error: true, message: error.message };
+          }
+        })
+      );
 
-      if (result.error) stats.errors++;
+      for (const result of results) {
+        if (result.emailSent === 1) stats.email1Sent++;
+        else if (result.emailSent === 2) stats.email2Sent++;
+        else if (result.emailSent === 3) stats.email3Sent++;
+        else if (result.skipped) stats.skipped++;
 
-      // Small delay between emails to avoid rate limits
+        if (result.error) stats.errors++;
+      }
+
+      // Rate limit between chunks (500ms for email provider limits)
       await new Promise(r => setTimeout(r, 500));
     }
 
-    console.log(`[AbandonmentEmail] Processing complete:`, stats);
+    console.log(`[AbandonmentEmail] Complete: ${stats.email1Sent + stats.email2Sent + stats.email3Sent} sent, ${stats.skipped} skipped, ${stats.errors} errors`);
 
     return { success: true, ...stats };
   } catch (error) {

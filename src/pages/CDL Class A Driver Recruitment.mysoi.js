@@ -49,7 +49,7 @@ async function loadClassAJobs() {
     }
 
     const repeater = $w('#classAJobsRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = jobs.map(job => ({
         _id: job._id,
         carrierName: job.carrierName,
@@ -64,19 +64,19 @@ async function loadClassAJobs() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#jobCarrierName')) $item('#jobCarrierName').text = itemData.carrierName;
-          if ($item('#jobPayRange')) $item('#jobPayRange').text = itemData.payRange;
-          if ($item('#jobLocation')) $item('#jobLocation').text = itemData.location;
-          if ($item('#jobOperationType')) $item('#jobOperationType').text = itemData.operationType;
-          if ($item('#jobHomeTime')) $item('#jobHomeTime').text = itemData.homeTime;
-          if ($item('#jobBenefits')) $item('#jobBenefits').text = itemData.benefits;
-          if ($item('#jobFleetSize')) $item('#jobFleetSize').text = itemData.fleetSize;
-          if ($item('#jobTruckAge')) $item('#jobTruckAge').text = itemData.truckAge;
+          if ($item('#jobCarrierName').rendered) $item('#jobCarrierName').text = itemData.carrierName;
+          if ($item('#jobPayRange').rendered) $item('#jobPayRange').text = itemData.payRange;
+          if ($item('#jobLocation').rendered) $item('#jobLocation').text = itemData.location;
+          if ($item('#jobOperationType').rendered) $item('#jobOperationType').text = itemData.operationType;
+          if ($item('#jobHomeTime').rendered) $item('#jobHomeTime').text = itemData.homeTime;
+          if ($item('#jobBenefits').rendered) $item('#jobBenefits').text = itemData.benefits;
+          if ($item('#jobFleetSize').rendered) $item('#jobFleetSize').text = itemData.fleetSize;
+          if ($item('#jobTruckAge').rendered) $item('#jobTruckAge').text = itemData.truckAge;
 
           // Apply button
           try {
             const applyBtn = $item('#jobApplyBtn');
-            if (applyBtn) {
+            if (applyBtn.rendered) {
               applyBtn.onClick(() => {
                 wixLocation.to(`/driver-jobs/${itemData._id}`);
               });
@@ -134,7 +134,7 @@ async function loadClassARequirements() {
 
   try {
     const repeater = $w('#requirementsChecklist');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       // Flatten for repeater
       const flatItems = [];
       requirements.forEach((cat, catIndex) => {
@@ -155,12 +155,12 @@ async function loadClassARequirements() {
           if (itemData.showCategory && $item('#reqCategory')) {
             $item('#reqCategory').text = itemData.category;
             $item('#reqCategory').show();
-          } else if ($item('#reqCategory')) {
+          } else if ($item('#reqCategory').rendered) {
             $item('#reqCategory').hide();
           }
-          if ($item('#reqName')) $item('#reqName').text = itemData.requirement;
-          if ($item('#reqDescription')) $item('#reqDescription').text = itemData.description;
-          if ($item('#reqIcon')) {
+          if ($item('#reqName').rendered) $item('#reqName').text = itemData.requirement;
+          if ($item('#reqDescription').rendered) $item('#reqDescription').text = itemData.description;
+          if ($item('#reqIcon').rendered) {
             $item('#reqIcon').text = itemData.required ? 'Required' : 'Optional';
           }
         } catch (e) {
@@ -224,7 +224,7 @@ async function loadClassAPayRanges() {
   try {
     // Send data to HTML chart component
     const htmlChart = $w('#payRangeChart');
-    if (htmlChart && htmlChart.postMessage) {
+    if (htmlChart.rendered && htmlChart.postMessage) {
       htmlChart.postMessage({
         type: 'payRangeData',
         data: payRanges
@@ -233,7 +233,7 @@ async function loadClassAPayRanges() {
 
     // Also populate text-based repeater if exists
     const repeater = $w('#payRangeRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = payRanges.map((range, i) => ({
         _id: `pay-${i}`,
         level: range.experienceLevel,
@@ -246,12 +246,12 @@ async function loadClassAPayRanges() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#payLevel')) $item('#payLevel').text = itemData.level;
-          if ($item('#payYears')) $item('#payYears').text = itemData.years;
-          if ($item('#payCpm')) $item('#payCpm').text = itemData.cpm;
-          if ($item('#payWeekly')) $item('#payWeekly').text = itemData.weekly;
-          if ($item('#payAnnual')) $item('#payAnnual').text = itemData.annual;
-          if ($item('#payNotes')) $item('#payNotes').text = itemData.notes;
+          if ($item('#payLevel').rendered) $item('#payLevel').text = itemData.level;
+          if ($item('#payYears').rendered) $item('#payYears').text = itemData.years;
+          if ($item('#payCpm').rendered) $item('#payCpm').text = itemData.cpm;
+          if ($item('#payWeekly').rendered) $item('#payWeekly').text = itemData.weekly;
+          if ($item('#payAnnual').rendered) $item('#payAnnual').text = itemData.annual;
+          if ($item('#payNotes').rendered) $item('#payNotes').text = itemData.notes;
         } catch (e) {
           // Element may not exist
         }
@@ -301,7 +301,7 @@ async function loadTrainingPrograms() {
 
   try {
     const repeater = $w('#trainingRepeater');
-    if (repeater && repeater.data !== undefined) {
+    if (repeater.rendered && repeater.data !== undefined) {
       repeater.data = trainingPrograms.map((program, i) => ({
         _id: `training-${i}`,
         ...program,
@@ -310,16 +310,16 @@ async function loadTrainingPrograms() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#trainingName')) $item('#trainingName').text = itemData.name;
-          if ($item('#trainingDuration')) $item('#trainingDuration').text = itemData.duration;
-          if ($item('#trainingCost')) $item('#trainingCost').text = itemData.cost;
-          if ($item('#trainingDescription')) $item('#trainingDescription').text = itemData.description;
-          if ($item('#trainingFeatures')) $item('#trainingFeatures').text = itemData.featuresText;
+          if ($item('#trainingName').rendered) $item('#trainingName').text = itemData.name;
+          if ($item('#trainingDuration').rendered) $item('#trainingDuration').text = itemData.duration;
+          if ($item('#trainingCost').rendered) $item('#trainingCost').text = itemData.cost;
+          if ($item('#trainingDescription').rendered) $item('#trainingDescription').text = itemData.description;
+          if ($item('#trainingFeatures').rendered) $item('#trainingFeatures').text = itemData.featuresText;
 
           // Learn more button
           try {
             const learnBtn = $item('#trainingLearnMore');
-            if (learnBtn) {
+            if (learnBtn.rendered) {
               learnBtn.onClick(() => {
                 wixLocation.to('/cdl-training-programs');
               });
@@ -354,7 +354,7 @@ async function loadEndorsementJobs() {
     ];
 
     const repeater = $w('#endorsementJobsRepeater');
-    if (repeater && repeater.data !== undefined && endorsementJobs.length > 0) {
+    if (repeater.rendered && repeater.data !== undefined && endorsementJobs.length > 0) {
       repeater.data = endorsementJobs.map(job => ({
         _id: job._id,
         carrierName: job.carrierName,
@@ -365,10 +365,10 @@ async function loadEndorsementJobs() {
 
       repeater.onItemReady(($item, itemData) => {
         try {
-          if ($item('#endJobCarrier')) $item('#endJobCarrier').text = itemData.carrierName;
-          if ($item('#endJobPay')) $item('#endJobPay').text = itemData.payRange;
-          if ($item('#endJobEndorsement')) $item('#endJobEndorsement').text = itemData.endorsement;
-          if ($item('#endJobLocation')) $item('#endJobLocation').text = itemData.location;
+          if ($item('#endJobCarrier').rendered) $item('#endJobCarrier').text = itemData.carrierName;
+          if ($item('#endJobPay').rendered) $item('#endJobPay').text = itemData.payRange;
+          if ($item('#endJobEndorsement').rendered) $item('#endJobEndorsement').text = itemData.endorsement;
+          if ($item('#endJobLocation').rendered) $item('#endJobLocation').text = itemData.location;
         } catch (e) {
           // Element may not exist
         }
@@ -416,7 +416,7 @@ function setupEventHandlers() {
   // Apply Now CTA button
   try {
     const applyBtn = $w('#applyNowBtn');
-    if (applyBtn) {
+    if (applyBtn.rendered) {
       applyBtn.onClick(() => {
         wixLocation.to('/quick-apply');
       });
@@ -428,7 +428,7 @@ function setupEventHandlers() {
   // Browse All Jobs button
   try {
     const browseBtn = $w('#browseJobsBtn');
-    if (browseBtn) {
+    if (browseBtn.rendered) {
       browseBtn.onClick(() => {
         wixLocation.to('/driver-opportunities?cdl=classA');
       });
@@ -440,7 +440,7 @@ function setupEventHandlers() {
   // Training info button
   try {
     const trainingBtn = $w('#trainingInfoBtn');
-    if (trainingBtn) {
+    if (trainingBtn.rendered) {
       trainingBtn.onClick(() => {
         wixLocation.to('/cdl-training-programs');
       });
@@ -452,7 +452,7 @@ function setupEventHandlers() {
   // Upload CDL button
   try {
     const uploadBtn = $w('#uploadCdlBtn');
-    if (uploadBtn) {
+    if (uploadBtn.rendered) {
       uploadBtn.onClick(() => {
         wixLocation.to('/quick-apply-upload');
       });
@@ -468,7 +468,7 @@ function setupEventHandlers() {
 function hideJobsSection() {
   try {
     const section = $w('#jobsSection');
-    if (section && section.collapse) {
+    if (section.rendered && section.collapse) {
       section.collapse();
     }
   } catch (e) {
