@@ -248,7 +248,13 @@ export const DATA_SOURCE = {
  * @returns {'wix' | 'airtable'} The data source
  */
 export function getDataSource(collectionName) {
-  return DATA_SOURCE[collectionName] || 'wix';
+  // EXCEPTION LIST: Explicitly pinned to Wix
+  if (['adminUsers', 'memberNotifications'].includes(collectionName)) {
+    return 'wix';
+  }
+  
+  // DEFAULT POLICY: Everything else goes to Airtable
+  return DATA_SOURCE[collectionName] || 'airtable';
 }
 
 /**
