@@ -1,6 +1,16 @@
+/**
+ * Match Notifications Service
+ *
+ * Handles driver and carrier notifications related to matching events.
+ * Integrated with the unified dataAccess layer for dual-source support.
+ *
+ * @module backend/matchNotifications
+ */
+
 import { createNotification } from 'backend/memberService';
 import * as dataAccess from 'backend/dataAccess';
-import wixSecretsBackend from 'wix-secrets-backend';
+import { chunkArray } from 'backend/utils/arrayUtils';
+import { log, logDatabase } from 'backend/observabilityService';
 
 // Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
@@ -11,141 +21,418 @@ const COLLECTION_KEYS = {
   recruiterCarriers: 'recruiterCarriers'
 };
 
-const NOTIFICATION_CHANNELS = { PROFILE_VIEWED: 'profile_viewed', CONTACTED: 'contacted', NEW_MATCH: 'new_match' };
-const NOTIFICATION_TYPES = { EMAIL: 'email', SMS: 'sms', IN_APP: 'in_app' };
-const DEFAULT_NOTIFICATION_PREFERENCES = { profile_viewed: true, contacted: true };
+const NOTIFICATION_CHANNELS = {
+  PROFILE_VIEWED: 'profile_viewed',
+  CONTACTED: 'contacted',
+  NEW_MATCH: 'new_match'
+};
+
+const NOTIFICATION_TYPES = {
+  EMAIL: 'email',
+  SMS: 'sms',
+  IN_APP: 'in_app'
+};
+
+const DEFAULT_NOTIFICATION_PREFERENCES = {
+  profile_viewed: true,
+  contacted: true
+};
+
 const MATCH_SCORE_THRESHOLD = 70;
 
-// Lazy-loaded services
-async function getSubscriptionService() { return await import('backend/subscriptionService'); }
-async function getDriverScoring() { return await import('backend/driverScoring'); }
-async function getEmailService() {
-  try { return await import('wix-users-backend'); } catch (err) { return null; }
+// ============================================================================
+// LAZY-LOADED SERVICES (to avoid circular dependencies)
+// ============================================================================
+
+async function getSubscriptionService() {
+  return await import('backend/subscriptionService');
 }
 
+async function getDriverScoring() {
+  return await import('backend/driverScoring');
+}
+
+async function getEmailService() {
+  try {
+    return await import('wix-users-backend');
+  } catch (err) {
+    return null;
+  }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Checks if a driver should be notified based on their preferences
+ */
 function shouldNotifyDriver(preferences, channel) {
   const prefs = preferences || DEFAULT_NOTIFICATION_PREFERENCES;
   return !!prefs[channel];
 }
 
+/**
+ * Parses raw notification preferences
+ */
 function parsePreferences(raw) {
   if (!raw) return DEFAULT_NOTIFICATION_PREFERENCES;
   if (typeof raw === 'object') return raw;
-  try { return JSON.parse(raw); } catch { return DEFAULT_NOTIFICATION_PREFERENCES; }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    return DEFAULT_NOTIFICATION_PREFERENCES;
+  }
 }
 
+/**
+ * Checks if a subscription is Enterprise tier
+ */
 function isEnterpriseTier(subscription) {
   if (!subscription) return false;
   const tier = (subscription.plan_type || subscription.tier || '').toLowerCase();
   return tier === 'enterprise';
 }
 
+/**
+ * Logs a notification event to the database
+ */
 async function logNotification(data) {
   try {
     await dataAccess.insertRecord(COLLECTION_KEYS.notificationLog, {
-      carrier_dot: data.carrier_dot || '', driver_id: data.driver_id || '',
-      notification_type: data.notification_type || 'in_app', channel: data.channel || '',
-      recipient_id: data.recipient_id || '', sent_at: new Date().toISOString(),
-      status: data.status || 'sent', error_message: data.error_message || '',
+      carrier_dot: data.carrier_dot || '',
+      driver_id: data.driver_id || '',
+      notification_type: data.notification_type || NOTIFICATION_TYPES.IN_APP,
+      channel: data.channel || '',
+      recipient_id: data.recipient_id || '',
+      sent_at: new Date().toISOString(),
+      status: data.status || 'sent',
+      error_message: data.error_message || '',
       metadata: typeof data.metadata === 'string' ? data.metadata : JSON.stringify(data.metadata || {})
     }, { suppressAuth: true });
-  } catch (err) { }
+  } catch (err) {
+    console.error('[matchNotifications] Failed to log notification:', err.message);
+  }
 }
 
+// ============================================================================
+// PUBLIC WEB METHODS
+// ============================================================================
+
+/**
+ * Notifies a driver that their profile was viewed by a carrier
+ */
 export async function notifyDriverProfileViewed(driverId, carrierInfo = {}) {
+  const traceId = `view-${Date.now()}`;
   try {
     const profile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
-    const prefs = parsePreferences(profile?.notification_preferences);
-    if (!shouldNotifyDriver(prefs, NOTIFICATION_CHANNELS.PROFILE_VIEWED)) return { success: true, skipped: true };
+    if (!profile) return { success: false, error: 'Driver profile not found' };
 
-    const name = carrierInfo.carrierName || 'A carrier';
-    await createNotification(driverId, NOTIFICATION_CHANNELS.PROFILE_VIEWED, 'Your Profile Was Viewed', `${name} viewed your driver profile.`, '/dashboard');
-    await logNotification({ carrier_dot: carrierInfo.carrierDot, driver_id: driverId, notification_type: NOTIFICATION_TYPES.IN_APP, channel: NOTIFICATION_CHANNELS.PROFILE_VIEWED, recipient_id: driverId });
+    const prefs = parsePreferences(profile.notification_preferences);
+    if (!shouldNotifyDriver(prefs, NOTIFICATION_CHANNELS.PROFILE_VIEWED)) {
+      return { success: true, skipped: true, reason: 'User preference' };
+    }
+
+    const carrierName = carrierInfo.carrierName || 'A carrier';
+    await createNotification(
+      driverId,
+      NOTIFICATION_CHANNELS.PROFILE_VIEWED,
+      'Your Profile Was Viewed',
+      `${carrierName} viewed your driver profile.`,
+      '/dashboard'
+    );
+
+    await logNotification({
+      carrier_dot: carrierInfo.carrierDot,
+      driver_id: driverId,
+      notification_type: NOTIFICATION_TYPES.IN_APP,
+      channel: NOTIFICATION_CHANNELS.PROFILE_VIEWED,
+      recipient_id: driverId
+    });
+
     return { success: true };
   } catch (err) {
-    await logNotification({ carrier_dot: carrierInfo.carrierDot, driver_id: driverId, status: 'failed', error_message: err.message });
+    await log({
+      level: 'ERROR',
+      source: 'match-notifications',
+      message: `Failed to notify driver ${driverId} of profile view`,
+      traceId,
+      details: { error: err.message, carrierInfo }
+    });
+
+    await logNotification({
+      carrier_dot: carrierInfo.carrierDot,
+      driver_id: driverId,
+      status: 'failed',
+      error_message: err.message
+    });
+
     return { success: false, error: err.message };
   }
 }
 
+/**
+ * Notifies a driver that they have been contacted by a recruiter
+ */
 export async function notifyDriverContacted(driverId, contactInfo = {}) {
+  const traceId = `contact-${Date.now()}`;
   try {
     const profile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
-    const prefs = parsePreferences(profile?.notification_preferences);
-    if (!shouldNotifyDriver(prefs, NOTIFICATION_CHANNELS.CONTACTED)) return { success: true, skipped: true };
+    if (!profile) return { success: false, error: 'Driver profile not found' };
 
-    const msg = contactInfo.messagePreview ? `: "${contactInfo.messagePreview.substring(0, 80)}..."` : '';
-    await createNotification(driverId, NOTIFICATION_CHANNELS.CONTACTED, 'New Message', `A recruiter sent you a message${msg}.`, '/dashboard');
-
-    const wixUsers = await getEmailService();
-    if (wixUsers?.default?.emailUser) {
-      await wixUsers.default.emailUser('recruiterContactNotification', driverId, { variables: { messagePreview: contactInfo.messagePreview || 'New message' } });
+    const prefs = parsePreferences(profile.notification_preferences);
+    if (!shouldNotifyDriver(prefs, NOTIFICATION_CHANNELS.CONTACTED)) {
+      return { success: true, skipped: true, reason: 'User preference' };
     }
 
-    await logNotification({ carrier_dot: contactInfo.carrierDot, driver_id: driverId, notification_type: NOTIFICATION_TYPES.IN_APP, channel: NOTIFICATION_CHANNELS.CONTACTED, recipient_id: driverId });
+    const messagePreview = contactInfo.messagePreview 
+      ? `: "${contactInfo.messagePreview.substring(0, 80)}..."` 
+      : '';
+    
+    await createNotification(
+      driverId,
+      NOTIFICATION_CHANNELS.CONTACTED,
+      'New Message',
+      `A recruiter sent you a message${messagePreview}.`,
+      '/dashboard'
+    );
+
+    // Email notification if available
+    const wixUsers = await getEmailService();
+    if (wixUsers && wixUsers.emailUser) {
+      try {
+        await wixUsers.emailUser('recruiterContactNotification', driverId, {
+          variables: { messagePreview: contactInfo.messagePreview || 'New message' }
+        });
+      } catch (emailErr) {
+        console.warn('[matchNotifications] Email notification failed:', emailErr.message);
+      }
+    }
+
+    await logNotification({
+      carrier_dot: contactInfo.carrierDot,
+      driver_id: driverId,
+      notification_type: NOTIFICATION_TYPES.IN_APP,
+      channel: NOTIFICATION_CHANNELS.CONTACTED,
+      recipient_id: driverId
+    });
+
     return { success: true };
   } catch (err) {
-    await logNotification({ carrier_dot: contactInfo.carrierDot, driver_id: driverId, status: 'failed', error_message: err.message });
+    await log({
+      level: 'ERROR',
+      source: 'match-notifications',
+      message: `Failed to notify driver ${driverId} of contact`,
+      traceId,
+      details: { error: err.message, contactInfo }
+    });
+
+    await logNotification({
+      carrier_dot: contactInfo.carrierDot,
+      driver_id: driverId,
+      status: 'failed',
+      error_message: err.message
+    });
+
     return { success: false, error: err.message };
   }
 }
 
+/**
+ * Notifies a carrier (Enterprise only) of new matching drivers
+ */
 export async function notifyCarrierNewMatches(carrierDot, matchingDrivers) {
+  if (!matchingDrivers || matchingDrivers.length === 0) {
+    return { success: true, skipped: true, reason: 'No matches' };
+  }
+
   try {
-    if (!matchingDrivers?.length) return { success: true, skipped: true };
     const subSvc = await getSubscriptionService();
-    const sub = await subSvc.getSubscription(carrierDot);
-    if (!isEnterpriseTier(sub)) return { success: true, skipped: true };
+    const subscription = await subSvc.getSubscription(carrierDot);
 
-    const wixUsers = await getEmailService();
-    const contactRes = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, { filters: { carrier_dot: carrierDot }, limit: 1, suppressAuth: true });
-    const contact = contactRes.items?.[0];
-
-    if (wixUsers?.default?.emailUser && contact?.member_id) {
-      const summary = matchingDrivers.slice(0, 5).map(m => `${m.first_name} (${m.score}%)`).join('\n');
-      await wixUsers.default.emailUser('newMatchAlert', contact.member_id, { variables: { matchCount: String(matchingDrivers.length), topMatchSummary: summary } });
+    if (!isEnterpriseTier(subscription)) {
+      return { success: true, skipped: true, reason: 'Not enterprise tier' };
     }
 
-    await logNotification({ carrier_dot: carrierDot, notification_type: NOTIFICATION_TYPES.EMAIL, channel: NOTIFICATION_CHANNELS.NEW_MATCH, recipient_id: carrierDot, metadata: { count: matchingDrivers.length } });
+    const wixUsers = await getEmailService();
+    const recruiterRes = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+      filters: { carrier_dot: carrierDot },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    const recruiter = recruiterRes.items?.[0];
+    if (wixUsers && wixUsers.emailUser && recruiter?.member_id) {
+      const topMatchSummary = matchingDrivers
+        .slice(0, 5)
+        .map(m => `${m.first_name} (${m.score}%)`)
+        .join('\n');
+
+      await wixUsers.emailUser('newMatchAlert', recruiter.member_id, {
+        variables: {
+          matchCount: String(matchingDrivers.length),
+          topMatchSummary
+        }
+      });
+    }
+
+    await logNotification({
+      carrier_dot: carrierDot,
+      notification_type: NOTIFICATION_TYPES.EMAIL,
+      channel: NOTIFICATION_CHANNELS.NEW_MATCH,
+      recipient_id: carrierDot,
+      metadata: { matchCount: matchingDrivers.length }
+    });
+
     return { success: true };
-  } catch (err) { return { success: false, error: err.message }; }
+  } catch (err) {
+    console.error(`[matchNotifications] Carrier match notification failed (${carrierDot}):`, err.message);
+    return { success: false, error: err.message };
+  }
 }
 
+/**
+ * Background job to scan for new drivers and notify enterprise carriers
+ * Runs as part of a scheduled task.
+ */
 export async function scanForNewMatchingDrivers() {
   const startTime = Date.now();
+  const traceId = `scan-${Date.now()}`;
+
   try {
-    const cutoff = new Date(Date.now() - 24 * 3600000).toISOString();
-    const dRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, { filters: { is_searchable: true, updated_date: { gte: cutoff } }, limit: 500, suppressAuth: true });
-    const newDrivers = dRes.items || [];
-    if (!newDrivers.length) return { success: true, carriersNotified: 0 };
+    // 1. Get new drivers updated in the last 24 hours
+    const cutoffDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const driversRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
+      filters: { 
+        is_searchable: true,
+        updated_date: { gte: cutoffDate }
+      },
+      limit: 500,
+      suppressAuth: true
+    });
 
-    const sRes = await dataAccess.queryRecords(COLLECTION_KEYS.carrierSubscriptions, { filters: { plan_type: 'enterprise', is_active: true }, limit: 200, suppressAuth: true });
-    const enterpriseCarriers = sRes.items || [];
-    const scoring = await getDriverScoring();
-
-    let notifiedCount = 0;
-    for (const carrier of enterpriseCarriers) {
-      const dot = carrier.carrier_dot;
-      const pRes = await dataAccess.queryRecords(COLLECTION_KEYS.carrierHiringPreferences, { filters: { carrier_dot: dot }, limit: 1, suppressAuth: true });
-      const prefs = pRes.items?.[0];
-      if (!prefs) continue;
-
-      const matches = [];
-      for (const d of newDrivers) {
-        const s = scoring.calculateDriverMatchScore(d, prefs);
-        if ((s.totalScore || s.score || 0) >= MATCH_SCORE_THRESHOLD) matches.push({ first_name: d.display_name, score: s.totalScore || s.score });
-      }
-      if (matches.length) { await notifyCarrierNewMatches(dot, matches); notifiedCount++; }
+    const newDrivers = driversRes.items || [];
+    if (newDrivers.length === 0) {
+      return { success: true, carriersNotified: 0, reason: 'No new drivers' };
     }
-    return { success: true, carriersNotified: notifiedCount, duration: Date.now() - startTime };
-  } catch (err) { return { success: false, error: err.message }; }
+
+    // 2. Get active enterprise carriers
+    const carriersRes = await dataAccess.queryRecords(COLLECTION_KEYS.carrierSubscriptions, {
+      filters: { 
+        plan_type: 'enterprise',
+        is_active: true
+      },
+      limit: 200,
+      suppressAuth: true
+    });
+
+    const enterpriseCarriers = carriersRes.items || [];
+    if (enterpriseCarriers.length === 0) {
+      return { success: true, carriersNotified: 0, reason: 'No enterprise carriers' };
+    }
+
+    const scoring = await getDriverScoring();
+    let carriersNotified = 0;
+
+    // 3. Process carriers in chunks to respect rate limits and prevent timeouts
+    const carrierChunks = chunkArray(enterpriseCarriers, 10);
+
+    for (const chunk of carrierChunks) {
+      await Promise.all(chunk.map(async (carrier) => {
+        try {
+          const dot = carrier.carrier_dot;
+          
+          // Get carrier hiring preferences
+          const prefsRes = await dataAccess.queryRecords(COLLECTION_KEYS.carrierHiringPreferences, {
+            filters: { carrier_dot: dot },
+            limit: 1,
+            suppressAuth: true
+          });
+
+          const prefs = prefsRes.items?.[0];
+          if (!prefs) return;
+
+          // Find matches among new drivers
+          const matches = [];
+          for (const driver of newDrivers) {
+            const scoreResult = scoring.calculateDriverMatchScore(driver, prefs);
+            const score = scoreResult.overallScore || scoreResult.score || 0;
+
+            if (score >= MATCH_SCORE_THRESHOLD) {
+              matches.push({
+                first_name: driver.display_name || 'Driver',
+                score
+              });
+            }
+          }
+
+          if (matches.length > 0) {
+            await notifyCarrierNewMatches(dot, matches);
+            carriersNotified++;
+          }
+        } catch (innerErr) {
+          console.error(`[matchNotifications] Error processing carrier ${carrier.carrier_dot}:`, innerErr.message);
+        }
+      }));
+
+      // Rate limit delay between chunks (200ms)
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+
+    const duration = Date.now() - startTime;
+    await log({
+      level: 'INFO',
+      source: 'match-notifications',
+      message: `Completed match scan: ${carriersNotified} carriers notified`,
+      traceId,
+      details: { 
+        newDrivers: newDrivers.length,
+        totalCarriers: enterpriseCarriers.length,
+        carriersNotified,
+        duration
+      }
+    });
+
+    return { 
+      success: true, 
+      carriersNotified, 
+      duration 
+    };
+  } catch (err) {
+    await log({
+      level: 'ERROR',
+      source: 'match-notifications',
+      message: 'Match scan failed',
+      traceId,
+      details: { error: err.message }
+    });
+
+    return { success: false, error: err.message };
+  }
 }
 
+/**
+ * Updates a driver's notification preferences
+ */
 export async function updateDriverNotificationPreferences(driverId, preferences) {
   try {
     const profile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
-    if (!profile) return { success: false, error: 'Not found' };
-    await dataAccess.updateRecord(COLLECTION_KEYS.driverProfiles, { ...profile, notification_preferences: JSON.stringify(preferences), _id: driverId }, { suppressAuth: true });
+    if (!profile) {
+      return { success: false, error: 'Driver profile not found' };
+    }
+
+    // Update profile with new preferences (serialized as string for compatibility)
+    const updatedProfile = {
+      ...profile,
+      notification_preferences: JSON.stringify(preferences),
+      _id: driverId
+    };
+
+    await dataAccess.updateRecord(COLLECTION_KEYS.driverProfiles, updatedProfile, { suppressAuth: true });
+    
     return { success: true, preferences };
-  } catch (err) { return { success: false, error: err.message }; }
+  } catch (err) {
+    console.error(`[matchNotifications] Failed to update preferences for ${driverId}:`, err.message);
+    return { success: false, error: err.message };
+  }
 }

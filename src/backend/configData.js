@@ -48,6 +48,8 @@ export const DATA_SOURCE = {
   // -------------------------------------------------------------------------
   messages: 'airtable',
   memberNotifications: 'wix', // KEEP IN WIX: Requires Wix auth context
+  memberBadges: 'wix',        // KEEP IN WIX: Wix system collection
+  memberPrivateData: 'wix',   // KEEP IN WIX: Wix system collection
   memberActivity: 'airtable',
 
   // -------------------------------------------------------------------------
@@ -327,6 +329,8 @@ export const WIX_COLLECTION_NAMES = {
   // Messaging & Notifications
   messages: 'Messages',
   memberNotifications: 'MemberNotifications',
+  memberBadges: 'Members/Badges',
+  memberPrivateData: 'Members/PrivateMembersData',
   memberActivity: 'MemberActivity',
   carrierAnnouncements: 'CarrierAnnouncements',
   announcementReadReceipts: 'AnnouncementReadReceipts',

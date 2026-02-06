@@ -1,4 +1,12 @@
-// import wixData from 'wix-data'; // Removed - using dataAccess
+/**
+ * Scheduler Service - "The Silent Night Shift"
+ * Handles background jobs, batch enrichment, and abandonment recovery follow-ups.
+ * 
+ * This service uses unified dataAccess for dual-source support.
+ *
+ * @module backend/scheduler
+ */
+
 import { enrichCarrier } from 'backend/aiEnrichment';
 import { scanSocialMedia } from 'backend/socialScanner';
 import {
@@ -7,33 +15,35 @@ import {
   sendAbandonmentEmail3,
   markEmailSent
 } from 'backend/abandonmentEmailService';
-// import { usesAirtable, getAirtableTableName } from 'backend/configData'; // Not needed if using dataAccess
-// import * as airtable from 'backend/airtableClient'; // Not needed if using dataAccess
 import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
 
 // ============================================================================
-// CONFIGURATION - THE SILENT NIGHT SHIFT
+// CONFIGURATION
 // ============================================================================
 
 const CONFIG = {
-  // Use configData.js keys
   carriersKey: 'carriers',
   enrichmentsKey: 'carrierEnrichments',
   
   // EXECUTION LIMITS
-  // We reduce batch size to 3 because "High Value" carriers take longer to scan.
-  // 3 carriers x ~15s each = ~45s (Safe buffer for Wix 60s backend timeout)
   batchSize: 3, 
-  
-  // RE-ENRICHMENT RULES
-  staleThresholdDays: 30, // Refresh data older than 30 days
+  staleThresholdDays: 30,
   
   // THROTTLING
-  delayBetweenCallsMs: 2000, // Be polite to APIs
+  delayBetweenCallsMs: 2000,
   
-  // HIGH VALUE THRESHOLDS (Triggers Social Sniper)
-  highValueFleetSize: 50,    // 50+ trucks
-  highValueScore: 80         // 80%+ Match Score
+  // HIGH VALUE THRESHOLDS
+  highValueFleetSize: 50,
+  highValueScore: 80
+};
+
+const ABANDONMENT_CONFIG = {
+  collectionKey: 'checkoutAbandonment',
+  email2DelayDays: 3,
+  email3DelayDays: 7,
+  maxPerRun: 10,
+  delayBetweenEmailsMs: 1000
 };
 
 // ============================================================================
@@ -41,94 +51,61 @@ const CONFIG = {
 // ============================================================================
 
 export async function runEnrichmentBatch() {
-  console.log('⏰ SCHEDULER: Starting "Silent Night Shift" enrichment batch...');
+  console.log('⏰ SCHEDULER: Starting enrichment batch...');
   const startTime = Date.now();
+  const traceId = `enrich-${Date.now()}`;
   
   let processedCount = 0;
   let errorCount = 0;
   let socialScansRun = 0;
 
   try {
-    // 1. Get potential targets (Carriers that exist)
-    // We sort by 'combined_score' descending to prioritize your best inventory first
     const carrierResult = await dataAccess.queryRecords(CONFIG.carriersKey, {
       sort: [{ field: 'combined_score', direction: 'desc' }],
-      limit: 60, // Fetch a pool of candidates
+      limit: 60,
       suppressAuth: true
     });
       
     if (!carrierResult.success || carrierResult.items.length === 0) {
-      console.log('⏰ SCHEDULER: No carriers found in database.');
       return { status: 'empty' };
     }
 
-    // 2. Filter out ones that are already fresh in CarrierEnrichments
     const candidates = await filterForUnenriched(carrierResult.items);
     
     if (candidates.length === 0) {
-      console.log('⏰ SCHEDULER: All high-priority carriers are already fresh. Sleeping.');
       return { success: true, processed: 0, message: "All fresh" };
     }
     
-    console.log(`⏰ SCHEDULER: Found ${candidates.length} candidates. Processing top ${CONFIG.batchSize}...`);
-    
-    // 3. Process the batch (sliced to strict limit)
     const batch = candidates.slice(0, CONFIG.batchSize);
     
     for (const carrier of batch) {
       const dot = String(carrier.dot_number || carrier.DOT_NUMBER).trim();
-      
-      if (!dot) {
-        console.warn('⚠️ SCHEDULER: Skipping carrier with no DOT number');
-        continue;
-      }
-      
-      console.log(`▶️ PROCESSING: ${carrier.legal_name || 'Unknown'} (DOT: ${dot})`);
+      if (!dot) continue;
       
       try {
-        // --- LOGIC: IS THIS A HIGH VALUE TARGET? ---
         const fleetSize = carrier.nbr_power_unit || carrier.NBR_POWER_UNIT || 0;
         const score = carrier.combined_score || 0;
-        
         const isHighValue = fleetSize >= CONFIG.highValueFleetSize || score >= CONFIG.highValueScore;
         
         let socialIntel = null;
-
         if (isHighValue) {
-          console.log(`💎 HIGH VALUE TARGET DETECTED (Fleet: ${fleetSize}, Score: ${score})`);
-          console.log(`🕵️ ACTIVATING SOCIAL SNIPER...`);
-          
-          // Call the Social Scanner (Perplexity)
-          // We await this because we are in a background job—we have time.
           socialIntel = await scanSocialMedia(carrier.legal_name, dot);
-          
           if (socialIntel) socialScansRun++;
-        } else {
-           console.log(`🔹 Standard Target. Skipping deep social scan.`);
         }
 
-        // --- PREPARE PREFS ---
-        // Since this is a background job, we don't have a specific driver.
-        // We use "Market Standard" preferences to get a general baseline.
         const systemPrefs = { 
           minCPM: 0.50, 
           operationType: 'Any',
           driverName: 'System Scheduler',
-          isSystemJob: true // Flag for analytics
+          isSystemJob: true 
         };
 
-        // --- EXECUTE ENRICHMENT ---
-        // We pass the socialIntel to the enrichment function
         await enrichCarrier(dot, carrier, systemPrefs, socialIntel);
-        
         processedCount++;
-        console.log(`✅ COMPLETE: DOT ${dot}`);
         
-        // Sleep to respect rate limits & prevent race conditions
         if (processedCount < batch.length) {
-            await new Promise(r => setTimeout(r, CONFIG.delayBetweenCallsMs));
+            await sleep(CONFIG.delayBetweenCallsMs);
         }
-        
       } catch (err) {
         console.error(`❌ FAILED DOT ${dot}:`, err.message);
         errorCount++;
@@ -136,113 +113,39 @@ export async function runEnrichmentBatch() {
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`🏁 BATCH FINISHED in ${elapsed}s`);
-    console.log(`   Processed: ${processedCount}`);
-    console.log(`   Social Scans: ${socialScansRun}`);
-    console.log(`   Errors: ${errorCount}`);
     
-    return { 
-      success: true, 
-      processed: processedCount, 
-      socialScans: socialScansRun,
-      errors: errorCount,
-      timeTaken: elapsed
-    };
-
+    await log({
+      level: 'INFO',
+      source: 'scheduler',
+      message: `Enrichment batch complete: ${processedCount} processed`,
+      traceId,
+      details: { processedCount, socialScansRun, errorCount, duration: elapsed }
+    });
+    
+    return { success: true, processed: processedCount, socialScans: socialScansRun, errors: errorCount, timeTaken: elapsed };
   } catch (error) {
-    console.error('❌ SCHEDULER CRITICAL FAILURE:', error);
+    console.error('❌ SCHEDULER CRITICAL FAILURE:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 // ============================================================================
-// HELPER: FILTER LOGIC
-// ============================================================================
-
-async function filterForUnenriched(carriers) {
-  const dotNumbers = carriers.map(c => String(c.dot_number || c.DOT_NUMBER)).filter(d => d);
-  
-  if (dotNumbers.length === 0) return [];
-
-  try {
-    // Query existing enrichments for these DOTs
-    const existingResult = await dataAccess.queryRecords(CONFIG.enrichmentsKey, {
-        filters: { dot_number: dotNumbers },
-        limit: 100,
-        suppressAuth: true
-    });
-        
-    // Create a map of existing enrichments
-    const enrichmentMap = {};
-    (existingResult.items || []).forEach(item => {
-        enrichmentMap[item.dot_number] = item;
-    });
-
-    // Filter the original list
-    return carriers.filter(c => {
-        const dot = String(c.dot_number || c.DOT_NUMBER);
-        const existing = enrichmentMap[dot];
-        
-        // If it doesn't exist, we MUST enrich it
-        if (!existing) return true;
-        
-        // If it exists, check if it's stale
-        const enrichedDate = existing.enriched_date ? new Date(existing.enriched_date) : new Date(0);
-        const ageInDays = (Date.now() - enrichedDate.getTime()) / (1000 * 60 * 60 * 24);
-        
-        // Return true if it's older than our threshold
-        return ageInDays > CONFIG.staleThresholdDays;
-    });
-  } catch (err) {
-      console.error("Filter logic error:", err);
-      return []; // Fail safe to empty to avoid infinite loops
-  }
-}
-
-// ============================================================================
-// ABANDONMENT RECOVERY CONFIGURATION
-// ============================================================================
-
-const ABANDONMENT_CONFIG = {
-  collectionKey: 'checkoutAbandonment', // camelCase key
-
-  // Timing thresholds (in days)
-  email2DelayDays: 3,  // Send email 2 after 3 days
-  email3DelayDays: 7,  // Send email 3 after 7 days
-
-  // Processing limits
-  maxPerRun: 10,  // Process max 10 abandonments per scheduled run
-
-  // Delay between emails to avoid rate limits
-  delayBetweenEmailsMs: 1000
-};
-
-// ============================================================================
 // JOB: PROCESS ABANDONMENT FOLLOW-UPS
-// Runs daily to send follow-up emails for checkout abandonments
 // ============================================================================
 
 export async function processAbandonmentFollowUps() {
   console.log('📧 SCHEDULER: Starting abandonment follow-up processing...');
   const startTime = Date.now();
+  const traceId = `abandon-followup-${Date.now()}`;
 
   let email2Sent = 0;
   let email3Sent = 0;
   let errorCount = 0;
-  let skippedRecovered = 0;
 
   try {
     const now = new Date();
     const threeDaysAgo = new Date(now.getTime() - (ABANDONMENT_CONFIG.email2DelayDays * 24 * 60 * 60 * 1000));
     const sevenDaysAgo = new Date(now.getTime() - (ABANDONMENT_CONFIG.email3DelayDays * 24 * 60 * 60 * 1000));
-
-    // Query for abandonments that need follow-up emails
-    // We look for records where:
-    // - recovered is false (not yet converted)
-    // - email2Sent is false OR email3Sent is false
-    // Note: Airtable filters might need specific handling if boolean fields are strings, but dataAccess handles basic filters.
-    // However, complex OR logic might need separate queries if not supported well.
-    // Here we query for recovered=false, and filter in memory since we fetch 50 anyway.
 
     const result = await dataAccess.queryRecords(ABANDONMENT_CONFIG.collectionKey, {
       filters: { recovered: false },
@@ -251,42 +154,25 @@ export async function processAbandonmentFollowUps() {
     });
 
     if (!result.success || result.items.length === 0) {
-      console.log('📧 SCHEDULER: No pending abandonments found.');
       return { success: true, processed: 0, message: 'No pending abandonments' };
     }
 
-    console.log(`📧 SCHEDULER: Found ${result.items.length} abandonment records to check.`);
-
     let processedCount = 0;
-
     for (const record of result.items) {
-      // Stop if we've hit our limit
-      if (processedCount >= ABANDONMENT_CONFIG.maxPerRun) {
-        console.log(`📧 SCHEDULER: Reached max ${ABANDONMENT_CONFIG.maxPerRun} per run. Stopping.`);
-        break;
-      }
+      if (processedCount >= ABANDONMENT_CONFIG.maxPerRun) break;
+      if (record.recovered) continue;
 
-      // Skip if already recovered (should be filtered by query but good double check)
-      if (record.recovered) {
-        skippedRecovered++;
-        continue;
-      }
-
-      const abandonedAt = new Date(record.abandonedAt);
+      const abandonedAt = new Date(record.abandoned_at || record.abandonedAt);
       const abandonmentData = {
         email: record.email,
-        firstName: record.firstName,
-        planType: record.planType,
-        planName: record.planName
+        firstName: record.first_name || record.firstName,
+        planType: record.plan_type || record.planType,
+        planName: record.plan_name || record.planName
       };
 
       try {
-        // Check if we need to send email 3 (7+ days)
-        if (!record.email3Sent && abandonedAt <= sevenDaysAgo) {
-          console.log(`📧 Sending email 3 to ${record.email} (abandoned ${getDaysAgo(abandonedAt)} days ago)`);
-
+        if (!(record.email_3_sent || record.email3Sent) && abandonedAt <= sevenDaysAgo) {
           const sendResult = await sendAbandonmentEmail3(abandonmentData);
-
           if (sendResult.success) {
             await markEmailSent(record._id, 3);
             email3Sent++;
@@ -294,17 +180,12 @@ export async function processAbandonmentFollowUps() {
           } else {
             errorCount++;
           }
-
           await sleep(ABANDONMENT_CONFIG.delayBetweenEmailsMs);
-          continue; // Move to next record
+          continue;
         }
 
-        // Check if we need to send email 2 (3+ days)
-        if (!record.email2Sent && abandonedAt <= threeDaysAgo) {
-          console.log(`📧 Sending email 2 to ${record.email} (abandoned ${getDaysAgo(abandonedAt)} days ago)`);
-
+        if (!(record.email_2_sent || record.email2Sent) && abandonedAt <= threeDaysAgo) {
           const sendResult = await sendAbandonmentEmail2(abandonmentData);
-
           if (sendResult.success) {
             await markEmailSent(record._id, 2);
             email2Sent++;
@@ -312,10 +193,8 @@ export async function processAbandonmentFollowUps() {
           } else {
             errorCount++;
           }
-
           await sleep(ABANDONMENT_CONFIG.delayBetweenEmailsMs);
         }
-
       } catch (err) {
         console.error(`❌ Error processing abandonment ${record._id}:`, err.message);
         errorCount++;
@@ -323,187 +202,145 @@ export async function processAbandonmentFollowUps() {
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`📧 ABANDONMENT FOLLOW-UP COMPLETE in ${elapsed}s`);
-    console.log(`   Email 2 sent: ${email2Sent}`);
-    console.log(`   Email 3 sent: ${email3Sent}`);
-    console.log(`   Skipped (recovered): ${skippedRecovered}`);
-    console.log(`   Errors: ${errorCount}`);
+    
+    await log({
+      level: 'INFO',
+      source: 'scheduler',
+      message: `Abandonment follow-ups complete: ${email2Sent + email3Sent} sent`,
+      traceId,
+      details: { email2Sent, email3Sent, errorCount, duration: elapsed }
+    });
 
-    return {
-      success: true,
-      email2Sent,
-      email3Sent,
-      skippedRecovered,
-      errors: errorCount,
-      timeTaken: elapsed
-    };
-
+    return { success: true, email2Sent, email3Sent, errors: errorCount, timeTaken: elapsed };
   } catch (error) {
-    console.error('❌ ABANDONMENT SCHEDULER CRITICAL FAILURE:', error);
+    console.error('❌ ABANDONMENT SCHEDULER CRITICAL FAILURE:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 // ============================================================================
-// RECORD CHECKOUT ABANDONMENT
-// Called when user lands on checkout cancel page
+// ACTIONS
 // ============================================================================
 
 /**
- * Records a checkout abandonment and triggers the immediate email (Email 1).
- *
- * @param {string} email - User's email address
- * @param {string} planType - 'pro' or 'enterprise'
- * @param {string} sessionId - Stripe checkout session ID
- * @param {Object} additionalData - Optional additional data
- * @param {string} additionalData.firstName - User's first name
- * @param {string} additionalData.companyName - Company name
- * @returns {Promise<{success: boolean, recordId?: string, error?: string}>}
+ * Records a checkout abandonment
  */
 export async function recordCheckoutAbandonment(email, planType, sessionId, additionalData = {}) {
-  console.log(`📧 Recording checkout abandonment for ${email} (plan: ${planType})`);
-
   try {
-    // Check for existing abandonment with same email and session
     const existing = await dataAccess.queryRecords(ABANDONMENT_CONFIG.collectionKey, {
-      filters: { email: email, sessionId: sessionId },
+      filters: { email: email, session_id: sessionId },
       limit: 1,
       suppressAuth: true
     });
 
     if (existing.success && existing.items.length > 0) {
-      console.log(`📧 Abandonment already recorded for session ${sessionId}`);
-      return {
-        success: true,
-        recordId: existing.items[0]._id,
-        alreadyExists: true
-      };
+      return { success: true, recordId: existing.items[0]._id, alreadyExists: true };
     }
 
-    // Create the abandonment record
+    const planName = getPlanDisplayName(planType);
     const abandonmentRecord = {
       email: email,
-      planType: planType,
-      planName: getPlanDisplayName(planType),
-      sessionId: sessionId,
-      firstName: additionalData.firstName || '',
-      companyName: additionalData.companyName || '',
-      abandonedAt: new Date(),
+      plan_type: planType,
+      plan_name: planName,
+      session_id: sessionId,
+      first_name: additionalData.firstName || '',
+      company_name: additionalData.companyName || '',
+      abandoned_at: new Date(),
       recovered: false,
-      email1Sent: false,
-      email2Sent: false,
-      email3Sent: false,
-      email1SentAt: null,
-      email2SentAt: null,
-      email3SentAt: null
+      email_1_sent: false,
+      email_2_sent: false,
+      email_3_sent: false
     };
 
-    const insertResult = await dataAccess.insertRecord(ABANDONMENT_CONFIG.collectionKey, abandonmentRecord, {
-      suppressAuth: true
-    });
-
-    if (!insertResult.success) {
-        throw new Error(insertResult.error);
-    }
+    const insertResult = await dataAccess.insertRecord(ABANDONMENT_CONFIG.collectionKey, abandonmentRecord, { suppressAuth: true });
+    if (!insertResult.success) throw new Error(insertResult.error);
 
     const insertedId = insertResult.record._id;
-    console.log(`📧 Abandonment recorded with ID: ${insertedId}`);
 
-    // Send immediate email (Email 1)
-    const emailData = {
-      email: email,
-      firstName: additionalData.firstName || '',
-      planType: planType,
-      planName: abandonmentRecord.planName
-    };
-
+    // Send immediate email
+    const emailData = { email, firstName: additionalData.firstName || '', planType, planName };
     const emailResult = await sendAbandonmentEmail1(emailData);
 
     if (emailResult.success) {
       await markEmailSent(insertedId, 1);
-      console.log(`📧 Immediate abandonment email sent to ${email}`);
-    } else {
-      console.warn(`⚠️ Failed to send immediate email: ${emailResult.error}`);
     }
 
-    return {
-      success: true,
-      recordId: insertedId,
-      emailSent: emailResult.success
-    };
-
+    return { success: true, recordId: insertedId, emailSent: emailResult.success };
   } catch (error) {
-    console.error('❌ Error recording checkout abandonment:', error);
+    console.error('[scheduler] recordCheckoutAbandonment error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// MARK ABANDONMENT AS RECOVERED
-// Called when user successfully completes checkout
-// ============================================================================
-
 /**
- * Marks an abandonment record as recovered (user completed checkout).
- * This prevents further follow-up emails.
- *
- * @param {string} email - User's email address
- * @param {string} sessionId - Optional: specific session to mark recovered
- * @returns {Promise<{success: boolean, updated: number}>}
+ * Marks abandonment as recovered
  */
 export async function markAbandonmentRecovered(email, sessionId = null) {
   try {
     const filters = { email: email, recovered: false };
-    if (sessionId) {
-      filters.sessionId = sessionId;
-    }
+    if (sessionId) filters.session_id = sessionId;
 
     const result = await dataAccess.queryRecords(ABANDONMENT_CONFIG.collectionKey, {
       filters: filters,
       suppressAuth: true
     });
 
-    if (!result.success || result.items.length === 0) {
-      return { success: true, updated: 0 };
-    }
+    if (!result.success || result.items.length === 0) return { success: true, updated: 0 };
 
     let updatedCount = 0;
     for (const record of result.items) {
       await dataAccess.updateRecord(ABANDONMENT_CONFIG.collectionKey, {
+        ...record,
         _id: record._id,
         recovered: true,
-        recoveredAt: new Date()
+        recovered_at: new Date()
       }, { suppressAuth: true });
       updatedCount++;
     }
 
-    console.log(`📧 Marked ${updatedCount} abandonment(s) as recovered for ${email}`);
     return { success: true, updated: updatedCount };
-
   } catch (error) {
-    console.error('❌ Error marking abandonment recovered:', error);
+    console.error('[scheduler] markAbandonmentRecovered error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 // ============================================================================
-// HELPER FUNCTIONS
+// HELPERS
 // ============================================================================
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+async function filterForUnenriched(carriers) {
+  const dotNumbers = carriers.map(c => String(c.dot_number || c.DOT_NUMBER)).filter(d => d);
+  if (dotNumbers.length === 0) return [];
+
+  try {
+    const existingResult = await dataAccess.queryRecords(CONFIG.enrichmentsKey, {
+        filters: { dot_number: { hasSome: dotNumbers } },
+        limit: 100,
+        suppressAuth: true
+    });
+        
+    const enrichmentMap = {};
+    (existingResult.items || []).forEach(item => { enrichmentMap[item.dot_number] = item; });
+
+    return carriers.filter(c => {
+        const dot = String(c.dot_number || c.DOT_NUMBER);
+        const existing = enrichmentMap[dot];
+        if (!existing) return true;
+        
+        const enrichedDate = existing.enriched_date ? new Date(existing.enriched_date) : new Date(0);
+        const ageInDays = (Date.now() - enrichedDate.getTime()) / (1000 * 60 * 60 * 24);
+        return ageInDays > CONFIG.staleThresholdDays;
+    });
+  } catch (err) {
+      console.error("Filter logic error:", err.message);
+      return [];
+  }
 }
 
-function getDaysAgo(date) {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  return Math.floor(diffMs / (24 * 60 * 60 * 1000));
-}
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 function getPlanDisplayName(planType) {
-  const names = {
-    pro: 'Pro Plan',
-    enterprise: 'Enterprise Plan'
-  };
+  const names = { pro: 'Pro Plan', enterprise: 'Enterprise Plan' };
   return names[planType] || 'Pro Plan';
 }

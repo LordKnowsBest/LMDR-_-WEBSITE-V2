@@ -4,7 +4,6 @@
 // Last Updated: December 2025
 // ============================================================================
 
-import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import wixSeo from 'wix-seo';
 

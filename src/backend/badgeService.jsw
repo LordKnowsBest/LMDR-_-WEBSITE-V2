@@ -7,12 +7,15 @@
  * - Milestone badges (First Hire, Ten Club, Century Club)
  *
  * This service uses Airtable-only collections (no Wix fallback).
+ * 
+ * @module backend/badgeService
  */
 
 import * as dataAccess from 'backend/dataAccess';
 import { createNotification } from 'backend/memberService';
 import { logGamificationEvent, awardRecruiterPoints } from 'backend/gamificationService';
 import { chunkArray } from 'backend/utils/arrayUtils';
+import { log } from 'backend/observabilityService';
 
 // Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
@@ -78,10 +81,15 @@ export async function getBadgeDefinitions(userType = 'recruiter') {
     if (userType !== 'all') filters.user_type = userType;
 
     const result = await dataAccess.queryRecords(COLLECTION_KEYS.badgeDefinitions, {
-      filters, sort: [{ field: 'display_order', direction: 'asc' }], limit: 100, suppressAuth: true
+      filters, 
+      sort: [{ field: 'display_order', direction: 'asc' }], 
+      limit: 100, 
+      suppressAuth: true
     });
     return (result.items || []).map(normalizeBadgeDefinition);
-  } catch (error) { return []; }
+  } catch (error) { 
+    return []; 
+  }
 }
 
 /**
@@ -91,17 +99,40 @@ export async function getBadges(userId, userType = 'recruiter') {
   try {
     const [defs, earned] = await Promise.all([
       getBadgeDefinitions(userType),
-      dataAccess.queryRecords(COLLECTION_KEYS.recruiterBadges, { filters: { recruiter_id: userId }, limit: 100, suppressAuth: true })
+      dataAccess.queryRecords(COLLECTION_KEYS.recruiterBadges, { 
+        filters: { recruiter_id: userId }, 
+        limit: 100, 
+        suppressAuth: true 
+      })
     ]);
 
     const earnedMap = new Map();
-    (earned.items || []).forEach(r => earnedMap.set(r.badge_id, { _id: r._id, tier: r.current_tier || 1, tierName: r.tier_name, earnedAt: r.earned_at, lastUpgraded: r.last_upgraded, progress: r.progress || 0 }));
+    (earned.items || []).forEach(r => {
+      earnedMap.set(r.badge_id, { 
+        _id: r._id, 
+        tier: r.current_tier || 1, 
+        tierName: r.tier_name, 
+        earnedAt: r.earned_at, 
+        lastUpgraded: r.last_upgraded, 
+        progress: r.progress || 0 
+      });
+    });
 
     return defs.map(def => {
       const e = earnedMap.get(def.badgeId);
-      return { ...def, earned: !!e, currentTier: e?.tier || 0, tierName: e?.tierName || null, earnedAt: e?.earnedAt || null, lastUpgraded: e?.lastUpgraded || null, progress: e?.progress || 0 };
+      return { 
+        ...def, 
+        earned: !!e, 
+        currentTier: e?.tier || 0, 
+        tierName: e?.tierName || null, 
+        earnedAt: e?.earnedAt || null, 
+        lastUpgraded: e?.lastUpgraded || null, 
+        progress: e?.progress || 0 
+      };
     });
-  } catch (error) { return []; }
+  } catch (error) { 
+    return []; 
+  }
 }
 
 // =============================================================================
@@ -145,6 +176,9 @@ export function calculateHiresBadge(total) {
 // RECALCULATE BADGES
 // =============================================================================
 
+/**
+ * Recalculate badges for a specific recruiter
+ */
 export async function recalculateRecruiterBadges(recruiterId) {
   try {
     const stats = await getRecruiterStats(recruiterId);
@@ -155,50 +189,130 @@ export async function recalculateRecruiterBadges(recruiterId) {
       { id: 'hires_milestone', cat: 'milestone', calc: calculateHiresBadge(stats.totalHires) }
     ];
 
-    const existingRes = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterBadges, { filters: { recruiter_id: recruiterId }, limit: 50, suppressAuth: true });
+    const existingRes = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterBadges, { 
+      filters: { recruiter_id: recruiterId }, 
+      limit: 50, 
+      suppressAuth: true 
+    });
     const existingMap = new Map();
     (existingRes.items || []).forEach(b => existingMap.set(b.badge_id, b));
 
-    const results = { badges_updated: 0, new_badges: [], tier_upgrades: [] }, now = new Date().toISOString();
+    const results = { badges_updated: 0, new_badges: [], tier_upgrades: [] };
+    const now = new Date().toISOString();
 
     for (const { id, cat, calc } of badgeCalcs) {
       if (!calc.qualifies) continue;
       const e = existingMap.get(id);
+      
       if (e) {
         if (calc.tier > (e.current_tier || 0)) {
-          await dataAccess.updateRecord(COLLECTION_KEYS.recruiterBadges, { ...e, current_tier: calc.tier, tier_name: calc.name, badge_color: calc.color, last_upgraded: now, updated_at: now }, { suppressAuth: true });
+          await dataAccess.updateRecord(COLLECTION_KEYS.recruiterBadges, { 
+            ...e, 
+            current_tier: calc.tier, 
+            tier_name: calc.name, 
+            badge_color: calc.color, 
+            last_upgraded: now, 
+            updated_at: now 
+          }, { suppressAuth: true });
+          
           results.tier_upgrades.push({ id, previous: e.current_tier, new: calc.tier, name: calc.name });
           await sendBadgeTierUpgradeNotification(recruiterId, id, calc);
           results.badges_updated++;
         }
       } else {
-        await dataAccess.insertRecord(COLLECTION_KEYS.recruiterBadges, { recruiter_id: recruiterId, badge_id: id, badge_category: cat, current_tier: calc.tier, tier_name: calc.name, badge_color: calc.color, earned_at: now, last_upgraded: now, progress: 100, created_at: now, updated_at: now }, { suppressAuth: true });
+        await dataAccess.insertRecord(COLLECTION_KEYS.recruiterBadges, { 
+          recruiter_id: recruiterId, 
+          badge_id: id, 
+          badge_category: cat, 
+          current_tier: calc.tier, 
+          tier_name: calc.name, 
+          badge_color: calc.color, 
+          earned_at: now, 
+          last_upgraded: now, 
+          progress: 100, 
+          created_at: now, 
+          updated_at: now 
+        }, { suppressAuth: true });
+        
         results.new_badges.push({ id, tier: calc.tier, name: calc.name });
         await sendNewBadgeNotification(recruiterId, id, calc);
         results.badges_updated++;
       }
     }
 
-    if (results.badges_updated > 0) await logGamificationEvent(recruiterId, 'recruiter', { eventType: 'badge_update', action: 'badge_recalculation', metadata: { newBadges: results.new_badges, tierUpgrades: results.tier_upgrades } });
+    if (results.badges_updated > 0) {
+      await logGamificationEvent(recruiterId, 'recruiter', { 
+        eventType: 'badge_update', 
+        action: 'badge_recalculation', 
+        metadata: { 
+          newBadges: results.new_badges, 
+          tierUpgrades: results.tier_upgrades 
+        } 
+      });
+    }
+    
     return results;
-  } catch (error) { return { badges_updated: 0, new_badges: [], tier_upgrades: [], error: error.message }; }
+  } catch (error) { 
+    return { 
+      badges_updated: 0, 
+      new_badges: [], 
+      tier_upgrades: [], 
+      error: error.message 
+    }; 
+  }
 }
 
+/**
+ * Get internal recruiter stats for badge calculation
+ */
 async function getRecruiterStats(recruiterId) {
   try {
-    const progRes = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterProgression, { filters: { recruiter_id: recruiterId }, limit: 1, suppressAuth: true });
-    if (!progRes.items?.length) return { avgResponseHours: null, acceptanceRate: null, retention90DayRate: null, totalHires: 0 };
-    const p = progRes.items[0], liveResp = await calculateLiveResponseTime(recruiterId);
-    return { avgResponseHours: liveResp || p.avg_response_hours || null, acceptanceRate: p.hire_acceptance_rate || null, retention90DayRate: p.retention_90_day_rate || null, totalHires: p.total_hires || 0 };
-  } catch (err) { return { avgResponseHours: null, acceptanceRate: null, retention90DayRate: null, totalHires: 0 }; }
+    const progRes = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterProgression, { 
+      filters: { recruiter_id: recruiterId }, 
+      limit: 1, 
+      suppressAuth: true 
+    });
+    
+    if (!progRes.items?.length) {
+      return { avgResponseHours: null, acceptanceRate: null, retention90DayRate: null, totalHires: 0 };
+    }
+    
+    const p = progRes.items[0];
+    const liveResp = await calculateLiveResponseTime(recruiterId);
+    
+    return { 
+      avgResponseHours: liveResp || p.avg_response_hours || null, 
+      acceptanceRate: p.hire_acceptance_rate || null, 
+      retention90DayRate: p.retention_90_day_rate || null, 
+      totalHires: p.total_hires || 0 
+    };
+  } catch (err) { 
+    return { avgResponseHours: null, acceptanceRate: null, retention90DayRate: null, totalHires: 0 }; 
+  }
 }
 
+/**
+ * Calculate live response time from interest records
+ */
 async function calculateLiveResponseTime(recruiterId) {
   try {
-    const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverCarrierInterests, { filters: { recruiter_id: recruiterId, recruiter_response_time: { ne: null } }, limit: 100, suppressAuth: true });
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverCarrierInterests, { 
+      filters: { 
+        recruiter_id: recruiterId, 
+        recruiter_response_time: { ne: null } 
+      }, 
+      limit: 100, 
+      suppressAuth: true 
+    });
+    
     const items = res.items || [];
-    return items.length ? items.reduce((s, i) => s + (i.recruiter_response_time || 0), 0) / items.length : null;
-  } catch (err) { return null; }
+    if (items.length === 0) return null;
+    
+    const sum = items.reduce((s, i) => s + (i.recruiter_response_time || 0), 0);
+    return sum / items.length;
+  } catch (err) { 
+    return null; 
+  }
 }
 
 export async function checkBadgeTierProgress(userId, badgeId) {
@@ -211,27 +325,83 @@ export async function checkBadgeTierProgress(userId, badgeId) {
       case 'hires_milestone': return calculateHiresProgress(stats.totalHires);
       default: return { error: 'unknown_badge', badgeId };
     }
-  } catch (error) { return { error: error.message }; }
+  } catch (error) { 
+    return { error: error.message }; 
+  }
 }
 
-// Simplified progress helpers for migration...
-function calculateResponseTimeProgress(avg) { return { currentTier: calculateResponseTimeBadge(avg).tier, current: avg, target: 4, direction: 'lower_is_better' }; }
-function calculateQualityProgress(rate) { return { currentTier: calculateQualityBadge(rate).tier, current: rate, target: 0.9, direction: 'higher_is_better' }; }
-function calculateRetentionProgress(rate) { return { currentTier: calculateRetentionBadge(rate).tier, current: rate, target: 0.95, direction: 'higher_is_better' }; }
-function calculateHiresProgress(total) { return { currentTier: calculateHiresBadge(total).tier, current: total, target: 100, direction: 'higher_is_better' }; }
+function calculateResponseTimeProgress(avg) { 
+  return { 
+    currentTier: calculateResponseTimeBadge(avg).tier, 
+    current: avg, 
+    target: 4, 
+    direction: 'lower_is_better' 
+  }; 
+}
+
+function calculateQualityProgress(rate) { 
+  return { 
+    currentTier: calculateQualityBadge(rate).tier, 
+    current: rate, 
+    target: 0.9, 
+    direction: 'higher_is_better' 
+  }; 
+}
+
+function calculateRetentionProgress(rate) { 
+  return { 
+    currentTier: calculateRetentionBadge(rate).tier, 
+    current: rate, 
+    target: 0.95, 
+    direction: 'higher_is_better' 
+  }; 
+}
+
+function calculateHiresProgress(total) { 
+  return { 
+    currentTier: calculateHiresBadge(total).tier, 
+    current: total, 
+    target: 100, 
+    direction: 'higher_is_better' 
+  }; 
+}
 
 async function sendNewBadgeNotification(recruiterId, badgeId, badgeInfo) {
   try {
-    await createNotification(recruiterId, 'badge_earned', `New Badge: ${badgeInfo.name}!`, `Congratulations! You've earned the ${badgeInfo.name} badge.`, '/recruiter/dashboard');
-    await awardRecruiterPoints(recruiterId, 'badge_earned', { badgeId, tier: badgeInfo.tier, badgeName: badgeInfo.name });
-  } catch (error) { }
+    await createNotification(
+      recruiterId, 
+      'badge_earned', 
+      `New Badge: ${badgeInfo.name}!`, 
+      `Congratulations! You've earned the ${badgeInfo.name} badge.`, 
+      '/recruiter/dashboard'
+    );
+    await awardRecruiterPoints(recruiterId, 'badge_earned', { 
+      badgeId, 
+      tier: badgeInfo.tier, 
+      badgeName: badgeInfo.name 
+    });
+  } catch (error) { 
+    console.error('[badgeService] Failed to send new badge notification:', error.message);
+  }
 }
 
 async function sendBadgeTierUpgradeNotification(recruiterId, badgeId, badgeInfo) {
   try {
-    await createNotification(recruiterId, 'badge_upgrade', `Badge Upgraded: ${badgeInfo.name}!`, `Your badge has been upgraded to ${badgeInfo.name}!`, '/recruiter/dashboard');
-    await awardRecruiterPoints(recruiterId, 'badge_tier_upgrade', { badgeId, tier: badgeInfo.tier, badgeName: badgeInfo.name });
-  } catch (error) { }
+    await createNotification(
+      recruiterId, 
+      'badge_upgrade', 
+      `Badge Upgraded: ${badgeInfo.name}!`, 
+      `Your badge has been upgraded to ${badgeInfo.name}!`, 
+      '/recruiter/dashboard'
+    );
+    await awardRecruiterPoints(recruiterId, 'badge_tier_upgrade', { 
+      badgeId, 
+      tier: badgeInfo.tier, 
+      badgeName: badgeInfo.name 
+    });
+  } catch (error) { 
+    console.error('[badgeService] Failed to send badge upgrade notification:', error.message);
+  }
 }
 
 export function getResponseTimeBadgeForStats(avg) {
@@ -241,66 +411,116 @@ export function getResponseTimeBadgeForStats(avg) {
 
 export async function getRecruiterBadgeSummary(recruiterId) {
   try {
-    const [stats, earned] = await Promise.all([getRecruiterStats(recruiterId), getBadges(recruiterId, 'recruiter')]);
-    return { recruiter_id: recruiterId, total_badges: earned.filter(b => b.earned).length, badges: { response_time: calculateResponseTimeBadge(stats.avgResponseHours), quality: calculateQualityBadge(stats.acceptanceRate), retention: calculateRetentionBadge(stats.retention90DayRate), hires: calculateHiresBadge(stats.totalHires) }, stats, earned_badges: earned.filter(b => b.earned) };
-  } catch (error) { return { error: error.message }; }
+    const [stats, earned] = await Promise.all([
+      getRecruiterStats(recruiterId), 
+      getBadges(recruiterId, 'recruiter')
+    ]);
+    
+    return { 
+      recruiter_id: recruiterId, 
+      total_badges: earned.filter(b => b.earned).length, 
+      badges: { 
+        response_time: calculateResponseTimeBadge(stats.avgResponseHours), 
+        quality: calculateQualityBadge(stats.acceptanceRate), 
+        retention: calculateRetentionBadge(stats.retention90DayRate), 
+        hires: calculateHiresBadge(stats.totalHires) 
+      }, 
+      stats, 
+      earned_badges: earned.filter(b => b.earned) 
+    };
+  } catch (error) { 
+    return { error: error.message }; 
+  }
 }
-
-export async function batchRecalculateBadges() {
-  try {
-    const res = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterProgression, { limit: 1000, suppressAuth: true });
-    const recruiters = res.items || [];
-    let updated = 0;
-    for (const r of recruiters) {
-      if (r.recruiter_id) {
-        const res = await recalculateRecruiterBadges(r.recruiter_id);
-        if (res.badges_updated > 0) updated++;
-      }
-    }
-    return { processed: recruiters.length, updated };
-  } catch (error) { return { error: error.message }; }
-}
-
-function normalizeBadgeDefinition(r) {
-  return { _id: r._id, badgeId: r.badge_id, name: r.name, description: r.description, category: r.category, icon: r.icon, color: r.color, userType: r.user_type, maxTier: r.max_tier || 3, isActive: r.is_active === 'Yes', displayOrder: r.display_order || 0 };
-}
-
-export function getBadgeTierThresholds() { return { responseTime: RESPONSE_TIME_TIERS, quality: QUALITY_TIERS, retention: RETENTION_TIERS, hires: HIRES_TIERS }; }
-
-// =============================================================================
-// HELPERS
-// =============================================================================
 
 /**
- * Normalize Airtable badge definition record
+ * Batch recalculate badges for all recruiters
+ * Runs as a scheduled task or administrative action.
  */
-function normalizeBadgeDefinition(record) {
-  return {
-    _id: record.id,
-    badgeId: record['Badge ID'],
-    name: record['Name'],
-    description: record['Description'],
-    category: record['Category'],
-    icon: record['Icon'],
-    color: record['Color'],
-    userType: record['User Type'],
-    maxTier: record['Max Tier'] || 3,
-    tierNames: record['Tier Names'] ? JSON.parse(record['Tier Names']) : [],
-    tierThresholds: record['Tier Thresholds'] ? JSON.parse(record['Tier Thresholds']) : [],
-    isActive: record['Is Active'] === 'Yes',
-    displayOrder: record['Display Order'] || 0
+export async function batchRecalculateBadges() {
+  const traceId = `batch-badges-${Date.now()}`;
+  try {
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterProgression, { 
+      limit: 1000, 
+      suppressAuth: true 
+    });
+    const recruiters = res.items || [];
+    
+    let processed = 0;
+    let updated = 0;
+    
+    // Process recruiters in chunks
+    const chunks = chunkArray(recruiters, 10);
+    
+    for (const chunk of chunks) {
+      const results = await Promise.all(chunk.map(async (r) => {
+        if (r.recruiter_id) {
+          try {
+            const res = await recalculateRecruiterBadges(r.recruiter_id);
+            return res.badges_updated > 0;
+          } catch (err) {
+            console.error(`[badgeService] Failed to recalculate for ${r.recruiter_id}:`, err.message);
+            return false;
+          }
+        }
+        return false;
+      }));
+      
+      updated += results.filter(Boolean).length;
+      processed += chunk.length;
+      
+      // Delay to respect rate limits
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    
+    await log({
+      level: 'INFO',
+      source: 'badge-service',
+      message: `Batch badge recalculation complete: ${updated} recruiters updated`,
+      traceId,
+      details: { processed, updated }
+    });
+    
+    return { processed, updated };
+  } catch (error) { 
+    await log({
+      level: 'ERROR',
+      source: 'badge-service',
+      message: 'Batch badge recalculation failed',
+      traceId,
+      details: { error: error.message }
+    });
+    return { error: error.message }; 
+  }
+}
+
+/**
+ * Normalize badge definition record
+ */
+function normalizeBadgeDefinition(r) {
+  return { 
+    _id: r._id, 
+    badgeId: r.badge_id, 
+    name: r.name, 
+    description: r.description, 
+    category: r.category, 
+    icon: r.icon, 
+    color: r.color, 
+    userType: r.user_type, 
+    maxTier: r.max_tier || 3, 
+    isActive: r.is_active === 'Yes', 
+    displayOrder: r.display_order || 0 
   };
 }
 
 /**
  * Get badge tier thresholds for reference
- * @returns {object} All tier threshold configurations
  */
-export function getBadgeTierThresholds() {
-  return {
-    responseTime: RESPONSE_TIME_TIERS,
-    quality: QUALITY_TIERS,
-    retention: RETENTION_TIERS,
-    hires: HIRES_TIERS
-  };
+export function getBadgeTierThresholds() { 
+  return { 
+    responseTime: RESPONSE_TIME_TIERS, 
+    quality: QUALITY_TIERS, 
+    retention: RETENTION_TIERS, 
+    hires: HIRES_TIERS 
+  }; 
 }

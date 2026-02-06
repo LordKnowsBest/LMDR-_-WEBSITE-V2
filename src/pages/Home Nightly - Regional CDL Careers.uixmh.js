@@ -13,7 +13,6 @@
  * - #applyRegionalBtn - CTA button
  */
 
-import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import { getJobsByOperationType, getTopJobOpportunities, getRecentHires } from 'backend/publicStatsService';
 

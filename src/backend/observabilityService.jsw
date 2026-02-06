@@ -1,12 +1,14 @@
 /**
  * Observability Service - System logging and tracing for Super Admin
  * Provides comprehensive visibility into system operations
+ * 
+ * This service uses unified dataAccess for dual-source support.
+ *
+ * @module backend/observabilityService
  */
 
-import wixData from 'wix-data';
+import * as dataAccess from 'backend/dataAccess';
 import { currentMember } from 'wix-members-backend';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
 
 // ============================================
 // COLLECTION KEYS FOR DUAL-SOURCE ROUTING
@@ -20,57 +22,10 @@ const COLLECTION_KEYS = {
 };
 
 // ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.sort) {
-        query = options.sortDir === 'asc' ? query.ascending(options.sort) : query.descending(options.sort);
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
-
-// ============================================
 // CONFIGURATION
 // ============================================
 
 const CONFIG = {
-    collections: {
-        logs: 'SystemLogs',
-        traces: 'SystemTraces',
-        errors: 'SystemErrors',
-        metrics: 'SystemMetrics'
-    },
     // Log levels
     levels: {
         DEBUG: 0,
@@ -92,15 +47,7 @@ const CONFIG = {
         'database',
         'external-api',
         'system'
-    ],
-    // Retention periods (days)
-    retention: {
-        debug: 1,
-        info: 7,
-        warn: 14,
-        error: 30,
-        critical: 90
-    }
+    ]
 };
 
 // ============================================
@@ -129,64 +76,56 @@ async function requireSuperAdmin() {
 // ============================================
 
 /**
- * Log an event to the system (called by other services)
- * @param {Object} logEntry - Log entry data
- * @returns {Promise<Object>} - Created log entry
+ * Log an event to the system
  */
 export async function log(logEntry) {
     const entry = {
         timestamp: new Date(),
         level: logEntry.level || 'INFO',
-        levelNum: CONFIG.levels[logEntry.level] || 1,
+        level_num: CONFIG.levels[logEntry.level] || 1,
         source: logEntry.source || 'system',
         message: logEntry.message || '',
         details: logEntry.details || {},
-        traceId: logEntry.traceId || generateTraceId(),
-        spanId: logEntry.spanId || generateSpanId(),
-        parentSpanId: logEntry.parentSpanId || null,
-        userId: logEntry.userId || null,
-        sessionId: logEntry.sessionId || null,
+        trace_id: logEntry.traceId || generateTraceId(),
+        span_id: logEntry.spanId || generateSpanId(),
+        parent_span_id: logEntry.parentSpanId || null,
+        user_id: logEntry.userId || null,
+        session_id: logEntry.sessionId || null,
         duration: logEntry.duration || null,
-        tags: logEntry.tags || []
+        tags: Array.isArray(logEntry.tags) ? logEntry.tags.join(', ') : (logEntry.tags || '')
     };
 
-    // Persist logs via dual-source routing (Airtable/Wix)
     try {
-        // Add to errors collection for ERROR/CRITICAL levels
+        // 1. Add to errors collection for ERROR/CRITICAL levels
         if (entry.level === 'ERROR' || entry.level === 'CRITICAL') {
-            try {
-                const errorRecord = {
-                    timestamp: entry.timestamp,
-                    level: entry.level,
-                    level_num: entry.levelNum,
-                    source: entry.source,
-                    message: entry.message,
-                    details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : entry.details,
-                    trace_id: entry.traceId,
-                    span_id: entry.spanId,
-                    parent_span_id: entry.parentSpanId,
-                    user_id: entry.userId,
-                    session_id: entry.sessionId,
-                    duration: entry.duration,
-                    tags: Array.isArray(entry.tags) ? entry.tags.join(', ') : entry.tags
-                };
-                await insertData(COLLECTION_KEYS.errors, CONFIG.collections.errors, errorRecord);
-            } catch (errInsertError) {
-                // Errors collection insert failed - continue
-            }
+            const errorRecord = {
+                timestamp: entry.timestamp,
+                level: entry.level,
+                level_num: entry.level_num,
+                source: entry.source,
+                message: entry.message,
+                details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details),
+                trace_id: entry.trace_id,
+                span_id: entry.span_id,
+                parent_span_id: entry.parent_span_id,
+                user_id: entry.user_id,
+                session_id: entry.session_id,
+                duration: entry.duration,
+                tags: entry.tags
+            };
+            await dataAccess.insertRecord(COLLECTION_KEYS.errors, errorRecord, { suppressAuth: true });
         }
 
-        // SystemLogs has limited fields — store essentials
+        // 2. Main SystemLogs entry
         const logRecord = {
-            log_id: entry.traceId + '_' + entry.spanId,
+            log_id: entry.trace_id + '_' + entry.span_id,
             level: entry.level,
             service: entry.source,
             message: entry.message,
             log_date: entry.timestamp
         };
-        await insertData(COLLECTION_KEYS.logs, CONFIG.collections.logs, logRecord);
+        await dataAccess.insertRecord(COLLECTION_KEYS.logs, logRecord, { suppressAuth: true });
     } catch (error) {
-        // Silently handle to not break calling code
         console.error('[Observability] Failed to log:', error.message);
     }
 
@@ -194,92 +133,51 @@ export async function log(logEntry) {
 }
 
 /**
- * Log an AI operation with full context
- * @param {Object} aiLog - AI operation log data
- * @returns {Promise<Object>} - Created log entry
+ * Log an AI operation
  */
 export async function logAIOperation(aiLog) {
-    const entry = {
+    return log({
         level: aiLog.error ? 'ERROR' : 'INFO',
         source: aiLog.source || 'ai-router',
         message: `AI ${aiLog.operation}: ${aiLog.functionId}`,
-        details: {
-            functionId: aiLog.functionId,
-            provider: aiLog.provider,
-            model: aiLog.model,
-            inputTokens: aiLog.inputTokens,
-            outputTokens: aiLog.outputTokens,
-            totalTokens: aiLog.totalTokens,
-            latencyMs: aiLog.latencyMs,
-            cost: aiLog.cost,
-            usedFallback: aiLog.usedFallback,
-            promptId: aiLog.promptId,
-            request: sanitizeForLog(aiLog.request),
-            response: sanitizeForLog(aiLog.response),
-            error: aiLog.error
-        },
+        details: aiLog,
         traceId: aiLog.traceId,
         spanId: aiLog.spanId,
         duration: aiLog.latencyMs,
         tags: ['ai', aiLog.provider, aiLog.functionId]
-    };
-
-    return log(entry);
+    });
 }
 
 /**
  * Log an external API call
- * @param {Object} apiLog - API call log data
- * @returns {Promise<Object>} - Created log entry
  */
 export async function logExternalAPI(apiLog) {
-    const entry = {
+    return log({
         level: apiLog.statusCode >= 400 ? 'ERROR' : 'INFO',
         source: 'external-api',
         message: `${apiLog.method} ${apiLog.endpoint} - ${apiLog.statusCode}`,
-        details: {
-            method: apiLog.method,
-            endpoint: apiLog.endpoint,
-            statusCode: apiLog.statusCode,
-            latencyMs: apiLog.latencyMs,
-            requestHeaders: sanitizeHeaders(apiLog.requestHeaders),
-            responseHeaders: sanitizeHeaders(apiLog.responseHeaders),
-            error: apiLog.error
-        },
+        details: apiLog,
         traceId: apiLog.traceId,
         spanId: apiLog.spanId,
         duration: apiLog.latencyMs,
         tags: ['external-api', apiLog.service]
-    };
-
-    return log(entry);
+    });
 }
 
 /**
  * Log a database operation
- * @param {Object} dbLog - Database operation log data
- * @returns {Promise<Object>} - Created log entry
  */
 export async function logDatabase(dbLog) {
-    const entry = {
+    return log({
         level: dbLog.error ? 'ERROR' : 'DEBUG',
         source: 'database',
         message: `${dbLog.operation} on ${dbLog.collection}`,
-        details: {
-            operation: dbLog.operation,
-            collection: dbLog.collection,
-            query: dbLog.query,
-            affectedRows: dbLog.affectedRows,
-            latencyMs: dbLog.latencyMs,
-            error: dbLog.error
-        },
+        details: dbLog,
         traceId: dbLog.traceId,
         spanId: dbLog.spanId,
         duration: dbLog.latencyMs,
         tags: ['database', dbLog.collection]
-    };
-
-    return log(entry);
+    });
 }
 
 // ============================================
@@ -288,49 +186,32 @@ export async function logDatabase(dbLog) {
 
 /**
  * Start a new trace
- * @param {string} name - Trace name
- * @param {Object} metadata - Additional metadata
- * @returns {Promise<Object>} - Trace object
  */
 export async function startTrace(name, metadata = {}) {
     const trace = {
-        traceId: generateTraceId(),
+        trace_id: generateTraceId(),
         name,
-        startTime: new Date(),
+        start_time: new Date(),
         status: 'active',
-        spans: [],
-        metadata,
-        tags: metadata.tags || []
+        spans: '[]',
+        metadata: typeof metadata === 'object' ? JSON.stringify(metadata) : String(metadata),
+        tags: Array.isArray(metadata.tags) ? metadata.tags.join(', ') : (metadata.tags || '')
     };
 
-    // Persist trace via dual-source routing
     try {
-        const traceRecord = {
-            trace_id: trace.traceId,
-            name: trace.name,
-            start_time: trace.startTime,
-            status: trace.status,
-            spans: JSON.stringify(trace.spans),
-            metadata: typeof trace.metadata === 'object' ? JSON.stringify(trace.metadata) : trace.metadata,
-            tags: Array.isArray(trace.tags) ? trace.tags.join(', ') : trace.tags
-        };
-        await insertData(COLLECTION_KEYS.traces, CONFIG.collections.traces, traceRecord);
+        await dataAccess.insertRecord(COLLECTION_KEYS.traces, trace, { suppressAuth: true });
     } catch (error) {
         console.warn('[Observability] Could not persist trace:', error.message);
     }
 
     return {
-        traceId: trace.traceId,
-        startSpan: (spanName) => startSpan(trace.traceId, spanName)
+        traceId: trace.trace_id,
+        startSpan: (spanName) => startSpan(trace.trace_id, spanName)
     };
 }
 
 /**
  * Start a span within a trace
- * @param {string} traceId - Parent trace ID
- * @param {string} name - Span name
- * @param {string} parentSpanId - Parent span ID (optional)
- * @returns {Object} - Span object with end function
  */
 export function startSpan(traceId, name, parentSpanId = null) {
     const spanId = generateSpanId();
@@ -361,35 +242,33 @@ export function startSpan(traceId, name, parentSpanId = null) {
 
 /**
  * End a trace
- * @param {string} traceId - Trace ID
- * @param {string} status - Final status
- * @param {Object} summary - Summary data
- * @returns {Promise<Object>} - Updated trace
  */
 export async function endTrace(traceId, status = 'completed', summary = {}) {
     try {
-        const traces = await queryData(COLLECTION_KEYS.traces, CONFIG.collections.traces, {
-            filter: `{Trace ID} = '${traceId}'`,
-            limit: 1
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.traces, {
+            filters: { trace_id: traceId },
+            limit: 1,
+            suppressAuth: true
         });
 
-        if (!traces || traces.length === 0) return null;
+        if (!result.success || result.items.length === 0) return null;
 
-        const trace = traces[0];
+        const trace = result.items[0];
         const endTime = new Date();
-        const startTime = trace.start_time ? new Date(trace.start_time) : new Date();
-        const duration = endTime - startTime;
+        const startTime = new Date(trace.start_time);
+        const duration = endTime.getTime() - startTime.getTime();
 
         const traceUpdate = {
+            ...trace,
             _id: trace._id,
             end_time: endTime,
             status: status,
             duration: duration,
-            summary: typeof summary === 'object' ? JSON.stringify(summary) : summary
+            summary: typeof summary === 'object' ? JSON.stringify(summary) : String(summary)
         };
 
-        return await updateData(COLLECTION_KEYS.traces, CONFIG.collections.traces, traceUpdate);
-
+        const updateResult = await dataAccess.updateRecord(COLLECTION_KEYS.traces, traceUpdate, { suppressAuth: true });
+        return updateResult.record;
     } catch (error) {
         console.error('[Observability] Failed to end trace:', error.message);
         return null;
@@ -400,374 +279,72 @@ export async function endTrace(traceId, status = 'completed', summary = {}) {
 // QUERY FUNCTIONS (Super Admin)
 // ============================================
 
-/**
- * Get system logs with filtering
- * @param {Object} options - Query options
- * @returns {Promise<Object>} - Logs with pagination
- */
 export async function getLogs(options = {}) {
     await requireSuperAdmin();
 
     try {
-        // Build Airtable filter formula from options
-        // SystemLogs fields: Log ID, Level, Service, Message, Log Date
-        const conditions = [];
-
-        if (options.level) {
-            conditions.push(`{Level} = '${options.level}'`);
-        }
-
-        if (options.source) {
-            conditions.push(`{Service} = '${options.source}'`);
-        }
-
-        if (options.startDate) {
-            conditions.push(`IS_AFTER({Log Date}, '${new Date(options.startDate).toISOString()}')`);
-        }
-
-        if (options.endDate) {
-            conditions.push(`IS_BEFORE({Log Date}, '${new Date(options.endDate).toISOString()}')`);
-        }
-
-        if (options.search) {
-            conditions.push(`SEARCH('${options.search}', {Message}) > 0`);
-        }
-
-        const filter = conditions.length > 1
-            ? `AND(${conditions.join(', ')})`
-            : conditions[0] || '';
-
-        const limit = Math.min(options.limit || 50, 100);
-        const skip = options.skip || 0;
-
-        const items = await queryData(COLLECTION_KEYS.logs, CONFIG.collections.logs, {
-            filter,
-            sort: [{ field: 'Log Date', direction: 'desc' }],
-            limit: skip + limit
+        const filters = {};
+        if (options.level) filters.level = options.level;
+        if (options.source) filters.service = options.source;
+        
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.logs, {
+            filters,
+            sort: [{ field: 'log_date', direction: 'desc' }],
+            limit: options.limit || 50,
+            skip: options.skip || 0,
+            suppressAuth: true
         });
 
-        // Handle pagination in memory (Airtable doesn't support skip)
-        const paged = items.slice(skip, skip + limit);
-
         return {
-            items: paged,
-            totalCount: items.length,
-            hasMore: items.length > skip + limit,
-            page: Math.floor(skip / limit) + 1,
-            pageSize: limit
+            items: result.items,
+            totalCount: result.totalCount || result.items.length,
+            hasMore: result.items.length === (options.limit || 50),
+            page: Math.floor((options.skip || 0) / (options.limit || 50)) + 1,
+            pageSize: options.limit || 50
         };
-
     } catch (error) {
-        console.error('[Observability] Error fetching logs:', error);
+        console.error('[Observability] Error fetching logs:', error.message);
         throw new Error('Failed to fetch logs');
     }
 }
 
-/**
- * Get errors with aggregations
- * @param {Object} options - Query options
- * @returns {Promise<Object>} - Errors with stats
- */
-export async function getErrors(options = {}) {
-    await requireSuperAdmin();
-
-    try {
-        const now = new Date();
-        const period = options.period || 'day';
-        let startDate;
-
-        switch (period) {
-            case 'hour':
-                startDate = new Date(now.getTime() - 60 * 60 * 1000);
-                break;
-            case 'day':
-                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-                break;
-            case 'week':
-                startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-                break;
-            case 'month':
-                startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-                break;
-            default:
-                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        }
-
-        // Build Airtable filter for SystemErrors
-        const conditions = [`IS_AFTER({Timestamp}, '${startDate.toISOString()}')`];
-
-        if (options.source) {
-            conditions.push(`{Source} = '${options.source}'`);
-        }
-
-        const filter = conditions.length > 1
-            ? `AND(${conditions.join(', ')})`
-            : conditions[0];
-
-        const items = await queryData(COLLECTION_KEYS.errors, CONFIG.collections.errors, {
-            filter,
-            sort: [{ field: 'Timestamp', direction: 'desc' }],
-            limit: 100
-        });
-
-        const result = { items, totalCount: items.length };
-
-        // Aggregate by source
-        const bySource = {};
-        const byHour = {};
-
-        for (const error of result.items) {
-            // By source
-            bySource[error.source] = (bySource[error.source] || 0) + 1;
-
-            // By hour
-            const hourKey = new Date(error.timestamp).toISOString().slice(0, 13);
-            byHour[hourKey] = (byHour[hourKey] || 0) + 1;
-        }
-
-        return {
-            items: result.items,
-            totalCount: result.totalCount,
-            bySource,
-            byHour: Object.entries(byHour).map(([hour, count]) => ({ hour, count })),
-            period,
-            startDate
-        };
-
-    } catch (error) {
-        console.error('[Observability] Error fetching errors:', error);
-        throw new Error('Failed to fetch errors');
-    }
-}
-
-/**
- * Get a trace with all its spans
- * @param {string} traceId - Trace ID
- * @returns {Promise<Object>} - Trace with spans
- */
 export async function getTrace(traceId) {
     await requireSuperAdmin();
 
     try {
-        // Get trace from SystemTraces
-        const traces = await queryData(COLLECTION_KEYS.traces, CONFIG.collections.traces, {
-            filter: `{Trace ID} = '${traceId}'`,
-            limit: 1
+        const traceRes = await dataAccess.queryRecords(COLLECTION_KEYS.traces, {
+            filters: { trace_id: traceId },
+            limit: 1,
+            suppressAuth: true
         });
 
-        if (!traces || traces.length === 0) {
+        if (!traceRes.success || traceRes.items.length === 0) {
             throw new Error('Trace not found');
         }
 
-        // Get related errors for this trace (SystemErrors has Trace ID field)
-        const errorLogs = await queryData(COLLECTION_KEYS.errors, CONFIG.collections.errors, {
-            filter: `{Trace ID} = '${traceId}'`,
-            sort: [{ field: 'Timestamp', direction: 'asc' }],
-            limit: 100
+        const errorLogs = await dataAccess.queryRecords(COLLECTION_KEYS.errors, {
+            filters: { trace_id: traceId },
+            sort: [{ field: 'timestamp', direction: 'asc' }],
+            limit: 100,
+            suppressAuth: true
         });
 
         return {
-            trace: traces[0],
-            logs: errorLogs,
-            timeline: buildTimeline(errorLogs)
-        };
-
-    } catch (error) {
-        console.error('[Observability] Error fetching trace:', error);
-        throw new Error('Failed to fetch trace');
-    }
-}
-
-/**
- * Get system health metrics
- * @param {string} period - Time period
- * @returns {Promise<Object>} - Health metrics
- */
-export async function getHealthMetrics(period = 'hour') {
-    await requireSuperAdmin();
-
-    try {
-        const now = new Date();
-        let startDate;
-
-        switch (period) {
-            case 'hour':
-                startDate = new Date(now.getTime() - 60 * 60 * 1000);
-                break;
-            case 'day':
-                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-                break;
-            default:
-                startDate = new Date(now.getTime() - 60 * 60 * 1000);
-        }
-
-        // Get recent logs from SystemLogs
-        const logItems = await queryData(COLLECTION_KEYS.logs, CONFIG.collections.logs, {
-            filter: `IS_AFTER({Log Date}, '${startDate.toISOString()}')`,
-            sort: [{ field: 'Log Date', direction: 'desc' }],
-            limit: 100
-        });
-
-        // Calculate metrics
-        let totalRequests = 0;
-        let totalErrors = 0;
-        let totalLatency = 0;
-        let latencyCount = 0;
-        const bySource = {};
-
-        for (const log of logItems) {
-            totalRequests++;
-
-            // SystemLogs returns: log_id, level, service, message, log_date
-            const logLevel = log.level || '';
-            const logSource = log.service || 'unknown';
-
-            if (logLevel === 'ERROR' || logLevel === 'CRITICAL') {
-                totalErrors++;
-            }
-
-            bySource[logSource] = bySource[logSource] || { requests: 0, errors: 0 };
-            bySource[logSource].requests++;
-            if (logLevel === 'ERROR' || logLevel === 'CRITICAL') {
-                bySource[logSource].errors++;
-            }
-        }
-
-        const errorRate = totalRequests > 0 ? (totalErrors / totalRequests) * 100 : 0;
-        const avgLatency = latencyCount > 0 ? totalLatency / latencyCount : 0;
-
-        return {
-            period,
-            startDate,
-            endDate: now,
-            summary: {
-                totalRequests,
-                totalErrors,
-                errorRate: Math.round(errorRate * 100) / 100,
-                avgLatency: Math.round(avgLatency),
-                status: errorRate > 10 ? 'critical' : errorRate > 5 ? 'warning' : 'healthy'
-            },
-            bySource: Object.entries(bySource).map(([source, stats]) => ({
-                source,
-                ...stats,
-                errorRate: stats.requests > 0 ? Math.round((stats.errors / stats.requests) * 10000) / 100 : 0
+            trace: traceRes.items[0],
+            logs: errorLogs.items || [],
+            timeline: (errorLogs.items || []).map(l => ({
+                timestamp: l.timestamp,
+                spanId: l.span_id,
+                parentSpanId: l.parent_span_id,
+                message: l.message,
+                duration: l.duration,
+                level: l.level
             }))
         };
-
     } catch (error) {
-        console.error('[Observability] Error fetching health metrics:', error);
-        throw new Error('Failed to fetch health metrics');
+        console.error('[Observability] Error fetching trace:', error.message);
+        throw new Error('Failed to fetch trace');
     }
-}
-
-/**
- * Get AI operation analytics
- * @param {string} period - Time period
- * @returns {Promise<Object>} - AI analytics
- */
-export async function getAIAnalytics(period = 'day') {
-    await requireSuperAdmin();
-
-    try {
-        const now = new Date();
-        let startDate;
-
-        switch (period) {
-            case 'hour':
-                startDate = new Date(now.getTime() - 60 * 60 * 1000);
-                break;
-            case 'day':
-                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-                break;
-            case 'week':
-                startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-                break;
-            default:
-                startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        }
-
-        // Get AI-related errors/logs from SystemErrors (has details, tags, trace_id fields)
-        const aiItems = await queryData(COLLECTION_KEYS.errors, CONFIG.collections.errors, {
-            filter: `AND(IS_AFTER({Timestamp}, '${startDate.toISOString()}'), SEARCH('ai', {Tags}) > 0)`,
-            sort: [{ field: 'Timestamp', direction: 'desc' }],
-            limit: 100
-        });
-
-        const byProvider = {};
-        const byFunction = {};
-        let totalTokens = 0;
-        let totalCost = 0;
-        let totalLatency = 0;
-
-        for (const log of aiItems) {
-            let details = log.details || {};
-            if (typeof details === 'string') {
-                try { details = JSON.parse(details); } catch (e) { details = {}; }
-            }
-            const provider = details.provider || 'unknown';
-            const functionId = details.functionId || 'unknown';
-
-            // By provider
-            byProvider[provider] = byProvider[provider] || { requests: 0, tokens: 0, cost: 0, latency: 0 };
-            byProvider[provider].requests++;
-            byProvider[provider].tokens += details.totalTokens || 0;
-            byProvider[provider].cost += details.cost || 0;
-            byProvider[provider].latency += details.latencyMs || 0;
-
-            // By function
-            byFunction[functionId] = byFunction[functionId] || { requests: 0, tokens: 0, cost: 0, latency: 0 };
-            byFunction[functionId].requests++;
-            byFunction[functionId].tokens += details.totalTokens || 0;
-            byFunction[functionId].cost += details.cost || 0;
-            byFunction[functionId].latency += details.latencyMs || 0;
-
-            totalTokens += details.totalTokens || 0;
-            totalCost += details.cost || 0;
-            totalLatency += details.latencyMs || 0;
-        }
-
-        // Calculate averages
-        for (const provider of Object.values(byProvider)) {
-            provider.avgLatency = provider.requests > 0 ? Math.round(provider.latency / provider.requests) : 0;
-            provider.cost = Math.round(provider.cost * 100) / 100;
-        }
-
-        for (const func of Object.values(byFunction)) {
-            func.avgLatency = func.requests > 0 ? Math.round(func.latency / func.requests) : 0;
-            func.cost = Math.round(func.cost * 100) / 100;
-        }
-
-        return {
-            period,
-            startDate,
-            endDate: now,
-            summary: {
-                totalRequests: aiItems.length,
-                totalTokens,
-                totalCost: Math.round(totalCost * 100) / 100,
-                avgLatency: aiItems.length > 0 ? Math.round(totalLatency / aiItems.length) : 0
-            },
-            byProvider: Object.entries(byProvider).map(([name, stats]) => ({ provider: name, ...stats })),
-            byFunction: Object.entries(byFunction).map(([name, stats]) => ({ functionId: name, ...stats }))
-        };
-
-    } catch (error) {
-        console.error('[Observability] Error fetching AI analytics:', error);
-        throw new Error('Failed to fetch AI analytics');
-    }
-}
-
-/**
- * Get available sources and log levels
- * @returns {Promise<Object>} - Sources and levels
- */
-export async function getLogMetadata() {
-    await requireSuperAdmin();
-
-    return {
-        sources: CONFIG.sources,
-        levels: Object.keys(CONFIG.levels)
-    };
 }
 
 // ============================================
@@ -780,46 +357,4 @@ function generateTraceId() {
 
 function generateSpanId() {
     return 'sp_' + Math.random().toString(36).substr(2, 12);
-}
-
-function sanitizeForLog(data) {
-    if (!data) return null;
-
-    // Truncate long strings
-    const maxLength = 1000;
-    const str = typeof data === 'string' ? data : JSON.stringify(data);
-
-    if (str.length > maxLength) {
-        return str.substring(0, maxLength) + '... [truncated]';
-    }
-
-    return data;
-}
-
-function sanitizeHeaders(headers) {
-    if (!headers) return null;
-
-    const sensitive = ['authorization', 'x-api-key', 'cookie', 'set-cookie'];
-    const sanitized = {};
-
-    for (const [key, value] of Object.entries(headers)) {
-        if (sensitive.includes(key.toLowerCase())) {
-            sanitized[key] = '[REDACTED]';
-        } else {
-            sanitized[key] = value;
-        }
-    }
-
-    return sanitized;
-}
-
-function buildTimeline(logs) {
-    return logs.map(log => ({
-        timestamp: log.timestamp,
-        spanId: log.span_id || log.spanId,
-        parentSpanId: log.parent_span_id || log.parentSpanId,
-        message: log.message,
-        duration: log.duration,
-        level: log.level
-    }));
 }

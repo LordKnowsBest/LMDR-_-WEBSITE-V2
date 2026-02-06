@@ -3,13 +3,16 @@
  *
  * Manages the "Closing Loop" of driver employment - from hire to termination.
  * Captures granular disposition reasons and maintains a timeline of key events.
+ * 
+ * This service uses unified dataAccess for dual-source support.
  *
  * @module backend/lifecycleService
  */
 
 import { insertRecord, queryRecords, updateRecord, getRecord } from 'backend/dataAccess';
-import { currentUser } from 'wix-users-backend';
+import wixUsersBackend from 'wix-users-backend';
 import * as feedbackLoopService from 'backend/feedbackLoopService';
+import { log } from 'backend/observabilityService';
 
 // ============================================================================
 // CONSTANTS & ENUMS
@@ -46,6 +49,11 @@ export const SURVEY_TRIGGERS = {
   EXIT: 'EXIT'
 };
 
+const COLLECTION_KEYS = {
+  events: 'lifecycleEvents',
+  terminations: 'terminationLogs'
+};
+
 // ============================================================================
 // CORE FUNCTIONS
 // ============================================================================
@@ -54,124 +62,117 @@ export const SURVEY_TRIGGERS = {
  * Log a lifecycle event for a driver
  *
  * @param {string} driverId - The driver's ID
- * @param {string} carrierId - The carrier's ID (or DOT number if that's how we link)
+ * @param {string} carrierId - The carrier's ID (or DOT number)
  * @param {string} eventType - One of EVENT_TYPES
- * @param {Object} [metadata] - Additional context (JSON serializable)
- * @param {Date} [eventDate] - Optional override for event date (default: now)
- * @returns {Promise<Object>} The created event record
+ * @param {Object} [metadata] - Additional context
+ * @param {Date} [eventDate] - Optional override for event date
  */
 export async function logEvent(driverId, carrierId, eventType, metadata = {}, eventDate = new Date()) {
   try {
-    const user = currentUser;
     let createdBy = 'SYSTEM';
     
-    // Try to get current user ID if available (might fail in job context)
     try {
-      if (user && user.id) {
+      const user = wixUsersBackend.currentUser;
+      if (user && user.loggedIn) {
         createdBy = user.id;
       }
     } catch (e) {
-      // Ignore user context errors
+      // Ignore user context errors in non-user environments
     }
 
     const eventRecord = {
-      driverId,
-      carrierId,
-      eventType,
-      eventDate: eventDate.toISOString(),
+      driver_id: driverId,
+      carrier_id: String(carrierId),
+      event_type: eventType,
+      event_date: eventDate.toISOString(),
       metadata: JSON.stringify(metadata),
-      createdBy
+      created_by: createdBy
     };
 
-    const result = await insertRecord('lifecycleEvents', eventRecord);
+    const result = await insertRecord(COLLECTION_KEYS.events, eventRecord, { suppressAuth: true });
 
     if (!result.success) {
-      throw new Error(`Failed to log event: ${result.error}`);
+      throw new Error(result.error);
     }
 
     return result.record;
   } catch (error) {
-    console.error(`[lifecycleService] logEvent error:`, error);
-    // We generally don't want to block the main flow if logging fails, 
-    // but for now we'll throw to ensure we catch integration issues early.
-    throw error;
+    console.error(`[lifecycleService] logEvent error:`, error.message);
+    // Don't throw to avoid breaking the main application flow
+    return null;
   }
 }
 
 /**
  * Get the full timeline for a driver
- *
- * @param {string} driverId - The driver's ID
- * @returns {Promise<Array>} List of events sorted by date (newest first)
  */
 export async function getDriverTimeline(driverId) {
   try {
-    const result = await queryRecords('lifecycleEvents', {
-      filters: { driverId },
-      sort: [{ field: 'eventDate', direction: 'desc' }]
+    const result = await queryRecords(COLLECTION_KEYS.events, {
+      filters: { driver_id: driverId },
+      sort: [{ field: 'event_date', direction: 'desc' }],
+      suppressAuth: true
     });
 
     if (!result.success) {
-      throw new Error(`Failed to fetch timeline: ${result.error}`);
+      throw new Error(result.error);
     }
 
-    // Parse metadata back to object
-    return result.items.map(item => ({
-      ...item,
-      metadata: item.metadata ? JSON.parse(item.metadata) : {}
-    }));
+    return result.items.map(item => {
+      let parsedMetadata = {};
+      try {
+        parsedMetadata = item.metadata ? (typeof item.metadata === 'string' ? JSON.parse(item.metadata) : item.metadata) : {};
+      } catch (e) {
+        parsedMetadata = {};
+      }
+      
+      return {
+        ...item,
+        metadata: parsedMetadata
+      };
+    });
   } catch (error) {
-    console.error(`[lifecycleService] getDriverTimeline error:`, error);
+    console.error(`[lifecycleService] getDriverTimeline error:`, error.message);
     return [];
   }
 }
 
 /**
- * Terminate a driver (or process resignation)
- *
- * @param {string} driverId - The driver's ID
- * @param {string} carrierId - The carrier's ID
- * @param {Object} dispositionData - Details about the termination
- * @param {string} dispositionData.category - One of TERMINATION_CATEGORIES keys
- * @param {string} dispositionData.reasonCode - Specific reason code
- * @param {string} dispositionData.notes - Free text notes
- * @param {boolean} dispositionData.rehireEligible - Would they rehire?
- * @param {string} source - 'RECRUITER' or 'DRIVER'
- * @returns {Promise<Object>} The termination log record
+ * Terminate a driver or process resignation
  */
 export async function terminateDriver(driverId, carrierId, dispositionData, source) {
   try {
-    // 1. Calculate tenure (if possible - requires finding the HIRE event)
+    // 1. Calculate tenure
     const hireEvent = await findHireEvent(driverId, carrierId);
     let tenureDays = 0;
     let isEarlyChurn = false;
 
     if (hireEvent) {
-      const hireDate = new Date(hireEvent.eventDate);
+      const hireDate = new Date(hireEvent.event_date || hireEvent.eventDate);
       const termDate = new Date();
-      const diffTime = Math.abs(termDate - hireDate);
+      const diffTime = Math.abs(termDate.getTime() - hireDate.getTime());
       tenureDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
       isEarlyChurn = tenureDays < 30;
     }
 
     // 2. Create Termination Log
     const terminationRecord = {
-      driverId,
-      carrierId,
-      tenureDays,
-      isEarlyChurn,
+      driver_id: driverId,
+      carrier_id: String(carrierId),
+      tenure_days: tenureDays,
+      is_early_churn: isEarlyChurn,
       category: dispositionData.category,
-      reasonCode: dispositionData.reasonCode,
+      reason_code: dispositionData.reasonCode,
       notes: dispositionData.notes,
-      source,
-      rehireEligible: dispositionData.rehireEligible,
-      driverFeedback: dispositionData.driverFeedback || ''
+      source: source, // 'RECRUITER' or 'DRIVER'
+      rehire_eligible: dispositionData.rehireEligible,
+      driver_feedback: dispositionData.driverFeedback || ''
     };
 
-    const termResult = await insertRecord('terminationLogs', terminationRecord);
+    const termResult = await insertRecord(COLLECTION_KEYS.terminations, terminationRecord, { suppressAuth: true });
 
     if (!termResult.success) {
-      throw new Error(`Failed to create termination log: ${termResult.error}`);
+      throw new Error(termResult.error);
     }
 
     // 3. Log the event in the timeline
@@ -179,16 +180,26 @@ export async function terminateDriver(driverId, carrierId, dispositionData, sour
     await logEvent(driverId, carrierId, eventType, {
       reason: dispositionData.reasonCode,
       category: dispositionData.category,
-      tenureDays
+      tenureDays: tenureDays
     });
 
-    // 4. Update Driver Profile (Set status to 'Job Seeker' or similar?)
-    // Trigger recursive training loop (Phase 3)
-    await feedbackLoopService.analyzeTermination(termResult.record);
+    // 4. Trigger feedback loop analysis
+    try {
+      await feedbackLoopService.analyzeTermination(termResult.record);
+    } catch (analysisErr) {
+      console.warn('[lifecycleService] Feedback analysis failed:', analysisErr.message);
+    }
+
+    await log({
+      level: 'INFO',
+      source: 'lifecycle-service',
+      message: `Driver ${driverId} terminated from carrier ${carrierId}`,
+      details: { tenureDays, isEarlyChurn, source }
+    });
 
     return termResult.record;
   } catch (error) {
-    console.error(`[lifecycleService] terminateDriver error:`, error);
+    console.error(`[lifecycleService] terminateDriver error:`, error.message);
     throw error;
   }
 }
@@ -197,14 +208,15 @@ export async function terminateDriver(driverId, carrierId, dispositionData, sour
  * Helper to find the most recent HIRE event for tenure calculation
  */
 async function findHireEvent(driverId, carrierId) {
-  const result = await queryRecords('lifecycleEvents', {
+  const result = await queryRecords(COLLECTION_KEYS.events, {
     filters: { 
-      driverId, 
-      carrierId, 
-      eventType: EVENT_TYPES.HIRE 
+      driver_id: driverId, 
+      carrier_id: String(carrierId), 
+      event_type: EVENT_TYPES.HIRE 
     },
-    sort: [{ field: 'eventDate', direction: 'desc' }],
-    limit: 1
+    sort: [{ field: 'event_date', direction: 'desc' }],
+    limit: 1,
+    suppressAuth: true
   });
 
   return result.success && result.items.length > 0 ? result.items[0] : null;

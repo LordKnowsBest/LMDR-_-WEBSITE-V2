@@ -1,3 +1,13 @@
+/**
+ * Subscription Service
+ * 
+ * Manages carrier subscriptions, usage quotas, and Stripe checkouts.
+ * 
+ * This service uses unified dataAccess for dual-source support.
+ *
+ * @module backend/subscriptionService
+ */
+
 import wixUsersBackend from 'wix-users-backend';
 import { log } from 'backend/observabilityService';
 import {
@@ -9,14 +19,16 @@ import {
 } from 'backend/stripeService';
 import * as dataAccess from 'backend/dataAccess';
 
-// Collection keys (camelCase, matching config.jsw)
+// ============================================================================
+// CONFIGURATION & CONSTANTS
+// ============================================================================
+
 const COLLECTION_KEYS = {
   subscriptions: 'carrierSubscriptions',
   views: 'carrierDriverViews',
   carrierAccounts: 'carriers'
 };
 
-// Default free tier subscription object
 const DEFAULT_FREE_SUBSCRIPTION = {
   plan_type: 'free',
   monthly_view_quota: 0,
@@ -25,12 +37,9 @@ const DEFAULT_FREE_SUBSCRIPTION = {
 };
 
 // ============================================================================
-// Helper Functions
+// HELPER FUNCTIONS
 // ============================================================================
 
-/**
- * Checks if a subscription has valid data (not malformed)
- */
 function isValidSubscription(subscription) {
   return subscription &&
     typeof subscription.plan_type === 'string' &&
@@ -67,6 +76,23 @@ function calculateRemaining(subscription) {
   return Math.max(0, subscription.monthly_view_quota - subscription.views_used_this_month);
 }
 
+async function getCurrentCarrier() {
+  const user = wixUsersBackend.currentUser;
+  if (!user.loggedIn) throw new Error('User not logged in');
+
+  const email = await user.getEmail();
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.carrierAccounts, {
+    filters: { _owner: user.id },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  if (result.success && result.items.length > 0) {
+    return { dotNumber: String(result.items[0].dot_number), email };
+  }
+  throw new Error('No carrier profile found for this user');
+}
+
 // ============================================================================
 // MAIN FUNCTIONS
 // ============================================================================
@@ -80,7 +106,7 @@ export async function getSubscription(carrierDot) {
 
     const result = await dataAccess.queryRecords(COLLECTION_KEYS.subscriptions, {
       filters: { 
-        carrier_dot: carrierDot, 
+        carrier_dot: String(carrierDot), 
         is_active: true 
       },
       limit: 1,
@@ -98,8 +124,7 @@ export async function getSubscription(carrierDot) {
 
     return subscription;
   } catch (error) {
-    console.error('getSubscription error:', error);
-    log({ level: 'ERROR', source: 'subscription-service', message: `Failed to get subscription for ${carrierDot}`, details: { error: error.message } }).catch(() => {});
+    console.error('[subscriptionService] getSubscription error:', error.message);
     return { ...DEFAULT_FREE_SUBSCRIPTION };
   }
 }
@@ -124,14 +149,13 @@ export async function checkViewQuota(carrierDot) {
     const remaining = calculateRemaining(currentSub);
     return { hasQuota: remaining > 0, remaining, resetDate: currentSub.quota_reset_date };
   } catch (error) {
-    console.error('checkViewQuota error:', error);
-    log({ level: 'ERROR', source: 'subscription-service', message: `checkViewQuota failed for ${carrierDot}`, details: { error: error.message } }).catch(() => {});
+    console.error('[subscriptionService] checkViewQuota error:', error.message);
     return { hasQuota: false, remaining: 0, resetDate: null, error: 'system_error' };
   }
 }
 
 /**
- * Records a profile view and increments the view count
+ * Records a profile view and increments usage count
  */
 export async function recordProfileView(carrierDot, driverId, viewType, options = {}) {
   try {
@@ -145,11 +169,11 @@ export async function recordProfileView(carrierDot, driverId, viewType, options 
       return { success: false, error: 'quota_exhausted', remaining: 0, resetDate: subscription.quota_reset_date };
     }
 
-    // Check for existing view today
+    // Check for existing view today to avoid double-charging quota
     const startOfToday = getStartOfToday();
     const existingViewResult = await dataAccess.queryRecords(COLLECTION_KEYS.views, {
       filters: {
-        carrier_dot: carrierDot,
+        carrier_dot: String(carrierDot),
         driver_id: driverId,
         _createdDate: { gte: startOfToday }
       },
@@ -162,7 +186,7 @@ export async function recordProfileView(carrierDot, driverId, viewType, options 
     }
 
     const viewRecord = {
-      carrier_dot: carrierDot,
+      carrier_dot: String(carrierDot),
       driver_id: driverId,
       view_type: viewType,
       billing_period: getCurrentBillingPeriod(),
@@ -176,9 +200,10 @@ export async function recordProfileView(carrierDot, driverId, viewType, options 
     if (!result.success) throw new Error(result.error);
 
     // Increment views counter
-    const newViewsUsed = subscription.views_used_this_month + 1;
+    const newViewsUsed = (subscription.views_used_this_month || 0) + 1;
     await dataAccess.updateRecord(COLLECTION_KEYS.subscriptions, {
       ...subscription,
+      _id: subscription._id,
       views_used_this_month: newViewsUsed
     }, { suppressAuth: true });
 
@@ -188,14 +213,13 @@ export async function recordProfileView(carrierDot, driverId, viewType, options 
       remaining: isUnlimited ? -1 : Math.max(0, subscription.monthly_view_quota - newViewsUsed)
     };
   } catch (error) {
-    console.error('recordProfileView error:', error);
-    log({ level: 'ERROR', source: 'subscription-service', message: `recordProfileView failed for ${carrierDot}`, details: { error: error.message, driverId, viewType } }).catch(() => {});
+    console.error('[subscriptionService] recordProfileView error:', error.message);
     return { success: false, error: 'system_error' };
   }
 }
 
 /**
- * Gets usage statistics for the current billing period
+ * Gets usage statistics
  */
 export async function getUsageStats(carrierDot) {
   try {
@@ -216,23 +240,13 @@ export async function getUsageStats(carrierDot) {
       isUnlimited, isExhausted, daysUntilReset, resetDate: subscription.quota_reset_date
     };
   } catch (error) {
-    console.error('getUsageStats error:', error);
+    console.error('[subscriptionService] getUsageStats error:', error.message);
     return { used: 0, quota: 0, remaining: 0, plan_type: 'unknown', isUnlimited: false, isExhausted: true, daysUntilReset: 0, resetDate: null, error: 'system_error' };
   }
 }
 
-export function canSearchDrivers(subscription) {
-  return subscription?.is_active && ['pro', 'enterprise'].includes(subscription.plan_type);
-}
-
-export function canViewProfile(subscription) {
-  if (!subscription?.is_active || subscription.plan_type === 'free') return false;
-  if (subscription.monthly_view_quota === -1) return true;
-  return calculateRemaining(subscription) > 0;
-}
-
 /**
- * Resets quota if the billing cycle has passed
+ * Resets quota if billing cycle has passed
  */
 export async function resetQuotaIfNeeded(subscription) {
   try {
@@ -247,6 +261,7 @@ export async function resetQuotaIfNeeded(subscription) {
 
     const updatedSubscription = {
       ...subscription,
+      _id: subscription._id,
       views_used_this_month: 0,
       quota_reset_date: getOneMonthFromNow()
     };
@@ -256,33 +271,18 @@ export async function resetQuotaIfNeeded(subscription) {
 
     return { wasReset: true, subscription: result.record };
   } catch (error) {
-    console.error('resetQuotaIfNeeded error:', error);
-    log({ level: 'ERROR', source: 'subscription-service', message: `resetQuotaIfNeeded failed`, details: { error: error.message } }).catch(() => {});
+    console.error('[subscriptionService] resetQuotaIfNeeded error:', error.message);
     return { wasReset: false, subscription };
   }
 }
 
 // ============================================================================
-// Stripe Bridge Functions
+// STRIPE BRIDGE FUNCTIONS
 // ============================================================================
 
-async function getCurrentCarrier() {
-  const user = wixUsersBackend.currentUser;
-  if (!user.loggedIn) throw new Error('User not logged in');
-
-  const email = await user.getEmail();
-  const result = await dataAccess.queryRecords(COLLECTION_KEYS.carrierAccounts, {
-    filters: { _owner: user.id },
-    limit: 1,
-    suppressAuth: true
-  });
-
-  if (result.success && result.items.length > 0) {
-    return { dotNumber: String(result.items[0].dot_number), email };
-  }
-  throw new Error('No carrier profile found for this user');
-}
-
+/**
+ * Get all plan information
+ */
 export async function getAllPlanInfo() {
   return {
     pro: { id: 'pro', name: 'Pro', price: 24900, currency: 'usd', interval: 'month', quota: 25 },
@@ -290,10 +290,16 @@ export async function getAllPlanInfo() {
   };
 }
 
+/**
+ * Get Stripe publishable key
+ */
 export async function getStripePublishableKey() {
   return await getPublishableKey();
 }
 
+/**
+ * Get full subscription status
+ */
 export async function getFullSubscriptionStatus(carrierDot) {
   let dot = carrierDot;
   if (!dot) {
@@ -301,13 +307,15 @@ export async function getFullSubscriptionStatus(carrierDot) {
       const carrier = await getCurrentCarrier();
       dot = carrier.dotNumber;
     } catch (e) {
-      console.error('getFullSubscriptionStatus: No carrier context');
       return { success: false, error: 'No carrier profile found' };
     }
   }
   return await getSubscriptionDetails(dot);
 }
 
+/**
+ * Start a subscription checkout
+ */
 export async function startCheckout(priceId, billingPeriod = 'monthly', fallbackEmail = null, fallbackDot = null) {
   try {
     let carrier;
@@ -329,11 +337,14 @@ export async function startCheckout(priceId, billingPeriod = 'monthly', fallback
 
     return await createCheckoutSession(priceId, carrier.dotNumber, carrier.email, successUrl, cancelUrl, billingPeriod);
   } catch (error) {
-    console.error('startCheckout error:', error);
+    console.error('[subscriptionService] startCheckout error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
+/**
+ * Start a placement deposit checkout
+ */
 export async function startPlacementCheckout(driverCount, formData = {}) {
   try {
     const email = formData.email;
@@ -346,178 +357,21 @@ export async function startPlacementCheckout(driverCount, formData = {}) {
 
     return await createPlacementDepositCheckout(carrierDot, email, driverCount, successUrl, cancelUrl, formData);
   } catch (error) {
-    console.error('startPlacementCheckout error:', error);
+    console.error('[subscriptionService] startPlacementCheckout error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
+/**
+ * Open self-service billing portal
+ */
 export async function openBillingPortal() {
   try {
     const carrier = await getCurrentCarrier();
     const returnUrl = 'https://www.lastmiledr.app/carrier-dashboard';
     return await createPortalSession(carrier.dotNumber, returnUrl);
   } catch (error) {
-    console.error('openBillingPortal error:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-/**
- * Get all plan information for the pricing page
- */
-export async function getAllPlanInfo() {
-  // Return the plan configuration matching the spec
-  return {
-    pro: {
-      id: 'pro',
-      name: 'Pro',
-      price: 24900, // cents
-      currency: 'usd',
-      interval: 'month',
-      quota: 25
-    },
-    enterprise: {
-      id: 'enterprise',
-      name: 'Enterprise',
-      price: 74900, // cents
-      currency: 'usd',
-      interval: 'month',
-      quota: -1 // unlimited
-    }
-  };
-}
-
-/**
- * Get Stripe publishable key
- */
-export async function getStripePublishableKey() {
-  return await getPublishableKey();
-}
-
-/**
- * Get full subscription status for current user's carrier
- */
-export async function getFullSubscriptionStatus(carrierDot) {
-  // If dot passed, use it (admin/testing), otherwise resolve current user
-  let dot = carrierDot;
-  if (!dot) {
-    try {
-      const carrier = await getCurrentCarrier();
-      dot = carrier.dotNumber;
-    } catch (e) {
-      console.error('getFullSubscriptionStatus: No carrier context');
-      return { success: false, error: 'No carrier profile found' };
-    }
-  }
-
-  return await getSubscriptionDetails(dot);
-}
-
-/**
- * Start a subscription checkout session
- */
-export async function startCheckout(priceId, billingPeriod = 'monthly', fallbackEmail = null, fallbackDot = null) {
-  try {
-    let carrier;
-    try {
-      carrier = await getCurrentCarrier();
-    } catch (carrierError) {
-      // No carrier record linked to this user — resolve email from available sources
-      let email = fallbackEmail;
-
-      // If no URL-param email, try the logged-in user's own email (direct-to-pricing path)
-      if (!email) {
-        const user = wixUsersBackend.currentUser;
-        if (user.loggedIn) {
-          email = await user.getEmail();
-          console.log('No carrier record found, using logged-in member email for checkout:', email);
-        }
-      } else {
-        console.log('No carrier record found, using fallback email for checkout:', email);
-      }
-
-      if (email) {
-        carrier = {
-          dotNumber: fallbackDot || 'PENDING',
-          email: email
-        };
-      } else {
-        throw carrierError;
-      }
-    }
-
-    // Use dedicated success/cancel pages with HTML components
-    const baseUrl = 'https://www.lastmiledr.app';
-    const successUrl = `${baseUrl}/subscription-success?session_id={CHECKOUT_SESSION_ID}&plan=${priceId}`;
-    const cancelUrl = `${baseUrl}/subscription-canceled?plan=${priceId}`;
-
-    return await createCheckoutSession(
-      priceId,
-      carrier.dotNumber,
-      carrier.email,
-      successUrl,
-      cancelUrl,
-      billingPeriod
-    );
-  } catch (error) {
-    console.error('startCheckout error:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-/**
- * Start a placement deposit checkout (one-time)
- *
- * GUEST CHECKOUT ENABLED: This function does NOT require login.
- * It uses formData directly to identify the carrier/customer.
- * This allows carriers to pay the $100/driver deposit without creating an account first.
- *
- * @param {number} driverCount - Number of drivers to hire
- * @param {Object} formData - Form data including email, dotNumber, companyName, etc.
- * @returns {Promise<Object>} - { success, checkoutUrl } or { success: false, error }
- */
-export async function startPlacementCheckout(driverCount, formData = {}) {
-  try {
-    // Validate required data
-    const email = formData.email;
-    if (!email) {
-      return { success: false, error: 'Email required for checkout' };
-    }
-
-    // Get carrier DOT from formData (with fallbacks)
-    // Guest users may not have a DOT yet - that's OK, we use 'PENDING'
-    const carrierDot = formData.dotNumber || formData.carrierDot || 'PENDING';
-
-    // Use dedicated success/cancel pages
-    const baseUrl = 'https://www.lastmiledr.app';
-    const successUrl = `${baseUrl}/placement-success?session_id={CHECKOUT_SESSION_ID}&drivers=${driverCount}`;
-    const cancelUrl = `${baseUrl}/subscription-canceled?service=placement`;
-
-    return await createPlacementDepositCheckout(
-      carrierDot,
-      email,
-      driverCount,
-      successUrl,
-      cancelUrl,
-      formData
-    );
-  } catch (error) {
-    console.error('startPlacementCheckout error:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-/**
- * Open the self-service billing portal
- */
-export async function openBillingPortal() {
-  try {
-    const carrier = await getCurrentCarrier();
-    const returnUrl = 'https://www.lastmiledr.app/carrier-dashboard';
-
-    return await createPortalSession(carrier.dotNumber, returnUrl);
-  } catch (error) {
-    console.error('openBillingPortal error:', error);
+    console.error('[subscriptionService] openBillingPortal error:', error.message);
     return { success: false, error: error.message };
   }
 }

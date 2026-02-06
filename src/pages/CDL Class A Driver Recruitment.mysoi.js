@@ -6,7 +6,6 @@
  * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
  */
 
-import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import { getJobsByOperationType, getTopJobOpportunities, getPublicStats, getJobsByEndorsement } from 'backend/publicStatsService';
 

@@ -9,7 +9,6 @@
  * Broadcasts carrier context to all HTML components via PostMessage.
  */
 
-import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import { currentMember } from 'wix-members-frontend';
 import { getCarrierByDOT } from 'backend/recruiter_service';

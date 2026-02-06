@@ -1,30 +1,129 @@
-// ============================================================================
-// B2B SECURITY SERVICE - Authentication, authorization, compliance, audit
-//
-// Centralized security layer for all B2B Business Development Suite actions.
-// Handles role-based access control, consent validation, quiet hours,
-// do-not-contact enforcement, and audit logging.
-//
-// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
-//
-// Used by: b2bBridgeService.jsw (entry-point guard for all B2B actions)
-// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
-// ============================================================================
+/**
+ * B2B Security Service
+ *
+ * Centralized security layer for all B2B Business Development Suite actions.
+ * Handles role-based access control, consent validation, quiet hours,
+ * do-not-contact enforcement, and audit logging.
+ *
+ * This service uses unified dataAccess for dual-source support.
+ * 
+ * @module backend/b2bSecurityService
+ */
 
 import { currentMember } from 'wix-members-backend';
-import wixData from 'wix-data';
 import * as dataAccess from 'backend/dataAccess';
 
-// Collection keys for dataAccess
-const COLLECTIONS = {
-  contacts: 'b2bContacts',
-  activities: 'b2bActivities'
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+export const B2B_ROLES = {
+  VIEWER: 'b2b_viewer',
+  REP: 'b2b_rep',
+  MANAGER: 'b2b_manager',
+  ADMIN: 'b2b_admin'
 };
 
-const B2B_ROLES = { VIEWER: 'b2b_viewer', REP: 'b2b_rep', MANAGER: 'b2b_manager', ADMIN: 'b2b_admin' };
-const ROLE_HIERARCHY = { [B2B_ROLES.VIEWER]: 0, [B2B_ROLES.REP]: 1, [B2B_ROLES.MANAGER]: 2, [B2B_ROLES.ADMIN]: 3 };
+export const ROLE_HIERARCHY = {
+  [B2B_ROLES.VIEWER]: 0,
+  [B2B_ROLES.REP]: 1,
+  [B2B_ROLES.MANAGER]: 2,
+  [B2B_ROLES.ADMIN]: 3
+};
+
 const SITE_ADMIN_ROLES = ['admin', 'super_admin', 'ops_admin'];
 
+export const CONSENT_STATUS = {
+  PENDING: 'pending',
+  OPTED_IN: 'opted_in',
+  OPTED_OUT: 'opted_out',
+  DO_NOT_CONTACT: 'do_not_contact'
+};
+
+const CONSENT_REQUIRED_CHANNELS = ['sms', 'call'];
+
+export const QUIET_HOURS = { start: 21, end: 8 };
+
+const ACTION_PERMISSIONS = {
+  getDashboardKPIs: B2B_ROLES.VIEWER,
+  getTopProspects: B2B_ROLES.VIEWER,
+  getAlerts: B2B_ROLES.VIEWER,
+  getTopOpportunities: B2B_ROLES.VIEWER,
+  getNextActions: B2B_ROLES.VIEWER,
+  getAccount: B2B_ROLES.VIEWER,
+  listAccounts: B2B_ROLES.VIEWER,
+  getContacts: B2B_ROLES.VIEWER,
+  getSignal: B2B_ROLES.VIEWER,
+  getPipeline: B2B_ROLES.VIEWER,
+  getForecast: B2B_ROLES.VIEWER,
+  getOpportunity: B2B_ROLES.VIEWER,
+  getOpportunitiesByAccount: B2B_ROLES.VIEWER,
+  getPipelineKPIs: B2B_ROLES.VIEWER,
+  getStageConversions: B2B_ROLES.VIEWER,
+  getRisks: B2B_ROLES.VIEWER,
+  getStageDefinitions: B2B_ROLES.VIEWER,
+  getPlaybookSuggestions: B2B_ROLES.VIEWER,
+  getValueProps: B2B_ROLES.VIEWER,
+  getTimeline: B2B_ROLES.VIEWER,
+  getActivityVelocity: B2B_ROLES.VIEWER,
+  getSequences: B2B_ROLES.VIEWER,
+  getSequence: B2B_ROLES.VIEWER,
+  getThrottleStatus: B2B_ROLES.VIEWER,
+  getOutreachMetrics: B2B_ROLES.VIEWER,
+  getChannelPerformance: B2B_ROLES.VIEWER,
+  getRepPerformance: B2B_ROLES.VIEWER,
+  getSourcePerformance: B2B_ROLES.VIEWER,
+  getCPA: B2B_ROLES.VIEWER,
+  getCompetitorIntel: B2B_ROLES.VIEWER,
+  getBrief: B2B_ROLES.VIEWER,
+  getSignalSpikes: B2B_ROLES.VIEWER,
+  createAccount: B2B_ROLES.REP,
+  updateAccount: B2B_ROLES.REP,
+  createContact: B2B_ROLES.REP,
+  updateContact: B2B_ROLES.REP,
+  generateSignal: B2B_ROLES.REP,
+  generateBatchSignals: B2B_ROLES.REP,
+  createOpportunity: B2B_ROLES.REP,
+  moveStage: B2B_ROLES.REP,
+  logActivity: B2B_ROLES.REP,
+  recordEmail: B2B_ROLES.REP,
+  recordSms: B2B_ROLES.REP,
+  recordCall: B2B_ROLES.REP,
+  captureLead: B2B_ROLES.REP,
+  addCompetitorIntel: B2B_ROLES.REP,
+  generateBrief: B2B_ROLES.REP,
+  quickAction: B2B_ROLES.REP,
+  accountAction: B2B_ROLES.REP,
+  saveSequence: B2B_ROLES.MANAGER,
+  addStep: B2B_ROLES.MANAGER,
+  createCallCampaign: B2B_ROLES.MANAGER,
+  saveSnapshot: B2B_ROLES.MANAGER
+};
+
+const AUDITABLE_ACTIONS = [
+  'createAccount', 'updateAccount',
+  'createContact', 'updateContact',
+  'createOpportunity', 'moveStage',
+  'recordEmail', 'recordSms', 'recordCall',
+  'captureLead', 'saveSequence', 'addStep',
+  'createCallCampaign', 'addCompetitorIntel',
+  'generateBrief', 'generateBatchSignals',
+  'saveSnapshot', 'quickAction', 'accountAction'
+];
+
+const COLLECTION_KEYS = {
+  contacts: 'b2bContacts',
+  activities: 'b2bActivities',
+  adminUsers: 'adminUsers'
+};
+
+// ============================================================================
+// AUTH & IDENTITY
+// ============================================================================
+
+/**
+ * Get current B2B user and their role
+ */
 export async function getB2BUser() {
   try {
     const member = await currentMember.getMember({ fieldsets: ['FULL'] });
@@ -33,53 +132,43 @@ export async function getB2BUser() {
     const customFields = member.contactDetails?.customFields || {};
     let b2bRole = customFields.b2b_role || '';
 
+    // Check if site admin (auto-upgrades to B2B admin)
     if (!b2bRole && SITE_ADMIN_ROLES.includes((customFields.role || '').toLowerCase())) {
       b2bRole = B2B_ROLES.ADMIN;
     }
 
+    // Fallback: Check adminUsers collection
     if (!b2bRole) {
-      const adminCheck = await dataAccess.queryRecords('adminUsers', { filters: { email: member.loginEmail, status: 'active' }, limit: 1, suppressAuth: true });
+      const adminCheck = await dataAccess.queryRecords(COLLECTION_KEYS.adminUsers, { 
+        filters: { email: member.loginEmail, status: 'active' }, 
+        limit: 1, 
+        suppressAuth: true 
+      });
       if (adminCheck.items?.length) b2bRole = B2B_ROLES.ADMIN;
     }
 
-    if (!b2bRole) return { authenticated: true, user: { memberId: member._id, email: member.loginEmail, name: member.loginEmail }, error: 'No B2B role' };
-
-    return { authenticated: true, user: { memberId: member._id, email: member.loginEmail, name: member.loginEmail, role: b2bRole, roleLevel: ROLE_HIERARCHY[b2bRole] ?? 0 } };
-  } catch (error) { return { authenticated: false, error: error.message }; }
-}
-
-export async function validateConsent(contactId, channel) {
-  try {
-    if (!contactId) return { allowed: false, reason: 'Contact ID required' };
-    const contact = await dataAccess.getRecord(COLLECTIONS.contacts, contactId, { suppressAuth: true });
-    if (!contact) return { allowed: false, reason: 'Not found' };
-
-    if (channel === 'email') {
-      if (['opted_out', 'do_not_contact'].includes(contact.consent_status)) return { allowed: false, reason: 'Opted out', consent_status: contact.consent_status };
-      return { allowed: true, consent_status: contact.consent_status || 'pending' };
+    if (!b2bRole) {
+      return { 
+        authenticated: true, 
+        user: { memberId: member._id, email: member.loginEmail, name: member.loginEmail }, 
+        error: 'No B2B role' 
+      };
     }
 
-    if (['sms', 'call'].includes(channel)) {
-      const s = contact.consent_status || 'pending';
-      if (s !== 'opted_in') return { allowed: false, reason: `No consent for ${channel}`, consent_status: s };
-      return { allowed: true, consent_status: s };
-    }
-    return { allowed: true };
-  } catch (error) { return { allowed: false, reason: error.message }; }
-}
-
-export async function logB2BAudit({ action, userId, userEmail, targetType, targetId, details }) {
-  try {
-    const record = {
-      account_id: targetId || '', contact_id: '', type: 'audit', channel: 'platform',
-      subject: `[AUDIT] ${action}`, notes: JSON.stringify({ action, user_id: userId, user_email: userEmail, target_type: targetType || '', target_id: targetId || '', details: details || {}, timestamp: new Date().toISOString() }),
-      outcome: 'completed', owner_id: userId || '', created_at: new Date().toISOString()
+    return { 
+      authenticated: true, 
+      user: { 
+        memberId: member._id, 
+        email: member.loginEmail, 
+        name: member.loginEmail, 
+        role: b2bRole, 
+        roleLevel: ROLE_HIERARCHY[b2bRole] ?? 0 
+      } 
     };
-    await dataAccess.insertRecord(COLLECTIONS.activities, record, { suppressAuth: true });
-  } catch (err) { }
+  } catch (error) { 
+    return { authenticated: false, error: error.message }; 
+  }
 }
-
-export { B2B_ROLES, ROLE_HIERARCHY };
 
 // ============================================================================
 // AUTHORIZATION — Role Checks
@@ -87,10 +176,6 @@ export { B2B_ROLES, ROLE_HIERARCHY };
 
 /**
  * Check if a user has at least the minimum required role.
- *
- * @param {Object} user - User object from getB2BUser()
- * @param {string} minRole - Minimum required role
- * @returns {boolean}
  */
 export function hasRole(user, minRole) {
   if (!user || !user.role) return false;
@@ -101,9 +186,6 @@ export function hasRole(user, minRole) {
 
 /**
  * Get the minimum role required for a given action.
- *
- * @param {string} action - The B2B action name
- * @returns {string} The minimum role required (defaults to b2b_rep for unknown actions)
  */
 export function getRequiredRole(action) {
   return ACTION_PERMISSIONS[action] || B2B_ROLES.REP;
@@ -111,9 +193,6 @@ export function getRequiredRole(action) {
 
 /**
  * Check if an action requires audit logging.
- *
- * @param {string} action - The B2B action name
- * @returns {boolean}
  */
 export function isAuditable(action) {
   return AUDITABLE_ACTIONS.includes(action);
@@ -121,10 +200,6 @@ export function isAuditable(action) {
 
 /**
  * Check if a user can perform a specific action.
- *
- * @param {Object} user - User object from getB2BUser()
- * @param {string} action - The B2B action name
- * @returns {{allowed: boolean, reason?: string}}
  */
 export function checkActionPermission(user, action) {
   if (!user || !user.role) {
@@ -148,73 +223,50 @@ export function checkActionPermission(user, action) {
 
 /**
  * Validate that a contact has given consent for a specific outreach channel.
- *
- * @param {string} contactId - Contact record ID
- * @param {string} channel - Outreach channel (email, sms, call)
- * @returns {Promise<{allowed: boolean, reason?: string, consent_status?: string}>}
  */
 export async function validateConsent(contactId, channel) {
   try {
-    if (!contactId) {
-      return { allowed: false, reason: 'Contact ID is required for consent check' };
-    }
+    if (!contactId) return { allowed: false, reason: 'Contact ID required' };
+    
+    const contact = await dataAccess.getRecord(COLLECTION_KEYS.contacts, contactId, { suppressAuth: true });
+    if (!contact) return { allowed: false, reason: 'Not found' };
 
-    // Email doesn't require explicit opt-in (CAN-SPAM allows until opt-out)
+    // Email logic (CAN-SPAM)
     if (channel === 'email') {
-      const contacts = await findByField(COLLECTIONS.contacts, '_id', contactId);
-      const contact = contacts && contacts.length > 0 ? contacts[0] : null;
-      if (contact && (contact.consent_status === CONSENT_STATUS.OPTED_OUT || contact.consent_status === CONSENT_STATUS.DO_NOT_CONTACT)) {
+      if ([CONSENT_STATUS.OPTED_OUT, CONSENT_STATUS.DO_NOT_CONTACT].includes(contact.consent_status)) {
         return { allowed: false, reason: 'Contact has opted out', consent_status: contact.consent_status };
       }
-      return { allowed: true, consent_status: contact?.consent_status || CONSENT_STATUS.PENDING };
+      return { allowed: true, consent_status: contact.consent_status || CONSENT_STATUS.PENDING };
     }
 
-    // SMS and Call require explicit consent
+    // SMS/Call logic (TCPA)
     if (CONSENT_REQUIRED_CHANNELS.includes(channel)) {
-      const contacts = await findByField(COLLECTIONS.contacts, '_id', contactId);
-      const contact = contacts && contacts.length > 0 ? contacts[0] : null;
-
-      if (!contact) {
-        return { allowed: false, reason: 'Contact not found' };
-      }
-
       const status = contact.consent_status || CONSENT_STATUS.PENDING;
-
-      if (status === CONSENT_STATUS.DO_NOT_CONTACT) {
-        return { allowed: false, reason: 'Contact is on do-not-contact list', consent_status: status };
+      if (status !== CONSENT_STATUS.OPTED_IN) {
+        return { 
+          allowed: false, 
+          reason: status === CONSENT_STATUS.PENDING ? `${channel} requires explicit consent. Status is pending.` : `Contact has blocked ${channel}`, 
+          consent_status: status 
+        };
       }
-      if (status === CONSENT_STATUS.OPTED_OUT) {
-        return { allowed: false, reason: `Contact has opted out of ${channel}`, consent_status: status };
-      }
-      if (status === CONSENT_STATUS.PENDING) {
-        return { allowed: false, reason: `${channel} requires explicit consent. Status is pending.`, consent_status: status };
-      }
-
       return { allowed: true, consent_status: status };
     }
 
-    // Other channels — allow by default
     return { allowed: true };
-  } catch (error) {
-    console.error('[B2B Security] Consent validation error:', error);
-    return { allowed: false, reason: 'Consent check failed: ' + (error.message || 'Unknown error') };
+  } catch (error) { 
+    return { allowed: false, reason: error.message }; 
   }
 }
 
 /**
  * Check if a contact is on the do-not-contact list.
- *
- * @param {string} contactId
- * @returns {Promise<boolean>}
  */
 export async function isDoNotContact(contactId) {
   try {
     if (!contactId) return false;
-    const contacts = await findByField(COLLECTIONS.contacts, '_id', contactId);
-    const contact = contacts && contacts.length > 0 ? contacts[0] : null;
+    const contact = await dataAccess.getRecord(COLLECTION_KEYS.contacts, contactId, { suppressAuth: true });
     return contact?.consent_status === CONSENT_STATUS.DO_NOT_CONTACT;
   } catch (error) {
-    console.warn('[B2B Security] DNC check failed:', error.message);
     return false;
   }
 }
@@ -225,10 +277,6 @@ export async function isDoNotContact(contactId) {
 
 /**
  * Check if the current time falls within quiet hours.
- * Outreach (email, sms, call) should not be sent during quiet hours.
- *
- * @param {string} [timezone] - Contact timezone (future: use for local-time check)
- * @returns {{inQuietHours: boolean, resumesAt: string}}
  */
 export function checkQuietHours(timezone = '') {
   const now = new Date();
@@ -248,17 +296,8 @@ export function checkQuietHours(timezone = '') {
   return { inQuietHours, resumesAt };
 }
 
-// ============================================================================
-// COMPLIANCE — Outreach Pre-flight Check
-// ============================================================================
-
 /**
  * Run all compliance checks before sending outreach.
- * Combines consent, quiet hours, and DNC into one call.
- *
- * @param {string} contactId - Contact to reach
- * @param {string} channel - email, sms, or call
- * @returns {Promise<{allowed: boolean, reasons?: string[]}>}
  */
 export async function preflightOutreachCheck(contactId, channel) {
   const reasons = [];
@@ -287,20 +326,11 @@ export async function preflightOutreachCheck(contactId, channel) {
 
 /**
  * Log a B2B action for audit purposes.
- * Non-blocking — failures are logged but don't interrupt the operation.
- *
- * @param {Object} params
- * @param {string} params.action - The action performed
- * @param {string} params.userId - Who performed it
- * @param {string} params.userEmail - User email
- * @param {string} [params.targetType] - account, contact, opportunity, sequence, etc.
- * @param {string} [params.targetId] - ID of the affected record
- * @param {Object} [params.details] - Additional context
  */
 export async function logB2BAudit({ action, userId, userEmail, targetType, targetId, details }) {
   try {
     const record = {
-      account_id: targetId || '',
+      account_id: String(targetId || ''),
       contact_id: '',
       type: 'audit',
       channel: 'platform',
@@ -310,7 +340,7 @@ export async function logB2BAudit({ action, userId, userEmail, targetType, targe
         user_id: userId,
         user_email: userEmail,
         target_type: targetType || '',
-        target_id: targetId || '',
+        target_id: String(targetId || ''),
         details: details || {},
         timestamp: new Date().toISOString()
       }),
@@ -319,14 +349,8 @@ export async function logB2BAudit({ action, userId, userEmail, targetType, targe
       created_at: new Date().toISOString()
     };
 
-    await insertData(COLLECTIONS.activities, record);
+    await dataAccess.insertRecord(COLLECTION_KEYS.activities, record, { suppressAuth: true });
   } catch (error) {
     console.warn('[B2B Audit] Failed to log audit entry:', error.message);
   }
 }
-
-// ============================================================================
-// EXPORTS — Constants for external use
-// ============================================================================
-
-export { B2B_ROLES, ROLE_HIERARCHY, CONSENT_STATUS };

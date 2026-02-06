@@ -1,80 +1,85 @@
-// ============================================================================
-// APPLICATION SERVICE - Handles driver applications to carriers
-// Supports dual data sources (Wix and Airtable) via config.jsw feature flags.
-// ============================================================================
+/**
+ * Application Service
+ *
+ * Handles driver applications to carriers.
+ * Supports dual data sources (Wix and Airtable) via unified dataAccess layer.
+ *
+ * @module backend/applicationService
+ */
 
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
 import { mediaManager } from 'wix-media-backend';
-import { sendApplicationConfirmation } from 'backend/emailService.jsw';
-
-// Dual-source data access
-import { usesAirtable, getWixCollectionName } from 'backend/configData';
+import { sendApplicationConfirmation } from 'backend/emailService';
 import * as dataAccess from 'backend/dataAccess';
-import * as airtable from 'backend/airtableClient';
 import * as lifecycleService from 'backend/lifecycleService';
-
-// Gamification hooks
 import { checkApplicationAchievements } from 'backend/achievementService';
+import { log } from 'backend/observabilityService';
 
-// Lazy-loaded gamification services to avoid circular dependencies
+// ============================================================================
+// CONFIGURATION & CONSTANTS
+// ============================================================================
+
+const COLLECTION_KEYS = {
+  interests: 'driverCarrierInterests',
+  profiles: 'driverProfiles'
+};
+
+const STATUS = {
+  INTERESTED: 'interested',
+  APPLIED: 'applied',
+  IN_REVIEW: 'in_review',
+  CONTACTED: 'contacted',
+  OFFER: 'offer',
+  HIRED: 'hired',
+  REJECTED: 'rejected',
+  WITHDRAWN: 'withdrawn'
+};
+
+// ============================================================================
+// LAZY-LOADED SERVICES
+// ============================================================================
+
 async function getGamificationService() {
   return await import('backend/gamificationService');
 }
 
-// Non-blocking XP award helper
+async function getReferralService() {
+  return await import('backend/referralService');
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Award XP to driver (non-blocking)
+ */
 async function awardXPNonBlocking(driverId, action, metadata = {}) {
   try {
     const gamification = await getGamificationService();
     await gamification.awardDriverXP(driverId, action, metadata);
   } catch (err) {
-    console.warn(`XP award failed for ${action}:`, err.message);
+    console.warn(`[applicationService] XP award failed for ${action}:`, err.message);
   }
 }
 
-// Lazy-loaded referral service for conversion tracking
-async function getReferralService() {
-  return await import('backend/referralService');
-}
-
-// Track referral conversion when driver applies (non-blocking)
+/**
+ * Track referral conversion (non-blocking)
+ */
 async function trackReferralApplicationNonBlocking(driverId, metadata = {}) {
   try {
     const referralService = await getReferralService();
     await referralService.trackReferralConversion(driverId, 'applied', metadata);
   } catch (err) {
-    console.warn('Referral conversion tracking failed:', err.message);
+    console.warn('[applicationService] Referral conversion tracking failed:', err.message);
   }
 }
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
-
-const CONFIG = {
-  interestsCollection: 'DriverCarrierInterests',
-  profilesCollection: 'DriverProfiles',
-
-  // Application status values
-  STATUS: {
-    INTERESTED: 'interested',
-    APPLIED: 'applied',
-    IN_REVIEW: 'in_review',
-    CONTACTED: 'contacted',
-    OFFER: 'offer',
-    HIRED: 'hired',
-    REJECTED: 'rejected',
-    WITHDRAWN: 'withdrawn'
-  }
-};
-
-// ============================================================================
-// HELPER: Get driver profile
-// Supports dual data sources via config.jsw
-// ============================================================================
-
+/**
+ * Get driver profile by Wix user ID
+ */
 async function getDriverProfile(userId) {
-  const result = await dataAccess.queryRecords('driverProfiles', {
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.profiles, {
     filters: { _owner: userId },
     limit: 1,
     suppressAuth: true
@@ -83,14 +88,13 @@ async function getDriverProfile(userId) {
   return result.success && result.items.length > 0 ? result.items[0] : null;
 }
 
-// ============================================================================
-// HELPER: Upload base64 document to Wix Media
-// ============================================================================
-
+/**
+ * Upload base64 document to Wix Media
+ */
 async function uploadDocument(base64Data, fileName, mimeType, folder) {
   try {
     // Extract the actual base64 content (remove data URL prefix)
-    const base64Content = base64Data.split(',')[1];
+    const base64Content = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
 
     // Convert base64 to buffer
     const buffer = Buffer.from(base64Content, 'base64');
@@ -114,7 +118,7 @@ async function uploadDocument(base64Data, fileName, mimeType, folder) {
       fileName: fileName
     };
   } catch (error) {
-    console.error('Document upload error:', error);
+    console.error('[applicationService] Document upload error:', error.message);
     return {
       success: false,
       error: error.message
@@ -123,43 +127,18 @@ async function uploadDocument(base64Data, fileName, mimeType, folder) {
 }
 
 // ============================================================================
-// SUBMIT APPLICATION
+// PUBLIC WEB METHODS
 // ============================================================================
 
 /**
  * Submit a formal application to a carrier
- * Updates the interest record with application data and status
- *
- * @param {Object} applicationData
- * @param {string} applicationData.carrierDOT - Carrier DOT number
- * @param {string} applicationData.carrierName - Carrier name
- * @param {string} applicationData.phone - Driver contact phone
- * @param {string} applicationData.email - Driver contact email
- * @param {string} applicationData.preferredContact - 'phone' or 'email'
- * @param {string} applicationData.availability - When driver can start
- * @param {string} applicationData.message - Optional message to recruiter
+ * 
+ * @param {Object} applicationData - Data from the application form
  */
 export async function submitApplication(applicationData) {
+  const traceId = `app-${Date.now()}`;
   try {
-    // DEBUG: Log received application data
-    console.log('=== BACKEND RECEIVED APPLICATION DATA ===');
-    console.log('firstName:', applicationData.firstName);
-    console.log('lastName:', applicationData.lastName);
-    console.log('dob:', applicationData.dob);
-    console.log('city:', applicationData.city);
-    console.log('state:', applicationData.state);
-    console.log('homeZip:', applicationData.homeZip);
-    console.log('cdlClass:', applicationData.cdlClass);
-    console.log('endorsements:', applicationData.endorsements);
-    console.log('yearsExperience:', applicationData.yearsExperience);
-    console.log('equipmentExperience:', applicationData.equipmentExperience);
-    console.log('mvrStatus:', applicationData.mvrStatus);
-    console.log('preferredRoutes:', applicationData.preferredRoutes);
-    console.log('homeTimePreference:', applicationData.homeTimePreference);
-    console.log('=== END BACKEND DEBUG ===');
-
-    const currentUser = await wixUsersBackend.currentUser;
-
+    const currentUser = wixUsersBackend.currentUser;
     if (!currentUser.loggedIn) {
       return { success: false, error: 'User not logged in' };
     }
@@ -176,314 +155,126 @@ export async function submitApplication(applicationData) {
       return { success: false, error: 'Carrier DOT is required' };
     }
 
-    if (!applicationData.phone && !applicationData.email) {
-      return { success: false, error: 'Phone or email is required' };
-    }
-
     const now = new Date();
 
-    // Update DriverProfiles with application data
-    let profileUpdates = {};
+    // 1. Prepare profile updates based on application form data
+    const profileUpdates = {
+      updated_date: now,
+      docs_submitted: true,
+      is_searchable: true,
+      visibility_level: 'full',
+      profile_status: 'active'
+    };
 
-    // Track final document images for the application record
-    let cdlFrontImage = applicationData.existingProfileDocs?.cdl_front_image || null;
-    let cdlBackImage = applicationData.existingProfileDocs?.cdl_back_image || null;
-    let medCardImage = applicationData.existingProfileDocs?.med_card_image || null;
-    let resumeFile = applicationData.existingProfileDocs?.resume_file || null;
-
-    // ============================================================================
-    // DRIVER IDENTITY (NEW - matches seeded driver schema)
-    // ============================================================================
-    if (applicationData.firstName) {
-      profileUpdates.first_name = applicationData.firstName;
-    }
-    if (applicationData.lastName) {
-      profileUpdates.last_name = applicationData.lastName;
-    }
-    // Generate display_name from first + last
+    if (applicationData.firstName) profileUpdates.first_name = applicationData.firstName;
+    if (applicationData.lastName) profileUpdates.last_name = applicationData.lastName;
     if (applicationData.firstName && applicationData.lastName) {
       profileUpdates.display_name = `${applicationData.firstName} ${applicationData.lastName}`;
     }
-    // Date of Birth (from OCR) - Store as string in YYYY-MM-DD format for Wix DATE field
-    // Per Wix docs: Date fields expect string in ISO 8601 format "YYYY-MM-DD", NOT Date objects
-    // Date objects are only for "Date and Time" field types
+    
+    // Normalize DOB
     if (applicationData.dob) {
-      // Validate ISO date format YYYY-MM-DD
       const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
       if (isoDateRegex.test(applicationData.dob)) {
-        profileUpdates.dob = applicationData.dob; // Keep as string
-        console.log('✅ DOB stored as ISO string:', profileUpdates.dob);
+        profileUpdates.dob = applicationData.dob;
       } else {
-        // Attempt to parse and reformat if in different format
         const parsedDate = new Date(applicationData.dob);
         if (!isNaN(parsedDate.getTime())) {
-          // Format as YYYY-MM-DD using local date parts to avoid timezone shift
           const year = parsedDate.getFullYear();
           const month = String(parsedDate.getMonth() + 1).padStart(2, '0');
           const day = String(parsedDate.getDate()).padStart(2, '0');
           profileUpdates.dob = `${year}-${month}-${day}`;
-          console.log('✅ DOB reformatted to ISO string:', profileUpdates.dob);
-        } else {
-          console.error('❌ DOB format invalid, skipping:', applicationData.dob);
         }
       }
     }
 
-    // ============================================================================
-    // LOCATION (NEW - matches seeded driver schema)
-    // ============================================================================
-    if (applicationData.city) {
-      profileUpdates.city = applicationData.city;
-    }
+    if (applicationData.city) profileUpdates.city = applicationData.city;
     if (applicationData.state) {
       profileUpdates.state = applicationData.state;
-      profileUpdates.cdl_state = applicationData.state; // Also set cdl_state for schema compliance
+      profileUpdates.cdl_state = applicationData.state;
     }
     if (applicationData.homeZip) {
       profileUpdates.home_zip = applicationData.homeZip;
-      profileUpdates.zip_code = applicationData.homeZip; // Also set zip_code for compatibility
+      profileUpdates.zip_code = applicationData.homeZip;
     }
 
-    // ============================================================================
-    // CDL DETAILS (existing + new fields)
-    // ============================================================================
-    if (applicationData.cdlNumber) {
-      profileUpdates.cdl_number = applicationData.cdlNumber;
-    }
-    if (applicationData.cdlExpiration) {
-      // Store as ISO string YYYY-MM-DD for Wix Date field (same as DOB fix)
-      profileUpdates.cdl_expiration = applicationData.cdlExpiration;
-      console.log('✅ CDL Expiration stored as string:', profileUpdates.cdl_expiration);
-    }
-    if (applicationData.cdlClass) {
-      profileUpdates.cdl_class = applicationData.cdlClass;
-    }
-    if (applicationData.endorsements && Array.isArray(applicationData.endorsements)) {
-      profileUpdates.endorsements = applicationData.endorsements;
-    }
-    if (applicationData.restrictions && Array.isArray(applicationData.restrictions)) {
-      profileUpdates.restrictions = applicationData.restrictions;
-      console.log('✅ Restrictions stored:', profileUpdates.restrictions);
-    }
-    if (applicationData.medCardExpiration) {
-      // Store as ISO string YYYY-MM-DD for Wix Date field (same as DOB fix)
-      profileUpdates.med_card_expiration = applicationData.medCardExpiration;
-      console.log('✅ Med Card Expiration stored as string:', profileUpdates.med_card_expiration);
-    }
+    if (applicationData.cdlNumber) profileUpdates.cdl_number = applicationData.cdlNumber;
+    if (applicationData.cdlExpiration) profileUpdates.cdl_expiration = applicationData.cdlExpiration;
+    if (applicationData.cdlClass) profileUpdates.cdl_class = applicationData.cdlClass;
+    if (Array.isArray(applicationData.endorsements)) profileUpdates.endorsements = applicationData.endorsements;
+    if (Array.isArray(applicationData.restrictions)) profileUpdates.restrictions = applicationData.restrictions;
+    if (applicationData.medCardExpiration) profileUpdates.med_card_expiration = applicationData.medCardExpiration;
 
-    // ============================================================================
-    // EXPERIENCE (NEW - matches seeded driver schema)
-    // ============================================================================
-    if (applicationData.yearsExperience !== undefined && applicationData.yearsExperience !== null) {
-      profileUpdates.years_experience = applicationData.yearsExperience;
-    }
-    if (applicationData.equipmentExperience && Array.isArray(applicationData.equipmentExperience)) {
-      profileUpdates.equipment_experience = applicationData.equipmentExperience;
-    }
+    if (applicationData.yearsExperience !== undefined) profileUpdates.years_experience = applicationData.yearsExperience;
+    if (Array.isArray(applicationData.equipmentExperience)) profileUpdates.equipment_experience = applicationData.equipmentExperience;
     if (applicationData.mvrStatus) {
       profileUpdates.mvr_status = applicationData.mvrStatus;
-      // Derive clean_mvr boolean from mvr_status dropdown value
-      // "clean" = true, any other value (minor_violations, etc.) = false
       profileUpdates.clean_mvr = applicationData.mvrStatus.toLowerCase() === 'clean';
-      console.log('✅ clean_mvr derived from mvr_status:', profileUpdates.clean_mvr);
     }
 
-    // ============================================================================
-    // SAFETY & COMPLIANCE (NEW)
-    // ============================================================================
-    if (applicationData.accidentsLast3Years !== undefined && applicationData.accidentsLast3Years !== null) {
-      profileUpdates.accidents_last_3_years = parseInt(applicationData.accidentsLast3Years, 10) || 0;
-      console.log('✅ Accidents last 3 years stored:', profileUpdates.accidents_last_3_years);
-    }
-    if (applicationData.violationsLast3Years !== undefined && applicationData.violationsLast3Years !== null) {
-      profileUpdates.violations_last_3_years = parseInt(applicationData.violationsLast3Years, 10) || 0;
-      console.log('✅ Violations last 3 years stored:', profileUpdates.violations_last_3_years);
-    }
-    if (applicationData.cdlRestrictions) {
-      profileUpdates.restrictions = applicationData.cdlRestrictions;
-      console.log('✅ CDL Restrictions stored:', profileUpdates.restrictions);
-    }
+    if (applicationData.accidentsLast3Years !== undefined) profileUpdates.accidents_last_3_years = parseInt(applicationData.accidentsLast3Years, 10) || 0;
+    if (applicationData.violationsLast3Years !== undefined) profileUpdates.violations_last_3_years = parseInt(applicationData.violationsLast3Years, 10) || 0;
+    
+    if (applicationData.companiesLast3Years !== undefined) profileUpdates.companies_last_3_years = parseInt(applicationData.companiesLast3Years, 10) || 0;
+    if (applicationData.employer1Name) profileUpdates.employer_1_name = applicationData.employer1Name;
+    if (applicationData.employer1Duration) profileUpdates.employer_1_duration = applicationData.employer1Duration;
+    if (applicationData.employer2Name) profileUpdates.employer_2_name = applicationData.employer2Name;
+    if (applicationData.employer2Duration) profileUpdates.employer_2_duration = applicationData.employer2Duration;
+    if (applicationData.employer3Name) profileUpdates.employer_3_name = applicationData.employer3Name;
+    if (applicationData.employer3Duration) profileUpdates.employer_3_duration = applicationData.employer3Duration;
 
-    // ============================================================================
-    // EMPLOYMENT HISTORY (NEW)
-    // ============================================================================
-    if (applicationData.companiesLast3Years !== undefined && applicationData.companiesLast3Years !== null) {
-      profileUpdates.companies_last_3_years = parseInt(applicationData.companiesLast3Years, 10) || 0;
-      console.log('✅ Companies last 3 years stored:', profileUpdates.companies_last_3_years);
-    }
-    if (applicationData.employer1Name) {
-      profileUpdates.employer_1_name = applicationData.employer1Name;
-      console.log('✅ Employer 1 name stored:', profileUpdates.employer_1_name);
-    }
-    if (applicationData.employer1Duration) {
-      profileUpdates.employer_1_duration = applicationData.employer1Duration;
-      console.log('✅ Employer 1 duration stored:', profileUpdates.employer_1_duration);
-    }
-    if (applicationData.employer2Name) {
-      profileUpdates.employer_2_name = applicationData.employer2Name;
-      console.log('✅ Employer 2 name stored:', profileUpdates.employer_2_name);
-    }
-    if (applicationData.employer2Duration) {
-      profileUpdates.employer_2_duration = applicationData.employer2Duration;
-      console.log('✅ Employer 2 duration stored:', profileUpdates.employer_2_duration);
-    }
-    if (applicationData.employer3Name) {
-      profileUpdates.employer_3_name = applicationData.employer3Name;
-      console.log('✅ Employer 3 name stored:', profileUpdates.employer_3_name);
-    }
-    if (applicationData.employer3Duration) {
-      profileUpdates.employer_3_duration = applicationData.employer3Duration;
-      console.log('✅ Employer 3 duration stored:', profileUpdates.employer_3_duration);
-    }
-
-    // ============================================================================
-    // PREFERENCES (NEW - matches seeded driver schema)
-    // ============================================================================
-    if (applicationData.preferredRoutes && Array.isArray(applicationData.preferredRoutes)) {
+    if (Array.isArray(applicationData.preferredRoutes)) {
       profileUpdates.preferred_routes = applicationData.preferredRoutes;
-      // Also set preferred_operation_type from first selected route
-      if (applicationData.preferredRoutes.length > 0) {
-        profileUpdates.preferred_operation_type = applicationData.preferredRoutes[0];
-      }
+      if (applicationData.preferredRoutes.length > 0) profileUpdates.preferred_operation_type = applicationData.preferredRoutes[0];
     }
-    if (applicationData.homeTimePreference) {
-      profileUpdates.home_time_preference = applicationData.homeTimePreference;
-    }
-    if (applicationData.availability) {
-      profileUpdates.availability = applicationData.availability;
-    }
+    if (applicationData.homeTimePreference) profileUpdates.home_time_preference = applicationData.homeTimePreference;
+    if (applicationData.availability) profileUpdates.availability = applicationData.availability;
+    if (applicationData.phone) profileUpdates.phone = applicationData.phone;
+    if (applicationData.email) profileUpdates.email = applicationData.email;
 
-    // ============================================================================
-    // CONTACT INFO (existing)
-    // ============================================================================
-    if (applicationData.phone) {
-      profileUpdates.phone = applicationData.phone;
-    }
-    if (applicationData.email) {
-      profileUpdates.email = applicationData.email;
-    }
+    // 2. Handle document uploads
+    let cdlFrontImage = applicationData.existingProfileDocs?.cdl_front_image || profile.cdl_front_image || null;
+    let cdlBackImage = applicationData.existingProfileDocs?.cdl_back_image || profile.cdl_back_image || null;
+    let medCardImage = applicationData.existingProfileDocs?.med_card_image || profile.med_card_image || null;
+    let resumeFile = applicationData.existingProfileDocs?.resume_file || profile.resume_file || null;
 
-    // ============================================================================
-    // APPLICATION TRACKING & SEARCHABILITY
-    // ============================================================================
-    profileUpdates.application_date = now;
-    profileUpdates.docs_submitted = true;
-
-    // CRITICAL: Set searchability fields so recruiters can find this driver
-    // These fields are required by driverMatching.jsw query filters
-    profileUpdates.is_searchable = true;
-    profileUpdates.visibility_level = 'full';
-    profileUpdates.profile_status = 'active';
-
-    // Upload documents if provided
     if (applicationData.documents) {
       const uploadFolder = `${userId}/${Date.now()}`;
+      
+      const docsToUpload = [
+        { key: 'cdlFront', field: 'cdl_front_image', urlField: 'cdl_front_url' },
+        { key: 'cdlBack', field: 'cdl_back_image', urlField: 'cdl_back_url' },
+        { key: 'medCard', field: 'med_card_image', urlField: 'med_card_url' },
+        { key: 'resume', field: 'resume_file', urlField: null }
+      ];
 
-      try {
-        // Upload CDL Front
-        if (applicationData.documents.cdlFront && applicationData.documents.cdlFront.data) {
-          console.log('Uploading CDL front...');
-          const cdlFrontResult = await uploadDocument(
-            applicationData.documents.cdlFront.data,
-            applicationData.documents.cdlFront.name,
-            applicationData.documents.cdlFront.type,
-            uploadFolder
-          );
-          console.log('CDL front result:', cdlFrontResult);
-          if (cdlFrontResult.success) {
-            profileUpdates.cdl_front_image = cdlFrontResult.fileUrl; // Store in image field
-            profileUpdates.cdl_front_url = cdlFrontResult.fileUrl;   // Also store in URL field for recruiter access
-            cdlFrontImage = cdlFrontResult.fileUrl;
-            console.log('✅ CDL front stored:', cdlFrontResult.fileUrl);
+      for (const doc of docsToUpload) {
+        const fileData = applicationData.documents[doc.key];
+        if (fileData && fileData.data) {
+          const result = await uploadDocument(fileData.data, fileData.name, fileData.type, uploadFolder);
+          if (result.success) {
+            profileUpdates[doc.field] = result.fileUrl;
+            if (doc.urlField) profileUpdates[doc.urlField] = result.fileUrl;
+            
+            // Update local variables for application record
+            if (doc.key === 'cdlFront') cdlFrontImage = result.fileUrl;
+            if (doc.key === 'cdlBack') cdlBackImage = result.fileUrl;
+            if (doc.key === 'medCard') medCardImage = result.fileUrl;
+            if (doc.key === 'resume') resumeFile = result.fileUrl;
           }
         }
-
-        // Upload CDL Back
-        if (applicationData.documents.cdlBack && applicationData.documents.cdlBack.data) {
-          console.log('Uploading CDL back...');
-          const cdlBackResult = await uploadDocument(
-            applicationData.documents.cdlBack.data,
-            applicationData.documents.cdlBack.name,
-            applicationData.documents.cdlBack.type,
-            uploadFolder
-          );
-          console.log('CDL back result:', cdlBackResult);
-          if (cdlBackResult.success) {
-            profileUpdates.cdl_back_image = cdlBackResult.fileUrl; // Store in image field
-            profileUpdates.cdl_back_url = cdlBackResult.fileUrl;   // Also store in URL field for recruiter access
-            cdlBackImage = cdlBackResult.fileUrl;
-            console.log('✅ CDL back stored:', cdlBackResult.fileUrl);
-          }
-        }
-
-        // Upload Medical Card
-        if (applicationData.documents.medCard && applicationData.documents.medCard.data) {
-          console.log('Uploading medical card...');
-          const medCardResult = await uploadDocument(
-            applicationData.documents.medCard.data,
-            applicationData.documents.medCard.name,
-            applicationData.documents.medCard.type,
-            uploadFolder
-          );
-          console.log('Medical card result:', medCardResult);
-          if (medCardResult.success) {
-            profileUpdates.med_card_image = medCardResult.fileUrl; // Store in image field
-            profileUpdates.med_card_url = medCardResult.fileUrl;   // Also store in URL field for recruiter access
-            medCardImage = medCardResult.fileUrl;
-            console.log('✅ Med card stored:', medCardResult.fileUrl);
-          }
-        }
-
-        // Upload Resume
-        if (applicationData.documents.resume && applicationData.documents.resume.data) {
-          console.log('Uploading resume...');
-          const resumeResult = await uploadDocument(
-            applicationData.documents.resume.data,
-            applicationData.documents.resume.name,
-            applicationData.documents.resume.type,
-            uploadFolder
-          );
-          if (resumeResult.success) {
-            profileUpdates.resume_file = resumeResult.fileUrl; // Store in file field
-            resumeFile = resumeResult.fileUrl;
-          }
-        }
-
-        // Set docs_complete if all required docs are present
-        const hasAllDocs = (cdlFrontImage || applicationData.documents.cdlFront) &&
-                          (cdlBackImage || applicationData.documents.cdlBack) &&
-                          (medCardImage || applicationData.documents.medCard);
-        if (hasAllDocs) {
-          profileUpdates.docs_complete = true;
-        }
-      } catch (uploadError) {
-        console.error('Document upload error:', uploadError);
-        // Continue without documents - text fields will still be saved
       }
 
-      // NOTE: OCR is now handled during document upload via extractDocumentOCR.
-      // The OCR data is passed from the frontend in cdlNumber, cdlExpiration, etc.
-      // This avoids running OCR twice and prevents 504 timeout errors.
-    }
-
-    // Update DriverProfiles using dual-source data access
-    if (Object.keys(profileUpdates).length > 0) {
-      try {
-        profileUpdates.updated_date = now;
-        const updatedProfile = {
-          ...profile,
-          ...profileUpdates
-        };
-        console.log('Updating profile with:', Object.keys(profileUpdates));
-        await dataAccess.updateRecord('driverProfiles', updatedProfile, { suppressAuth: true });
-        console.log('Driver profile updated successfully');
-      } catch (profileError) {
-        console.error('Profile update error:', profileError);
+      if (cdlFrontImage && cdlBackImage && medCardImage) {
+        profileUpdates.docs_complete = true;
       }
     }
 
-    // Find existing interest record using dual-source data access
-    const existingInterest = await dataAccess.queryRecords('driverCarrierInterests', {
+    // 3. Update driver profile
+    await dataAccess.updateRecord(COLLECTION_KEYS.profiles, { ...profile, ...profileUpdates }, { suppressAuth: true });
+
+    // 4. Handle interest/application record
+    const existingInterestRes = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
       filters: {
         driver_id: profile._id,
         carrier_dot: String(applicationData.carrierDOT)
@@ -492,225 +283,140 @@ export async function submitApplication(applicationData) {
       suppressAuth: true
     });
 
-    // Check for duplicate submission - prevent re-applying if already in active pipeline
-    const hasExistingInterest = existingInterest.success && existingInterest.items.length > 0;
-    if (hasExistingInterest) {
-      const existing = existingInterest.items[0];
-      const activeStatuses = [CONFIG.STATUS.APPLIED, CONFIG.STATUS.IN_REVIEW, CONFIG.STATUS.CONTACTED, CONFIG.STATUS.OFFER, CONFIG.STATUS.HIRED];
-
-      if (activeStatuses.includes(existing.status)) {
-        console.log(`⚠️ Duplicate submission blocked: Driver already has status "${existing.status}" for DOT ${applicationData.carrierDOT}`);
+    const existingInterest = existingInterestRes.items?.[0];
+    if (existingInterest) {
+      const activeStatuses = [STATUS.APPLIED, STATUS.IN_REVIEW, STATUS.CONTACTED, STATUS.OFFER, STATUS.HIRED];
+      if (activeStatuses.includes(existingInterest.status)) {
         return {
           success: false,
           error: 'You have already applied to this carrier',
-          existingStatus: existing.status,
-          applicationId: existing._id,
+          existingStatus: existingInterest.status,
+          applicationId: existingInterest._id,
           isDuplicate: true
         };
       }
-      // If status is 'interested', 'withdrawn', or 'rejected' - allow re-application
     }
 
-    if (!hasExistingInterest) {
-      // No existing interest - create new record with applied status
-      const newApplication = {
-        driver_id: profile._id,
-        carrier_dot: String(applicationData.carrierDOT),
-        carrier_name: applicationData.carrierName || '',
-        match_score: applicationData.matchScore || 0,
-        action: 'applied',
-        action_timestamp: now,
-        driver_zip_at_match: profile.home_zip || '',
-
-        // Application-specific fields
-        status: CONFIG.STATUS.APPLIED,
-        application_date: now,
-        contact_phone: applicationData.phone || '',
-        contact_email: applicationData.email || '',
-        preferred_contact: applicationData.preferredContact || 'phone',
-        availability: applicationData.availability || '',
-        driver_message: applicationData.message || '',
-        
-        // Documents (URLs stored in interest record for this specific application)
-        cdl_front_url: cdlFrontImage,
-        cdl_back_url: cdlBackImage,
-        med_card_url: medCardImage,
-        resume_url: resumeFile,
-
-        // Status history
-        status_history: JSON.stringify([{
-          status: CONFIG.STATUS.APPLIED,
-          timestamp: now.toISOString(),
-          note: 'Application submitted'
-        }]),
-
-        outcome: null,
-        outcome_date: null,
-        notes: null
-      };
-
-      const insertResult = await dataAccess.insertRecord('driverCarrierInterests', newApplication, { suppressAuth: true });
-      const inserted = insertResult.record;
-
-      console.log(`✅ New application submitted: Driver ${profile._id} → Carrier DOT ${applicationData.carrierDOT}`);
-
-      // Lifecycle: Log the APPLICATION event (non-blocking)
-      lifecycleService.logEvent(profile._id, applicationData.carrierDOT, lifecycleService.EVENT_TYPES.APPLICATION, {
-        applicationId: inserted._id,
-        matchScore: applicationData.matchScore
-      }).catch(err => console.warn('Failed to log lifecycle application event:', err.message));
-
-      // Send confirmation email (async, don't await blocking return)
-      sendApplicationConfirmation(userId, {
-        driverName: profile.display_name || profile.driver_name || 'Driver',
-        carrierName: applicationData.carrierName,
-        carrierDot: applicationData.carrierDOT,
-        applicationId: inserted._id
-      }).catch(err => console.error('Email send failed:', err));
-
-      // Check for application-related achievements (non-blocking)
-      // First, get total applications count
-      dataAccess.queryRecords('driverCarrierInterests', {
-        filters: { driver_id: profile._id, status: CONFIG.STATUS.APPLIED },
-        suppressAuth: true
-      }).then(result => {
-        const totalApplications = result.success ? (result.totalCount || result.items.length) : 1;
-        return checkApplicationAchievements(profile._id, totalApplications);
-      }).catch(err => console.warn('Achievement check failed:', err.message));
-
-      // Award XP for job application (non-blocking)
-      awardXPNonBlocking(profile._id, 'apply_job', {
-        carrierDot: applicationData.carrierDOT,
-        carrierName: applicationData.carrierName,
-        matchScore: applicationData.matchScore
-      });
-
-      // Track referral conversion if this driver was referred (non-blocking)
-      trackReferralApplicationNonBlocking(profile._id, {
-        carrierDot: applicationData.carrierDOT
-      });
-
-      return {
-        success: true,
-        application: inserted,
-        isNew: true
-      };
-
-    } else {
-      // Update existing interest record to applied status
-      const existing = existingInterest.items[0];
-
-      // Parse existing status history or create new
-      let statusHistory = [];
+    // Prepare status history
+    let statusHistory = [];
+    if (existingInterest?.status_history) {
       try {
-        statusHistory = existing.status_history ? JSON.parse(existing.status_history) : [];
+        statusHistory = JSON.parse(existingInterest.status_history);
       } catch (e) {
         statusHistory = [];
       }
+    }
+    statusHistory.push({
+      status: STATUS.APPLIED,
+      timestamp: now.toISOString(),
+      note: 'Application submitted'
+    });
 
-      // Add new status to history
-      statusHistory.push({
-        status: CONFIG.STATUS.APPLIED,
-        timestamp: now.toISOString(),
-        note: 'Application submitted'
-      });
+    const applicationRecord = {
+      driver_id: profile._id,
+      carrier_dot: String(applicationData.carrierDOT),
+      carrier_name: applicationData.carrierName || '',
+      match_score: applicationData.matchScore || 0,
+      action: 'applied',
+      action_timestamp: now,
+      driver_zip_at_match: profile.home_zip || '',
+      status: STATUS.APPLIED,
+      application_date: now,
+      contact_phone: applicationData.phone || '',
+      contact_email: applicationData.email || '',
+      preferred_contact: applicationData.preferredContact || 'phone',
+      availability: applicationData.availability || '',
+      driver_message: applicationData.message || '',
+      cdl_front_url: cdlFrontImage,
+      cdl_back_url: cdlBackImage,
+      med_card_url: medCardImage,
+      resume_url: resumeFile,
+      status_history: JSON.stringify(statusHistory)
+    };
 
-      const updatedApplication = {
-        ...existing,
-        action: 'applied',
-        action_timestamp: now,
-
-        // Application-specific fields
-        status: CONFIG.STATUS.APPLIED,
-        application_date: now,
-        contact_phone: applicationData.phone || existing.contact_phone || '',
-        contact_email: applicationData.email || existing.contact_email || '',
-        preferred_contact: applicationData.preferredContact || existing.preferred_contact || 'phone',
-        availability: applicationData.availability || '',
-        driver_message: applicationData.message || '',
-        
-        // Documents (Update if we have new ones or existing ones)
-        cdl_front_url: cdlFrontImage || existing.cdl_front_url,
-        cdl_back_url: cdlBackImage || existing.cdl_back_url,
-        med_card_url: medCardImage || existing.med_card_url,
-        resume_url: resumeFile || existing.resume_url,
-
-        // Update status history
-        status_history: JSON.stringify(statusHistory)
-      };
-
-      const updateResult = await dataAccess.updateRecord('driverCarrierInterests', updatedApplication, { suppressAuth: true });
-      const updated = updateResult.record;
-
-      console.log(`✅ Application updated: Driver ${profile._id} → Carrier DOT ${applicationData.carrierDOT}`);
-
-      // Lifecycle: Log the APPLICATION event (non-blocking)
-      lifecycleService.logEvent(profile._id, applicationData.carrierDOT, lifecycleService.EVENT_TYPES.APPLICATION, {
-        applicationId: updated._id,
-        matchScore: applicationData.matchScore,
-        isReapplication: true
-      }).catch(err => console.warn('Failed to log lifecycle application event:', err.message));
-
-      // Send confirmation email
-      sendApplicationConfirmation(userId, {
-        driverName: profile.display_name || profile.driver_name || 'Driver',
-        carrierName: applicationData.carrierName,
-        carrierDot: applicationData.carrierDOT,
-        applicationId: updated._id
-      }).catch(err => console.error('Email send failed:', err));
-
-      // Check for application-related achievements (non-blocking)
-      dataAccess.queryRecords('driverCarrierInterests', {
-        filters: { driver_id: profile._id, status: CONFIG.STATUS.APPLIED },
-        suppressAuth: true
-      }).then(result => {
-        const totalApplications = result.success ? (result.totalCount || result.items.length) : 1;
-        return checkApplicationAchievements(profile._id, totalApplications);
-      }).catch(err => console.warn('Achievement check failed:', err.message));
-
-      // Award XP for job application (non-blocking)
-      awardXPNonBlocking(profile._id, 'apply_job', {
-        carrierDot: applicationData.carrierDOT,
-        carrierName: applicationData.carrierName,
-        matchScore: applicationData.matchScore
-      });
-
-      return {
-        success: true,
-        application: updated,
-        isNew: false
-      };
+    let resultRecord;
+    if (existingInterest) {
+      const updateResult = await dataAccess.updateRecord(COLLECTION_KEYS.interests, { ...existingInterest, ...applicationRecord }, { suppressAuth: true });
+      resultRecord = updateResult.record;
+    } else {
+      const insertResult = await dataAccess.insertRecord(COLLECTION_KEYS.interests, applicationRecord, { suppressAuth: true });
+      resultRecord = insertResult.record;
     }
 
+    // 5. Post-submission actions (non-blocking)
+    
+    // Lifecycle logging
+    lifecycleService.logEvent(profile._id, applicationData.carrierDOT, lifecycleService.EVENT_TYPES.APPLICATION, {
+      applicationId: resultRecord._id,
+      matchScore: applicationData.matchScore,
+      isReapplication: !!existingInterest
+    }).catch(err => console.warn('[applicationService] Lifecycle log failed:', err.message));
+
+    // Confirmation email
+    sendApplicationConfirmation(userId, {
+      driverName: profile.display_name || 'Driver',
+      carrierName: applicationData.carrierName,
+      carrierDot: applicationData.carrierDOT,
+      applicationId: resultRecord._id
+    }).catch(err => console.error('[applicationService] Email send failed:', err));
+
+    // Gamification & Achievements
+    dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { driver_id: profile._id, status: STATUS.APPLIED },
+      suppressAuth: true
+    }).then(result => {
+      const count = result.success ? (result.totalCount || result.items.length) : 1;
+      return checkApplicationAchievements(profile._id, count);
+    }).catch(err => console.warn('[applicationService] Achievement check failed:', err.message));
+
+    awardXPNonBlocking(profile._id, 'apply_job', {
+      carrierDot: applicationData.carrierDOT,
+      carrierName: applicationData.carrierName,
+      matchScore: applicationData.matchScore
+    });
+
+    trackReferralApplicationNonBlocking(profile._id, {
+      carrierDot: applicationData.carrierDOT
+    });
+
+    await log({
+      level: 'INFO',
+      source: 'application-service',
+      message: `Driver ${profile._id} applied to ${applicationData.carrierDOT}`,
+      traceId,
+      details: { driverId: profile._id, carrierDot: applicationData.carrierDOT }
+    });
+
+    return {
+      success: true,
+      application: resultRecord,
+      isNew: !existingInterest
+    };
+
   } catch (error) {
-    console.error('❌ Error submitting application:', error);
+    await log({
+      level: 'ERROR',
+      source: 'application-service',
+      message: 'Application submission failed',
+      traceId,
+      details: { error: error.message, carrierDOT: applicationData.carrierDOT }
+    });
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// GET APPLICATION STATUS
-// ============================================================================
-
 /**
- * Get the current status of an application
+ * Get the current status of an application for a specific carrier
  */
 export async function getApplicationStatus(carrierDOT) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
 
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
+    const profile = await getDriverProfile(currentUser.id);
+    if (!profile) return { success: false, error: 'Driver profile not found' };
 
-    const userId = currentUser.id;
-    const profile = await getDriverProfile(userId);
-
-    if (!profile) {
-      return { success: false, error: 'Driver profile not found' };
-    }
-
-    const result = await dataAccess.queryRecords('driverCarrierInterests', {
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
       filters: {
         driver_id: profile._id,
         carrier_dot: String(carrierDOT)
@@ -739,36 +445,24 @@ export async function getApplicationStatus(carrierDOT) {
         status_history: statusHistory
       }
     };
-
   } catch (error) {
-    console.error('❌ Error getting application status:', error);
+    console.error('[applicationService] getApplicationStatus error:', error.message);
     return { success: false, error: error.message };
   }
 }
-
-// ============================================================================
-// WITHDRAW APPLICATION
-// ============================================================================
 
 /**
  * Withdraw an application
  */
 export async function withdrawApplication(carrierDOT) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
 
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
+    const profile = await getDriverProfile(currentUser.id);
+    if (!profile) return { success: false, error: 'Driver profile not found' };
 
-    const userId = currentUser.id;
-    const profile = await getDriverProfile(userId);
-
-    if (!profile) {
-      return { success: false, error: 'Driver profile not found' };
-    }
-
-    const result = await dataAccess.queryRecords('driverCarrierInterests', {
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
       filters: {
         driver_id: profile._id,
         carrier_dot: String(carrierDOT)
@@ -784,7 +478,6 @@ export async function withdrawApplication(carrierDOT) {
     const application = result.items[0];
     const now = new Date();
 
-    // Parse existing status history
     let statusHistory = [];
     try {
       statusHistory = application.status_history ? JSON.parse(application.status_history) : [];
@@ -792,51 +485,41 @@ export async function withdrawApplication(carrierDOT) {
       statusHistory = [];
     }
 
-    // Add withdrawal to history
     statusHistory.push({
-      status: CONFIG.STATUS.WITHDRAWN,
+      status: STATUS.WITHDRAWN,
       timestamp: now.toISOString(),
       note: 'Application withdrawn by driver'
     });
 
-    const updatedApplication = {
+    await dataAccess.updateRecord(COLLECTION_KEYS.interests, {
       ...application,
-      status: CONFIG.STATUS.WITHDRAWN,
-      action: 'withdrawn', // Optional: change primary action type
+      _id: application._id,
+      status: STATUS.WITHDRAWN,
+      action: 'withdrawn',
       status_history: JSON.stringify(statusHistory)
-    };
-
-    await dataAccess.updateRecord('driverCarrierInterests', updatedApplication, { suppressAuth: true });
+    }, { suppressAuth: true });
     
     return { success: true };
-
   } catch (error) {
-    console.error('❌ Error withdrawing application:', error);
+    console.error('[applicationService] withdrawApplication error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// GET ALL DRIVER APPLICATIONS
-// ============================================================================
-
 /**
- * GET ALL DRIVER APPLICATIONS
- * Fetches all applications for a specific driver
+ * Get all applications for a driver
  */
 export async function getDriverApplications(driverId) {
   try {
     const authResult = await verifyDriverAuthorization(driverId);
-    if (!authResult.success) {
-      return authResult;
-    }
+    if (!authResult.success) return authResult;
 
-    const result = await dataAccess.queryRecords('driverCarrierInterests', {
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
       filters: {
         driver_id: driverId,
-        action: 'applied' // Only fetch actual applications, not just interests
+        action: 'applied'
       },
-      limit: 100, // Reasonable limit
+      limit: 100,
       suppressAuth: true
     });
 
@@ -844,7 +527,6 @@ export async function getDriverApplications(driverId) {
       return { success: false, error: result.error || 'Failed to fetch applications' };
     }
 
-    // Process items to ensure history is parsed
     const applications = result.items.map(app => {
       let statusHistory = [];
       try {
@@ -856,27 +538,24 @@ export async function getDriverApplications(driverId) {
       return {
         ...app,
         status_history: statusHistory,
-        // Ensure carrier name is populated (it should be, but fallback just in case)
         carrier_name: app.carrier_name || 'Unknown Carrier'
       };
     });
 
-    // Sort by most recent application first
     applications.sort((a, b) => new Date(b.action_timestamp) - new Date(a.action_timestamp));
 
     return {
       success: true,
       applications
     };
-
   } catch (error) {
-    console.error('❌ Error getting driver applications:', error);
+    console.error('[applicationService] getDriverApplications error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 /**
- * Verifies that the current user is authorized to access data for the given driverId.
+ * Verify driver authorization
  */
 async function verifyDriverAuthorization(driverId) {
     const currentUser = wixUsersBackend.currentUser;
@@ -888,7 +567,6 @@ async function verifyDriverAuthorization(driverId) {
         return { success: true };
     }
     
-    // Check if the current user owns the driver profile associated with driverId
     const profile = await getDriverProfile(currentUser.id);
     if (profile && profile._id === driverId) {
         return { success: true };
@@ -896,6 +574,3 @@ async function verifyDriverAuthorization(driverId) {
 
     return { success: false, error: 'Unauthorized access.' };
 }
-
-
-

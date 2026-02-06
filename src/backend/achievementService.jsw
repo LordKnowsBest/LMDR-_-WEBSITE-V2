@@ -7,12 +7,16 @@
  * - Retrieving earned and available achievements
  *
  * This service uses Airtable-only collections (no Wix fallback).
+ * 
+ * @module backend/achievementService
  */
 
 import * as dataAccess from 'backend/dataAccess';
 import { createNotification } from 'backend/memberService';
 import { awardDriverXP, awardRecruiterPoints, logGamificationEvent } from 'backend/gamificationService';
 import { runAchievementChecker, DRIVER_ACHIEVEMENT_CHECKERS, RECRUITER_ACHIEVEMENT_CHECKERS } from 'backend/achievementCheckers';
+import { chunkArray } from 'backend/utils/arrayUtils';
+import { log } from 'backend/observabilityService';
 
 // Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
@@ -37,10 +41,15 @@ export async function getAchievementDefinitions(userType = 'all', category = nul
     if (category) filters.category = category;
 
     const result = await dataAccess.queryRecords(COLLECTION_KEYS.achievementDefinitions, {
-      filters, sort: [{ field: 'display_order', direction: 'asc' }], limit: 100, suppressAuth: true
+      filters, 
+      sort: [{ field: 'display_order', direction: 'asc' }], 
+      limit: 100, 
+      suppressAuth: true
     });
     return (result.items || []).map(normalizeAchievementDefinition);
-  } catch (error) { return []; }
+  } catch (error) { 
+    return []; 
+  }
 }
 
 /**
@@ -50,19 +59,37 @@ export async function getAchievements(userId, userType, options = {}) {
   try {
     const [defs, earned] = await Promise.all([
       getAchievementDefinitions(userType, options.category),
-      dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { filters: { user_id: userId, user_type: userType }, limit: 100, suppressAuth: true })
+      dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { 
+        filters: { user_id: userId, user_type: userType }, 
+        limit: 100, 
+        suppressAuth: true 
+      })
     ]);
 
     const earnedMap = new Map();
-    (earned.items || []).forEach(r => earnedMap.set(r.achievement_id, { earnedAt: r.earned_at, progress: r.progress || 100, isComplete: r.is_complete === 'Yes' }));
+    (earned.items || []).forEach(r => {
+      earnedMap.set(r.achievement_id, { 
+        earnedAt: r.earned_at, 
+        progress: r.progress || 100, 
+        isComplete: r.is_complete === 'Yes' 
+      });
+    });
 
     const achievements = defs.map(def => {
       const e = earnedMap.get(def.achievementId);
-      return { ...def, earned: !!e?.isComplete, earnedAt: e?.earnedAt || null, progress: e?.progress || 0, isComplete: e?.isComplete || false };
+      return { 
+        ...def, 
+        earned: !!e?.isComplete, 
+        earnedAt: e?.earnedAt || null, 
+        progress: e?.progress || 0, 
+        isComplete: e?.isComplete || false 
+      };
     });
 
     return options.include_locked ? achievements : achievements.filter(a => !a.isHidden || a.earned);
-  } catch (error) { return []; }
+  } catch (error) { 
+    return []; 
+  }
 }
 
 /**
@@ -70,158 +97,382 @@ export async function getAchievements(userId, userType, options = {}) {
  */
 export async function getAchievementProgress(userId, achievementId) {
   try {
-    const defs = await dataAccess.queryRecords(COLLECTION_KEYS.achievementDefinitions, { filters: { achievement_id: achievementId }, limit: 1, suppressAuth: true });
-    if (!defs.items?.length) return { current: 0, target: 0, percentage: 0, is_complete: false, error: 'not_found' };
+    const defs = await dataAccess.queryRecords(COLLECTION_KEYS.achievementDefinitions, { 
+      filters: { achievement_id: achievementId }, 
+      limit: 1, 
+      suppressAuth: true 
+    });
+    
+    if (!defs.items?.length) {
+      return { current: 0, target: 0, percentage: 0, is_complete: false, error: 'not_found' };
+    }
+    
     const def = normalizeAchievementDefinition(defs.items[0]);
 
-    const earned = await dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { filters: { user_id: userId, achievement_id: achievementId, is_complete: 'Yes' }, limit: 1, suppressAuth: true });
-    if (earned.items?.length) return { current: def.requirementValue, target: def.requirementValue, percentage: 100, is_complete: true, earned_at: earned.items[0].earned_at };
+    const earned = await dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { 
+      filters: { user_id: userId, achievement_id: achievementId, is_complete: 'Yes' }, 
+      limit: 1, 
+      suppressAuth: true 
+    });
+    
+    if (earned.items?.length) {
+      return { 
+        current: def.requirementValue, 
+        target: def.requirementValue, 
+        percentage: 100, 
+        is_complete: true, 
+        earned_at: earned.items[0].earned_at 
+      };
+    }
 
     const checkerResult = await runAchievementChecker(def.achievementId, userId, def.userType, {});
-    if (!checkerResult.error || checkerResult.error !== 'no_checker') return { current: checkerResult.current, target: checkerResult.target, percentage: Math.min(100, Math.round((checkerResult.current / checkerResult.target) * 100)), is_complete: checkerResult.qualifies };
+    if (checkerResult && (!checkerResult.error || checkerResult.error !== 'no_checker')) {
+      return { 
+        current: checkerResult.current, 
+        target: checkerResult.target, 
+        percentage: Math.min(100, Math.round((checkerResult.current / checkerResult.target) * 100)), 
+        is_complete: checkerResult.qualifies 
+      };
+    }
 
     const current = await calculateCurrentProgress(userId, def);
-    return { current, target: def.requirementValue, percentage: Math.min(100, Math.round((current / def.requirementValue) * 100)), is_complete: current >= def.requirementValue };
-  } catch (error) { return { current: 0, target: 0, percentage: 0, is_complete: false, error: error.message }; }
+    return { 
+      current, 
+      target: def.requirementValue, 
+      percentage: Math.min(100, Math.round((current / def.requirementValue) * 100)), 
+      is_complete: current >= def.requirementValue 
+    };
+  } catch (error) { 
+    return { current: 0, target: 0, percentage: 0, is_complete: false, error: error.message }; 
+  }
 }
 
 // =============================================================================
 // CHECK AND AWARD ACHIEVEMENTS
 // =============================================================================
 
+/**
+ * Check and award all pending achievements for a user
+ */
 export async function checkAndAwardAchievements(userId, userType, context = {}) {
   try {
     const defs = await getAchievementDefinitions(userType);
-    const earned = await dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { filters: { user_id: userId, user_type: userType, is_complete: 'Yes' }, limit: 200, suppressAuth: true });
+    const earned = await dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { 
+      filters: { user_id: userId, user_type: userType, is_complete: 'Yes' }, 
+      limit: 200, 
+      suppressAuth: true 
+    });
+    
     const earnedIds = new Set((earned.items || []).map(r => r.achievement_id));
 
     const newlyEarned = [];
     for (const def of defs) {
       if (earnedIds.has(def.achievementId)) continue;
+      
       if (await checkAchievementQualification(userId, userType, def, context)) {
-        if (await awardAchievement(userId, userType, def)) newlyEarned.push({ ...def, earnedAt: new Date().toISOString() });
+        const success = await awardAchievement(userId, userType, def);
+        if (success) {
+          newlyEarned.push({ ...def, earnedAt: new Date().toISOString() });
+        }
       }
     }
     return newlyEarned;
-  } catch (error) { return []; }
+  } catch (error) { 
+    console.error('[achievementService] checkAndAwardAchievements error:', error.message);
+    return []; 
+  }
 }
 
 async function checkAchievementQualification(userId, userType, def, context = {}) {
   try {
     const res = await runAchievementChecker(def.achievementId, userId, userType, context);
-    if (!res.error || res.error !== 'no_checker') return res.qualifies;
+    if (res && (!res.error || res.error !== 'no_checker')) {
+      return res.qualifies;
+    }
     return (await calculateCurrentProgress(userId, def)) >= def.requirementValue;
-  } catch (error) { return false; }
+  } catch (error) { 
+    return false; 
+  }
 }
 
 async function calculateCurrentProgress(userId, def) {
   try {
     const progKey = def.userType === 'driver' ? COLLECTION_KEYS.driverProgression : COLLECTION_KEYS.recruiterProgression;
     const filter = def.userType === 'driver' ? { driver_id: userId } : { recruiter_id: userId };
+    
     const progRes = await dataAccess.queryRecords(progKey, { filters: filter, limit: 1, suppressAuth: true });
     const progression = progRes.items?.[0] || {};
 
     if (def.requirementType === 'count') {
-      const val = getFieldValue(progression, def.requirementField);
+      const val = progression[def.requirementField];
       if (val !== undefined) return val;
-      const evts = await dataAccess.queryRecords(COLLECTION_KEYS.gamificationEvents, { filters: { user_id: userId, action: def.requirementField }, limit: 1000, suppressAuth: true });
+      
+      const evts = await dataAccess.queryRecords(COLLECTION_KEYS.gamificationEvents, { 
+        filters: { user_id: userId, action: def.requirementField }, 
+        limit: 1000, 
+        suppressAuth: true 
+      });
       return evts.items?.length || 0;
     }
-    if (def.requirementType === 'streak') return progression.streak_days || 0;
-    const val = getFieldValue(progression, def.requirementField);
+    
+    if (def.requirementType === 'streak') {
+      return progression.streak_days || 0;
+    }
+    
+    const val = progression[def.requirementField];
     return def.requirementType === 'threshold' ? (val || 0) : (val ? 1 : 0);
-  } catch (error) { return 0; }
-}
-
-function getFieldValue(record, field) {
-  const variations = [field, field.replace(/_/g, ' '), field.charAt(0).toUpperCase() + field.slice(1)];
-  for (const v of variations) if (record[v] !== undefined) return record[v];
-  return undefined;
+  } catch (error) { 
+    return 0; 
+  }
 }
 
 async function awardAchievement(userId, userType, def) {
   try {
     const now = new Date().toISOString();
-    await dataAccess.insertRecord(COLLECTION_KEYS.driverAchievements, { user_id: userId, user_type: userType, achievement_id: def.achievementId, achievement_name: def.name, earned_at: now, progress: 100, is_complete: 'Yes', notified: 'No', display_order: def.displayOrder || 0 }, { suppressAuth: true });
+    await dataAccess.insertRecord(COLLECTION_KEYS.driverAchievements, { 
+      user_id: userId, 
+      user_type: userType, 
+      achievement_id: def.achievementId, 
+      achievement_name: def.name, 
+      earned_at: now, 
+      progress: 100, 
+      is_complete: 'Yes', 
+      notified: 'No', 
+      display_order: def.displayOrder || 0 
+    }, { suppressAuth: true });
 
     if (def.xpReward > 0) {
-      if (userType === 'driver') await awardDriverXP(userId, 'achievement_earned', { achievementId: def.achievementId, xpOverride: def.xpReward });
-      else await awardRecruiterPoints(userId, 'achievement_earned', { achievementId: def.achievementId, pointsOverride: def.xpReward });
+      if (userType === 'driver') {
+        await awardDriverXP(userId, 'achievement_earned', { 
+          achievementId: def.achievementId, 
+          xpOverride: def.xpReward 
+        });
+      } else {
+        await awardRecruiterPoints(userId, 'achievement_earned', { 
+          achievementId: def.achievementId, 
+          pointsOverride: def.xpReward 
+        });
+      }
     }
 
-    await createNotification(userId, 'achievement_earned', `Unlocked: ${def.name}!`, def.description + (def.xpReward > 0 ? ` +${def.xpReward} XP` : ''), '/dashboard');
-    await logGamificationEvent(userId, userType, { eventType: 'achievement_earned', action: 'achievement_earned', xpEarned: def.xpReward || 0, metadata: { achievementId: def.achievementId, achievementName: def.name, category: def.category } });
+    await createNotification(
+      userId, 
+      'achievement_earned', 
+      `Unlocked: ${def.name}!`, 
+      def.description + (def.xpReward > 0 ? ` +${def.xpReward} ${userType === 'driver' ? 'XP' : 'Points'}` : ''), 
+      '/dashboard'
+    );
+    
+    await logGamificationEvent(userId, userType, { 
+      eventType: 'achievement_earned', 
+      action: 'achievement_earned', 
+      xpEarned: userType === 'driver' ? def.xpReward : 0, 
+      pointsEarned: userType === 'recruiter' ? def.xpReward : 0,
+      metadata: { 
+        achievementId: def.achievementId, 
+        achievementName: def.name, 
+        category: def.category 
+      } 
+    });
+    
     return true;
-  } catch (error) { return false; }
+  } catch (error) { 
+    console.error('[achievementService] awardAchievement error:', error.message);
+    return false; 
+  }
 }
 
 export async function manuallyAwardAchievement(userId, achievementId) {
   try {
-    const res = await dataAccess.queryRecords(COLLECTION_KEYS.achievementDefinitions, { filters: { achievement_id: achievementId }, limit: 1, suppressAuth: true });
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.achievementDefinitions, { 
+      filters: { achievement_id: achievementId }, 
+      limit: 1, 
+      suppressAuth: true 
+    });
+    
     if (!res.items?.length) return { success: false, reason: 'not_found' };
     const def = normalizeAchievementDefinition(res.items[0]);
 
-    const earned = await dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { filters: { user_id: userId, achievement_id: achievementId, is_complete: 'Yes' }, limit: 1, suppressAuth: true });
+    const earned = await dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { 
+      filters: { user_id: userId, achievement_id: achievementId, is_complete: 'Yes' }, 
+      limit: 1, 
+      suppressAuth: true 
+    });
+    
     if (earned.items?.length) return { success: false, reason: 'already_earned' };
 
     const awarded = await awardAchievement(userId, def.userType, def);
-    return awarded ? { success: true, achievement: { ...def, earnedAt: new Date().toISOString() } } : { success: false, reason: 'award_failed' };
-  } catch (error) { return { success: false, error: error.message }; }
+    return awarded 
+      ? { success: true, achievement: { ...def, earnedAt: new Date().toISOString() } } 
+      : { success: false, reason: 'award_failed' };
+  } catch (error) { 
+    return { success: false, error: error.message }; 
+  }
 }
 
 export async function checkProfileAchievements(driverId, data = {}) {
-  return await checkAndAwardAchievements(driverId, 'driver', { action: 'profile_update', profileCompletion: data.profileCompletion || 0, hasPhoto: !!data.photoUrl, hasCDL: !!data.cdlNumber, cdlVerified: !!data.cdlVerified, bioLength: (data.bio || '').length });
+  return await checkAndAwardAchievements(driverId, 'driver', { 
+    action: 'profile_update', 
+    profileCompletion: data.profileCompletion || 0, 
+    hasPhoto: !!data.photoUrl, 
+    hasCDL: !!data.cdlNumber, 
+    cdlVerified: !!data.cdlVerified, 
+    bioLength: (data.bio || '').length 
+  });
 }
 
 export async function checkApplicationAchievements(driverId, count) {
-  return await checkAndAwardAchievements(driverId, 'driver', { action: 'submit_application', totalApplications: count });
+  return await checkAndAwardAchievements(driverId, 'driver', { 
+    action: 'submit_application', 
+    totalApplications: count 
+  });
 }
 
 export async function checkResponseAchievements(driverId, hours) {
-  return await checkAndAwardAchievements(driverId, 'driver', { action: 'message_response', responseTimeHours: hours });
+  return await checkAndAwardAchievements(driverId, 'driver', { 
+    action: 'message_response', 
+    responseTimeHours: hours 
+  });
 }
 
 export async function checkLevelAchievements(driverId, level) {
-  return await checkAndAwardAchievements(driverId, 'driver', { action: 'level_up', level });
+  return await checkAndAwardAchievements(driverId, 'driver', { 
+    action: 'level_up', 
+    level 
+  });
 }
 
 export async function checkHireAchievements(recruiterId, count) {
-  return await checkAndAwardAchievements(recruiterId, 'recruiter', { action: 'successful_hire', totalHires: count });
+  return await checkAndAwardAchievements(recruiterId, 'recruiter', { 
+    action: 'successful_hire', 
+    totalHires: count 
+  });
 }
 
 export async function checkStreakAchievements(driverId, days) {
-  return await checkAndAwardAchievements(driverId, 'driver', { action: 'streak_update', streakDays: days });
+  return await checkAndAwardAchievements(driverId, 'driver', { 
+    action: 'streak_update', 
+    streakDays: days 
+  });
 }
 
+/**
+ * Batch check achievements for all users of a certain type
+ */
 export async function batchCheckAchievements(userType) {
+  const traceId = `batch-achievements-${Date.now()}`;
   try {
     const key = userType === 'driver' ? COLLECTION_KEYS.driverProgression : COLLECTION_KEYS.recruiterProgression;
     const idField = userType === 'driver' ? 'driver_id' : 'recruiter_id';
+    
     const res = await dataAccess.queryRecords(key, { limit: 1000, suppressAuth: true });
+    const users = res.items || [];
+    
+    let processed = 0;
     let awarded = 0;
-    for (const u of (res.items || [])) {
-      if (u[idField]) { const newly = await checkAndAwardAchievements(u[idField], userType); awarded += newly.length; }
+    
+    // Process users in chunks
+    const chunks = chunkArray(users, 10);
+    
+    for (const chunk of chunks) {
+      const results = await Promise.all(chunk.map(async (u) => {
+        if (u[idField]) {
+          try {
+            const newly = await checkAndAwardAchievements(u[idField], userType);
+            return newly.length;
+          } catch (err) {
+            console.error(`[achievementService] Failed for user ${u[idField]}:`, err.message);
+            return 0;
+          }
+        }
+        return 0;
+      }));
+      
+      awarded += results.reduce((a, b) => a + b, 0);
+      processed += chunk.length;
+      
+      // Delay to respect rate limits
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
-    return { processed: res.items?.length || 0, awarded };
-  } catch (error) { return { error: error.message }; }
+
+    await log({
+      level: 'INFO',
+      source: 'achievement-service',
+      message: `Batch achievement check complete: ${awarded} achievements awarded`,
+      traceId,
+      details: { processed, awarded, userType }
+    });
+    
+    return { processed, awarded };
+  } catch (error) { 
+    await log({
+      level: 'ERROR',
+      source: 'achievement-service',
+      message: 'Batch achievement check failed',
+      traceId,
+      details: { error: error.message, userType }
+    });
+    return { error: error.message }; 
+  }
 }
 
+/**
+ * Normalize achievement definition record
+ */
 function normalizeAchievementDefinition(r) {
-  return { _id: r._id, achievementId: r.achievement_id, name: r.name, description: r.description, category: r.category, icon: r.icon, color: r.color, userType: r.user_type, requirementType: r.requirement_type, requirementField: r.requirement_field, requirementValue: r.requirement_value || 1, xpReward: r.xp_reward || 0, isHidden: r.is_hidden === 'Yes', isActive: r.is_active === 'Yes', displayOrder: r.display_order || 0 };
+  return { 
+    _id: r._id, 
+    achievementId: r.achievement_id, 
+    name: r.name, 
+    description: r.description, 
+    category: r.category, 
+    icon: r.icon, 
+    color: r.color, 
+    userType: r.user_type, 
+    requirementType: r.requirement_type, 
+    requirementField: r.requirement_field, 
+    requirementValue: r.requirement_value || 1, 
+    xpReward: r.xp_reward || 0, 
+    isHidden: r.is_hidden === 'Yes', 
+    isActive: r.is_active === 'Yes', 
+    displayOrder: r.display_order || 0 
+  };
 }
 
-export function hasAchievementChecker(id, type) { return !!(type === 'driver' ? DRIVER_ACHIEVEMENT_CHECKERS : RECRUITER_ACHIEVEMENT_CHECKERS)[id]; }
-export function listAchievementCheckers() { return { driver: Object.keys(DRIVER_ACHIEVEMENT_CHECKERS), recruiter: Object.keys(RECRUITER_ACHIEVEMENT_CHECKERS) }; }
+export function hasAchievementChecker(id, type) { 
+  return !!(type === 'driver' ? DRIVER_ACHIEVEMENT_CHECKERS : RECRUITER_ACHIEVEMENT_CHECKERS)[id]; 
+}
 
+export function listAchievementCheckers() { 
+  return { 
+    driver: Object.keys(DRIVER_ACHIEVEMENT_CHECKERS), 
+    recruiter: Object.keys(RECRUITER_ACHIEVEMENT_CHECKERS) 
+  }; 
+}
+
+/**
+ * Get progress for multiple achievements at once
+ */
 export async function getBulkAchievementProgress(userId, userType, ids = []) {
   try {
     const defs = await getAchievementDefinitions(userType);
     const results = {};
-    for (const def of defs) {
-      if (ids.length && !ids.includes(def.achievementId)) continue;
+    
+    // Process in sequential chunks to avoid overwhelming the system
+    const targetDefs = ids.length ? defs.filter(d => ids.includes(d.achievementId)) : defs;
+    
+    for (const def of targetDefs) {
       const prog = await getAchievementProgress(userId, def.achievementId);
-      results[def.achievementId] = { name: def.name, category: def.category, ...prog };
+      results[def.achievementId] = { 
+        name: def.name, 
+        category: def.category, 
+        ...prog 
+      };
     }
+    
     return results;
-  } catch (error) { return {}; }
+  } catch (error) { 
+    console.error('[achievementService] getBulkAchievementProgress error:', error.message);
+    return {}; 
+  }
 }

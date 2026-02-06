@@ -1,77 +1,25 @@
+/**
+ * Recruiter Service
+ *
+ * Core service for recruiter-specific operations including:
+ * - Profile management
+ * - Carrier portfolio management (Agency Model)
+ * - Pipeline and candidate tracking
+ * - Stats and analytics
+ *
+ * This service uses unified dataAccess for dual-source support.
+ * 
+ * @module backend/recruiter_service
+ */
+
 import wixUsersBackend from 'wix-users-backend';
 import * as dataAccess from 'backend/dataAccess';
 import { sendStatusUpdateNotification } from 'backend/emailService';
 import * as lifecycleService from 'backend/lifecycleService';
-
-// Gamification hooks - lazy-loaded to avoid circular dependencies
-async function getGamificationService() {
-  return await import('backend/gamificationService');
-}
-
-async function getChallengeService() {
-  return await import('backend/challengeService');
-}
-
-// Non-blocking gamification award helpers
-async function awardDriverXPNonBlocking(driverId, action, metadata = {}) {
-  try {
-    const gamification = await getGamificationService();
-    await gamification.awardDriverXP(driverId, action, metadata);
-  } catch (err) {
-    console.warn(`Driver XP award failed for ${action}:`, err.message);
-  }
-}
-
-async function awardRecruiterPointsNonBlocking(recruiterId, action, metadata = {}) {
-  try {
-    const gamification = await getGamificationService();
-    await gamification.awardRecruiterPoints(recruiterId, action, metadata);
-  } catch (err) {
-    console.warn(`Recruiter points award failed for ${action}:`, err.message);
-  }
-}
-
-async function updateChallengeProgressNonBlocking(userId, action, count = 1) {
-  try {
-    const challengeService = await getChallengeService();
-    await challengeService.updateChallengeProgress(userId, action, count);
-  } catch (err) {
-    console.warn(`Challenge progress update failed for ${action}:`, err.message);
-  }
-}
-
-// Lazy-loaded referral service for cross-platform bonuses
-async function getReferralService() {
-  return await import('backend/referralService');
-}
-
-// Process hire bonuses (match quality + referral conversions)
-async function processHireBonusNonBlocking(driverId, recruiterId, matchScore, metadata = {}) {
-  try {
-    const referralService = await getReferralService();
-    await referralService.processHireBonus(driverId, recruiterId, matchScore, metadata);
-  } catch (err) {
-    console.warn('Hire bonus processing failed:', err.message);
-  }
-}
-
-// Pipeline automation hooks - lazy-loaded to avoid circular dependencies
-async function getPipelineAutomation() {
-  return await import('backend/pipelineAutomationService');
-}
-
-// Non-blocking pipeline event emission
-async function emitPipelineEventNonBlocking(carrierDot, eventType, eventData) {
-  try {
-    const automation = await getPipelineAutomation();
-    await automation.processEvent(carrierDot, eventType, eventData);
-  } catch (err) {
-    console.warn(`Pipeline event emission failed for ${eventType}:`, err.message);
-  }
-}
+import { log } from 'backend/observabilityService';
 
 // ============================================================================
-// CONFIGURATION
+// CONFIGURATION & CONSTANTS
 // ============================================================================
 
 const CONFIG = {
@@ -91,7 +39,6 @@ const CONFIG = {
   STAGE_ORDER: ['interested', 'applied', 'in_review', 'contacted', 'offer', 'hired']
 };
 
-// Collection key mapping for config.jsw
 const COLLECTION_KEYS = {
   recruiterProfiles: 'recruiterProfiles',
   recruiterCarriers: 'recruiterCarriers',
@@ -101,31 +48,90 @@ const COLLECTION_KEYS = {
 };
 
 // ============================================================================
-// HELPER: Get current user ID
+// LAZY-LOADED SERVICES
+// ============================================================================
+
+async function getGamificationService() {
+  return await import('backend/gamificationService');
+}
+
+async function getChallengeService() {
+  return await import('backend/challengeService');
+}
+
+async function getReferralService() {
+  return await import('backend/referralService');
+}
+
+async function getPipelineAutomation() {
+  return await import('backend/pipelineAutomationService');
+}
+
+// ============================================================================
+// NON-BLOCKING HELPERS
+// ============================================================================
+
+async function awardDriverXPNonBlocking(driverId, action, metadata = {}) {
+  try {
+    const gamification = await getGamificationService();
+    await gamification.awardDriverXP(driverId, action, metadata);
+  } catch (err) {
+    console.warn(`[recruiter_service] Driver XP award failed for ${action}:`, err.message);
+  }
+}
+
+async function awardRecruiterPointsNonBlocking(recruiterId, action, metadata = {}) {
+  try {
+    const gamification = await getGamificationService();
+    await gamification.awardRecruiterPoints(recruiterId, action, metadata);
+  } catch (err) {
+    console.warn(`[recruiter_service] Recruiter points award failed for ${action}:`, err.message);
+  }
+}
+
+async function updateChallengeProgressNonBlocking(userId, action, count = 1) {
+  try {
+    const challengeService = await getChallengeService();
+    await challengeService.updateChallengeProgress(userId, action, count);
+  } catch (err) {
+    console.warn(`[recruiter_service] Challenge progress update failed for ${action}:`, err.message);
+  }
+}
+
+async function processHireBonusNonBlocking(driverId, recruiterId, matchScore, metadata = {}) {
+  try {
+    const referralService = await getReferralService();
+    await referralService.processHireBonus(driverId, recruiterId, matchScore, metadata);
+  } catch (err) {
+    console.warn('[recruiter_service] Hire bonus processing failed:', err.message);
+  }
+}
+
+async function emitPipelineEventNonBlocking(carrierDot, eventType, eventData) {
+  try {
+    const automation = await getPipelineAutomation();
+    await automation.processEvent(carrierDot, eventType, eventData);
+  } catch (err) {
+    console.warn(`[recruiter_service] Pipeline event emission failed for ${eventType}:`, err.message);
+  }
+}
+
+// ============================================================================
+// AUTH HELPERS
 // ============================================================================
 
 async function getCurrentUserId() {
   const currentUser = wixUsersBackend.currentUser;
-  if (!currentUser.loggedIn) {
-    return null;
-  }
-  return currentUser.id;
+  return currentUser.loggedIn ? currentUser.id : null;
 }
-
-// ============================================================================
-// HELPER: Verify recruiter has access to carrier
-// ============================================================================
 
 async function verifyRecruiterAccess(carrierDOT) {
   try {
     const userId = await getCurrentUserId();
-    if (!userId) {
-      return { success: false, error: 'Not authenticated' };
-    }
+    if (!userId) return { success: false, error: 'Not authenticated' };
 
     const dotString = String(carrierDOT).trim();
 
-    // Check RecruiterCarriers for access
     const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
       filters: { 
         recruiter_id: userId, 
@@ -142,26 +148,22 @@ async function verifyRecruiterAccess(carrierDOT) {
 
     return { success: true, carrierAccess: result.items[0] };
   } catch (error) {
-    console.error('verifyRecruiterAccess error:', error);
+    console.error('[recruiter_service] verifyRecruiterAccess error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 // ============================================================================
-// GET OR CREATE RECRUITER PROFILE
+// PUBLIC WEB METHODS
 // ============================================================================
 
 /**
- * Get the logged-in user's recruiter profile
- * Returns profile + list of carriers they have access to
+ * Get or create recruiter profile
  */
 export async function getOrCreateRecruiterProfile() {
   try {
     const currentUser = wixUsersBackend.currentUser;
-
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
 
     const userId = currentUser.id;
     const userEmail = await currentUser.getEmail();
@@ -174,9 +176,7 @@ export async function getOrCreateRecruiterProfile() {
     });
 
     let profile;
-
     if (!profileResult.success || profileResult.items.length === 0) {
-      // Create new profile
       const newProfile = {
         display_name: '',
         email: userEmail || '',
@@ -185,30 +185,25 @@ export async function getOrCreateRecruiterProfile() {
         is_independent: true,
         created_date: new Date(),
         last_active_date: new Date(),
-        is_active: false, // SECURITY: Default to inactive/pending until admin approves
+        is_active: false,
         verification_status: 'pending'
       };
 
       const result = await dataAccess.insertRecord(COLLECTION_KEYS.recruiterProfiles, newProfile, { suppressAuth: true });
       if (!result.success) throw new Error(result.error);
       profile = result.record;
-      console.log('Created new recruiter profile');
     } else {
       profile = profileResult.items[0];
-
-      // Update last active date
       await dataAccess.updateRecord(COLLECTION_KEYS.recruiterProfiles, {
         ...profile,
+        _id: profile._id,
         last_active_date: new Date()
       }, { suppressAuth: true });
     }
 
-    // Get carriers this recruiter has access to
+    // Get carriers
     const carriersResult = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
-      filters: { 
-        recruiter_id: userId, 
-        is_active: true 
-      },
+      filters: { recruiter_id: userId, is_active: true },
       sort: [{ field: 'added_date', direction: 'desc' }],
       limit: 100,
       suppressAuth: true
@@ -216,17 +211,11 @@ export async function getOrCreateRecruiterProfile() {
 
     const carriers = carriersResult.items || [];
 
-    // If they have carriers, get full carrier info for the first one
     let defaultCarrier = null;
     if (carriers.length > 0) {
       const carrierDot = carriers[0].carrier_dot;
-      const carrierInfo = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', carrierDot, { suppressAuth: true });
-      if (carrierInfo) {
-        defaultCarrier = carrierInfo;
-      }
+      defaultCarrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', carrierDot, { suppressAuth: true });
     }
-
-    console.log(`Recruiter profile loaded with ${carriers.length} carriers`);
 
     return {
       success: true,
@@ -236,181 +225,111 @@ export async function getOrCreateRecruiterProfile() {
       defaultCarrier: defaultCarrier,
       defaultCarrierDOT: carriers.length > 0 ? carriers[0].carrier_dot : null
     };
-
   } catch (error) {
-    console.error('getOrCreateRecruiterProfile error:', error);
+    console.error('[recruiter_service] getOrCreateRecruiterProfile error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// ADD CARRIER TO RECRUITER'S PORTFOLIO
-// ============================================================================
-
 /**
- * Add a carrier to the recruiter's portfolio
+ * Add a carrier to recruiter portfolio
  */
 export async function addCarrier(carrierDOT) {
   try {
     const userId = await getCurrentUserId();
-    if (!userId) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!userId) return { success: false, error: 'User not logged in' };
 
     const dotString = String(carrierDOT).trim();
-
-    // Check if carrier exists
     const carrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', dotString, { suppressAuth: true });
 
-    if (!carrier) {
-      return {
-        success: false,
-        error: `Carrier with DOT ${dotString} not found`
-      };
-    }
+    if (!carrier) return { success: false, error: `Carrier with DOT ${dotString} not found` };
 
-    // Check if already added
     const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
-      filters: { 
-        recruiter_id: userId, 
-        carrier_dot: dotString 
-      },
+      filters: { recruiter_id: userId, carrier_dot: dotString },
       limit: 1,
       suppressAuth: true
     });
 
     if (existingResult.success && existingResult.items.length > 0) {
       const existing = existingResult.items[0];
-      if (existing.is_active) {
-        return {
-          success: false,
-          error: 'This carrier is already in your portfolio'
-        };
-      } else {
-        // Reactivate
-        await dataAccess.updateRecord(COLLECTION_KEYS.recruiterCarriers, {
-          ...existing,
-          is_active: true,
-          added_date: new Date()
-        }, { suppressAuth: true });
+      if (existing.is_active) return { success: false, error: 'Already in portfolio' };
+      
+      await dataAccess.updateRecord(COLLECTION_KEYS.recruiterCarriers, {
+        ...existing,
+        _id: existing._id,
+        is_active: true,
+        added_date: new Date()
+      }, { suppressAuth: true });
 
-        return {
-          success: true,
-          carrierAccess: existing,
-          carrierInfo: carrier,
-          reactivated: true
-        };
-      }
+      return { success: true, carrierAccess: existing, carrierInfo: carrier, reactivated: true };
     }
 
-    // Create new carrier access record
     const newAccess = {
       recruiter_id: userId,
       carrier_dot: dotString,
       carrier_name: carrier.legal_name || carrier.title || 'Unknown',
       added_date: new Date(),
-      is_active: false, // SECURITY: Default to inactive/pending until ownership verified
+      is_active: false, // Default to inactive until verified
       verification_status: 'pending_verification'
     };
 
     const result = await dataAccess.insertRecord(COLLECTION_KEYS.recruiterCarriers, newAccess, { suppressAuth: true });
-
-    console.log(`Recruiter added carrier ${dotString} to portfolio`);
-
-    return {
-      success: true,
-      carrierAccess: result.record,
-      carrierInfo: carrier
-    };
-
+    return { success: true, carrierAccess: result.record, carrierInfo: carrier };
   } catch (error) {
-    console.error('addCarrier error:', error);
+    console.error('[recruiter_service] addCarrier error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// REMOVE CARRIER FROM PORTFOLIO
-// ============================================================================
-
 /**
- * Remove a carrier from the recruiter's portfolio
+ * Remove a carrier (soft delete)
  */
 export async function removeCarrier(carrierDOT) {
   try {
     const userId = await getCurrentUserId();
-    if (!userId) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!userId) return { success: false, error: 'User not logged in' };
 
     const dotString = String(carrierDOT).trim();
-
-    // Find the access record
     const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
-      filters: { 
-        recruiter_id: userId, 
-        carrier_dot: dotString 
-      },
+      filters: { recruiter_id: userId, carrier_dot: dotString },
       limit: 1,
       suppressAuth: true
     });
 
-    if (!result.success || result.items.length === 0) {
-      return { success: false, error: 'Carrier not found in your portfolio' };
-    }
+    if (!result.success || result.items.length === 0) return { success: false, error: 'Carrier not found' };
 
-    // Soft delete - set is_active to false
     const access = result.items[0];
     await dataAccess.updateRecord(COLLECTION_KEYS.recruiterCarriers, {
       ...access,
+      _id: access._id,
       is_active: false
     }, { suppressAuth: true });
 
-    console.log(`Recruiter removed carrier ${dotString} from portfolio`);
-
     return { success: true };
-
   } catch (error) {
-    console.error('removeCarrier error:', error);
+    console.error('[recruiter_service] removeCarrier error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// GET RECRUITER'S CARRIERS
-// ============================================================================
-
 /**
- * Get list of all carriers in recruiter's portfolio
+ * Get all carriers for the current recruiter
  */
 export async function getRecruiterCarriers() {
   try {
     const userId = await getCurrentUserId();
-    if (!userId) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!userId) return { success: false, error: 'User not logged in' };
 
-    // Get all carrier access records
     const accessResult = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
-      filters: { 
-        recruiter_id: userId, 
-        is_active: true 
-      },
+      filters: { recruiter_id: userId, is_active: true },
       sort: [{ field: 'added_date', direction: 'desc' }],
       limit: 100,
       suppressAuth: true
     });
 
     const carrierAccess = accessResult.items || [];
+    if (carrierAccess.length === 0) return { success: true, carriers: [] };
 
-    if (carrierAccess.length === 0) {
-      return {
-        success: true,
-        carriers: []
-      };
-    }
-
-    // Get full carrier info for each
     const dotNumbers = carrierAccess.map(a => a.carrier_dot);
     const carriersResult = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
       filters: { dot_number: { hasSome: dotNumbers } },
@@ -419,19 +338,13 @@ export async function getRecruiterCarriers() {
     });
 
     const carriersItems = carriersResult.items || [];
+    const carrierMap = new Map(carriersItems.map(c => [String(c.dot_number), c]));
 
-    // Create lookup map
-    const carrierMap = {};
-    carriersItems.forEach(c => {
-      carrierMap[c.dot_number] = c;
-    });
-
-    // Combine access with carrier info
     const carriers = carrierAccess.map(access => {
-      const carrier = carrierMap[access.carrier_dot] || {};
+      const carrier = carrierMap.get(String(access.carrier_dot)) || {};
       return {
         dot_number: access.carrier_dot,
-        carrier_name: access.carrier_name || carrier.legal_name || carrier.title || 'Unknown',
+        carrier_name: access.carrier_name || carrier.legal_name || 'Unknown',
         phy_city: carrier.phy_city,
         phy_state: carrier.phy_state,
         nbr_power_unit: carrier.nbr_power_unit,
@@ -440,74 +353,49 @@ export async function getRecruiterCarriers() {
       };
     });
 
-    return {
-      success: true,
-      carriers: carriers
-    };
-
+    return { success: true, carriers };
   } catch (error) {
-    console.error('getRecruiterCarriers error:', error);
+    console.error('[recruiter_service] getRecruiterCarriers error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// VALIDATE CARRIER DOT
-// ============================================================================
-
 /**
- * Validate a carrier DOT exists and return carrier info
+ * Validate DOT exists
  */
 export async function validateCarrierDOT(carrierDOT) {
   try {
     const dotString = String(carrierDOT).trim();
-
-    // Query carrier
     const carrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', dotString, { suppressAuth: true });
 
-    if (!carrier) {
-      return {
-        success: false,
-        error: `No carrier found with DOT ${dotString}`
-      };
-    }
+    if (!carrier) return { success: false, error: `DOT ${dotString} not found` };
 
     return {
       success: true,
       carrier: {
         dot_number: carrier.dot_number,
-        legal_name: carrier.legal_name || carrier.title || 'Unknown',
+        legal_name: carrier.legal_name || 'Unknown',
         phy_city: carrier.phy_city,
         phy_state: carrier.phy_state,
         nbr_power_unit: carrier.nbr_power_unit,
         driver_total: carrier.driver_total
       }
     };
-
   } catch (error) {
-    console.error('validateCarrierDOT error:', error);
+    console.error('[recruiter_service] validateCarrierDOT error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// GET PIPELINE CANDIDATES
-// ============================================================================
-
 /**
- * Get all candidates in the pipeline for a carrier
+ * Get candidates in pipeline
  */
 export async function getPipelineCandidates(carrierDOT, filters = {}) {
   try {
-    // Verify access
     const accessCheck = await verifyRecruiterAccess(carrierDOT);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
+    if (!accessCheck.success) return accessCheck;
 
     const dotString = String(carrierDOT).trim();
-
-    // Build query
     const interestFilters = { carrier_dot: dotString };
 
     if (filters.status && filters.status !== 'all') {
@@ -528,32 +416,23 @@ export async function getPipelineCandidates(carrierDOT, filters = {}) {
     });
 
     const interests = result.items || [];
-
-    // Get driver profile IDs
     const driverIds = [...new Set(interests.map(i => i.driver_id).filter(Boolean))];
 
-    // Fetch driver profiles
-    let driverProfiles = {};
+    let driverProfiles = new Map();
     if (driverIds.length > 0) {
       const profilesResult = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
         filters: { _id: { hasSome: driverIds } },
         limit: 100,
         suppressAuth: true
       });
-
-      (profilesResult.items || []).forEach(p => {
-        driverProfiles[p._id] = p;
-      });
+      (profilesResult.items || []).forEach(p => driverProfiles.set(p._id, p));
     }
 
-    // Combine interests with driver profiles
     const candidates = interests.map(interest => {
-      const driver = driverProfiles[interest.driver_id] || {};
-
-      // Parse status history
+      const driver = driverProfiles.get(interest.driver_id) || {};
       let statusHistory = [];
       try {
-        statusHistory = interest.status_history ? JSON.parse(interest.status_history) : [];
+        statusHistory = interest.status_history ? (typeof interest.status_history === 'string' ? JSON.parse(interest.status_history) : interest.status_history) : [];
       } catch (e) {
         statusHistory = [];
       }
@@ -573,7 +452,6 @@ export async function getPipelineCandidates(carrierDOT, filters = {}) {
         preferredContact: interest.preferred_contact,
         availability: interest.availability,
         driverMessage: interest.driver_message,
-        // Driver profile fields
         driverName: driver.display_name || driver.driver_name || 'Unknown Driver',
         driverEmail: driver.email || interest.contact_email || '',
         driverPhone: driver.phone || interest.contact_phone || '',
@@ -585,68 +463,45 @@ export async function getPipelineCandidates(carrierDOT, filters = {}) {
       };
     });
 
-    // Group by status
     const groupedByStatus = {};
-    CONFIG.STAGE_ORDER.forEach(stage => {
-      groupedByStatus[stage] = [];
+    CONFIG.STAGE_ORDER.forEach(stage => groupedByStatus[stage] = []);
+    candidates.forEach(c => {
+      const stage = c.status || CONFIG.PIPELINE_STAGES.INTERESTED;
+      if (groupedByStatus[stage]) groupedByStatus[stage].push(c);
     });
-
-    candidates.forEach(candidate => {
-      const stage = candidate.status || CONFIG.PIPELINE_STAGES.INTERESTED;
-      if (groupedByStatus[stage]) {
-        groupedByStatus[stage].push(candidate);
-      }
-    });
-
-    console.log(`Pipeline loaded: ${candidates.length} candidates for carrier ${dotString}`);
 
     return {
       success: true,
-      candidates: candidates,
-      groupedByStatus: groupedByStatus,
+      candidates,
+      groupedByStatus,
       totalCount: candidates.length,
       stageOrder: CONFIG.STAGE_ORDER
     };
-
   } catch (error) {
-    console.error('getPipelineCandidates error:', error);
+    console.error('[recruiter_service] getPipelineCandidates error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// UPDATE CANDIDATE STATUS
-// ============================================================================
-
 /**
- * Move a candidate to a new pipeline stage
+ * Move candidate to new stage
  */
 export async function updateCandidateStatus(interestId, newStatus, notes = '') {
   try {
-    // Get the interest record
     const interest = await dataAccess.getRecord(COLLECTION_KEYS.interests, interestId, { suppressAuth: true });
+    if (!interest) return { success: false, error: 'Record not found' };
 
-    if (!interest) {
-      return { success: false, error: 'Candidate record not found' };
-    }
-
-    // Verify access to this carrier
     const accessCheck = await verifyRecruiterAccess(interest.carrier_dot);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
+    if (!accessCheck.success) return accessCheck;
 
     const now = new Date();
-
-    // Parse existing status history
     let statusHistory = [];
     try {
-      statusHistory = interest.status_history ? JSON.parse(interest.status_history) : [];
+      statusHistory = interest.status_history ? (typeof interest.status_history === 'string' ? JSON.parse(interest.status_history) : interest.status_history) : [];
     } catch (e) {
       statusHistory = [];
     }
 
-    // Add new status entry
     statusHistory.push({
       status: newStatus,
       timestamp: now.toISOString(),
@@ -654,7 +509,6 @@ export async function updateCandidateStatus(interestId, newStatus, notes = '') {
       actor: 'recruiter'
     });
 
-    // Calculate recruiter response time if this is first recruiter action
     let recruiterResponseTime = interest.recruiter_response_time;
     if (!recruiterResponseTime && (newStatus === CONFIG.PIPELINE_STAGES.CONTACTED || newStatus === CONFIG.PIPELINE_STAGES.IN_REVIEW)) {
       const startTime = interest.application_date || interest.action_timestamp;
@@ -664,106 +518,59 @@ export async function updateCandidateStatus(interestId, newStatus, notes = '') {
       }
     }
 
-    // Update the record
     const updatedRecord = {
       ...interest,
+      _id: interest._id,
       status: newStatus,
       status_history: JSON.stringify(statusHistory),
       action_timestamp: now,
       recruiter_response_time: recruiterResponseTime
     };
 
-    // Add outcome fields for terminal statuses
-    if (newStatus === CONFIG.PIPELINE_STAGES.HIRED ||
-        newStatus === CONFIG.PIPELINE_STAGES.REJECTED ||
-        newStatus === CONFIG.PIPELINE_STAGES.WITHDRAWN) {
+    if ([CONFIG.PIPELINE_STAGES.HIRED, CONFIG.PIPELINE_STAGES.REJECTED, CONFIG.PIPELINE_STAGES.WITHDRAWN].includes(newStatus)) {
       updatedRecord.outcome = newStatus;
       updatedRecord.outcome_date = now;
     }
 
     await dataAccess.updateRecord(COLLECTION_KEYS.interests, updatedRecord, { suppressAuth: true });
 
-    console.log(`Candidate ${interestId} moved to ${newStatus}`);
-
-    // Send email notification to driver (non-blocking)
-    try {
-      // Get driver profile to find user ID
-      if (interest.driver_id) {
-        const driverProfile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, interest.driver_id, { suppressAuth: true });
-
-        if (driverProfile && driverProfile._owner) {
-          // Get carrier name
-          let carrierName = 'the carrier';
+    // Background notifications
+    if (interest.driver_id) {
+      dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, interest.driver_id, { suppressAuth: true }).then(async (dp) => {
+        if (dp && dp._owner) {
           const carrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', interest.carrier_dot, { suppressAuth: true });
-
-          if (carrier) {
-            carrierName = carrier.legal_name || carrier.title || carrierName;
-          }
-
-          // Send notification
-          await sendStatusUpdateNotification(driverProfile._owner, {
-            driverName: driverProfile.display_name || driverProfile.driver_name || 'Driver',
-            carrierName: carrierName,
-            newStatus: newStatus,
+          const carrierName = carrier?.legal_name || carrier?.title || 'the carrier';
+          await sendStatusUpdateNotification(dp._owner, {
+            driverName: dp.display_name || 'Driver',
+            carrierName,
+            newStatus,
             applicationId: interestId
           });
-          console.log(`📧 Status notification sent to driver for ${newStatus}`);
         }
-      }
-    } catch (emailError) {
-      // Don't fail the status update if email fails
-      console.error('⚠️ Failed to send status notification email:', emailError.message);
+      }).catch(() => {});
     }
 
-    // Gamification: Award XP/points for hire completion (non-blocking)
     if (newStatus === CONFIG.PIPELINE_STAGES.HIRED) {
       const recruiterId = wixUsersBackend.currentUser?.id;
+      lifecycleService.logEvent(interest.driver_id, interest.carrier_dot, lifecycleService.EVENT_TYPES.HIRE, {
+        recruiterId,
+        matchScore: interest.match_score,
+        applicationId: interestId
+      }).catch(() => {});
 
-      // Lifecycle: Log the HIRE event (non-blocking)
-      try {
-        await lifecycleService.logEvent(interest.driver_id, interest.carrier_dot, lifecycleService.EVENT_TYPES.HIRE, {
-          recruiterId: recruiterId,
-          matchScore: interest.match_score,
-          applicationId: interestId
-        });
-        console.log(`✅ Lifecycle HIRE event logged for driver ${interest.driver_id}`);
-      } catch (err) {
-        console.warn('Failed to log lifecycle hire event:', err.message);
-      }
-
-      // Award XP to the driver who got hired
       if (interest.driver_id) {
-        awardDriverXPNonBlocking(interest.driver_id, 'get_hired', {
-          carrierDot: interest.carrier_dot,
-          carrierName: interest.carrier_name
-        });
-
-        // Update driver challenge progress for 'get_hired' action
+        awardDriverXPNonBlocking(interest.driver_id, 'get_hired', { carrierDot: interest.carrier_dot, carrierName: interest.carrier_name });
         updateChallengeProgressNonBlocking(interest.driver_id, 'get_hired', 1);
       }
 
-      // Award points to the recruiter who made the hire
       if (recruiterId) {
-        awardRecruiterPointsNonBlocking(recruiterId, 'make_hire', {
-          driverId: interest.driver_id,
-          carrierDot: interest.carrier_dot
-        });
-
-        // Update recruiter challenge progress for 'make_hire' action
+        awardRecruiterPointsNonBlocking(recruiterId, 'make_hire', { driverId: interest.driver_id, carrierDot: interest.carrier_dot });
         updateChallengeProgressNonBlocking(recruiterId, 'make_hire', 1);
       }
 
-      console.log(`🎮 Gamification rewards triggered for hire: driver ${interest.driver_id}, recruiter ${recruiterId}`);
-
-      // Process cross-platform bonuses (match quality + referral conversions)
-      const matchScore = interest.match_score || 0;
-      processHireBonusNonBlocking(interest.driver_id, recruiterId, matchScore, {
-        carrierDot: interest.carrier_dot,
-        carrierName: interest.carrier_name
-      });
+      processHireBonusNonBlocking(interest.driver_id, recruiterId, interest.match_score || 0, { carrierDot: interest.carrier_dot });
     }
 
-    // Pipeline Automation: Emit status_change event (non-blocking)
     emitPipelineEventNonBlocking(interest.carrier_dot, 'status_change', {
       driverId: interest.driver_id,
       interestId,
@@ -771,37 +578,22 @@ export async function updateCandidateStatus(interestId, newStatus, notes = '') {
       toStatus: newStatus
     });
 
-    return {
-      success: true,
-      record: updatedRecord,
-      newStatus: newStatus,
-      responseTime: recruiterResponseTime
-    };
-
+    return { success: true, record: updatedRecord, newStatus, responseTime: recruiterResponseTime };
   } catch (error) {
-    console.error('updateCandidateStatus error:', error);
+    console.error('[recruiter_service] updateCandidateStatus error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// GET PIPELINE STATS
-// ============================================================================
-
 /**
- * Get aggregate statistics for a carrier's pipeline
+ * Get pipeline stats
  */
 export async function getPipelineStats(carrierDOT) {
   try {
-    // Verify access
     const accessCheck = await verifyRecruiterAccess(carrierDOT);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
+    if (!accessCheck.success) return accessCheck;
 
     const dotString = String(carrierDOT).trim();
-
-    // Get all interests for this carrier
     const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
       filters: { carrier_dot: dotString },
       limit: 1000,
@@ -809,229 +601,122 @@ export async function getPipelineStats(carrierDOT) {
     });
 
     const interests = result.items || [];
-
-    // Calculate stats
-    const stats = {
-      totalPipeline: 0,
-      byStage: {},
-      avgResponseTime: null,
-      responseTimes: [],
-      last7Days: 0,
-      last30Days: 0,
-      conversionRate: 0
-    };
-
-    // Initialize stage counts
-    CONFIG.STAGE_ORDER.forEach(stage => {
-      stats.byStage[stage] = 0;
-    });
-    stats.byStage.rejected = 0;
-    stats.byStage.withdrawn = 0;
+    const stats = { totalPipeline: 0, byStage: {}, avgResponseTime: null, last7Days: 0, last30Days: 0, conversionRate: 0 };
+    
+    CONFIG.STAGE_ORDER.forEach(s => stats.byStage[s] = 0);
+    ['rejected', 'withdrawn'].forEach(s => stats.byStage[s] = 0);
 
     const now = new Date();
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-    let hiredCount = 0;
-    let completedCount = 0;
+    let hiredCount = 0, completedCount = 0, responseTimes = [];
 
     interests.forEach(interest => {
       const status = interest.status || CONFIG.PIPELINE_STAGES.INTERESTED;
-
-      // Count by stage
-      if (stats.byStage.hasOwnProperty(status)) {
-        stats.byStage[status]++;
-      }
-
-      // Exclude rejected/withdrawn from total pipeline count
-      if (status !== CONFIG.PIPELINE_STAGES.REJECTED &&
-          status !== CONFIG.PIPELINE_STAGES.WITHDRAWN) {
+      if (stats.byStage.hasOwnProperty(status)) stats.byStage[status]++;
+      
+      if (![CONFIG.PIPELINE_STAGES.REJECTED, CONFIG.PIPELINE_STAGES.WITHDRAWN].includes(status)) {
         stats.totalPipeline++;
       }
 
-      // Count recent interests
       const actionDate = new Date(interest.action_timestamp);
-      if (actionDate >= sevenDaysAgo) {
-        stats.last7Days++;
-      }
-      if (actionDate >= thirtyDaysAgo) {
-        stats.last30Days++;
-      }
+      if (actionDate >= sevenDaysAgo) stats.last7Days++;
+      if (actionDate >= thirtyDaysAgo) stats.last30Days++;
 
-      // Track response times
-      if (interest.recruiter_response_time) {
-        stats.responseTimes.push(interest.recruiter_response_time);
-      }
+      if (interest.recruiter_response_time) responseTimes.push(interest.recruiter_response_time);
 
-      // Track conversion
-      if (status === CONFIG.PIPELINE_STAGES.HIRED) {
-        hiredCount++;
-      }
-      if (status === CONFIG.PIPELINE_STAGES.HIRED ||
-          status === CONFIG.PIPELINE_STAGES.REJECTED ||
-          status === CONFIG.PIPELINE_STAGES.WITHDRAWN) {
+      if (status === CONFIG.PIPELINE_STAGES.HIRED) hiredCount++;
+      if ([CONFIG.PIPELINE_STAGES.HIRED, CONFIG.PIPELINE_STAGES.REJECTED, CONFIG.PIPELINE_STAGES.WITHDRAWN].includes(status)) {
         completedCount++;
       }
     });
 
-    // Calculate average response time
-    if (stats.responseTimes.length > 0) {
-      const sum = stats.responseTimes.reduce((a, b) => a + b, 0);
-      stats.avgResponseTime = Math.round((sum / stats.responseTimes.length) * 10) / 10;
+    if (responseTimes.length > 0) {
+      stats.avgResponseTime = Math.round((responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length) * 10) / 10;
     }
 
-    // Calculate conversion rate
-    if (completedCount > 0) {
-      stats.conversionRate = Math.round((hiredCount / completedCount) * 100);
-    }
+    if (completedCount > 0) stats.conversionRate = Math.round((hiredCount / completedCount) * 100);
 
-    // Response time badge
-    if (stats.avgResponseTime !== null) {
-      if (stats.avgResponseTime < 4) {
-        stats.responseBadge = 'Lightning Responder';
-        stats.badgeColor = '#10b981';
-      } else if (stats.avgResponseTime < 24) {
-        stats.responseBadge = 'Fast Responder';
-        stats.badgeColor = '#3b82f6';
-      } else if (stats.avgResponseTime < 48) {
-        stats.responseBadge = 'Active Recruiter';
-        stats.badgeColor = '#6366f1';
-      }
-    }
-
-    delete stats.responseTimes;
-
-    console.log(`Pipeline stats loaded for carrier ${dotString}`);
-
-    return {
-      success: true,
-      stats: stats
-    };
-
+    return { success: true, stats };
   } catch (error) {
-    console.error('getPipelineStats error:', error);
+    console.error('[recruiter_service] getPipelineStats error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// GET CANDIDATE DETAILS
-// ============================================================================
-
 /**
- * Get full details for a candidate
+ * Get candidate details
  */
 export async function getCandidateDetails(interestId) {
   try {
-    // Get the interest record
     const interest = await dataAccess.getRecord(COLLECTION_KEYS.interests, interestId, { suppressAuth: true });
+    if (!interest) return { success: false, error: 'Not found' };
 
-    if (!interest) {
-      return { success: false, error: 'Candidate record not found' };
-    }
-
-    // Verify access
     const accessCheck = await verifyRecruiterAccess(interest.carrier_dot);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
+    if (!accessCheck.success) return accessCheck;
 
-    // Get driver profile
     let driverProfile = null;
     if (interest.driver_id) {
       driverProfile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, interest.driver_id, { suppressAuth: true });
     }
 
-    // Parse status history
     let statusHistory = [];
     try {
-      statusHistory = interest.status_history ? JSON.parse(interest.status_history) : [];
+      statusHistory = interest.status_history ? (typeof interest.status_history === 'string' ? JSON.parse(interest.status_history) : interest.status_history) : [];
     } catch (e) {
       statusHistory = [];
     }
 
     return {
       success: true,
-      interest: {
-        ...interest,
-        status_history: statusHistory
-      },
-      driverProfile: driverProfile
+      interest: { ...interest, status_history: statusHistory },
+      driverProfile
     };
-
   } catch (error) {
-    console.error('getCandidateDetails error:', error);
+    console.error('[recruiter_service] getCandidateDetails error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// ADD RECRUITER NOTES
-// ============================================================================
-
 /**
- * Add or update recruiter notes for a candidate
+ * Add recruiter notes
  */
 export async function addRecruiterNotes(interestId, notes) {
   try {
-    // Get the interest record
     const interest = await dataAccess.getRecord(COLLECTION_KEYS.interests, interestId, { suppressAuth: true });
+    if (!interest) return { success: false, error: 'Not found' };
 
-    if (!interest) {
-      return { success: false, error: 'Candidate record not found' };
-    }
-
-    // Verify access
     const accessCheck = await verifyRecruiterAccess(interest.carrier_dot);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
+    if (!accessCheck.success) return accessCheck;
 
-    // Update notes
-    const updatedRecord = {
+    await dataAccess.updateRecord(COLLECTION_KEYS.interests, {
       ...interest,
+      _id: interest._id,
       recruiter_notes: notes
-    };
+    }, { suppressAuth: true });
 
-    await dataAccess.updateRecord(COLLECTION_KEYS.interests, updatedRecord, { suppressAuth: true });
-
-    console.log(`Notes updated for candidate ${interestId}`);
-
-    return {
-      success: true,
-      interestId: interestId
-    };
-
+    return { success: true, interestId };
   } catch (error) {
-    console.error('addRecruiterNotes error:', error);
+    console.error('[recruiter_service] addRecruiterNotes error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// UPDATE RECRUITER PROFILE
-// ============================================================================
-
 /**
- * Update recruiter's profile info
+ * Update recruiter profile
  */
 export async function updateRecruiterProfile(profileData) {
   try {
     const userId = await getCurrentUserId();
-    if (!userId) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!userId) return { success: false, error: 'Not authenticated' };
 
-    // Get existing profile
     const profile = await dataAccess.findByField(COLLECTION_KEYS.recruiterProfiles, '_owner', userId, { suppressAuth: true });
+    if (!profile) return { success: false, error: 'Profile not found' };
 
-    if (!profile) {
-      return { success: false, error: 'Profile not found' };
-    }
-
-    // Update allowed fields
     const updatedProfile = {
       ...profile,
+      _id: profile._id,
       display_name: profileData.displayName || profile.display_name,
       email: profileData.email || profile.email,
       phone: profileData.phone || profile.phone,
@@ -1041,53 +726,33 @@ export async function updateRecruiterProfile(profileData) {
     };
 
     await dataAccess.updateRecord(COLLECTION_KEYS.recruiterProfiles, updatedProfile, { suppressAuth: true });
-
-    console.log('Recruiter profile updated');
-
-    return {
-      success: true,
-      profile: updatedProfile
-    };
-
+    return { success: true, profile: updatedProfile };
   } catch (error) {
-    console.error('updateRecruiterProfile error:', error);
+    console.error('[recruiter_service] updateRecruiterProfile error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// CARRIER IDENTITY - Unified carrier lookup for all carrier-facing pages
-// ============================================================================
-
 /**
- * Get carrier details by DOT number
- * @param {string} dotNumber - The carrier DOT number
- * @returns {Promise<Object|null>} Carrier record or null
+ * Get carrier by DOT
  */
 export async function getCarrierByDOT(dotNumber) {
   try {
     if (!dotNumber) return null;
-    return await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', dotNumber, { suppressAuth: true });
+    return await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', String(dotNumber), { suppressAuth: true });
   } catch (error) {
-    console.error('getCarrierByDOT error:', error);
+    console.error('[recruiter_service] getCarrierByDOT error:', error.message);
     return null;
   }
 }
 
 /**
- * Get carrier identity for the current logged-in user
- * Unified lookup used by all carrier-facing pages (dashboard, search, compliance, etc.)
- * Wraps getOrCreateRecruiterProfile() with a focused return shape.
- *
- * @returns {Promise<Object>} { success, dotNumber, companyName, plan, needsOnboarding, ... }
+ * Get carrier identity
  */
 export async function getCarrierIdentity() {
   try {
     const result = await getOrCreateRecruiterProfile();
-
-    if (!result.success) {
-      return { success: false, error: result.error, needsOnboarding: true };
-    }
+    if (!result.success) return { success: false, error: result.error, needsOnboarding: true };
 
     const hasDOT = !!result.defaultCarrierDOT;
     const carrier = result.defaultCarrier || {};
@@ -1105,7 +770,7 @@ export async function getCarrierIdentity() {
       carriers: result.carriers
     };
   } catch (error) {
-    console.error('getCarrierIdentity error:', error);
+    console.error('[recruiter_service] getCarrierIdentity error:', error.message);
     return { success: false, error: error.message, needsOnboarding: true };
   }
 }
