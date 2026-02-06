@@ -10,6 +10,7 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **carrierMatching.jsw** - Main matching engine scoring carriers against driver preferences using weighted criteria (location, pay, operation type, turnover, safety, truck age, fleet size)
 - **driverMatching.jsw** - Reverse matching engine enabling carriers to search and match with qualified CDL drivers (primary revenue driver with tier-based limits)
 - **driverScoring.js** - Scores drivers against carrier hiring preferences using weighted criteria for qualifications, experience, location, availability, and salary fit
+- **matchExplanationService.jsw** - Generates driver-facing "Why You Matched" rationale for matched carriers
 
 **AI & Enrichment Services:**
 - **aiEnrichment.jsw** - Two-stage AI pipeline: Perplexity fetches web research, Claude synthesizes into structured JSON enrichment with 14-day cache
@@ -19,11 +20,23 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **promptLibraryService.jsw** - CRUD operations for managing AI prompts with version history and category organization
 
 **Data Services:**
+- **dataAccess.jsw** - Unified data access layer routing between Wix and Airtable based on configuration. **Required for all database operations.**
 - **fmcsaService.jsw** - Fetches carrier safety data from FMCSA SAFER API including BASIC scores, inspection rates, and crash data with 7-day cache
 - **carrierPreferences.jsw** - Manages carrier hiring preferences for the reverse matching engine with CRUD operations for CarrierHiringPreferences
 - **driverProfiles.jsw** - Driver profile management including completeness scoring, document upload handling, and status tracking
 - **carrierLeadsService.jsw** - Handles inbound carrier staffing requests with lead status management and carrier linking
 - **contentService.jsw** - Blog posts, compliance guides, best practices, and partner content for content pages
+
+**B2B Business Development Suite:**
+- **b2bBridgeService.jsw** - Unified message router for B2B panels, handles authentication and permission checks
+- **b2bSecurityService.jsw** - Centralized security layer for B2B suite: roles, consent validation, and audit logging
+- **b2bMatchSignalService.jsw** - Match-driven prospecting signals and autonomous lead generation
+- **b2bAccountService.jsw** - CRM layer for non-client carrier accounts and contacts
+- **b2bPipelineService.jsw** - Sales pipeline management with stage transitions and forecasting
+- **b2bActivityService.jsw** - Unified timeline for all outreach and sales interactions
+- **b2bSequenceService.jsw** - Multi-channel outreach automation (email, SMS, call) with throttling
+- **b2bAnalyticsService.jsw** - ROI tracking, CPA analysis, and competitor intelligence
+- **b2bResearchAgentService.jsw** - AI-powered one-click carrier intelligence briefs
 
 **Commerce Services:**
 - **stripeService.jsw** - Stripe API integration for checkout sessions, customer portal, subscription management with upsert and quota reset
@@ -48,6 +61,7 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 **Recruiter Services:**
 - **recruiter_service.jsw** - Recruiter Operating System backend supporting agency model where one recruiter manages multiple carriers
 - **recruiterStats.jsw** - Carrier responsiveness statistics including average response times and interaction counts for badges
+- **recruiterHealthService.jsw** - Real-time system health monitoring for recruiter dashboards
 - **retentionService.jsw** - Driver retention risk analysis with risk scoring thresholds and ROI calculations for turnover prevention
 
 **Application Services:**
@@ -58,6 +72,7 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **gamificationService.jsw** - Core gamification engine handling XP/points awards, level/rank progression, and event logging with audit trail
 - **streakService.jsw** - Manages driver daily login streaks, streak freezes, and multiplier calculations
 - **achievementService.jsw** - Achievement engine for checking and awarding badges to drivers and recruiters based on criteria
+- **badgeService.jsw** - Recruiter-specific badge tier calculations and awarding
 - **challengeService.jsw** - Time-limited challenges with progress tracking and rewards
 - **seasonalEventService.jsw** - Seasonal event lifecycle management with XP multipliers
 - **streakNotifications.jsw** - Handles notifications for streak risks, breaks, and milestones
@@ -70,6 +85,7 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **moderationService.jsw** - Content moderation system with automated filtering, user reporting, and admin review queue
 - **reputationService.jsw** - Bridge service connecting community actions (posts, likes, answers) to the gamification engine
 - **petFriendlyService.jsw** - Pet-friendly location search (geo-radius), submission, and review management
+- **healthService.jsw** - Crowdsourced health resources and tips for truck drivers
 
 **Public Services:**
 - **publicStatsService.jsw** - Public-facing platform statistics for homepage and landing pages (driver count, active carriers, hires)
@@ -80,60 +96,18 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **setupCollections.jsw** - One-time setup utilities for creating required Wix collections and test records
 - **http-functions.js** - HTTP endpoints including Stripe webhook handler with HMAC signature verification and idempotency
 
-## Wix Collections (Database)
+## Database Architecture (Dual-Source)
 
-**Core Data:**
-- `Carriers` - Main carrier data with FMCSA info, pay rates, fleet metrics
-- `DriverProfiles` - Driver profiles with CDL info, experience, preferences, and job-seeking status
-- `DriverJobs` - Job postings linked to carriers
+The platform uses a **dual-source architecture**. Most business data resides in **Airtable**, while authentication and system integrations stay in **Wix**. All access must go through `dataAccess.jsw`.
 
-**Matching & Interests:**
-- `DriverCarrierInterests` - Tracks driver interest/applications to carriers with status (applied, hired, etc.)
-- `CarrierDriverViews` - Records when carriers view driver profiles (for analytics and billing)
-- `MatchEvents` - Analytics log of driver-carrier matches
-- `CarrierHiringPreferences` - Carrier-specific hiring criteria for matching algorithm
-- `DriverInterests` - Driver preferences and interests for matching
+### Collections Staying in Wix (Pinned)
+- `AdminUsers` - Permissions/auth
+- `MemberNotifications` - In-app notification system
+- `Members/Badges` - Member system badges
+- `Members/PrivateMembersData` - Private account data
 
-**Messaging & Notifications:**
-- `Messages` - Direct messages between recruiters and drivers
-- `MemberNotifications` - In-app notifications for members (new matches, messages, etc.)
-- `MemberActivity` - Activity log for member actions (profile views, applications, etc.)
-
-**Enrichment & Cache:**
-- `CarrierEnrichments` - Cached AI enrichment results (14-day TTL)
-- `CarrierSafetyData` - Cached FMCSA API responses (7-day TTL)
-
-**Billing & Subscriptions:**
-- `CarrierSubscriptions` - Stripe subscription records linked by carrier DOT
-- `ProfileViews` - Tracks driver profile views for quota enforcement
-- `BillingHistory` - Payment events and billing lifecycle logs
-- `StripeEvents` - Idempotency tracking for webhook events
-
-**Onboarding & Admin:**
-- `PartnerOnboarding` - Partner onboarding flow data and progress tracking
-- `CarrierOnboarding` - Carrier onboarding status and completion tracking
-- `recruiterCarriers` - Links recruiters to their associated carriers for access control
-
-**Content & CMS:**
-- `BlogPosts`, `BlogCategories`, `FAQs`, `ComplianceGuides`, `BestPracticesGuides`
-- `PricingTiers`, `ServiceFeatures`, `CaseStudies`, `IndustryComparisons`
-
-**Community & Forums:**
-- `ForumCategories` - Forum sections and metadata
-- `ForumThreads` - Discussion topics with author and stats
-- `ForumPosts` - Individual posts and replies
-- `ForumReports` - Moderation queue for flagged content
-- `PetFriendlyLocations` - Crowdsourced pet-friendly stops with geo-data
-- `PetFriendlyReviews` - Driver reviews and amenity verification
-
-**Reviews & Testimonials:**
-- `CarrierReviews`, `CarrierTestimonials`, `DriverTestimonials`
-
-**Admin:**
-- `AdminUsers` - Admin user records for content moderation
-- `JobPostings` - Job posting submissions (for moderation)
-- `TeamMembers` - Team member profiles for About page
-- `CompanyMilestones` - Company timeline milestones
+### Collections in Airtable (v2_* Tables)
+- ~65+ collections including: `Carriers`, `DriverProfiles`, `Messages`, `CarrierSubscriptions`, `DriverCarrierInterests`, `MatchEvents`, and the complete B2B Suite.
 
 ## API Keys (Wix Secrets Manager)
 
@@ -158,6 +132,7 @@ Configured in `src/backend/jobs.config`:
 - `runEnrichmentBatch` runs hourly (`0 * * * *`) - Pre-enriches high-priority carriers with AI data (scheduler.jsw)
 - `runBackfillMigration` runs every 30 min (`30 * * * *`) - Ensures all submitted drivers are searchable by recruiters (migrations/backfillSearchableDrivers.jsw)
 - `processAbandonmentEmails` runs every 15 min (`15 * * * *`) - Processes checkout abandonment email sequences (2hr, 3-day, 7-day follow-ups) (abandonmentEmailService.jsw)
+- `runB2BSignalBatch` runs nightly (`0 3 * * *`) - Autonomous B2B prospecting (b2bMatchSignalService.jsw)
 
 ## Web Module Permissions
 
