@@ -1,0 +1,259 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  usage: 'apiUsage'
+};
+
+const TIER_LIMITS = {
+  starter: { requestsPerMinute: 10, requestsPerMonth: 5000, driverSearchesMonthly: 0, documentExtractionsMonthly: 0 },
+  growth: { requestsPerMinute: 60, requestsPerMonth: 50000, driverSearchesMonthly: 100, documentExtractionsMonthly: 50 },
+  enterprise: { requestsPerMinute: 300, requestsPerMonth: Number.MAX_SAFE_INTEGER, driverSearchesMonthly: Number.MAX_SAFE_INTEGER, documentExtractionsMonthly: 500 },
+  custom: { requestsPerMinute: 600, requestsPerMonth: Number.MAX_SAFE_INTEGER, driverSearchesMonthly: Number.MAX_SAFE_INTEGER, documentExtractionsMonthly: Number.MAX_SAFE_INTEGER }
+};
+
+const minuteBuckets = new Map();
+
+export function getTierLimits(tier) {
+  return TIER_LIMITS[String(tier || 'starter').toLowerCase()] || TIER_LIMITS.starter;
+}
+
+/**
+ * Enforce per-minute + per-month limits and persist usage.
+ * @param {Object} params
+ * @param {string} params.partnerId
+ * @param {string} params.tier
+ * @param {string} params.endpoint
+ * @param {number} [params.statusCode]
+ * @param {number} [params.latencyMs]
+ * @returns {Promise<Object>}
+ */
+export async function checkAndTrackUsage({
+  partnerId,
+  tier,
+  endpoint,
+  subscription = null,
+  requestsPerMinuteOverride = null,
+  requestsPerMonthOverride = null,
+  bypassRateLimit = false,
+  statusCode = 200,
+  latencyMs = 0
+}) {
+  const limits = resolveLimits({
+    tier,
+    subscription,
+    requestsPerMinuteOverride,
+    requestsPerMonthOverride
+  });
+
+  if (bypassRateLimit) {
+    const unlimitedMinute = {
+      allowed: true,
+      retryAfter: 0,
+      remaining: limits.requestsPerMinute,
+      resetEpochSeconds: Math.floor((Date.now() + 60000) / 1000)
+    };
+    return {
+      allowed: true,
+      headers: buildRateHeaders(limits, unlimitedMinute, limits.requestsPerMonth, 0)
+    };
+  }
+
+  const minuteCheck = checkMinuteLimit(partnerId, limits.requestsPerMinute);
+  if (!minuteCheck.allowed) {
+    return {
+      allowed: false,
+      errorCode: 'rate_limit_exceeded',
+      retryAfter: minuteCheck.retryAfter,
+      headers: buildRateHeaders(limits, minuteCheck)
+    };
+  }
+
+  const period = getCurrentPeriod();
+  const usageRecord = await getOrCreateUsageRecord(partnerId, period);
+  const usage = usageRecord?.usage || {};
+  const totalRequests = Number(usage.total_requests || 0);
+  const monthlyAllowed = limits.requestsPerMonth;
+
+  if (monthlyAllowed !== Number.MAX_SAFE_INTEGER && totalRequests >= monthlyAllowed) {
+    return {
+      allowed: false,
+      errorCode: 'quota_exceeded',
+      retryAfter: 0,
+      headers: buildRateHeaders(limits, minuteCheck, monthlyAllowed, totalRequests)
+    };
+  }
+
+  await persistUsage({
+    usageRecord,
+    partnerId,
+    period,
+    endpoint,
+    statusCode,
+    latencyMs
+  });
+
+  return {
+    allowed: true,
+    headers: buildRateHeaders(limits, minuteCheck, monthlyAllowed, totalRequests + 1)
+  };
+}
+
+export function buildRateHeaders(limits, minuteCheck, monthlyLimit = null, monthlyUsed = 0) {
+  const monthLimit = monthlyLimit || limits.requestsPerMonth;
+  const remainingMonthly = monthLimit === Number.MAX_SAFE_INTEGER ?
+    'unlimited' :
+    String(Math.max(0, monthLimit - monthlyUsed));
+
+  return {
+    'X-RateLimit-Limit': String(limits.requestsPerMinute),
+    'X-RateLimit-Remaining': String(Math.max(0, minuteCheck.remaining)),
+    'X-RateLimit-Reset': String(minuteCheck.resetEpochSeconds),
+    'X-Quota-Limit': monthLimit === Number.MAX_SAFE_INTEGER ? 'unlimited' : String(monthLimit),
+    'X-Quota-Remaining': remainingMonthly,
+    'X-Quota-Reset': getNextMonthIsoDate()
+  };
+}
+
+function checkMinuteLimit(partnerId, limitPerMinute) {
+  const now = Date.now();
+  const bucket = minuteBuckets.get(partnerId) || [];
+  const active = bucket.filter((ts) => now - ts < 60000);
+  if (active.length >= limitPerMinute) {
+    const oldest = Math.min(...active);
+    const retryAfter = Math.ceil((60000 - (now - oldest)) / 1000);
+    return {
+      allowed: false,
+      retryAfter,
+      remaining: 0,
+      resetEpochSeconds: Math.floor((oldest + 60000) / 1000)
+    };
+  }
+
+  active.push(now);
+  minuteBuckets.set(partnerId, active);
+  const resetEpochSeconds = Math.floor((active[0] + 60000) / 1000);
+  return {
+    allowed: true,
+    retryAfter: 0,
+    remaining: limitPerMinute - active.length,
+    resetEpochSeconds
+  };
+}
+
+async function getOrCreateUsageRecord(partnerId, period) {
+  const existingResult = await dataAccess.queryRecords(COLLECTIONS.usage, {
+    filters: {
+      partner_id: partnerId,
+      period_key: period.key
+    },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  if (existingResult.success && existingResult.items?.length) {
+    return existingResult.items[0];
+  }
+
+  const created = await dataAccess.insertRecord(COLLECTIONS.usage, {
+    partner_id: partnerId,
+    period_key: period.key,
+    period_start: period.start,
+    period_end: period.end,
+    usage: {
+      total_requests: 0,
+      requests_by_endpoint: {},
+      requests_by_day: [],
+      errors: 0,
+      avg_latency_ms: 0
+    },
+    quotas_used: {
+      driver_searches: 0,
+      document_extractions: 0
+    },
+    billing_amount: 0
+  }, { suppressAuth: true });
+
+  return created.record || null;
+}
+
+async function persistUsage({
+  usageRecord,
+  partnerId,
+  period,
+  endpoint,
+  statusCode,
+  latencyMs
+}) {
+  if (!usageRecord?._id) return;
+
+  const prev = usageRecord.usage || {};
+  const endpointMap = { ...(prev.requests_by_endpoint || {}) };
+  endpointMap[endpoint] = Number(endpointMap[endpoint] || 0) + 1;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const byDay = Array.isArray(prev.requests_by_day) ? [...prev.requests_by_day] : [];
+  const dayIndex = byDay.findIndex((d) => d.date === today);
+  if (dayIndex >= 0) {
+    byDay[dayIndex] = {
+      date: today,
+      count: Number(byDay[dayIndex].count || 0) + 1
+    };
+  } else {
+    byDay.push({ date: today, count: 1 });
+  }
+
+  const totalRequests = Number(prev.total_requests || 0) + 1;
+  const prevAvgLatency = Number(prev.avg_latency_ms || 0);
+  const avgLatency = ((prevAvgLatency * (totalRequests - 1)) + Number(latencyMs || 0)) / totalRequests;
+  const errors = Number(prev.errors || 0) + (statusCode >= 400 ? 1 : 0);
+
+  await dataAccess.updateRecord(COLLECTIONS.usage, {
+    _id: usageRecord._id,
+    partner_id: partnerId,
+    period_key: period.key,
+    usage: {
+      total_requests: totalRequests,
+      requests_by_endpoint: endpointMap,
+      requests_by_day: byDay,
+      errors,
+      avg_latency_ms: Math.round(avgLatency)
+    },
+    updated_at: new Date()
+  }, { suppressAuth: true });
+}
+
+function getCurrentPeriod(now = new Date()) {
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0));
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0));
+  const month = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const key = `${now.getUTCFullYear()}-${month}`;
+  return { key, start, end };
+}
+
+function getNextMonthIsoDate(now = new Date()) {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
+}
+
+function resolveLimits({
+  tier,
+  subscription,
+  requestsPerMinuteOverride,
+  requestsPerMonthOverride
+}) {
+  const tierLimits = getTierLimits(tier);
+  const subscriptionLimits = subscription?.rate_limits || {};
+
+  const requestsPerMinute = Number(requestsPerMinuteOverride) ||
+    Number(subscriptionLimits.requests_per_minute) ||
+    tierLimits.requestsPerMinute;
+
+  const requestsPerMonth = Number(requestsPerMonthOverride) ||
+    Number(subscriptionLimits.requests_per_month) ||
+    tierLimits.requestsPerMonth;
+
+  return {
+    ...tierLimits,
+    requestsPerMinute,
+    requestsPerMonth
+  };
+}

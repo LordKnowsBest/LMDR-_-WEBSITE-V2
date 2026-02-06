@@ -1,5 +1,6 @@
 import { currentUser } from 'wix-users-backend';
 import * as dataAccess from 'backend/dataAccess';
+import { getCarrierIdentity } from 'backend/recruiter_service';
 
 // Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
@@ -7,8 +8,169 @@ const COLLECTION_KEYS = {
     recruiterAccess: 'recruiterCarriers'
 };
 
+/**
+ * Helper to get carrier DOT for current user if not provided
+ */
+async function resolveCarrierDot(carrierDot) {
+    if (carrierDot) return String(carrierDot);
+    const identity = await getCarrierIdentity();
+    if (identity.success && identity.dotNumber) return String(identity.dotNumber);
+    return null;
+}
+
+/**
+ * Alias for getWeightPreferences to support page code names
+ */
+export async function getCarrierPreferences(carrierDot = null) {
+    const dot = await resolveCarrierDot(carrierDot);
+    if (!dot) return { success: false, error: 'Carrier DOT not found' };
+    
+    const res = await getWeightPreferences(dot);
+    if (!res.success) return res;
+    
+    // Flatten result for frontend
+    return {
+        ...res.weights,
+        preset_id: res.preferenceId ? (await getHiringPreferenceById(res.preferenceId)).preferences?.preset_id : null,
+        is_customized: res.preferenceId ? (await getHiringPreferenceById(res.preferenceId)).preferences?.is_customized : false
+    };
+}
+
+/**
+ * Alias for saveWeightPreferences to support page code names
+ */
+export async function saveCarrierPreferences(weights, carrierDot = null) {
+    const dot = await resolveCarrierDot(carrierDot);
+    if (!dot) return { success: false, error: 'Carrier DOT not found' };
+    return await saveWeightPreferences(dot, weights);
+}
+
+/**
+ * Alias for applyPresetTemplate to support page code names
+ */
+export async function applyPreset(presetId, carrierDot = null) {
+    const dot = await resolveCarrierDot(carrierDot);
+    if (!dot) return { success: false, error: 'Carrier DOT not found' };
+    return await applyPresetTemplate(dot, presetId);
+}
+
 const VALID_CDL_TYPES = ['A', 'B', 'C'];
 const VALID_URGENCY_VALUES = ['immediate', '30_day', 'ongoing'];
+
+export const PRESET_TEMPLATES = {
+  otr_heavy_haul: {
+    id: 'otr_heavy_haul',
+    name: 'OTR Heavy Haul',
+    description: 'Long-haul drivers for heavy/oversized loads',
+    icon: 'truck',
+    weights: {
+      weight_qualifications: 35,
+      weight_experience: 25,
+      weight_location: 10,
+      weight_availability: 15,
+      weight_salaryFit: 10,
+      weight_engagement: 5
+    },
+    preferences: {
+      required_cdl_types: ['A'],
+      min_experience_years: 3,
+      required_endorsements: [],
+      route_types: ['otr', 'regional'],
+      equipment_types: ['heavy_haul', 'oversize', 'flatbed']
+    }
+  },
+  regional_dedicated: {
+    id: 'regional_dedicated',
+    name: 'Regional Dedicated',
+    description: 'Consistent regional routes, home weekly',
+    icon: 'map-pin',
+    weights: {
+      weight_qualifications: 25,
+      weight_experience: 15,
+      weight_location: 30,
+      weight_availability: 15,
+      weight_salaryFit: 10,
+      weight_engagement: 5
+    },
+    preferences: {
+      required_cdl_types: ['A'],
+      min_experience_years: 1,
+      required_endorsements: [],
+      route_types: ['regional', 'dedicated'],
+      equipment_types: ['dry_van', 'reefer']
+    }
+  },
+  local_pd: {
+    id: 'local_pd',
+    name: 'Local P&D',
+    description: 'Local pickup & delivery, daily home time',
+    icon: 'home',
+    weights: {
+      weight_qualifications: 20,
+      weight_experience: 10,
+      weight_location: 40,
+      weight_availability: 20,
+      weight_salaryFit: 5,
+      weight_engagement: 5
+    },
+    preferences: {
+      required_cdl_types: ['A', 'B'],
+      min_experience_years: 0,
+      required_endorsements: [],
+      route_types: ['local'],
+      equipment_types: ['straight_truck', 'box_truck', 'dry_van']
+    }
+  },
+  tanker_hazmat: {
+    id: 'tanker_hazmat',
+    name: 'Tanker/Hazmat',
+    description: 'Specialized tanker and hazmat endorsements',
+    icon: 'alert-triangle',
+    weights: {
+      weight_qualifications: 45,
+      weight_experience: 20,
+      weight_location: 15,
+      weight_availability: 10,
+      weight_salaryFit: 5,
+      weight_engagement: 5
+    },
+    preferences: {
+      required_cdl_types: ['A'],
+      min_experience_years: 2,
+      required_endorsements: ['H', 'N', 'X'],
+      route_types: ['otr', 'regional', 'local'],
+      equipment_types: ['tanker']
+    }
+  },
+  flatbed_stepdeck: {
+    id: 'flatbed_stepdeck',
+    name: 'Flatbed/Stepdeck',
+    description: 'Open deck freight and securement specialists',
+    icon: 'layers',
+    weights: {
+      weight_qualifications: 30,
+      weight_experience: 25,
+      weight_location: 15,
+      weight_availability: 15,
+      weight_salaryFit: 10,
+      weight_engagement: 5
+    },
+    preferences: {
+      required_cdl_types: ['A'],
+      min_experience_years: 2,
+      required_endorsements: [],
+      route_types: ['otr', 'regional'],
+      equipment_types: ['flatbed', 'stepdeck', 'rgn']
+    }
+  }
+};
+
+/**
+ * Returns all preset templates for carrier hiring preferences
+ */
+export function getPresetTemplates() {
+  return Object.values(PRESET_TEMPLATES);
+}
 
 /**
  * Validates the preference data
@@ -165,6 +327,48 @@ export async function getWeightPreferences(carrierDot) {
 }
 
 /**
+ * Applies a preset template to a carrier's hiring preferences
+ */
+export async function applyPresetTemplate(carrierDot, presetId) {
+  try {
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+    
+    const preset = PRESET_TEMPLATES[presetId];
+    if (!preset) return { success: false, error: 'Invalid preset ID' };
+
+    if (!await checkCarrierAccess(carrierDot)) return { success: false, error: 'Not authorized' };
+
+    const existing = await getHiringPreferences(carrierDot);
+    const now = new Date();
+
+    const preferenceData = {
+      carrier_dot: String(carrierDot),
+      recruiter_id: currentUser.id,
+      ...preset.preferences,
+      ...preset.weights,
+      preset_id: presetId,
+      preset_applied_at: now,
+      is_customized: false,
+      is_active: true,
+      _updatedDate: now
+    };
+
+    let result;
+    if (existing.success && existing.preferences) {
+      const updated = { ...existing.preferences, ...preferenceData, _id: existing.preferences._id };
+      result = await dataAccess.updateRecord(COLLECTION_KEYS.hiringPreferences, updated, { suppressAuth: true });
+    } else {
+      result = await dataAccess.insertRecord(COLLECTION_KEYS.hiringPreferences, preferenceData, { suppressAuth: true });
+    }
+
+    return { success: result.success, preferences: result.record, error: result.error };
+  } catch (error) {
+    console.error('[carrierPreferences] applyPresetTemplate error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Save weight preferences for a carrier
  */
 export async function saveWeightPreferences(carrierDot, weights) {
@@ -173,11 +377,31 @@ export async function saveWeightPreferences(carrierDot, weights) {
     
     const existing = await getHiringPreferences(carrierDot);
     if (existing.success && existing.preferences) {
-      const updated = { ...existing.preferences, ...weights, _updatedDate: new Date() };
+      // If weights are different from current, and we have a preset_id, mark as customized
+      let isCustomized = existing.preferences.is_customized || false;
+      if (existing.preferences.preset_id) {
+        const hasWeightChanges = Object.keys(weights).some(key => weights[key] !== existing.preferences[key]);
+        if (hasWeightChanges) isCustomized = true;
+      }
+
+      const updated = { 
+        ...existing.preferences, 
+        ...weights, 
+        is_customized: isCustomized,
+        _updatedDate: new Date() 
+      };
       const res = await dataAccess.updateRecord(COLLECTION_KEYS.hiringPreferences, updated, { suppressAuth: true });
       return { success: res.success, weights: res.record };
     } else {
-      const newPref = { carrier_dot: String(carrierDot), recruiter_id: currentUser.id, required_cdl_types: ['A'], target_radius_miles: 100, ...weights, is_active: true };
+      const newPref = { 
+        carrier_dot: String(carrierDot), 
+        recruiter_id: currentUser.id, 
+        required_cdl_types: ['A'], 
+        target_radius_miles: 100, 
+        ...weights, 
+        is_active: true,
+        is_customized: false
+      };
       const res = await dataAccess.insertRecord(COLLECTION_KEYS.hiringPreferences, newPref, { suppressAuth: true });
       return { success: res.success, weights: res.record };
     }

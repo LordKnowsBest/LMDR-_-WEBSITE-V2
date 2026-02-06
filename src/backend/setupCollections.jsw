@@ -1380,7 +1380,8 @@ export async function runFullSetup() {
     carrierCommunication: null,
     roadUtilities: null,
     fuelUtilities: null,
-    carrierPayments: null
+    carrierPayments: null,
+    externalApiPlatform: null
   };
 
   results.carrierSubscriptions = await setupCarrierSubscriptions();
@@ -1392,6 +1393,7 @@ export async function runFullSetup() {
   results.fuelUtilities = await setupFuelCollections();
   results.carrierPayments = await setupCarrierPayments();
   results.fleetDashboard = await setupFleetDashboardCollections();
+  results.externalApiPlatform = await setupExternalApiPlatformCollections();
 
   console.log('[SETUP] Full setup complete:', results);
   return results;
@@ -1623,4 +1625,167 @@ export async function setupSourceAttribution() {
       'Create index on: conversion_date'
     ]
   };
+}
+
+// ============================================================================
+// EXTERNAL API PLATFORM SETUP
+// Reference: Conductor/tracks/external_api_platform_20260123/spec.md
+// ============================================================================
+
+const API_PARTNERS_SCHEMA = {
+  collectionName: 'ApiPartners',
+  displayName: 'API Partners',
+  fields: [
+    { name: 'partner_id', type: 'text', description: 'Unique partner identifier' },
+    { name: 'company_name', type: 'text', description: 'Partner company name' },
+    { name: 'contact_email', type: 'text', description: 'Primary contact email' },
+    { name: 'contact_name', type: 'text', description: 'Primary contact name' },
+    { name: 'tier', type: 'text', description: 'starter, growth, enterprise, custom' },
+    { name: 'status', type: 'text', description: 'active, suspended, churned' },
+    { name: 'api_keys', type: 'array', description: 'Array of key metadata objects' },
+    { name: 'ip_whitelist', type: 'array', description: 'Optional allowed IP list' },
+    { name: 'webhook_url', type: 'text', description: 'Default webhook URL' },
+    { name: 'webhook_secret', type: 'text', description: 'Webhook signing secret' },
+    { name: 'created_at', type: 'date', description: 'Created timestamp' },
+    { name: 'updated_at', type: 'date', description: 'Updated timestamp' }
+  ],
+  permissions: { read: 'Admin', create: 'Admin', update: 'Admin', delete: 'Admin' }
+};
+
+const API_SUBSCRIPTIONS_SCHEMA = {
+  collectionName: 'ApiSubscriptions',
+  displayName: 'API Subscriptions',
+  fields: [
+    { name: 'partner_id', type: 'text', description: 'Reference to ApiPartners.partner_id' },
+    { name: 'tier', type: 'text', description: 'starter, growth, enterprise, custom' },
+    { name: 'plan_type', type: 'text', description: 'monthly or annual' },
+    { name: 'price_monthly', type: 'number', description: 'Monthly plan price' },
+    { name: 'api_products', type: 'array', description: 'Enabled API product IDs' },
+    { name: 'rate_limits', type: 'object', description: 'Tier and override limits' },
+    { name: 'quotas', type: 'object', description: 'Feature-specific quotas' },
+    { name: 'stripe_subscription_id', type: 'text', description: 'Billing subscription ID' },
+    { name: 'current_period_start', type: 'date', description: 'Billing period start' },
+    { name: 'current_period_end', type: 'date', description: 'Billing period end' },
+    { name: 'status', type: 'text', description: 'active, past_due, cancelled' }
+  ],
+  permissions: { read: 'Admin', create: 'Admin', update: 'Admin', delete: 'Admin' }
+};
+
+const API_USAGE_SCHEMA = {
+  collectionName: 'ApiUsage',
+  displayName: 'API Usage',
+  fields: [
+    { name: 'partner_id', type: 'text', description: 'Reference to ApiPartners.partner_id' },
+    { name: 'period_key', type: 'text', description: 'YYYY-MM usage key' },
+    { name: 'period_start', type: 'date', description: 'Period start date' },
+    { name: 'period_end', type: 'date', description: 'Period end date' },
+    { name: 'usage', type: 'object', description: 'Request totals and endpoint metrics' },
+    { name: 'quotas_used', type: 'object', description: 'Quota counters by product' },
+    { name: 'billing_amount', type: 'number', description: 'Calculated overages' },
+    { name: 'updated_at', type: 'date', description: 'Updated timestamp' }
+  ],
+  permissions: { read: 'Admin', create: 'Admin', update: 'Admin', delete: 'Admin' }
+};
+
+const API_REQUEST_LOG_SCHEMA = {
+  collectionName: 'ApiRequestLog',
+  displayName: 'API Request Log',
+  fields: [
+    { name: 'request_id', type: 'text', description: 'Gateway request ID' },
+    { name: 'partner_id', type: 'text', description: 'Reference to ApiPartners.partner_id' },
+    { name: 'api_key_id', type: 'text', description: 'API key metadata ID' },
+    { name: 'endpoint', type: 'text', description: 'Requested endpoint path' },
+    { name: 'method', type: 'text', description: 'HTTP method' },
+    { name: 'request_params', type: 'object', description: 'Sanitized request params' },
+    { name: 'response_status', type: 'number', description: 'HTTP status code' },
+    { name: 'response_time_ms', type: 'number', description: 'Latency in ms' },
+    { name: 'cache_hit', type: 'boolean', description: 'Whether response used cache' },
+    { name: 'error_message', type: 'text', description: 'Error message when status >= 400' },
+    { name: 'ip_address', type: 'text', description: 'Source IP address' },
+    { name: 'user_agent', type: 'text', description: 'Source user agent' },
+    { name: 'created_at', type: 'date', description: 'Request timestamp' }
+  ],
+  permissions: { read: 'Admin', create: 'Admin', update: 'Admin', delete: 'Admin' }
+};
+
+const API_PRODUCTS_SCHEMA = {
+  collectionName: 'ApiProducts',
+  displayName: 'API Products',
+  fields: [
+    { name: 'product_id', type: 'text', description: 'Unique product identifier' },
+    { name: 'name', type: 'text', description: 'Display name' },
+    { name: 'description', type: 'text', description: 'Product description' },
+    { name: 'category', type: 'text', description: 'safety, intelligence, operational, etc.' },
+    { name: 'base_endpoint', type: 'text', description: 'Endpoint group prefix' },
+    { name: 'endpoints', type: 'array', description: 'Endpoint definition objects' },
+    { name: 'pricing', type: 'object', description: 'Tier and overage pricing metadata' },
+    { name: 'is_active', type: 'boolean', description: 'Active flag' },
+    { name: 'documentation_url', type: 'text', description: 'Docs URL' }
+  ],
+  permissions: { read: 'Admin', create: 'Admin', update: 'Admin', delete: 'Admin' }
+};
+
+const API_ALERT_SUBSCRIPTIONS_SCHEMA = {
+  collectionName: 'ApiAlertSubscriptions',
+  displayName: 'API Alert Subscriptions',
+  fields: [
+    { name: 'partner_id', type: 'text', description: 'Reference to ApiPartners.partner_id' },
+    { name: 'dot_numbers', type: 'array', description: 'Monitored DOT numbers' },
+    { name: 'alert_types', type: 'array', description: 'Subscribed alert types' },
+    { name: 'webhook_url', type: 'text', description: 'Delivery webhook endpoint' },
+    { name: 'webhook_secret', type: 'text', description: 'Per-subscription signing secret' },
+    { name: 'is_active', type: 'boolean', description: 'Active status' },
+    { name: 'created_at', type: 'date', description: 'Created timestamp' },
+    { name: 'updated_at', type: 'date', description: 'Updated timestamp' }
+  ],
+  permissions: { read: 'Admin', create: 'Admin', update: 'Admin', delete: 'Admin' }
+};
+
+export async function setupExternalApiPlatformCollections() {
+  console.log('[SETUP] Setting up External API Platform collections...');
+
+  const schemas = [
+    API_PARTNERS_SCHEMA,
+    API_SUBSCRIPTIONS_SCHEMA,
+    API_USAGE_SCHEMA,
+    API_REQUEST_LOG_SCHEMA,
+    API_PRODUCTS_SCHEMA,
+    API_ALERT_SUBSCRIPTIONS_SCHEMA
+  ];
+
+  const results = {
+    existing: [],
+    missing: []
+  };
+
+  for (const schema of schemas) {
+    const { exists } = await checkCollectionExists(schema.collectionName);
+    if (exists) {
+      results.existing.push(schema.collectionName);
+    } else {
+      const indexRecommendations = [];
+      if (schema.collectionName === 'ApiPartners') {
+        indexRecommendations.push('Create index on: partner_id (unique)');
+        indexRecommendations.push('Create index on: status');
+      }
+      if (schema.collectionName === 'ApiSubscriptions') {
+        indexRecommendations.push('Create index on: partner_id');
+        indexRecommendations.push('Create index on: status');
+      }
+      if (schema.collectionName === 'ApiUsage') {
+        indexRecommendations.push('Create compound index on: partner_id + period_key');
+      }
+      if (schema.collectionName === 'ApiRequestLog') {
+        indexRecommendations.push('Create index on: partner_id');
+        indexRecommendations.push('Create index on: created_at');
+      }
+      results.missing.push({
+        name: schema.collectionName,
+        instructions: generateCollectionInstructions(schema),
+        indexRecommendations
+      });
+    }
+  }
+
+  return results;
 }

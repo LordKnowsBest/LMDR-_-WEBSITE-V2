@@ -100,7 +100,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./conductor/tracks/mobile_optimization_20260122/](./conductor/tracks/mobile_optimization_20260122/)*
 *Priority: High*
 *Goal: Systematic review and optimization of all HTML files for mobile responsiveness (iPhone 12/13 target).*
-*Status: Planning Complete, Execution Pending (0 of 56+ files modified)*
+*Status: Planning Complete, In Progress (6 of 56+ files modified)*
 *Standard: docs/MOBILE_OPTIMIZATION_GUIDE.md*
 *Phases: 5 (Pilot Landing Pages → Driver Portal → Recruiter Portal → Carrier & Admin → Verification)*
 
@@ -124,11 +124,11 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Link: [./tracks/external_api_platform_20260123/](./tracks/external_api_platform_20260123/)*
 *Depends on: fmcsaService, aiEnrichment, parkingService, fuelService, driverMatching, ocrService, gamification_strategy_20260123*
 *Priority: Critical*
-*Status: Planned*
+*Status: In Progress*
 *Goal: Monetize platform capabilities via B2B REST APIs - Safety & Compliance, Intelligence, Operational, Matching, Document, and Engagement (gamification white-label) APIs for external partners.*
 *Business Impact: Revenue Diversification - Target $300K ARR Year 1, 25 API partners, 1M+ monthly API calls.*
 *Phases: 8 (Gateway Infrastructure → Safety APIs → Intelligence APIs → Operational APIs → Matching APIs → Document APIs → Engagement APIs → Developer Portal)*
-*Pricing: Starter $199/mo, Growth $499/mo, Enterprise $999/mo + usage-based add-ons*
+*Pricing: Starter $99/mo, Growth $499/mo, Enterprise $999/mo + usage-based add-ons*
 
 ---
 
@@ -183,12 +183,20 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Recruiter Console: 21 inbound + 21 outbound PostMessage types, 21 handler functions*
 *Tests: 4 test suites (savedSearchService, callOutcomeService, interventionService, pipelineAutomationService)*
 
-## [ ] Track: Carrier Utility Expansion
+## [x] Track: Carrier Utility Expansion
 *Link: [./tracks/carrier_utility_expansion_20260120/](./tracks/carrier_utility_expansion_20260120/)*
 *Depends on: carrier_conversion_20260103*
 *Priority: Medium*
-*Status: Planned*
+*Status: Complete*
 *Goal: Improve carrier onboarding and engagement through Preference Presets, Status Tracker, and Instant Match Preview.*
+*Completed:*
+- *carrierPreferences.jsw (PRESET_TEMPLATES, applyPresetTemplate, customization tracking)*
+- *carrierStatusService.jsw (Onboarding status determination, real-time match count)*
+- *carrierLeadsService.jsw (getMatchPreview backend with cdl/endorsement/experience filters)*
+- *CARRIER_WEIGHT_PREFERENCES.html (Quick Start section, 5 presets, confirmation modal, customized badges)*
+- *STATUS_TRACKER.html (Embedded in Carrier_Welcome.html with 5-step progress, AI enrichment tracker, match preview card)*
+- *Carrier Lead Forms (Added Live Match Estimate section with debounced real-time updates to _TEMPLATE_Carrier_Staffing_Form.html and primary landing pages)*
+- *Page Code Bridges (Updated CARRIER_WEIGHT_PREFERENCES.kvkff.js, Carrier Welcome.gnhma.js, Home.c1dmp.js, and Last Mile staffing page code)*
 
 ## [ ] Track: Admin Utility Expansion
 *Link: [./tracks/admin_utility_expansion_20260120/](./tracks/admin_utility_expansion_20260120/)*

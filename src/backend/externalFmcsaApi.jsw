@@ -1,0 +1,200 @@
+import { getCarrierSafetyData } from 'backend/fmcsaService';
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+const CACHE_TTL_HOURS = 168;
+const DOT_REGEX = /^\d{1,8}$/;
+
+const BASIC_KEY_MAP = {
+  unsafe_driving: 'unsafe_driving',
+  hours_of_service: 'hours_of_service',
+  driver_fitness: 'driver_fitness',
+  drugs_alcohol: 'controlled_substances',
+  vehicle_maintenance: 'vehicle_maintenance',
+  hazmat: 'hazmat',
+  crash_indicator: 'crash_indicator'
+};
+
+/**
+ * Validate DOT number for external API requests.
+ * @param {string|number} dotNumber
+ * @returns {{ valid: boolean, value?: string, error?: string }}
+ */
+export function validateDotNumber(dotNumber) {
+  const value = String(dotNumber || '').trim();
+  if (!DOT_REGEX.test(value)) {
+    return { valid: false, error: 'DOT number must be 1-8 digits' };
+  }
+  return { valid: true, value };
+}
+
+/**
+ * External FMCSA carrier lookup response formatter.
+ * @param {string|number} dotNumber
+ * @param {Object} [options]
+ * @param {boolean} [options.forceRefresh=false]
+ * @returns {Promise<Object>}
+ */
+export async function getExternalCarrierSafety(dotNumber, options = {}) {
+  const validation = validateDotNumber(dotNumber);
+  if (!validation.valid) {
+    return { success: false, errorCode: 'invalid_request', message: validation.error };
+  }
+
+  const safetyData = await getCarrierSafetyData(validation.value, Boolean(options.forceRefresh));
+  if (safetyData?.error && !safetyData?.fromCache) {
+    return {
+      success: false,
+      errorCode: 'resource_not_found',
+      message: safetyData.userMessage || safetyData.error_message || 'Carrier safety data unavailable'
+    };
+  }
+
+  return {
+    success: true,
+    data: mapSafetyResponse(safetyData),
+    metadata: {
+      from_cache: Boolean(safetyData?.fromCache),
+      stale_data: Boolean(safetyData?.staleData)
+    }
+  };
+}
+
+/**
+ * Batch FMCSA lookup for up to 100 DOT numbers.
+ * @param {Array<string|number>} dotNumbers
+ * @returns {Promise<Object>}
+ */
+export async function batchExternalCarrierSafety(dotNumbers = []) {
+  const normalized = Array.isArray(dotNumbers) ? dotNumbers : [];
+  if (!normalized.length) {
+    return { success: false, errorCode: 'invalid_request', message: 'dot_numbers is required' };
+  }
+  if (normalized.length > 100) {
+    return { success: false, errorCode: 'invalid_request', message: 'Maximum 100 DOT numbers per batch' };
+  }
+
+  const items = normalized.map((dot) => String(dot || '').trim()).filter(Boolean);
+  const chunks = chunkArray(items, 10);
+  const results = [];
+
+  for (const chunk of chunks) {
+    const chunkResults = await Promise.all(chunk.map(async (dot) => {
+      const response = await getExternalCarrierSafety(dot);
+      if (!response.success) {
+        return {
+          dot_number: Number(dot),
+          success: false,
+          error: response.message
+        };
+      }
+      return {
+        dot_number: Number(dot),
+        success: true,
+        data: response.data
+      };
+    }));
+    results.push(...chunkResults);
+    await sleep(200);
+  }
+
+  const succeeded = results.filter((item) => item.success).length;
+  const failed = results.length - succeeded;
+
+  return {
+    success: true,
+    data: {
+      total_requested: results.length,
+      succeeded,
+      failed,
+      results
+    }
+  };
+}
+
+function mapSafetyResponse(safetyData = {}) {
+  const basics = safetyData.basics || {};
+  const mappedBasics = {};
+
+  Object.keys(BASIC_KEY_MAP).forEach((key) => {
+    const source = basics[key] || {};
+    mappedBasics[BASIC_KEY_MAP[key]] = {
+      score: toNullableNumber(source.score),
+      percentile: toNullableNumber(source.percentile),
+      alert: Boolean(source.alert)
+    };
+  });
+
+  const inspections = safetyData.inspections || {};
+  const crashes = safetyData.crashes || {};
+
+  return {
+    dot_number: toNullableNumber(safetyData.dot_number),
+    legal_name: safetyData.legal_name || null,
+    dba_name: safetyData.dba_name || null,
+    operating_status: safetyData.operating_status || 'UNKNOWN',
+    entity_type: 'CARRIER',
+    physical_address: {
+      street: null,
+      city: safetyData.phy_city || null,
+      state: safetyData.phy_state || null,
+      zip: safetyData.phy_zip || null
+    },
+    safety_rating: {
+      rating: safetyData.safety_rating || 'NOT RATED',
+      rating_date: toIsoDate(safetyData.safety_rating_date),
+      review_date: toIsoDate(safetyData.safety_review_date)
+    },
+    basic_scores: mappedBasics,
+    inspections: {
+      total: toNullableNumber(inspections.driver_inspections) +
+        toNullableNumber(inspections.vehicle_inspections),
+      driver_oos_rate: toNullableNumber(inspections.driver_oos_rate),
+      vehicle_oos_rate: toNullableNumber(inspections.vehicle_oos_rate),
+      national_avg_driver_oos: toNullableNumber(inspections.national_avg_driver_oos),
+      national_avg_vehicle_oos: toNullableNumber(inspections.national_avg_vehicle_oos)
+    },
+    crashes: {
+      total: toNullableNumber(crashes.total),
+      fatal: toNullableNumber(crashes.fatal),
+      injury: toNullableNumber(crashes.injury),
+      tow_away: toNullableNumber(crashes.tow)
+    },
+    fleet: {
+      power_units: toNullableNumber(safetyData.total_power_units),
+      drivers: toNullableNumber(safetyData.total_drivers),
+      mcs150_mileage: toNullableNumber(safetyData.mcs150_mileage),
+      mcs150_year: toNullableNumber(safetyData.mcs150_mileage_year)
+    },
+    authority: {
+      common: Boolean(safetyData.is_authorized),
+      contract: Boolean(safetyData.is_authorized),
+      broker: false,
+      cargo_carried: []
+    },
+    cached_at: toIsoDateTime(safetyData.fetched_date),
+    cache_ttl_hours: CACHE_TTL_HOURS
+  };
+}
+
+function toNullableNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function toIsoDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
+function toIsoDateTime(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

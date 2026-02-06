@@ -1,0 +1,423 @@
+import * as dataAccess from 'backend/dataAccess';
+import { validateApiKey } from 'backend/apiAuthService';
+import { checkAndTrackUsage } from 'backend/rateLimitService';
+import {
+  getExternalCarrierSafety,
+  batchExternalCarrierSafety
+} from 'backend/externalFmcsaApi';
+import { getExternalCurrentCSA, getExternalCSAHistory } from 'backend/externalCsaApi';
+
+const COLLECTIONS = {
+  requestLog: 'apiRequestLog',
+  alertSubscriptions: 'apiAlertSubscriptions'
+};
+
+const JSON_HEADERS = {
+  'Content-Type': 'application/json; charset=utf-8',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
+};
+
+/**
+ * Main gateway request handler.
+ * @param {Object} request
+ * @returns {Promise<Object>}
+ */
+export async function handleGatewayRequest(request) {
+  const startedAt = Date.now();
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const method = String(request?.method || 'GET').toUpperCase();
+  const routePath = getRoutePath(request);
+  const ipAddress = getIpAddress(request);
+  const userAgent = getHeader(request, 'user-agent') || null;
+
+  if (!routePath.startsWith('/v1/')) {
+    return errorResponse(404, requestId, 'resource_not_found', 'Endpoint not found');
+  }
+
+  let authContext = null;
+  let statusCode = 200;
+  let payload = null;
+  let responseHeaders = {};
+
+  try {
+    if (method === 'OPTIONS') {
+      return {
+        status: 200,
+        headers: JSON_HEADERS,
+        body: { ok: true }
+      };
+    }
+
+    authContext = await validateApiKey({
+      authorizationHeader: getHeader(request, 'authorization'),
+      ipAddress
+    });
+
+    if (!authContext.success) {
+      statusCode = authErrorStatus(authContext.errorCode);
+      return errorResponse(statusCode, requestId, authContext.errorCode, authContext.message);
+    }
+
+    const usageCheck = await checkAndTrackUsage({
+      partnerId: authContext.partner?.partner_id,
+      tier: authContext.tier,
+      subscription: authContext.subscription,
+      endpoint: routePath,
+      bypassRateLimit: shouldBypassRateLimit(request),
+      statusCode: 200,
+      latencyMs: 0
+    });
+
+    if (!usageCheck.allowed) {
+      statusCode = 429;
+      return errorResponse(
+        429,
+        requestId,
+        usageCheck.errorCode,
+        usageCheck.errorCode === 'quota_exceeded' ?
+          'Monthly API quota exceeded' :
+          'Rate limit exceeded',
+        { retry_after: usageCheck.retryAfter },
+        usageCheck.headers
+      );
+    }
+
+    responseHeaders = usageCheck.headers || {};
+    const routed = await routeRequest({
+      request,
+      method,
+      routePath,
+      authContext
+    });
+
+    statusCode = routed.status || 200;
+    payload = routed.payload || {};
+    responseHeaders = { ...responseHeaders, ...(routed.headers || {}) };
+  } catch (error) {
+    statusCode = 500;
+    payload = {
+      error: {
+        code: 'internal_error',
+        message: error.message || 'Unexpected API error'
+      },
+      request_id: requestId
+    };
+  } finally {
+    await logRequest({
+      requestId,
+      routePath,
+      method,
+      statusCode,
+      startedAt,
+      partnerId: authContext?.partner?.partner_id || null,
+      apiKeyId: authContext?.apiKey?.key_id || null,
+      ipAddress,
+      userAgent
+    });
+  }
+
+  if (statusCode >= 400) {
+    if (payload?.error?.code) {
+      return errorResponse(
+        statusCode,
+        requestId,
+        payload.error.code,
+        payload.error.message || 'Request failed',
+        payload.error
+      );
+    }
+    return {
+      status: statusCode,
+      headers: { ...JSON_HEADERS, ...responseHeaders },
+      body: payload
+    };
+  }
+
+  return successResponse(statusCode, requestId, payload, responseHeaders);
+}
+
+async function routeRequest({ request, method, routePath, authContext }) {
+  if (method === 'GET' && /^\/v1\/safety\/carrier\/\d+$/.test(routePath)) {
+    const dotNumber = routePath.split('/').pop();
+    const result = await getExternalCarrierSafety(dotNumber);
+    if (!result.success) {
+      return {
+        status: result.errorCode === 'resource_not_found' ? 404 : 400,
+        payload: { error: { code: result.errorCode, message: result.message } }
+      };
+    }
+    return { status: 200, payload: result.data };
+  }
+
+  if (method === 'POST' && routePath === '/v1/safety/carriers/batch') {
+    const body = await parseBody(request);
+    const result = await batchExternalCarrierSafety(body?.dot_numbers || []);
+    if (!result.success) {
+      return {
+        status: 400,
+        payload: { error: { code: result.errorCode, message: result.message } }
+      };
+    }
+    return { status: 200, payload: result.data };
+  }
+
+  if (method === 'GET' && /^\/v1\/safety\/csa\/\d+$/.test(routePath)) {
+    const dotNumber = routePath.split('/').pop();
+    const result = await getExternalCurrentCSA(dotNumber);
+    if (!result.success) {
+      return {
+        status: 400,
+        payload: { error: { code: result.errorCode, message: result.message } }
+      };
+    }
+    return { status: 200, payload: result.data };
+  }
+
+  if (method === 'GET' && /^\/v1\/safety\/csa\/\d+\/history$/.test(routePath)) {
+    const parts = routePath.split('/');
+    const dotNumber = parts[4];
+    const months = Number(request?.query?.months || 6);
+    const result = await getExternalCSAHistory(dotNumber, months);
+    if (!result.success) {
+      return {
+        status: 400,
+        payload: { error: { code: result.errorCode, message: result.message } }
+      };
+    }
+    return { status: 200, payload: result.data };
+  }
+
+  if (method === 'POST' && routePath === '/v1/safety/alerts/subscribe') {
+    const body = await parseBody(request);
+    const subscription = await createAlertSubscription(authContext.partner?.partner_id, body);
+    if (!subscription.success) {
+      return {
+        status: 400,
+        payload: { error: { code: 'invalid_request', message: subscription.message } }
+      };
+    }
+    return { status: 201, payload: subscription.data };
+  }
+
+  if (method === 'GET' && routePath === '/v1/safety/alerts/subscriptions') {
+    const subscriptions = await listAlertSubscriptions(authContext.partner?.partner_id);
+    return { status: 200, payload: { items: subscriptions } };
+  }
+
+  if (method === 'DELETE' && /^\/v1\/safety\/alerts\/[^/]+$/.test(routePath)) {
+    const subscriptionId = routePath.split('/').pop();
+    const deleted = await deleteAlertSubscription(authContext.partner?.partner_id, subscriptionId);
+    if (!deleted) {
+      return {
+        status: 404,
+        payload: { error: { code: 'resource_not_found', message: 'Subscription not found' } }
+      };
+    }
+    return { status: 200, payload: { success: true } };
+  }
+
+  return {
+    status: 404,
+    payload: { error: { code: 'resource_not_found', message: 'Endpoint not found' } }
+  };
+}
+
+function successResponse(status, requestId, data, extraHeaders = {}) {
+  return {
+    status,
+    headers: { ...JSON_HEADERS, ...extraHeaders },
+    body: {
+      data,
+      request_id: requestId
+    }
+  };
+}
+
+function errorResponse(status, requestId, code, message, extras = {}, extraHeaders = {}) {
+  return {
+    status,
+    headers: { ...JSON_HEADERS, ...extraHeaders },
+    body: {
+      error: {
+        code,
+        message,
+        ...extras
+      },
+      request_id: requestId
+    }
+  };
+}
+
+function authErrorStatus(code) {
+  if (code === 'invalid_api_key') return 401;
+  if (code === 'subscription_inactive' || code === 'forbidden_ip') return 403;
+  return 401;
+}
+
+function getRoutePath(request) {
+  const explicit = request?.path || '';
+  const queryPath = request?.query?.path || '';
+  const source = explicit || queryPath || safePathFromUrl(request?.url);
+  const normalized = String(source || '');
+  const index = normalized.indexOf('/v1/');
+  if (index >= 0) return normalized.slice(index);
+  return normalized.startsWith('/') ? normalized : `/${normalized}`;
+}
+
+function safePathFromUrl(url) {
+  if (!url) return '';
+  try {
+    return new URL(url).pathname || '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+function getHeader(request, name) {
+  const headers = request?.headers || {};
+  const lower = String(name || '').toLowerCase();
+  if (typeof headers.get === 'function') {
+    return headers.get(name) || headers.get(lower) || null;
+  }
+  return headers[name] || headers[lower] || null;
+}
+
+function getIpAddress(request) {
+  return (
+    getHeader(request, 'x-forwarded-for') ||
+    getHeader(request, 'x-real-ip') ||
+    null
+  );
+}
+
+function shouldBypassRateLimit(request) {
+  const headerValue = String(getHeader(request, 'x-lmdr-bypass-rate-limit') || '').toLowerCase();
+  return headerValue === 'true';
+}
+
+async function parseBody(request) {
+  if (!request?.body) return {};
+  if (typeof request.body.json === 'function') {
+    try {
+      return await request.body.json();
+    } catch (_e) { }
+  }
+
+  if (typeof request.body.text === 'function') {
+    const bodyText = await request.body.text();
+    if (!bodyText) return {};
+    try {
+      return JSON.parse(bodyText);
+    } catch (_e) {
+      return {};
+    }
+  }
+
+  return {};
+}
+
+async function logRequest({
+  requestId,
+  partnerId,
+  apiKeyId,
+  routePath,
+  method,
+  statusCode,
+  startedAt,
+  ipAddress,
+  userAgent
+}) {
+  try {
+    await dataAccess.insertRecord(COLLECTIONS.requestLog, {
+      request_id: requestId,
+      partner_id: partnerId,
+      api_key_id: apiKeyId,
+      endpoint: routePath,
+      method,
+      request_params: {},
+      response_status: statusCode,
+      response_time_ms: Date.now() - startedAt,
+      cache_hit: false,
+      error_message: statusCode >= 400 ? `HTTP ${statusCode}` : null,
+      ip_address: ipAddress,
+      user_agent: userAgent,
+      created_at: new Date()
+    }, { suppressAuth: true });
+  } catch (_e) { }
+}
+
+async function createAlertSubscription(partnerId, body) {
+  const dotNumbers = Array.isArray(body?.dot_numbers) ? body.dot_numbers : [];
+  const alertTypes = Array.isArray(body?.alert_types) ? body.alert_types : [];
+  const webhookUrl = String(body?.webhook_url || '').trim();
+  const webhookSecret = String(body?.webhook_secret || '').trim();
+
+  if (!dotNumbers.length || !webhookUrl) {
+    return {
+      success: false,
+      message: 'dot_numbers and webhook_url are required'
+    };
+  }
+
+  const record = await dataAccess.insertRecord(COLLECTIONS.alertSubscriptions, {
+    partner_id: partnerId,
+    dot_numbers: dotNumbers.map((dot) => Number(dot)),
+    alert_types: alertTypes,
+    webhook_url: webhookUrl,
+    webhook_secret: webhookSecret,
+    is_active: true,
+    created_at: new Date(),
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  const created = record?.record || null;
+  if (!created?._id) {
+    return { success: false, message: 'Failed to create subscription' };
+  }
+
+  return {
+    success: true,
+    data: {
+      subscription_id: created._id,
+      dot_numbers: created.dot_numbers || [],
+      alert_types: created.alert_types || [],
+      webhook_url: created.webhook_url
+    }
+  };
+}
+
+async function listAlertSubscriptions(partnerId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.alertSubscriptions, {
+    filters: { partner_id: partnerId, is_active: true },
+    limit: 100,
+    suppressAuth: true
+  });
+
+  return (result?.items || []).map((item) => ({
+    subscription_id: item._id,
+    dot_numbers: item.dot_numbers || [],
+    alert_types: item.alert_types || [],
+    webhook_url: item.webhook_url,
+    created_at: item.created_at || null
+  }));
+}
+
+async function deleteAlertSubscription(partnerId, subscriptionId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.alertSubscriptions, {
+    filters: { _id: subscriptionId, partner_id: partnerId },
+    limit: 1,
+    suppressAuth: true
+  });
+  const record = result?.items?.[0];
+  if (!record?._id) return false;
+
+  const updated = await dataAccess.updateRecord(COLLECTIONS.alertSubscriptions, {
+    _id: record._id,
+    is_active: false,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  return Boolean(updated?.success);
+}

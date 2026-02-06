@@ -409,6 +409,36 @@ POSTMESSAGE PROTOCOL:
                         </div>
                     </div>
 
+                    <!-- Match Preview Section -->
+                    <div id="matchPreviewContainer" class="hidden transition-all duration-500 scale-95 opacity-0">
+                        <div class="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-6 text-white shadow-xl relative overflow-hidden">
+                            <div class="absolute -right-10 -bottom-10 w-40 h-40 bg-white/10 rounded-full blur-3xl"></div>
+                            
+                            <div class="relative">
+                                <div class="flex items-center justify-between mb-4">
+                                    <span class="text-[10px] font-black bg-white/20 px-3 py-1 rounded-full uppercase tracking-widest">Live Match Estimate</span>
+                                    <div id="previewLoading" class="hidden">
+                                        <i class="fa-solid fa-circle-notch fa-spin text-white/50 text-xs"></i>
+                                    </div>
+                                </div>
+                                
+                                <div class="flex items-baseline gap-2 mb-1">
+                                    <span id="previewCount" class="text-5xl font-black transition-all duration-500">0</span>
+                                    <span class="text-xl font-bold opacity-80">Drivers</span>
+                                </div>
+                                <p id="previewMessage" class="text-sm opacity-90 leading-relaxed mb-4">ready to connect with you based on these criteria.</p>
+                                
+                                <div id="previewBullets" class="grid grid-cols-1 md:grid-cols-2 gap-2 mb-4">
+                                    <!-- Dynamic bullets -->
+                                </div>
+
+                                <div id="exceedsNeedBadge" class="hidden inline-flex items-center gap-2 bg-emerald-500 text-white text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-wider shadow-lg">
+                                    <i class="fa-solid fa-check-circle"></i> Exceeds your need
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Row 7: Additional Notes -->
                     <div>
                         <label for="additionalNotes" class="block text-sm font-semibold text-slate-700 mb-2">
@@ -495,7 +525,16 @@ POSTMESSAGE PROTOCOL:
             const formError = document.getElementById('formError');
             const formErrorMessage = document.getElementById('formErrorMessage');
 
+            // Match Preview Elements
+            const previewContainer = document.getElementById('matchPreviewContainer');
+            const previewCount = document.getElementById('previewCount');
+            const previewMessage = document.getElementById('previewMessage');
+            const previewBullets = document.getElementById('previewBullets');
+            const previewLoading = document.getElementById('previewLoading');
+            const exceedsNeedBadge = document.getElementById('exceedsNeedBadge');
+
             let pendingCallback = null;
+            let previewDebounceTimer = null;
 
             window.addEventListener('message', function (event) {
                 const msg = event.data;
@@ -503,7 +542,7 @@ POSTMESSAGE PROTOCOL:
 
                 log('Received message:', msg.type);
 
-                if (msg.type === 'staffingRequestResult') {
+                if (msg.type === 'staffingRequestResult' || msg.type === 'matchPreviewResult') {
                     if (pendingCallback) {
                         pendingCallback(msg.data);
                         pendingCallback = null;
@@ -548,14 +587,121 @@ POSTMESSAGE PROTOCOL:
                 };
             }
 
+            /**
+             * Debounced match preview fetch
+             */
+            function triggerPreviewUpdate() {
+                if (previewDebounceTimer) clearTimeout(previewDebounceTimer);
+                previewDebounceTimer = setTimeout(fetchMatchPreview, 500);
+            }
+
+            async function fetchMatchPreview() {
+                const data = getFormData();
+                
+                // Only show preview if some criteria is selected
+                if (!data.driversNeeded && data.driverTypes.length === 0) {
+                    previewContainer.classList.add('hidden', 'scale-95', 'opacity-0');
+                    return;
+                }
+
+                previewLoading.classList.remove('hidden');
+                if (previewContainer.classList.contains('hidden')) {
+                    previewContainer.classList.remove('hidden');
+                    setTimeout(() => {
+                        previewContainer.classList.remove('scale-95', 'opacity-0');
+                    }, 10);
+                }
+
+                try {
+                    const criteria = {
+                        cdlTypes: data.driverTypes.filter(t => t.includes('Class')).map(t => t.replace('Class ', '')),
+                        endorsements: data.driverTypes.filter(t => !t.includes('Class') && !t.includes('Non-CDL')),
+                        driversNeeded: data.driversNeeded
+                    };
+
+                    const result = await sendToVelo('getMatchPreview', criteria);
+                    if (result && result.success) {
+                        updatePreviewUI(result.preview);
+                    }
+                } catch (e) {
+                    log('Preview fetch failed:', e);
+                } finally {
+                    previewLoading.classList.add('hidden');
+                }
+            }
+
+            function updatePreviewUI(preview) {
+                if (!preview) return;
+
+                // Animate count
+                const start = parseInt(previewCount.textContent) || 0;
+                const end = preview.count;
+                animateNumber(previewCount, start, end, 500);
+
+                previewMessage.textContent = preview.message;
+
+                // Update bullets
+                let bullets = '';
+                if (preview.breakdown) {
+                    if (preview.breakdown.byClass) {
+                        Object.entries(preview.breakdown.byClass).forEach(([cls, count]) => {
+                            bullets += `
+                                <div class="flex items-center gap-2 text-[10px] font-bold bg-white/10 px-2 py-1 rounded-lg">
+                                    <i class="fa-solid fa-truck text-cyan-300"></i>
+                                    <span>${count} Class ${cls}</span>
+                                </div>`;
+                        });
+                    }
+                    if (preview.breakdown.withEndorsements > 0) {
+                        bullets += `
+                            <div class="flex items-center gap-2 text-[10px] font-bold bg-white/10 px-2 py-1 rounded-lg">
+                                <i class="fa-solid fa-flask text-emerald-300"></i>
+                                <span>${preview.breakdown.withEndorsements} Endorsed</span>
+                            </div>`;
+                    }
+                    if (preview.breakdown.avgExperience > 0) {
+                        bullets += `
+                            <div class="flex items-center gap-2 text-[10px] font-bold bg-white/10 px-2 py-1 rounded-lg">
+                                <i class="fa-solid fa-star text-yellow-300"></i>
+                                <span>${preview.breakdown.avgExperience}y Avg Exp</span>
+                            </div>`;
+                    }
+                }
+                previewBullets.innerHTML = bullets;
+
+                // Update badge and button
+                if (preview.exceedsNeed) {
+                    exceedsNeedBadge.classList.remove('hidden');
+                } else {
+                    exceedsNeedBadge.classList.add('hidden');
+                }
+
+                if (preview.count > 0) {
+                    submitBtnText.textContent = `Connect with ${preview.count} Drivers`;
+                } else {
+                    submitBtnText.textContent = 'Submit Staffing Request';
+                }
+            }
+
+            function animateNumber(el, start, end, duration) {
+                let startTimestamp = null;
+                const step = (timestamp) => {
+                    if (!startTimestamp) startTimestamp = timestamp;
+                    const progress = Math.min((timestamp - startTimestamp) / duration, 1);
+                    el.textContent = Math.floor(progress * (end - start) + start);
+                    if (progress < 1) {
+                        window.requestAnimationFrame(step);
+                    }
+                };
+                window.requestAnimationFrame(step);
+            }
+
             function setLoading(isLoading) {
                 submitBtn.disabled = isLoading;
                 if (isLoading) {
-                    submitBtnText.textContent = 'Submitting...';
                     submitSpinner.classList.remove('hidden');
                     submitBtn.querySelector('.fa-arrow-right').classList.add('hidden');
                 } else {
-                    submitBtnText.textContent = 'Submit Staffing Request';
                     submitSpinner.classList.add('hidden');
                     submitBtn.querySelector('.fa-arrow-right').classList.remove('hidden');
                 }
@@ -565,18 +711,12 @@ POSTMESSAGE PROTOCOL:
                 formSuccess.classList.remove('hidden');
                 formError.classList.add('hidden');
                 form.reset();
+                previewContainer.classList.add('hidden', 'scale-95', 'opacity-0');
                 formSuccess.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
                 // Track Conversion
                 try {
                     console.log('[Analytics] Tracking lead_submitted');
-                    /*
-                    gtag('event', 'lead_submitted', {
-                        'event_category': 'Carrier',
-                        'event_label': 'Staffing Request'
-                    });
-                    fbq('track', 'Lead');
-                    */
                 } catch (e) { console.error('Analytics error:', e); }
             }
 
@@ -591,6 +731,12 @@ POSTMESSAGE PROTOCOL:
                 formSuccess.classList.add('hidden');
                 formError.classList.add('hidden');
             }
+
+            // Event Listeners for Preview
+            form.querySelector('#driversNeeded').addEventListener('change', triggerPreviewUpdate);
+            form.querySelectorAll('input[name="driverTypes"]').forEach(cb => {
+                cb.addEventListener('change', triggerPreviewUpdate);
+            });
 
             form.addEventListener('submit', async function (e) {
                 e.preventDefault();

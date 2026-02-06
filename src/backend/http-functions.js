@@ -20,6 +20,7 @@ import {
   trackAbandonedCheckout,
   markCheckoutRecovered
 } from 'backend/abandonmentEmailService';
+import { handleGatewayRequest } from 'backend/apiGateway';
 
 // Data source configuration imports
 // Note: http-functions.js uses standard imports (not .jsw)
@@ -438,4 +439,25 @@ export function get_stripe_webhook(request) {
     service: 'stripe-webhook',
     timestamp: new Date().toISOString()
   });
+}
+
+// ============================================================================
+// EXTERNAL API GATEWAY ENDPOINT
+// Base route: /_functions/api_gateway/v1/*
+// ============================================================================
+
+export async function get_api_gateway(request) {
+  return handleGatewayRequest(request);
+}
+
+export async function post_api_gateway(request) {
+  return handleGatewayRequest(request);
+}
+
+export async function delete_api_gateway(request) {
+  return handleGatewayRequest(request);
+}
+
+export async function options_api_gateway(request) {
+  return handleGatewayRequest(request);
 }

@@ -144,6 +144,12 @@ export const DATA_SOURCE = {
   systemErrors: 'airtable',
   systemMetrics: 'airtable', // Switched to Airtable for visibility
   systemTraces: 'airtable', // Switched to Airtable for visibility
+  apiPartners: 'airtable',
+  apiSubscriptions: 'airtable',
+  apiUsage: 'airtable',
+  apiRequestLog: 'airtable',
+  apiProducts: 'airtable',
+  apiAlertSubscriptions: 'airtable',
 
   // -------------------------------------------------------------------------
   // Gamification System (Airtable-only, no Wix fallback)
@@ -407,6 +413,12 @@ export const WIX_COLLECTION_NAMES = {
   systemErrors: 'SystemErrors',
   systemMetrics: 'SystemMetrics',
   systemTraces: 'SystemTraces',
+  apiPartners: 'ApiPartners',
+  apiSubscriptions: 'ApiSubscriptions',
+  apiUsage: 'ApiUsage',
+  apiRequestLog: 'ApiRequestLog',
+  apiProducts: 'ApiProducts',
+  apiAlertSubscriptions: 'ApiAlertSubscriptions',
 
   // Recruiter Utility Expansion
   savedSearches: 'SavedSearches',
@@ -560,6 +572,12 @@ export const AIRTABLE_TABLE_NAMES = {
   systemErrors: 'v2_System Errors',
   systemMetrics: 'v2_System Metrics',
   systemTraces: 'v2_System Traces',
+  apiPartners: 'v2_API Partners',
+  apiSubscriptions: 'v2_API Subscriptions',
+  apiUsage: 'v2_API Usage',
+  apiRequestLog: 'v2_API Request Log',
+  apiProducts: 'v2_API Products',
+  apiAlertSubscriptions: 'v2_API Alert Subscriptions',
 
   // Gamification System (Airtable-only)
   driverProgression: 'v2_Driver Progression',

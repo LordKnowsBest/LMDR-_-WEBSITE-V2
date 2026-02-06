@@ -1,0 +1,187 @@
+import { getSecret } from 'wix-secrets-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  partners: 'apiPartners',
+  subscriptions: 'apiSubscriptions'
+};
+
+const KEY_PREFIX = 'lmdr_live_';
+const TEST_KEY_PREFIX = 'lmdr_test_';
+
+/**
+ * Parse bearer token from an Authorization header.
+ * @param {string} authHeader
+ * @returns {string|null}
+ */
+export function parseBearerToken(authHeader) {
+  if (!authHeader || typeof authHeader !== 'string') return null;
+  const [scheme, token] = authHeader.split(' ');
+  if (!scheme || !token || scheme.toLowerCase() !== 'bearer') return null;
+  return token.trim();
+}
+
+/**
+ * Create a 64-char API key with an optional environment prefix.
+ * @param {'live'|'test'} env
+ * @returns {Promise<string>}
+ */
+export async function generateApiKey(env = 'live') {
+  const prefix = env === 'test' ? TEST_KEY_PREFIX : KEY_PREFIX;
+  const randomPart = await randomHex(32);
+  return `${prefix}${randomPart}`;
+}
+
+/**
+ * Hash an API key for storage.
+ * Uses SHA-256 with optional pepper from secrets.
+ * @param {string} apiKey
+ * @returns {Promise<string>}
+ */
+export async function hashApiKey(apiKey) {
+  const pepper = await getSecret('API_KEY_PEPPER').catch(() => '');
+  const payload = `${apiKey}:${pepper || ''}`;
+  return await sha256Hex(payload);
+}
+
+/**
+ * Validate API key and resolve partner + subscription.
+ * @param {Object} params
+ * @param {string} params.authorizationHeader
+ * @param {string|null} [params.ipAddress]
+ * @returns {Promise<Object>}
+ */
+export async function validateApiKey({ authorizationHeader, ipAddress = null }) {
+  const rawKey = parseBearerToken(authorizationHeader);
+  if (!rawKey) {
+    return { success: false, errorCode: 'invalid_api_key', message: 'Missing Bearer token' };
+  }
+
+  const keyHash = await hashApiKey(rawKey);
+  const partnerResult = await dataAccess.queryRecords(COLLECTIONS.partners, {
+    filters: { status: 'active' },
+    limit: 200,
+    suppressAuth: true
+  });
+
+  if (!partnerResult.success) {
+    return { success: false, errorCode: 'internal_error', message: 'Partner lookup failed' };
+  }
+
+  const partner = (partnerResult.items || []).find((item) => hasMatchingKey(item, keyHash));
+  if (!partner) {
+    return { success: false, errorCode: 'invalid_api_key', message: 'Invalid API key' };
+  }
+
+  if (!isIpAllowed(partner, ipAddress)) {
+    return { success: false, errorCode: 'forbidden_ip', message: 'IP address not allowed' };
+  }
+
+  const keyMeta = (partner.api_keys || []).find((k) => k.key_hash === keyHash);
+  await touchApiKey(partner, keyMeta);
+
+  const subscription = await getActiveSubscription(partner.partner_id);
+  if (!subscription || subscription.status !== 'active') {
+    return { success: false, errorCode: 'subscription_inactive', message: 'Subscription inactive' };
+  }
+
+  return {
+    success: true,
+    partner,
+    subscription,
+    apiKey: keyMeta,
+    tier: String(subscription.tier || partner.tier || 'starter').toLowerCase()
+  };
+}
+
+/**
+ * Rotate key: deactivate old key and issue a new one.
+ * @param {string} partnerId
+ * @param {string} keyId
+ * @param {Object} [options]
+ * @param {'live'|'test'} [options.env]
+ * @param {string} [options.name]
+ * @returns {Promise<Object>}
+ */
+export async function rotateApiKey(partnerId, keyId, options = {}) {
+  const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
+    suppressAuth: true
+  });
+  if (!partner) return { success: false, error: 'Partner not found' };
+
+  const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
+  const updated = keys.map((k) => k.key_id === keyId ? { ...k, is_active: false } : k);
+
+  const newKey = await generateApiKey(options.env || 'live');
+  const newHash = await hashApiKey(newKey);
+  const nextKey = {
+    key_id: `key_${Date.now()}`,
+    key_hash: newHash,
+    name: options.name || 'Rotated Key',
+    created_at: new Date(),
+    last_used_at: null,
+    is_active: true
+  };
+  updated.push(nextKey);
+
+  const saveResult = await dataAccess.updateRecord(COLLECTIONS.partners, {
+    _id: partner._id,
+    api_keys: updated,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  if (!saveResult.success) return { success: false, error: saveResult.error };
+  return { success: true, key: newKey, key_id: nextKey.key_id };
+}
+
+async function getActiveSubscription(partnerId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+    filters: {
+      partner_id: partnerId,
+      status: 'active'
+    },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!result.success || !result.items?.length) return null;
+  return result.items[0];
+}
+
+function hasMatchingKey(partner, keyHash) {
+  const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
+  return keys.some((key) => key.is_active !== false && key.key_hash === keyHash);
+}
+
+function isIpAllowed(partner, ipAddress) {
+  if (!ipAddress) return true;
+  const whitelist = Array.isArray(partner.ip_whitelist) ? partner.ip_whitelist : [];
+  if (!whitelist.length) return true;
+  return whitelist.includes(ipAddress);
+}
+
+async function touchApiKey(partner, keyMeta) {
+  if (!partner?._id || !keyMeta?.key_id) return;
+  const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
+  const updatedKeys = keys.map((key) => key.key_id === keyMeta.key_id ?
+    { ...key, last_used_at: new Date() } : key
+  );
+  await dataAccess.updateRecord(COLLECTIONS.partners, {
+    _id: partner._id,
+    api_keys: updatedKeys,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+}
+
+async function randomHex(byteLength) {
+  const buf = new Uint8Array(byteLength);
+  crypto.getRandomValues(buf);
+  return Array.from(buf).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256Hex(input) {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}

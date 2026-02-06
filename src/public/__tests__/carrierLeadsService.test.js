@@ -154,4 +154,51 @@ describe('carrierLeadsService', () => {
       expect(leadRecord.driver_types).toEqual(['OTR', 'Regional', 'Local']);
     });
   });
+
+  describe('getMatchPreview', () => {
+    let getMatchPreview;
+
+    beforeEach(async () => {
+      ({ getMatchPreview } = await import('backend/carrierLeadsService'));
+    });
+
+    test('returns correct count and messaging', async () => {
+      airtable.queryRecords.mockResolvedValue({
+        success: true,
+        items: [
+          { cdl_class: 'A', years_experience: 5 },
+          { cdl_class: 'A', years_experience: 3 }
+        ],
+        totalCount: 2
+      });
+
+      const result = await getMatchPreview({ cdlTypes: ['A'] });
+      
+      expect(result.success).toBe(true);
+      expect(result.preview.count).toBe(2);
+      expect(result.preview.breakdown.avgExperience).toBe(4);
+      expect(result.preview.message).toContain('2 drivers');
+    });
+
+    test('filters by experience correctly', async () => {
+      await getMatchPreview({ minExperience: 3 });
+
+      const options = airtable.queryRecords.mock.calls[0][1];
+      expect(options.filters.years_experience.gte).toBe(3);
+    });
+
+    test('handles empty matches gracefully', async () => {
+      airtable.queryRecords.mockResolvedValue({
+        success: true,
+        items: [],
+        totalCount: 0
+      });
+
+      const result = await getMatchPreview({ cdlTypes: ['X'] });
+      
+      expect(result.preview.count).toBe(0);
+      expect(result.preview.hasMatches).toBe(false);
+      expect(result.preview.message).toContain('growing daily');
+    });
+  });
 });

@@ -1,0 +1,167 @@
+import * as dataAccess from 'backend/dataAccess';
+import { getHiringPreferences } from 'backend/carrierPreferences';
+
+const COLLECTION_KEYS = {
+    carriers: 'carriers',
+    enrichments: 'carrierEnrichments',
+    drivers: 'driverProfiles',
+    status: 'carrierOnboardingStatus'
+};
+
+const STAGES = {
+    RECEIVED: { id: 1, name: 'received', label: 'Request Received' },
+    PROCESSING: { id: 2, name: 'processing', label: 'Processing' },
+    ENRICHING: { id: 3, name: 'enriching', label: 'AI Enrichment' },
+    LIVE: { id: 4, name: 'live', label: 'Profile Live' },
+    MATCHING: { id: 5, name: 'matching', label: 'Matching' }
+};
+
+/**
+ * Get the onboarding status for a carrier
+ * @param {string} carrierDot 
+ */
+export async function getCarrierOnboardingStatus(carrierDot) {
+    try {
+        const dot = String(carrierDot);
+        
+        // 1. Get carrier record
+        const carrierRes = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+            filters: { dot_number: dot },
+            limit: 1,
+            suppressAuth: true
+        });
+        const carrier = carrierRes.items?.[0];
+        if (!carrier) return { success: false, error: 'Carrier not found' };
+
+        // 2. Get enrichment status
+        const enrichmentRes = await dataAccess.queryRecords(COLLECTION_KEYS.enrichments, {
+            filters: { dot_number: dot },
+            limit: 1,
+            suppressAuth: true
+        });
+        const enrichment = enrichmentRes.items?.[0];
+
+        // 3. Get match count
+        const matchPreview = await getMatchCount(dot);
+
+        // 4. Determine stage
+        let currentStageId = 1;
+        let stageName = 'received';
+        
+        if (carrier.status === 'active') {
+            currentStageId = 4;
+            stageName = 'live';
+        } else if (enrichment) {
+            currentStageId = 3;
+            stageName = 'enriching'; // Might be completed but we'll check progress
+        } else {
+            currentStageId = 2;
+            stageName = 'processing';
+        }
+
+        if (matchPreview.count > 0 && currentStageId >= 4) {
+            currentStageId = 5;
+            stageName = 'matching';
+        }
+
+        const stages = [
+            { ...STAGES.RECEIVED, completed: true },
+            { ...STAGES.PROCESSING, completed: currentStageId > 2, active: currentStageId === 2 },
+            { ...STAGES.ENRICHING, completed: currentStageId > 3 || (enrichment && !isEnrichmentStale(enrichment.enriched_date)), active: currentStageId === 3 },
+            { ...STAGES.LIVE, completed: currentStageId > 4 || carrier.status === 'active', active: currentStageId === 4 },
+            { ...STAGES.MATCHING, completed: currentStageId === 5, active: currentStageId === 5 }
+        ];
+
+        // Enrichment details
+        const enrichmentInfo = enrichment ? {
+            status: isEnrichmentStale(enrichment.enriched_date) ? 'stale' : 'completed',
+            lastUpdated: enrichment.enriched_date,
+            progress: 100
+        } : {
+            status: 'pending',
+            progress: 30
+        };
+
+        return {
+            success: true,
+            status: {
+                stage: currentStageId,
+                stageName: stageName,
+                stageLabel: STAGES[Object.keys(STAGES).find(k => STAGES[k].id === currentStageId)].label,
+                stages: stages,
+                enrichment: enrichmentInfo,
+                matchPreview: {
+                    available: true,
+                    count: matchPreview.count,
+                    lastUpdated: matchPreview.lastUpdated
+                },
+                nextAction: determineNextAction(currentStageId, enrichmentInfo)
+            }
+        };
+
+    } catch (error) {
+        console.error('[carrierStatusService] getCarrierOnboardingStatus error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get driver match count for a carrier based on their preferences
+ */
+export async function getMatchCount(carrierDot) {
+    try {
+        const dot = String(carrierDot);
+        const prefsRes = await getHiringPreferences(dot);
+        const prefs = prefsRes.preferences;
+
+        let query = dataAccess.queryRecords(COLLECTION_KEYS.drivers, {
+            filters: { is_searchable: true },
+            limit: 1, // We just want the count
+            suppressAuth: true
+        });
+
+        // If we have prefs, build a more specific query for a more accurate match count
+        const filters = { is_searchable: true };
+        if (prefs) {
+            if (prefs.required_cdl_types && prefs.required_cdl_types.length > 0) {
+                filters.cdl_class = { hasSome: prefs.required_cdl_types };
+            }
+            if (prefs.min_experience_years !== null) {
+                filters.years_experience = { gte: prefs.min_experience_years };
+            }
+        }
+
+        const countRes = await dataAccess.queryRecords(COLLECTION_KEYS.drivers, {
+            filters: filters,
+            limit: 0,
+            suppressAuth: true
+        });
+
+        return {
+            count: countRes.totalCount || 0,
+            lastUpdated: new Date()
+        };
+    } catch (error) {
+        console.error('[carrierStatusService] getMatchCount error:', error);
+        return { count: 0, lastUpdated: new Date() };
+    }
+}
+
+function isEnrichmentStale(enrichedDate) {
+    if (!enrichedDate) return true;
+    const daysSince = (Date.now() - new Date(enrichedDate).getTime()) / (1000 * 60 * 60 * 24);
+    return daysSince > 14;
+}
+
+function determineNextAction(stageId, enrichment) {
+    if (stageId === 5) {
+        return { type: 'view_matches', message: 'Review your matches and start hiring!', cta: 'View Matches' };
+    }
+    if (stageId === 4) {
+        return { type: 'wait', message: 'We are finding your first matches now.', cta: null };
+    }
+    if (stageId === 3) {
+        return { type: 'wait', message: 'AI enrichment typically completes within 15 minutes.', cta: null };
+    }
+    return { type: 'wait', message: 'Your request is being processed by our team.', cta: null };
+}

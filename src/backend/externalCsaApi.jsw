@@ -1,0 +1,153 @@
+import {
+  getCSAScoreHistory,
+  getCSAScoresWithTrends,
+  getCSARecommendations
+} from 'backend/csaMonitorService';
+import { validateDotNumber } from 'backend/externalFmcsaApi';
+
+/**
+ * Get current CSA scores for a carrier.
+ * @param {string|number} dotNumber
+ * @returns {Promise<Object>}
+ */
+export async function getExternalCurrentCSA(dotNumber) {
+  const validation = validateDotNumber(dotNumber);
+  if (!validation.valid) {
+    return { success: false, errorCode: 'invalid_request', message: validation.error };
+  }
+
+  const scoreRecord = await getCSAScoresWithTrends(validation.value);
+  const basics = parseJsonObject(scoreRecord?.basics);
+  const alerts = parseJsonArray(scoreRecord?.alerts_active);
+
+  return {
+    success: true,
+    data: {
+      dot_number: Number(validation.value),
+      current_scores: mapBasics(basics),
+      alert_status: {
+        has_alerts: alerts.length > 0,
+        categories: alerts
+      },
+      snapshot_date: toIsoDate(scoreRecord?.snapshot_date)
+    }
+  };
+}
+
+/**
+ * Get CSA history with trend/recommendation enrichment.
+ * @param {string|number} dotNumber
+ * @param {number} [months=6]
+ * @returns {Promise<Object>}
+ */
+export async function getExternalCSAHistory(dotNumber, months = 6) {
+  const validation = validateDotNumber(dotNumber);
+  if (!validation.valid) {
+    return { success: false, errorCode: 'invalid_request', message: validation.error };
+  }
+
+  const safeMonths = Math.max(1, Math.min(24, Number(months) || 6));
+  const [history, recommendations] = await Promise.all([
+    getCSAScoreHistory(validation.value, safeMonths),
+    getCSARecommendations(validation.value)
+  ]);
+
+  const mappedHistory = (history || []).map((entry) => {
+    const basics = parseJsonObject(entry?.basics);
+    const alertCategories = parseJsonArray(entry?.alerts_active);
+    return {
+      snapshot_date: toIsoDate(entry?.snapshot_date),
+      scores: mapBasics(basics),
+      alerts_active: alertCategories.length,
+      alert_categories: alertCategories
+    };
+  });
+
+  return {
+    success: true,
+    data: {
+      dot_number: Number(validation.value),
+      current_scores: mappedHistory.length ?
+        mappedHistory[mappedHistory.length - 1].scores :
+        {},
+      history: mappedHistory,
+      trends: buildTrendSummary(mappedHistory),
+      recommendations: mapRecommendations(recommendations)
+    }
+  };
+}
+
+function mapBasics(basics) {
+  const payload = {};
+  Object.keys(basics || {}).forEach((key) => {
+    const item = basics[key] || {};
+    payload[key] = {
+      score: toNullableNumber(item.score),
+      percentile: toNullableNumber(item.percentile),
+      alert: Boolean(item.alert)
+    };
+  });
+  return payload;
+}
+
+function buildTrendSummary(history = []) {
+  if (history.length < 2) return {};
+
+  const first = history[0].scores || {};
+  const last = history[history.length - 1].scores || {};
+  const keys = new Set([...Object.keys(first), ...Object.keys(last)]);
+  const trends = {};
+
+  keys.forEach((key) => {
+    const start = Number(first[key]?.percentile || 0);
+    const end = Number(last[key]?.percentile || 0);
+    const change = end - start;
+    trends[key] = {
+      direction: change > 0 ? 'degrading' : (change < 0 ? 'improving' : 'stable'),
+      change_30d: change
+    };
+  });
+
+  return trends;
+}
+
+function mapRecommendations(recommendations) {
+  return (recommendations || []).map((item) => {
+    if (typeof item === 'string') return item;
+    if (item?.action) return `${item.category}: ${item.action}`;
+    return 'Review CSA profile for corrective actions';
+  });
+}
+
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (_e) {
+    return {};
+  }
+}
+
+function parseJsonArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_e) {
+    return [];
+  }
+}
+
+function toNullableNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function toIsoDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}

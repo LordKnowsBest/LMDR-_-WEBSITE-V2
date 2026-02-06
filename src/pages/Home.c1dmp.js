@@ -7,7 +7,7 @@
  */
 
 import { getPublicStats, getFeaturedCarriers, getRecentHires } from 'backend/publicStatsService';
-import { submitCarrierStaffingRequest } from 'backend/carrierLeadsService';
+import { submitCarrierStaffingRequest, getMatchPreview } from 'backend/carrierLeadsService';
 import wixLocation from 'wix-location';
 
 $w.onReady(async function () {
@@ -70,6 +70,18 @@ function initCarrierStaffingForm() {
                 type: 'staffingRequestResult',
                 data: { success: false, error: error.message || 'Submission failed' }
               });
+            }
+          }
+
+          if (msg.type === 'getMatchPreview') {
+            try {
+              const result = await getMatchPreview(msg.data);
+              htmlComponent.postMessage({
+                type: 'matchPreviewResult',
+                data: result
+              });
+            } catch (error) {
+              console.error('[VELO] Preview error:', error);
             }
           }
         });

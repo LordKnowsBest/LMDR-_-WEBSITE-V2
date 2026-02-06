@@ -9,7 +9,9 @@
 
 import {
     getCarrierPreferences,
-    saveCarrierPreferences
+    saveCarrierPreferences,
+    applyPreset,
+    getPresetTemplates
 } from 'backend/carrierPreferences';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -36,6 +38,10 @@ $w.onReady(function () {
     });
 
     safeSend(component, { type: 'init' });
+    
+    // Load presets
+    const presets = getPresetTemplates();
+    safeSend(component, { type: 'loadPresets', data: presets });
 });
 
 function findHtmlComponent() {
@@ -60,6 +66,9 @@ async function routeMessage(component, msg) {
         case 'saveWeightPreferences':
             await handleSavePreferences(component, msg);
             break;
+        case 'applyPreset':
+            await handleApplyPreset(component, msg);
+            break;
         default:
             console.warn('CARRIER_WEIGHT_PREFERENCES: Unknown type:', msg.type);
     }
@@ -81,12 +90,28 @@ async function handleSavePreferences(component, msg) {
         const result = await saveCarrierPreferences(data);
         safeSend(component, {
             type: 'savePreferencesResult',
-            data: { success: true, result }
+            data: { success: true, weights: result.weights }
         });
     } catch (error) {
         console.error('CARRIER_WEIGHT_PREFERENCES: savePreferences error:', error);
         safeSend(component, {
             type: 'savePreferencesResult',
+            data: { success: false, error: error.message }
+        });
+    }
+}
+
+async function handleApplyPreset(component, msg) {
+    try {
+        const result = await applyPreset(msg.presetId);
+        safeSend(component, {
+            type: 'applyPresetResult',
+            data: result
+        });
+    } catch (error) {
+        console.error('CARRIER_WEIGHT_PREFERENCES: applyPreset error:', error);
+        safeSend(component, {
+            type: 'applyPresetResult',
             data: { success: false, error: error.message }
         });
     }

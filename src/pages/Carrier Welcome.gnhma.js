@@ -12,6 +12,7 @@
 import wixLocation from 'wix-location';
 import { currentMember } from 'wix-members-frontend';
 import { getCarrierByDOT } from 'backend/recruiter_service';
+import { getCarrierOnboardingStatus } from 'backend/carrierStatusService';
 
 $w.onReady(async function () {
   console.log('Carrier Welcome page initialized');
@@ -39,18 +40,28 @@ $w.onReady(async function () {
     fleetSize: null
   };
 
+  let onboardingStatus = null;
+
   // If we have a DOT number, load carrier details
   if (dotNumber) {
     try {
-      const carrier = await getCarrierByDOT(dotNumber);
+      const [carrier, statusRes] = await Promise.all([
+        getCarrierByDOT(dotNumber),
+        getCarrierOnboardingStatus(dotNumber)
+      ]);
+
       if (carrier) {
         carrierContext.companyName = carrier.legal_name || null;
         carrierContext.city = carrier.city || null;
         carrierContext.state = carrier.state || null;
         carrierContext.fleetSize = carrier.fleet_size || null;
       }
+
+      if (statusRes.success) {
+        onboardingStatus = statusRes.status;
+      }
     } catch (e) {
-      console.error('Failed to load carrier by DOT:', e);
+      console.error('Failed to load carrier data or status:', e);
     }
   }
 
@@ -58,7 +69,7 @@ $w.onReady(async function () {
   updateWelcomeElements(carrierContext);
 
   // Broadcast to all HTML components and set up handlers
-  broadcastToHtmlComponents(carrierContext);
+  broadcastToHtmlComponents(carrierContext, onboardingStatus);
 });
 
 /**
@@ -104,7 +115,7 @@ function updateWelcomeElements(ctx) {
 /**
  * Broadcast carrier context to all HTML components and handle messages
  */
-function broadcastToHtmlComponents(carrierContext) {
+function broadcastToHtmlComponents(carrierContext, onboardingStatus) {
   const possibleIds = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlComponent', '#onboardingChecklist', '#quickWinsHtml'];
   const htmlComponents = [];
 
@@ -130,6 +141,11 @@ function broadcastToHtmlComponents(carrierContext) {
     data: carrierContext
   };
 
+  const statusPayload = onboardingStatus ? {
+    type: 'loadStatus',
+    data: { status: onboardingStatus }
+  } : null;
+
   for (const { id, component } of htmlComponents) {
     // Handle messages from HTML
     component.onMessage(async (event) => {
@@ -150,12 +166,17 @@ function broadcastToHtmlComponents(carrierContext) {
         wixLocation.to('/recruiter-console?tab=settings');
       }
 
-      if (msg.type === 'navigateToDashboard') {
+      if (msg.type === 'navigateToDashboard' || msg.type === 'viewMatchesClicked') {
         wixLocation.to('/recruiter-console');
       }
 
       if (msg.type === 'navigateToDriverSearch') {
         wixLocation.to('/recruiter-driver-search');
+      }
+
+      if (msg.type === 'getCarrierWelcomeData') {
+        component.postMessage(payload);
+        if (statusPayload) component.postMessage(statusPayload);
       }
 
       // Legacy navigation handler
@@ -189,6 +210,7 @@ function broadcastToHtmlComponents(carrierContext) {
     // Send initial data
     setTimeout(() => {
       component.postMessage(payload);
+      if (statusPayload) component.postMessage(statusPayload);
     }, 500);
   }
 }

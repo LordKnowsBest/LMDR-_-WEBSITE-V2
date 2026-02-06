@@ -8,7 +8,7 @@
 
 import wixLocation from 'wix-location';
 import { getJobsByOperationType, getTopJobOpportunities, getPublicStats, getPartnerLogos } from 'backend/publicStatsService';
-import { submitCarrierStaffingRequest } from 'backend/carrierLeadsService';
+import { submitCarrierStaffingRequest, getMatchPreview } from 'backend/carrierLeadsService';
 
 $w.onReady(async function () {
   // Initialize the carrier staffing form HTML component first
@@ -493,6 +493,19 @@ function initCarrierStaffingForm() {
               error: error.message || 'Submission failed. Please try again.'
             }
           });
+        }
+      }
+
+      // Handle match preview request
+      if (msg.type === 'getMatchPreview') {
+        try {
+          const result = await getMatchPreview(msg.data);
+          htmlComponent.postMessage({
+            type: 'matchPreviewResult',
+            data: result
+          });
+        } catch (error) {
+          console.error('[StaffingForm] Preview error:', error);
         }
       }
     });

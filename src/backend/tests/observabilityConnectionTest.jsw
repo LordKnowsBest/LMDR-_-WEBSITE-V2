@@ -1,0 +1,372 @@
+/**
+ * CONNECTION TEST: Observability
+ * ==============================
+ * Verifies the full Airtable pipeline for observability collections:
+ *   1. API Connection - Can we reach Airtable?
+ *   2. Table Mapping  - Does config.jsw map our collection to the right v2_ table?
+ *   3. Field Transform - Do snake_case fields round-trip to Title Case correctly?
+ *   4. CRUD Ops       - Can we Create, Read, Update, Delete a test record?
+ *   5. Cleanup        - Remove test records so we don't pollute the database
+ *
+ * Collections tested:
+ *   - systemLogs (primary CRUD target)
+ *   - systemTraces
+ *   - systemErrors
+ *   - systemMetrics
+ *
+ * Usage:
+ *   import { runConnectionTest } from 'backend/tests/observabilityConnectionTest';
+ *   const result = await runConnectionTest();
+ *
+ * @module backend/tests/observabilityConnectionTest
+ */
+
+import {
+    testConnection,
+    queryRecords,
+    createRecord,
+    updateRecord,
+    deleteRecord,
+    toWixFormat,
+    toAirtableFormat
+} from 'backend/airtableClient';
+
+import { getAirtableTableName } from 'backend/configData';
+
+// =============================================================================
+// TEST CONFIGURATION
+// =============================================================================
+
+const DOMAIN_NAME = 'Observability';
+
+/**
+ * Collections this domain uses.
+ * Keys = config.jsw collection keys
+ * Values = expected Airtable table names (v2_ prefix)
+ */
+const TEST_COLLECTIONS = {
+    'systemLogs': 'v2_System Logs',
+    'systemTraces': 'v2_System Traces',
+    'systemErrors': 'v2_System Errors',
+    'systemMetrics': 'v2_System Metrics'
+};
+
+/**
+ * A sample record in snake_case (Wix format) for CRUD testing.
+ * Uses systemLogs as primary collection.
+ */
+const TEST_RECORD = {
+    level: 'info',
+    source: '__TEST_SEED__',
+    message: 'Connection test log entry - safe to delete',
+    metadata: JSON.stringify({ test: true, timestamp: Date.now() }),
+    timestamp: new Date().toISOString()
+};
+
+/**
+ * Expected Airtable field names after transformation.
+ * Maps snake_case -> Title Case for systemLogs.
+ */
+const EXPECTED_AIRTABLE_FIELDS = {
+    'level': 'Level',
+    'source': 'Source',
+    'message': 'Message',
+    'metadata': 'Metadata'
+};
+
+// The primary collection key to run CRUD tests against
+const PRIMARY_COLLECTION = 'systemLogs';
+
+// =============================================================================
+// MAIN TEST RUNNER
+// =============================================================================
+
+/**
+ * Run the full connection test suite for Observability
+ *
+ * @returns {Promise<Object>} Structured test results
+ */
+export async function runConnectionTest() {
+    const startTime = Date.now();
+    const results = {
+        domain: DOMAIN_NAME,
+        success: false,
+        timestamp: new Date().toISOString(),
+        tests: {},
+        summary: { passed: 0, failed: 0, total: 0 }
+    };
+
+    console.log('='.repeat(60));
+    console.log(`${DOMAIN_NAME} CONNECTION TEST - Starting`);
+    console.log('='.repeat(60));
+
+    // Phase 1: API Connection
+    results.tests.connection = await testApiConnection();
+    tally(results.summary, results.tests.connection.passed);
+
+    if (!results.tests.connection.passed) {
+        results.duration = Date.now() - startTime;
+        console.log('\n[FAIL] Connection failed - skipping remaining tests');
+        return results;
+    }
+
+    // Phase 2: Table Mapping
+    results.tests.tableMapping = await testTableMapping();
+    tally(results.summary, results.tests.tableMapping.passed);
+
+    // Phase 3: Field Transformation
+    results.tests.fieldTransform = await testFieldTransformation();
+    tally(results.summary, results.tests.fieldTransform.passed);
+
+    // Phase 4: CRUD Operations
+    results.tests.crud = await testCRUDOperations();
+    tally(results.summary, results.tests.crud.passed);
+
+    // Final
+    results.success = results.summary.failed === 0;
+    results.duration = Date.now() - startTime;
+
+    console.log('\n' + '='.repeat(60));
+    console.log(`${DOMAIN_NAME} TEST: ${results.success ? 'PASSED' : 'FAILED'}`);
+    console.log(`Passed: ${results.summary.passed}/${results.summary.total} | ${results.duration}ms`);
+    console.log('='.repeat(60));
+
+    return results;
+}
+
+/**
+ * Quick health check - lightweight version for status dashboards
+ */
+export async function quickCheck() {
+    try {
+        const conn = await testConnection();
+        if (!conn.success) return { healthy: false, error: conn.error };
+
+        const tableName = getAirtableTableName(PRIMARY_COLLECTION);
+        const query = await queryRecords(tableName, { maxRecords: 1 });
+
+        return {
+            healthy: !query.error,
+            collection: PRIMARY_COLLECTION,
+            tableName,
+            recordsAccessible: (query.records || []).length > 0
+        };
+    } catch (error) {
+        return { healthy: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// PHASE 1: API CONNECTION
+// =============================================================================
+
+async function testApiConnection() {
+    console.log('\n--- Phase 1: API Connection ---');
+    const result = { name: 'API Connection', passed: false, details: {} };
+
+    try {
+        const conn = await testConnection();
+        result.details = {
+            baseId: conn.baseId,
+            tableCount: conn.tableCount,
+            tables: conn.tables || []
+        };
+
+        if (conn.success) {
+            result.passed = true;
+            result.message = `Connected. Found ${conn.tableCount} tables.`;
+            console.log(`  [PASS] ${result.message}`);
+        } else {
+            result.message = conn.error || 'Connection failed';
+            console.log(`  [FAIL] ${result.message}`);
+        }
+    } catch (error) {
+        result.message = `Exception: ${error.message}`;
+        console.log(`  [FAIL] ${result.message}`);
+    }
+
+    return result;
+}
+
+// =============================================================================
+// PHASE 2: TABLE MAPPING
+// =============================================================================
+
+async function testTableMapping() {
+    console.log('\n--- Phase 2: Table Mapping ---');
+    const result = { name: 'Table Mapping', passed: false, details: {} };
+
+    try {
+        const mismatches = [];
+
+        for (const [collectionKey, expectedTable] of Object.entries(TEST_COLLECTIONS)) {
+            const actualTable = getAirtableTableName(collectionKey);
+            if (actualTable !== expectedTable) {
+                mismatches.push({
+                    collection: collectionKey,
+                    expected: expectedTable,
+                    actual: actualTable
+                });
+            } else {
+                console.log(`  [OK] ${collectionKey} -> ${actualTable}`);
+            }
+        }
+
+        result.details.collectionsChecked = Object.keys(TEST_COLLECTIONS).length;
+        result.details.mismatches = mismatches;
+
+        if (mismatches.length === 0) {
+            result.passed = true;
+            result.message = `All ${result.details.collectionsChecked} table mappings correct.`;
+            console.log(`  [PASS] ${result.message}`);
+        } else {
+            result.message = `${mismatches.length} mapping mismatch(es)`;
+            console.log(`  [FAIL] ${result.message}`);
+            mismatches.forEach(m => console.log(`    ${m.collection}: expected ${m.expected}, got ${m.actual}`));
+        }
+    } catch (error) {
+        result.message = `Exception: ${error.message}`;
+        console.log(`  [FAIL] ${result.message}`);
+    }
+
+    return result;
+}
+
+// =============================================================================
+// PHASE 3: FIELD TRANSFORMATION
+// =============================================================================
+
+async function testFieldTransformation() {
+    console.log('\n--- Phase 3: Field Transformation ---');
+    const result = { name: 'Field Transformation', passed: false, details: {} };
+
+    try {
+        // Use mapper name based on collection key
+        const mapperName = 'SystemLogs';
+
+        // Wix -> Airtable
+        const airtableFormatted = toAirtableFormat(TEST_RECORD, mapperName);
+        result.details.wixToAirtable = { input: TEST_RECORD, output: airtableFormatted };
+
+        const errors = [];
+        for (const [snakeField, titleField] of Object.entries(EXPECTED_AIRTABLE_FIELDS)) {
+            if (airtableFormatted[titleField] !== TEST_RECORD[snakeField]) {
+                errors.push(`${snakeField} -> ${titleField}: expected "${TEST_RECORD[snakeField]}", got "${airtableFormatted[titleField]}"`);
+            }
+        }
+
+        // Airtable -> Wix (round-trip)
+        const fakeAirtableRecord = {
+            id: 'recTEST_ROUNDTRIP',
+            createdTime: new Date().toISOString(),
+            fields: airtableFormatted
+        };
+        const wixFormatted = toWixFormat(fakeAirtableRecord, mapperName);
+        result.details.airtableToWix = { input: fakeAirtableRecord, output: wixFormatted };
+
+        // Verify round-trip
+        for (const snakeField of Object.keys(EXPECTED_AIRTABLE_FIELDS)) {
+            if (wixFormatted[snakeField] !== TEST_RECORD[snakeField]) {
+                errors.push(`Round-trip ${snakeField}: expected "${TEST_RECORD[snakeField]}", got "${wixFormatted[snakeField]}"`);
+            }
+        }
+
+        if (errors.length === 0) {
+            result.passed = true;
+            result.message = 'Field transformations round-trip correctly.';
+            console.log(`  [PASS] ${result.message}`);
+        } else {
+            result.message = `${errors.length} transformation error(s)`;
+            result.details.errors = errors;
+            console.log(`  [FAIL] ${result.message}`);
+            errors.forEach(e => console.log(`    ${e}`));
+        }
+    } catch (error) {
+        result.message = `Exception: ${error.message}`;
+        console.log(`  [FAIL] ${result.message}`);
+    }
+
+    return result;
+}
+
+// =============================================================================
+// PHASE 4: CRUD OPERATIONS
+// =============================================================================
+
+async function testCRUDOperations() {
+    console.log('\n--- Phase 4: CRUD Operations ---');
+    const result = { name: 'CRUD Operations', passed: false, details: {} };
+
+    let createdId = null;
+
+    try {
+        const tableName = getAirtableTableName(PRIMARY_COLLECTION);
+
+        // CREATE
+        console.log('  Creating test record...');
+        const created = await createRecord(tableName, TEST_RECORD);
+        createdId = created?.id || created?._id;
+        result.details.create = { success: !!createdId, id: createdId };
+        console.log(createdId ? `  [OK] Created: ${createdId}` : '  [FAIL] Create returned no ID');
+
+        if (!createdId) {
+            result.message = 'Create failed - cannot continue CRUD test';
+            return result;
+        }
+
+        // READ
+        console.log('  Reading back record...');
+        const queried = await queryRecords(tableName, { maxRecords: 1, filterByFormula: `RECORD_ID()='${createdId}'` });
+        const readSuccess = (queried.records || []).length > 0;
+        result.details.read = { success: readSuccess, recordCount: (queried.records || []).length };
+        console.log(readSuccess ? '  [OK] Read back successfully' : '  [FAIL] Could not read back');
+
+        // UPDATE
+        console.log('  Updating test record...');
+        const updateFields = { message: 'Connection test log entry - UPDATED' };
+        const updated = await updateRecord(tableName, createdId, updateFields);
+        const updateSuccess = !!updated;
+        result.details.update = { success: updateSuccess };
+        console.log(updateSuccess ? '  [OK] Updated successfully' : '  [FAIL] Update failed');
+
+        // DELETE (cleanup)
+        console.log('  Deleting test record...');
+        const deleted = await deleteRecord(tableName, createdId);
+        const deleteSuccess = !!deleted;
+        result.details.delete = { success: deleteSuccess };
+        console.log(deleteSuccess ? '  [OK] Deleted (cleaned up)' : '  [WARN] Delete may have failed');
+        createdId = null; // Mark as cleaned up
+
+        // All 4 ops must pass
+        result.passed = result.details.create.success && readSuccess && updateSuccess && deleteSuccess;
+        result.message = result.passed ? 'All CRUD operations succeeded.' : 'One or more CRUD operations failed.';
+        console.log(`  [${result.passed ? 'PASS' : 'FAIL'}] ${result.message}`);
+
+    } catch (error) {
+        result.message = `Exception: ${error.message}`;
+        console.log(`  [FAIL] ${result.message}`);
+
+        // Attempt cleanup if we created a record
+        if (createdId) {
+            try {
+                const tableName = getAirtableTableName(PRIMARY_COLLECTION);
+                await deleteRecord(tableName, createdId);
+                console.log(`  [CLEANUP] Deleted orphaned test record ${createdId}`);
+            } catch (cleanupError) {
+                console.log(`  [WARN] Could not clean up test record ${createdId}`);
+            }
+        }
+    }
+
+    return result;
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+function tally(summary, passed) {
+    summary.total++;
+    if (passed) summary.passed++;
+    else summary.failed++;
+}
