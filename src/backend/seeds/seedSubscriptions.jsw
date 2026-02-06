@@ -1,0 +1,303 @@
+/**
+ * SEED DATA: Subscriptions
+ * ========================
+ * Seeds carrier subscriptions and driver views for Wave 1 verification.
+ *
+ * Collections seeded:
+ *   - carrierSubscriptions (10 records) -> v2_Carrier Subscriptions
+ *   - carrierDriverViews (15 records) -> v2_Carrier Driver Views
+ *
+ * Edge cases included:
+ *   - 1 free tier subscription (no quota)
+ *   - 1 pro tier with quota nearly exhausted
+ *   - 1 enterprise tier with unlimited quota
+ *   - 1 canceled subscription
+ *   - 1 past_due subscription
+ *   - 1 subscription scheduled to cancel at period end
+ *
+ * @module backend/seeds/seedSubscriptions
+ */
+
+import wixData from 'wix-data';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
+import * as airtable from 'backend/airtableClient';
+
+// =============================================================================
+// DUAL-SOURCE HELPERS (do not modify)
+// =============================================================================
+
+async function insertData(collectionKey, data) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        const { _id, ...airtableData } = data;
+        return await airtable.createRecord(tableName, airtableData);
+    }
+    const wixName = getWixCollectionName(collectionKey);
+    return await wixData.insert(wixName, data, { suppressAuth: true });
+}
+
+async function countData(collectionKey) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        const result = await airtable.queryRecords(tableName, { maxRecords: 1 });
+        return (result.records || []).length;
+    }
+    const wixName = getWixCollectionName(collectionKey);
+    return await wixData.query(wixName).limit(1).count({ suppressAuth: true });
+}
+
+// =============================================================================
+// COLLECTION KEYS
+// =============================================================================
+
+const COLLECTIONS = {
+    subscriptions: 'carrierSubscriptions',
+    views: 'carrierDriverViews'
+};
+
+// =============================================================================
+// DATA GENERATORS
+// =============================================================================
+
+const PLAN_TIERS = ['free', 'pro', 'enterprise'];
+const STATUSES = ['active', 'past_due', 'canceled', 'trialing'];
+
+const PLAN_QUOTAS = {
+    free: 0,
+    pro: 50,
+    enterprise: -1  // unlimited
+};
+
+const PLAN_PRICES = {
+    free: null,
+    pro: 'price_pro_monthly_test',
+    enterprise: 'price_enterprise_monthly_test'
+};
+
+function generateSubscriptions(carrierDots = []) {
+    const records = [];
+    const now = new Date();
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+    for (let i = 0; i < carrierDots.length; i++) {
+        const isFreeTier = i === 0;
+        const isProQuotaExhausted = i === 1;
+        const isEnterprise = i === 2;
+        const isCanceled = i === 3;
+        const isPastDue = i === 4;
+        const isCancelAtPeriodEnd = i === 5;
+        const isTrialing = i === 6;
+
+        // Determine plan tier
+        let planTier = 'pro';
+        if (isFreeTier) planTier = 'free';
+        else if (isEnterprise) planTier = 'enterprise';
+
+        // Determine status
+        let status = 'active';
+        if (isCanceled) status = 'canceled';
+        else if (isPastDue) status = 'past_due';
+        else if (isTrialing) status = 'trialing';
+
+        // Determine usage
+        const quota = PLAN_QUOTAS[planTier];
+        let viewsUsed = 0;
+        if (isProQuotaExhausted && planTier === 'pro') {
+            viewsUsed = quota; // Fully used
+        } else if (planTier === 'pro') {
+            viewsUsed = Math.floor(Math.random() * 20) + 5; // 5-24 views used
+        } else if (planTier === 'enterprise') {
+            viewsUsed = Math.floor(Math.random() * 100) + 10; // 10-109 views used
+        }
+
+        const subscription = {
+            carrier_dot: carrierDots[i],
+            stripe_customer_id: `cus_test_${String(carrierDots[i]).slice(-6)}`,
+            stripe_subscription_id: planTier === 'free' ? null : `sub_test_${String(carrierDots[i]).slice(-6)}`,
+            plan_tier: planTier,
+            status: status,
+            monthly_views_quota: quota,
+            views_used: viewsUsed,
+            period_start: periodStart.toISOString().split('T')[0],
+            period_end: periodEnd.toISOString().split('T')[0],
+            stripe_price_id: PLAN_PRICES[planTier],
+            cancel_at_period_end: isCancelAtPeriodEnd ? 'Yes' : 'No',
+            is_active: (status === 'active' || status === 'trialing') ? 'Yes' : 'No',
+            quota_reset_date: periodEnd.toISOString().split('T')[0]
+        };
+
+        records.push(subscription);
+    }
+
+    return records;
+}
+
+function generateDriverViews(subscriptionData = []) {
+    const records = [];
+    const now = new Date();
+
+    // Generate views for active pro/enterprise subscriptions
+    subscriptionData.forEach((sub, subIndex) => {
+        if (sub.plan_tier === 'free' || sub.status === 'canceled') return;
+
+        // Generate 1-3 views per subscription
+        const viewCount = Math.min(3, Math.floor(Math.random() * 3) + 1);
+
+        for (let i = 0; i < viewCount; i++) {
+            const daysAgo = Math.floor(Math.random() * 20);
+            const viewDate = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+
+            const view = {
+                carrier_dot: sub.carrier_dot,
+                driver_id: `__TEST_SEED__driver_${subIndex}_${i}`,
+                driver_name: `__TEST_SEED__ Test Driver ${subIndex}-${i}`,
+                viewed_at: viewDate.toISOString(),
+                match_score: 60 + Math.floor(Math.random() * 35), // 60-94
+                view_source: ['search', 'recommendation', 'saved'][i % 3],
+                contact_attempted: i % 2 === 0 ? 'Yes' : 'No',
+                notes: i === 0 ? 'Promising candidate, need to follow up' : null
+            };
+
+            records.push(view);
+        }
+    });
+
+    return records;
+}
+
+// =============================================================================
+// SEED FUNCTIONS
+// =============================================================================
+
+export async function seedSubscriptions(carrierDots) {
+    const key = COLLECTIONS.subscriptions;
+    if (!carrierDots?.length) {
+        console.log(`[Seed] No carrier DOTs provided for ${key}. Skipping.`);
+        return { seeded: false, count: 0 };
+    }
+
+    const existing = await countData(key);
+    if (existing > 0) {
+        console.log(`[Seed] ${key} already has data. Skipping.`);
+        return { seeded: false, count: existing };
+    }
+
+    const items = generateSubscriptions(carrierDots);
+    console.log(`[Seed] Seeding ${items.length} records into ${key}...`);
+
+    const ids = [];
+    const seededItems = [];
+    const chunks = chunkArray(items, 10);
+
+    for (const chunk of chunks) {
+        const results = await Promise.all(
+            chunk.map(async (item) => {
+                try {
+                    const result = await insertData(key, item);
+                    return { success: true, id: result._id || result.id, item };
+                } catch (error) {
+                    console.error(`[Seed] Failed to insert subscription for DOT ${item.carrier_dot}:`, error.message);
+                    return { success: false, error: error.message };
+                }
+            })
+        );
+        ids.push(...results.filter(r => r.success).map(r => r.id));
+        seededItems.push(...results.filter(r => r.success).map(r => r.item));
+        await new Promise(r => setTimeout(r, 200));
+    }
+
+    return { seeded: true, count: ids.length, ids, items: seededItems };
+}
+
+export async function seedDriverViews(subscriptionData) {
+    const key = COLLECTIONS.views;
+    if (!subscriptionData?.length) {
+        console.log(`[Seed] No subscription data provided for ${key}. Skipping.`);
+        return { seeded: false, count: 0 };
+    }
+
+    const existing = await countData(key);
+    if (existing > 0) {
+        console.log(`[Seed] ${key} already has data. Skipping.`);
+        return { seeded: false, count: existing };
+    }
+
+    const items = generateDriverViews(subscriptionData);
+    console.log(`[Seed] Seeding ${items.length} records into ${key}...`);
+
+    const ids = [];
+    const chunks = chunkArray(items, 10);
+
+    for (const chunk of chunks) {
+        const results = await Promise.all(
+            chunk.map(item => insertData(key, item)
+                .then(r => ({ success: true, id: r._id || r.id }))
+                .catch(e => ({ success: false, error: e.message }))
+            )
+        );
+        ids.push(...results.filter(r => r.success).map(r => r.id));
+        await new Promise(r => setTimeout(r, 200));
+    }
+
+    return { seeded: true, count: ids.length, ids };
+}
+
+// =============================================================================
+// ORCHESTRATOR
+// =============================================================================
+
+/**
+ * Seed all subscription-related collections
+ *
+ * @param {number[]} carrierDots - Array of carrier DOT numbers to create subscriptions for
+ *
+ * Usage from Wix page:
+ * ```javascript
+ * import { seedAllSubscriptions } from 'backend/seeds/seedSubscriptions';
+ * // Use DOTs from seedCarrierMatching or provide your own
+ * const result = await seedAllSubscriptions([1000000, 1000001, 1000002, ...]);
+ * console.log('Seed result:', result);
+ * ```
+ */
+export async function seedAllSubscriptions(carrierDots = []) {
+    console.log('='.repeat(50));
+    console.log('[Seed] Starting Subscriptions seed...');
+    console.log('='.repeat(50));
+
+    // Use default test DOTs if none provided
+    const dots = carrierDots.length > 0
+        ? carrierDots
+        : [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009];
+
+    const results = {};
+
+    // Step 1: Seed subscriptions
+    results.subscriptions = await seedSubscriptions(dots);
+
+    // Step 2: Seed driver views (depends on subscription data)
+    if (results.subscriptions.items?.length) {
+        results.driverViews = await seedDriverViews(results.subscriptions.items);
+    }
+
+    console.log('='.repeat(50));
+    console.log('[Seed] Complete:', JSON.stringify(results, null, 2));
+    console.log('='.repeat(50));
+
+    return results;
+}
+
+// Alias for consistency with template
+export const seedAll = seedAllSubscriptions;
+
+// =============================================================================
+// UTILITIES
+// =============================================================================
+
+function chunkArray(arr, size) {
+    const chunks = [];
+    for (let i = 0; i < arr.length; i += size) {
+        chunks.push(arr.slice(i, i + size));
+    }
+    return chunks;
+}
