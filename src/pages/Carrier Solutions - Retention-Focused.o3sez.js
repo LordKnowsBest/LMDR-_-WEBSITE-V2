@@ -5,9 +5,9 @@
  * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
  */
 
-import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import { getCarrierPlatformStats } from 'backend/publicStatsService';
+import { getPricingTiers, getServiceFeatures, getCaseStudies, getFAQs } from 'backend/contentService';
 
 $w.onReady(async function () {
   await Promise.all([
@@ -22,36 +22,19 @@ $w.onReady(async function () {
 /**
  * Load pricing tiers for display
  * Element: #pricingRepeater
- * Collection: PricingTiers (if exists)
  */
 async function loadPricingTiers() {
   try {
-    const result = await wixData.query('PricingTiers')
-      .eq('is_active', true)
-      .eq('customer_type', 'carrier')
-      .ascending('display_order')
-      .find();
+    const result = await getPricingTiers('carrier');
 
-    if (result.items.length === 0) {
-      // Show default pricing if no collection data
+    if (!result.success || result.tiers.length === 0) {
       showDefaultPricing();
       return;
     }
 
     const repeater = $w('#pricingRepeater');
     if (repeater.rendered && repeater.data !== undefined) {
-      repeater.data = result.items.map(tier => ({
-        _id: tier._id,
-        name: tier.tier_name,
-        price: tier.price_display,
-        priceSubtext: tier.price_subtext,
-        description: tier.description,
-        features: tier.features || [],
-        ctaText: tier.cta_text || 'Get Started',
-        ctaLink: tier.cta_link || '/carrier-welcome',
-        isPopular: tier.is_popular,
-        badgeText: tier.badge_text
-      }));
+      repeater.data = result.tiers;
 
       repeater.onItemReady(($item, itemData) => {
         try {
@@ -68,9 +51,7 @@ async function loadPricingTiers() {
                 badge.text = itemData.badgeText;
                 badge.show();
               }
-            } catch (e) {
-              // Element may not exist
-            }
+            } catch (e) { }
           }
 
           // CTA button
@@ -82,9 +63,7 @@ async function loadPricingTiers() {
                 wixLocation.to(itemData.ctaLink);
               });
             }
-          } catch (e) {
-            // Element may not exist
-          }
+          } catch (e) { }
 
           // Features list
           try {
@@ -95,18 +74,13 @@ async function loadPricingTiers() {
                 text: f
               }));
             }
-          } catch (e) {
-            // Element may not exist
-          }
-        } catch (e) {
-          // Element may not exist
-        }
+          } catch (e) { }
+        } catch (e) { }
       });
     }
 
   } catch (err) {
-    // Collection may not exist yet - show default pricing
-    console.log('PricingTiers collection not found');
+    console.error('Failed to load pricing tiers:', err);
     showDefaultPricing();
   }
 }
@@ -115,7 +89,6 @@ async function loadPricingTiers() {
  * Show default pricing when no collection data exists
  */
 function showDefaultPricing() {
-  // Update static elements with default values
   const defaults = {
     '#basicPrice': '$299',
     '#basicSubtext': 'per hire',
@@ -128,44 +101,30 @@ function showDefaultPricing() {
   Object.entries(defaults).forEach(([selector, value]) => {
     try {
       const element = $w(selector);
-      if (element && element.text !== undefined) {
-        element.text = value;
-      }
-    } catch (e) {
-      // Element may not exist
-    }
+      if (element && element.text !== undefined) element.text = value;
+    } catch (e) { }
   });
 }
 
 /**
  * Load service features for comparison matrix
  * Element: #featureMatrixHtml (HTML component)
- * Collection: ServiceFeatures (if exists)
  */
 async function loadServiceFeatures() {
   try {
-    const result = await wixData.query('ServiceFeatures')
-      .eq('is_active', true)
-      .ascending('category_order')
-      .ascending('feature_order')
-      .find();
+    const result = await getServiceFeatures();
 
-    if (result.items.length === 0) {
-      // Hide feature matrix if no data
+    if (!result.success || result.features.length === 0) {
       try {
         const section = $w('#featureMatrixSection');
         if (section.rendered && section.collapse) section.collapse();
-      } catch (e) {
-        // Section may not exist
-      }
+      } catch (e) { }
       return;
     }
 
     // Group by category
-    const grouped = result.items.reduce((acc, feature) => {
-      if (!acc[feature.category]) {
-        acc[feature.category] = [];
-      }
+    const grouped = result.features.reduce((acc, feature) => {
+      if (!acc[feature.category]) acc[feature.category] = [];
       acc[feature.category].push({
         name: feature.feature_name,
         description: feature.description,
@@ -185,126 +144,77 @@ async function loadServiceFeatures() {
           data: grouped
         });
       }
-    } catch (e) {
-      // HTML component may not exist
-    }
+    } catch (e) { }
 
   } catch (err) {
-    // Collection may not exist yet
-    console.log('ServiceFeatures collection not found');
+    console.error('Failed to load service features:', err);
   }
 }
 
 /**
  * Load case studies / success stories
  * Element: #caseStudiesRepeater
- * Collection: CaseStudies (if exists)
  */
 async function loadCaseStudies() {
   try {
-    const result = await wixData.query('CaseStudies')
-      .eq('is_published', true)
-      .eq('customer_type', 'carrier')
-      .descending('published_date')
-      .limit(3)
-      .find();
+    const result = await getCaseStudies('carrier', 3);
 
-    if (result.items.length === 0) {
-      // Hide case studies section if no data
+    if (!result.success || result.caseStudies.length === 0) {
       try {
         const section = $w('#caseStudiesSection');
         if (section.rendered && section.collapse) section.collapse();
-      } catch (e) {
-        // Section may not exist
-      }
+      } catch (e) { }
       return;
     }
 
     const repeater = $w('#caseStudiesRepeater');
     if (repeater.rendered && repeater.data !== undefined) {
-      repeater.data = result.items.map(study => ({
-        _id: study._id,
-        title: study.title,
-        companyName: study.company_name,
-        logoUrl: study.logo_url,
-        challenge: study.challenge_summary,
-        result: study.result_summary,
-        keyMetric: study.key_metric,
-        keyMetricValue: study.key_metric_value,
-        testimonialQuote: study.testimonial_quote,
-        testimonialAuthor: study.testimonial_author,
-        testimonialTitle: study.testimonial_title,
-        fullStudyUrl: study.full_study_url
-      }));
+      repeater.data = result.caseStudies;
 
       repeater.onItemReady(($item, itemData) => {
         try {
           if ($item('#csTitle').rendered) $item('#csTitle').text = itemData.title;
           if ($item('#csCompany').rendered) $item('#csCompany').text = itemData.companyName;
-          if ($item('#csLogo').rendered && itemData.logoUrl) {
-            $item('#csLogo').src = itemData.logoUrl;
-          }
+          if ($item('#csLogo').rendered && itemData.logoUrl) $item('#csLogo').src = itemData.logoUrl;
           if ($item('#csChallenge').rendered) $item('#csChallenge').text = itemData.challenge;
           if ($item('#csResult').rendered) $item('#csResult').text = itemData.result;
           if ($item('#csMetricValue').rendered) $item('#csMetricValue').text = itemData.keyMetricValue;
           if ($item('#csMetricLabel').rendered) $item('#csMetricLabel').text = itemData.keyMetric;
           if ($item('#csQuote').rendered) $item('#csQuote').text = `"${itemData.testimonialQuote}"`;
-          if ($item('#csAuthor').rendered) {
-            $item('#csAuthor').text = `— ${itemData.testimonialAuthor}, ${itemData.testimonialTitle}`;
-          }
+          if ($item('#csAuthor').rendered) $item('#csAuthor').text = `— ${itemData.testimonialAuthor}, ${itemData.testimonialTitle}`;
 
-          // Full study link
           if (itemData.fullStudyUrl) {
             try {
               const readMoreBtn = $item('#csReadMore');
-              if (readMoreBtn.rendered) {
-                readMoreBtn.onClick(() => {
-                  wixLocation.to(itemData.fullStudyUrl);
-                });
-              }
-            } catch (e) {
-              // Element may not exist
-            }
+              if (readMoreBtn.rendered) readMoreBtn.onClick(() => { wixLocation.to(itemData.fullStudyUrl); });
+            } catch (e) { }
           }
-        } catch (e) {
-          // Element may not exist
-        }
+        } catch (e) { }
       });
     }
 
   } catch (err) {
-    // Collection may not exist yet
-    console.log('CaseStudies collection not found');
+    console.error('Failed to load case studies:', err);
     try {
       const section = $w('#caseStudiesSection');
       if (section.rendered && section.collapse) section.collapse();
-    } catch (e) {
-      // Section may not exist
-    }
+    } catch (e) { }
   }
 }
 
 /**
  * Load FAQs for accordion
  * Element: #faqAccordionHtml (HTML component)
- * Collection: FAQs (if exists)
  */
 async function loadFAQs() {
   try {
-    const result = await wixData.query('FAQs')
-      .eq('category', 'carrier-solutions')
-      .eq('is_active', true)
-      .ascending('display_order')
-      .find();
+    const result = await getFAQs('carrier-solutions');
 
-    if (result.items.length === 0) {
-      // Hide FAQ section if no data
+    if (!result.success || result.faqs.length === 0) {
       try {
         const section = $w('#faqSection');
         if (section.rendered && section.collapse) section.collapse();
-      } catch (e) {
-        // Section may not exist
-      }
+      } catch (e) { }
       return;
     }
 
@@ -314,19 +224,38 @@ async function loadFAQs() {
       if (htmlFaq.rendered && htmlFaq.postMessage) {
         htmlFaq.postMessage({
           type: 'faqData',
-          data: result.items.map(faq => ({
-            question: faq.question,
-            answer: faq.answer
-          }))
+          data: result.faqs
         });
       }
-    } catch (e) {
-      // HTML component may not exist
-    }
+    } catch (e) { }
 
   } catch (err) {
-    // Collection may not exist yet
-    console.log('FAQs collection not found');
+    console.error('Failed to load FAQs:', err);
+  }
+}
+
+/**
+ * Load platform stats for credibility
+ */
+async function loadPlatformStats() {
+  try {
+    const stats = await getCarrierPlatformStats();
+
+    const statElements = {
+      '#statQualifiedDrivers': stats.qualifiedDrivers.toLocaleString(),
+      '#statAvgTimeToHire': `${stats.avgDaysToHire} days`,
+      '#statRetentionRate': `${stats.retentionRate}%`
+    };
+
+    Object.entries(statElements).forEach(([selector, value]) => {
+      try {
+        const element = $w(selector);
+        if (element && element.text !== undefined) element.text = value;
+      } catch (e) { }
+    });
+
+  } catch (err) {
+    console.error('Failed to load platform stats:', err);
   }
 }
 

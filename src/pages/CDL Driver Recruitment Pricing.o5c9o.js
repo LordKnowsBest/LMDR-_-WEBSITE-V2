@@ -15,13 +15,13 @@
  */
 
 import wixWindow from 'wix-window';
-import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import wixUsers from 'wix-users';
 import { authentication } from 'wix-members-frontend';
 import { getPricingTiers, getFAQs } from 'backend/contentService';
 import { getCarrierPlatformStats } from 'backend/publicStatsService';
 import { submitCarrierStaffingRequest, ensureCarrierRecord } from 'backend/carrierLeadsService';
+import { getMemberCarrierDot } from 'backend/memberService';
 import {
   startCheckout,
   startPlacementCheckout,
@@ -787,17 +787,10 @@ function initSubscriptionHandlers() {
         if (isLoggedIn) {
           userEmail = await currentUser.getEmail();
 
-          // Try to get carrier DOT from user's profile or linked carrier
-          try {
-            const userDetails = await wixData.query('Members/PrivateMembersData')
-              .eq('loginEmail', userEmail)
-              .find({ suppressAuth: true });
-
-            if (userDetails.items.length > 0) {
-              carrierDot = userDetails.items[0].carrierDot || userDetails.items[0].dotNumber;
-            }
-          } catch (e) {
-            console.log('Could not fetch carrier DOT from profile');
+          // Try to get carrier DOT from user's profile using backend service
+          const dotResult = await getMemberCarrierDot(userEmail);
+          if (dotResult.success && dotResult.carrierDot) {
+            carrierDot = dotResult.carrierDot;
           }
 
           // If we have a carrier DOT, get subscription status

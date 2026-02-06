@@ -5,8 +5,8 @@
  * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
  */
 
-import wixData from 'wix-data';
 import { getPublicStats, getPartnerLogos } from 'backend/publicStatsService';
+import { getTeamMembers, getCompanyMilestones } from 'backend/contentService';
 
 $w.onReady(async function () {
   await Promise.all([
@@ -89,16 +89,12 @@ function calculateYearsInBusiness() {
 /**
  * Load team members
  * Element: #teamRepeater
- * Collection: TeamMembers (if exists)
  */
 async function loadTeamMembers() {
   try {
-    const result = await wixData.query('TeamMembers')
-      .eq('is_active', true)
-      .ascending('display_order')
-      .find();
+    const result = await getTeamMembers();
 
-    if (result.items.length === 0) {
+    if (!result.success || result.members.length === 0) {
       // Hide team section if no data
       try {
         const section = $w('#teamSection');
@@ -111,15 +107,7 @@ async function loadTeamMembers() {
 
     const repeater = $w('#teamRepeater');
     if (repeater.rendered && repeater.data !== undefined) {
-      repeater.data = result.items.map(member => ({
-        _id: member._id,
-        name: member.full_name,
-        title: member.job_title,
-        photoUrl: member.photo_url || '/default-avatar.png',
-        bio: member.short_bio,
-        linkedIn: member.linkedin_url,
-        expertise: member.expertise_tags
-      }));
+      repeater.data = result.members;
 
       repeater.onItemReady(($item, itemData) => {
         try {
@@ -149,36 +137,27 @@ async function loadTeamMembers() {
     }
 
   } catch (err) {
-    // Collection may not exist yet - hide section
-    console.log('TeamMembers collection not found');
+    console.error('Failed to load team members:', err);
     try {
       const section = $w('#teamSection');
       if (section.rendered && section.collapse) section.collapse();
-    } catch (e) {
-      // Section may not exist
-    }
+    } catch (e) { }
   }
 }
 
 /**
  * Load company milestones for timeline
  * Element: #timelineHtml (HTML component)
- * Collection: CompanyMilestones (if exists)
  */
 async function loadCompanyMilestones() {
   try {
-    const result = await wixData.query('CompanyMilestones')
-      .ascending('milestone_date')
-      .find();
+    const result = await getCompanyMilestones();
 
-    if (result.items.length === 0) {
-      // Hide timeline section if no data
+    if (!result.success || result.milestones.length === 0) {
       try {
         const section = $w('#milestonesSection');
         if (section.rendered && section.collapse) section.collapse();
-      } catch (e) {
-        // Section may not exist
-      }
+      } catch (e) { }
       return;
     }
 
@@ -188,27 +167,17 @@ async function loadCompanyMilestones() {
       if (htmlTimeline.rendered && htmlTimeline.postMessage) {
         htmlTimeline.postMessage({
           type: 'milestones',
-          data: result.items.map(m => ({
-            date: m.milestone_date,
-            title: m.title,
-            description: m.description,
-            icon: m.icon_name || 'fa-star'
-          }))
+          data: result.milestones
         });
       }
-    } catch (e) {
-      // HTML component may not exist
-    }
+    } catch (e) { }
 
   } catch (err) {
-    // Collection may not exist yet - hide section
-    console.log('CompanyMilestones collection not found');
+    console.error('Failed to load company milestones:', err);
     try {
       const section = $w('#milestonesSection');
       if (section.rendered && section.collapse) section.collapse();
-    } catch (e) {
-      // Section may not exist
-    }
+    } catch (e) { }
   }
 }
 

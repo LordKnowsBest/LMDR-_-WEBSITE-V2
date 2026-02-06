@@ -5,9 +5,9 @@
  * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
  */
 
-import wixData from 'wix-data';
 import wixLocation from 'wix-location';
 import { getTopJobOpportunities, getJobsByState, getRecentHires } from 'backend/publicStatsService';
+import { getDriverTestimonials } from 'backend/contentService';
 
 $w.onReady(async function () {
   await Promise.all([
@@ -41,28 +41,22 @@ async function loadJobHighlights() {
           if ($item('#jobType').rendered) $item('#jobType').text = itemData.operationType;
           if ($item('#jobBenefits').rendered) $item('#jobBenefits').text = itemData.benefits;
 
-          // Set up click handler to navigate to matching
           const learnMoreBtn = $item('#learnMoreBtn');
           if (learnMoreBtn.rendered) {
             learnMoreBtn.onClick(() => {
               wixLocation.to(`/ai-matching?carrier=${itemData._id}`);
             });
           }
-        } catch (e) {
-          // Element may not exist
-        }
+        } catch (e) { }
       });
     }
 
-    // Send to HTML component if exists
     try {
       const htmlJobs = $w('#jobsFeedHtml');
       if (htmlJobs.rendered && htmlJobs.postMessage) {
         htmlJobs.postMessage({ type: 'jobsData', jobs });
       }
-    } catch (e) {
-      // HTML component may not exist
-    }
+    } catch (e) { }
 
   } catch (err) {
     console.error('Failed to load job highlights:', err);
@@ -72,38 +66,22 @@ async function loadJobHighlights() {
 /**
  * Load driver testimonials
  * Element: #testimonialsRepeater
- * Collection: DriverTestimonials (if exists)
  */
 async function loadDriverTestimonials() {
   try {
-    // Check if DriverTestimonials collection exists
-    const result = await wixData.query('DriverTestimonials')
-      .eq('is_approved', true)
-      .eq('is_featured', true)
-      .limit(3)
-      .find();
+    const result = await getDriverTestimonials(3);
 
-    if (result.items.length === 0) {
-      // Hide testimonials section if no data
+    if (!result.success || result.testimonials.length === 0) {
       try {
         const section = $w('#testimonialsSection');
         if (section.rendered && section.collapse) section.collapse();
-      } catch (e) {
-        // Section may not exist
-      }
+      } catch (e) { }
       return;
     }
 
     const repeater = $w('#testimonialsRepeater');
     if (repeater.rendered && repeater.data !== undefined) {
-      repeater.data = result.items.map(t => ({
-        _id: t._id,
-        quote: t.testimonial_text,
-        driverName: t.driver_first_name,
-        yearsExperience: t.years_experience,
-        operationType: t.operation_type,
-        photoUrl: t.photo_url || '/default-driver.png'
-      }));
+      repeater.data = result.testimonials;
 
       repeater.onItemReady(($item, itemData) => {
         try {
@@ -114,21 +92,16 @@ async function loadDriverTestimonials() {
           if ($item('#testimonialPhoto').rendered && itemData.photoUrl) {
             $item('#testimonialPhoto').src = itemData.photoUrl;
           }
-        } catch (e) {
-          // Element may not exist
-        }
+        } catch (e) { }
       });
     }
 
   } catch (err) {
-    // Collection may not exist yet - hide section
-    console.log('DriverTestimonials collection not found or empty');
+    console.error('Failed to load testimonials:', err);
     try {
       const section = $w('#testimonialsSection');
       if (section.rendered && section.collapse) section.collapse();
-    } catch (e) {
-      // Section may not exist
-    }
+    } catch (e) { }
   }
 }
 
@@ -143,13 +116,10 @@ async function loadLocationBasedJobs() {
     const userState = query.state || null;
 
     if (!userState) {
-      // Hide location section if no state provided
       try {
         const section = $w('#locationJobsSection');
         if (section.rendered && section.collapse) section.collapse();
-      } catch (e) {
-        // Section may not exist
-      }
+      } catch (e) { }
       return;
     }
 
@@ -159,19 +129,14 @@ async function loadLocationBasedJobs() {
       try {
         const section = $w('#locationJobsSection');
         if (section.rendered && section.collapse) section.collapse();
-      } catch (e) {
-        // Section may not exist
-      }
+      } catch (e) { }
       return;
     }
 
-    // Update section title
     try {
       const title = $w('#locationTitle');
       if (title.rendered) title.text = `Jobs in ${userState}`;
-    } catch (e) {
-      // Element may not exist
-    }
+    } catch (e) { }
 
     const repeater = $w('#locationJobsRepeater');
     if (repeater.rendered && repeater.data !== undefined) {
@@ -182,9 +147,7 @@ async function loadLocationBasedJobs() {
           if ($item('#locJobCarrier').rendered) $item('#locJobCarrier').text = itemData.carrierName;
           if ($item('#locJobPay').rendered) $item('#locJobPay').text = itemData.payRange;
           if ($item('#locJobType').rendered) $item('#locJobType').text = itemData.operationType;
-        } catch (e) {
-          // Element may not exist
-        }
+        } catch (e) { }
       });
     }
 
@@ -201,15 +164,12 @@ async function loadRecentHiresTicker() {
   try {
     const hires = await getRecentHires(10);
 
-    // Send to HTML ticker component
     try {
       const htmlTicker = $w('#hireTicker');
       if (htmlTicker.rendered && htmlTicker.postMessage) {
         htmlTicker.postMessage({ type: 'recentHires', hires });
       }
-    } catch (e) {
-      // HTML component may not exist
-    }
+    } catch (e) { }
 
   } catch (err) {
     console.error('Failed to load recent hires:', err);
@@ -226,15 +186,10 @@ function setupHtmlMessageHandlers() {
       htmlJobs.onMessage((event) => {
         if (event.data.type === 'navigateToMatching') {
           const carrierId = event.data.data?.preselectedCarrier;
-          if (carrierId) {
-            wixLocation.to(`/ai-matching?carrier=${carrierId}`);
-          } else {
-            wixLocation.to('/ai-matching');
-          }
+          if (carrierId) wixLocation.to(`/ai-matching?carrier=${carrierId}`);
+          else wixLocation.to('/ai-matching');
         }
       });
     }
-  } catch (e) {
-    // HTML component may not exist
-  }
+  } catch (e) { }
 }

@@ -5,6 +5,8 @@
 
 import wixUsers from 'wix-users';
 import wixLocation from 'wix-location';
+import { session } from 'wix-storage';
+import { initUtmTracking } from 'public/js/utm-tracker.js';
 import { getUnreadCount } from 'backend/messaging';
 import { updateLastActive } from 'backend/memberService';
 import {
@@ -39,6 +41,9 @@ import {
 import { getOrCreateDriverProfile } from 'backend/driverProfiles';
 
 $w.onReady(async function () {
+    // Initialize Global Tracking
+    initUtmTracking();
+
     await updateAuthState();
     setupGlobalNavigation();
     setupSidebarNavigation();
@@ -47,6 +52,10 @@ $w.onReady(async function () {
     if (wixUsers.currentUser.loggedIn) {
         loadNotificationBadge();
         updateLastActive();
+
+        // Ensure profile exists and link attribution
+        const sessionId = session.getItem('lmdr_anon_session_id');
+        getOrCreateDriverProfile(sessionId).catch(err => console.log('[MasterPage] Profile sync:', err));
     }
 });
 

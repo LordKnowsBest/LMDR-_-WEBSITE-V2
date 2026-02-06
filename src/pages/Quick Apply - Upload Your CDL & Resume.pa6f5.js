@@ -255,7 +255,7 @@ async function loadExistingProfile() {
 // ============================================================================
 
 function getHtmlComponent() {
-  const possibleIds = [CONFIG.htmlComponentId, 'html1', 'html2', 'html3', 'html4', 'htmlEmbed1'];
+  const possibleIds = [CONFIG.htmlComponentId, 'html1', 'html2', 'html3', 'html4', 'html5', 'htmlEmbed1'];
 
   for (const id of possibleIds) {
     try {

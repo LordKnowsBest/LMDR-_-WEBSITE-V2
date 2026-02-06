@@ -15,11 +15,13 @@
  * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
  */
 
-import wixData from 'wix-data';
-import wixLocation from 'wix-location';
 import wixWindow from 'wix-window';
+import wixLocation from 'wix-location';
 import wixUsers from 'wix-users';
 import { getPremiumOpportunities, getTopJobOpportunities } from 'backend/publicStatsService';
+import { getDriverJobById } from 'backend/contentService';
+import { getCarrierByDOT } from 'backend/recruiter_service';
+import { getOrCreateDriverProfile, logCarrierInterest } from 'backend/driverProfiles';
 
 // Page state
 let currentJob = null;
@@ -222,28 +224,27 @@ async function loadJobDetails(jobId) {
       return;
     }
 
-    // Query for specific job from Carriers collection
-    const result = await wixData.query('Carriers')
-      .eq('_id', jobId)
-      .find();
-
-    if (result.items.length === 0) {
-      // Try DriverJobs collection
-      const jobsResult = await wixData.query('DriverJobs')
-        .eq('_id', jobId)
-        .find();
-
-      if (jobsResult.items.length > 0) {
-        currentJob = formatDriverJob(jobsResult.items[0]);
+    // Try Carrier lookup first (if it's a DOT number or carrier record ID)
+    let carrier = null;
+    // Simple heuristic: if it looks like a DOT, try getCarrierByDOT
+    if (!isNaN(jobId) && jobId.length >= 4) {
+        carrier = await getCarrierByDOT(jobId);
+    }
+    
+    if (carrier) {
+        currentJob = formatCarrierJob(carrier);
         displayJobDetails(currentJob);
-      } else {
-        showNoJobMessage();
-      }
-      return;
+        return;
     }
 
-    currentJob = formatCarrierJob(result.items[0]);
-    displayJobDetails(currentJob);
+    // Try DriverJob lookup
+    const jobRes = await getDriverJobById(jobId);
+    if (jobRes.success && jobRes.job) {
+        currentJob = formatDriverJob(jobRes.job);
+        displayJobDetails(currentJob);
+    } else {
+        showNoJobMessage();
+    }
 
   } catch (err) {
     console.error('Failed to load job details:', err);
@@ -280,19 +281,19 @@ function formatCarrierJob(carrier) {
 function formatDriverJob(job) {
   return {
     _id: job._id,
-    carrierName: job.hiringLocation || job.companyBase || 'LMDR Partner',
-    payRange: job.payRate || 'Competitive',
+    carrierName: job.hiring_location || job.company_base || 'LMDR Partner',
+    payRange: job.pay_rate || 'Competitive',
     signOnBonus: null,
     location: `${job.city || ''}, ${job.state || ''}`.replace(/^, |, $/g, '') || 'Multiple Locations',
-    operationType: job.routeType || 'OTR',
-    homeTime: job.homeTime || 'Varies',
+    operationType: job.route_type || 'OTR',
+    homeTime: job.home_time || 'Varies',
     benefits: job.benefits || 'Full benefits package',
     fleetSize: null,
     urgencyLevel: 'high',
     openPositions: 1,
-    description: job.description || job.jobDescription1 || '',
-    validThrough: job.validThrough || null,
-    logoUrl: job.companyLogo || ''
+    description: job.description || '',
+    validThrough: job.valid_through || null,
+    logoUrl: job.company_logo || ''
   };
 }
 
@@ -604,58 +605,47 @@ async function handleQuickApply(jobId) {
         quickApplyBtn.label = 'Applying...';
         quickApplyBtn.disable();
       }
-    } catch (e) {
-      // Element may not exist
-    }
+    } catch (e) { }
 
-    // Get driver profile
-    const userId = user.id;
-    const profileResult = await wixData.query('DriverProfiles')
-      .eq('_owner', userId)
-      .find();
+    // Get or create driver profile
+    const profileRes = await getOrCreateDriverProfile();
 
-    if (profileResult.items.length === 0) {
+    if (!profileRes.success || !profileRes.profile) {
       // No profile - redirect to profile creation
       wixLocation.to('/quick-apply-upload-your-cdl-resume');
       return;
     }
 
-    const driverProfile = profileResult.items[0];
-
-    // Create application/interest record
-    const application = {
-      driver_id: driverProfile._id,
-      carrier_id: jobId,
-      status: 'applied',
-      applied_date: new Date(),
-      source: 'rapid-response',
-      match_score: 85 // Default for quick apply
-    };
-
-    await wixData.insert('DriverCarrierInterests', application);
-
-    // Show success message
-    try {
-      const quickApplyBtn = $w('#quickApplyBtn');
-      if (quickApplyBtn.rendered) {
-        quickApplyBtn.label = 'Applied!';
-      }
-
-      const successMessage = $w('#applySuccessMessage');
-      if (successMessage.rendered) {
-        successMessage.show();
-      }
-    } catch (e) {
-      // Element may not exist
-    }
-
-    // Show success lightbox or notification
-    wixWindow.openLightbox('ApplicationSuccess', {
-      jobTitle: currentJob?.carrierName || 'CDL Position',
-      message: 'Your application has been submitted! The carrier will contact you soon.'
-    }).catch(() => {
-      // Lightbox may not exist - show inline success
+    // Create application/interest record using backend service
+    const interestResult = await logCarrierInterest({
+      carrierDOT: currentJob?.dotNumber || jobId,
+      carrierName: currentJob?.carrierName || '',
+      matchScore: 85, // Default for quick apply
+      action: 'applied'
     });
+
+    if (interestResult.success) {
+      // Show success message
+      try {
+        const quickApplyBtn = $w('#quickApplyBtn');
+        if (quickApplyBtn.rendered) {
+          quickApplyBtn.label = 'Applied!';
+        }
+
+        const successMessage = $w('#applySuccessMessage');
+        if (successMessage.rendered) {
+          successMessage.show();
+        }
+      } catch (e) { }
+
+      // Show success lightbox or notification
+      wixWindow.openLightbox('ApplicationSuccess', {
+        jobTitle: currentJob?.carrierName || 'CDL Position',
+        message: 'Your application has been submitted! The carrier will contact you soon.'
+      }).catch(() => {
+        // Lightbox may not exist - show inline success
+      });
+    }
 
   } catch (err) {
     console.error('Quick apply failed:', err);
@@ -667,9 +657,7 @@ async function handleQuickApply(jobId) {
         quickApplyBtn.label = 'Quick Apply Now';
         quickApplyBtn.enable();
       }
-    } catch (e) {
-      // Element may not exist
-    }
+    } catch (e) { }
   }
 }
 

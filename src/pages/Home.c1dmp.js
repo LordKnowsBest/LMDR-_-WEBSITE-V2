@@ -6,7 +6,6 @@
  * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
  */
 
-import wixData from 'wix-data';
 import { getPublicStats, getFeaturedCarriers, getRecentHires } from 'backend/publicStatsService';
 import { submitCarrierStaffingRequest } from 'backend/carrierLeadsService';
 import wixLocation from 'wix-location';
