@@ -2,77 +2,16 @@
  * Parking Service - Truck parking finder and reporting
  */
 
-import wixData from 'wix-data';
 import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
-// Collection keys for dual-source routing
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     parkingLocations: 'parkingLocations',
     parkingReports: 'parkingReports',
     roadUtilityCache: 'roadUtilityCache'
 };
-
-// ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.eq) {
-        for (const [field, value] of Object.entries(options.eq)) {
-            query = query.eq(field, value);
-        }
-    }
-    if (options.gt) {
-        for (const [field, value] of Object.entries(options.gt)) {
-            query = query.gt(field, value);
-        }
-    }
-    if (options.descending) {
-        query = query.descending(options.descending);
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function getRecord(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.getRecord(tableName, recordId);
-    }
-    return await wixData.get(wixCollectionName, recordId, { suppressAuth: true });
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
 
 // Local Haversine formula - avoid async overhead from importing .jsw module
 function calculateDistance(lat1, lng1, lat2, lng2) {
@@ -1127,15 +1066,15 @@ export async function searchParking(lat, lng, radius = 25, filters = {}) {
     const cacheKey = `parking:${lat.toFixed(2)}:${lng.toFixed(2)}:${radius}:${JSON.stringify(filters)}`;
     
     try {
-        // 1. Check cache first
-        const cached = await wixData.query(COLLECTIONS.CACHE)
-            .eq('cache_key', cacheKey)
-            .gt('expires_at', new Date())
-            .limit(1)
-            .find({ suppressAuth: true });
+        // 1. Check cache first using dataAccess
+        const cachedRes = await dataAccess.queryRecords(COLLECTION_KEYS.roadUtilityCache, {
+            filters: { cache_key: cacheKey, expires_at: { gt: new Date() } },
+            limit: 1,
+            suppressAuth: true
+        });
             
-        if (cached.items.length > 0) {
-            return { success: true, items: cached.items[0].data, fromCache: true };
+        if (cachedRes.items?.length) {
+            return { success: true, items: cachedRes.items[0].data, fromCache: true };
         }
 
         // 2. Cache miss: Fetch from multiple sources
@@ -1143,8 +1082,8 @@ export async function searchParking(lat, lng, radius = 25, filters = {}) {
             queryTruckParkingClubAPI(lat, lng, radius).catch(() => []),
             queryParkMyTruckAPI(lat, lng, radius),
             queryStateDOTAPIs(lat, lng, radius),
-            // Also include local database locations
-            wixData.query(COLLECTIONS.LOCATIONS).limit(100).find({ suppressAuth: true }).then(res => res.items)
+            // Also include local database locations using dataAccess
+            dataAccess.queryRecords(COLLECTION_KEYS.parkingLocations, { limit: 100, suppressAuth: true }).then(r => r.items || [])
         ];
 
         const allResults = await Promise.all(sources);
@@ -1180,11 +1119,11 @@ export async function searchParking(lat, lng, radius = 25, filters = {}) {
         // Sort by distance
         finalItems.sort((a, b) => a.distance_miles - b.distance_miles);
 
-        // 3. Store in cache
+        // 3. Store in cache using dataAccess
         const expiry = new Date();
         expiry.setMinutes(expiry.getMinutes() + 5);
         
-        await wixData.insert(COLLECTIONS.CACHE, {
+        await dataAccess.insertRecord(COLLECTION_KEYS.roadUtilityCache, {
             cache_key: cacheKey,
             cache_type: 'parking',
             data: finalItems,
@@ -1272,7 +1211,7 @@ export async function getParkingDetails(locationId) {
     if (!locationId) return { success: false, error: 'locationId is required' };
     
     try {
-        const item = await wixData.get(COLLECTIONS.LOCATIONS, locationId, { suppressAuth: true });
+        const item = await dataAccess.getRecord(COLLECTION_KEYS.parkingLocations, locationId, { suppressAuth: true });
         if (!item) return { success: false, error: 'Location not found' };
         
         return { success: true, item };
@@ -1294,17 +1233,20 @@ export async function reportParkingAvailability(locationId, report) {
         return { success: false, error: 'Invalid spaces available' };
     }
 
-    // Rate limiting: 1 report per location per hour per driver
+    // Rate limiting: 1 report per location per hour per driver using dataAccess
     const oneHourAgo = new Date(Date.now() - 3600000);
     try {
-        const recentReports = await wixData.query(COLLECTIONS.REPORTS)
-            .eq('location_id', locationId)
-            .eq('driver_id', report.driver_id)
-            .gt('reported_at', oneHourAgo)
-            .limit(1)
-            .find({ suppressAuth: true });
+        const recentRes = await dataAccess.queryRecords(COLLECTION_KEYS.parkingReports, {
+            filters: {
+                location_id: locationId,
+                driver_id: report.driver_id,
+                reported_at: { gt: oneHourAgo }
+            },
+            limit: 1,
+            suppressAuth: true
+        });
 
-        if (recentReports.items.length > 0) {
+        if (recentRes.items?.length > 0) {
             return { success: false, error: 'You have already reported for this location in the last hour' };
         }
 
@@ -1316,12 +1258,13 @@ export async function reportParkingAvailability(locationId, report) {
             reported_at: new Date()
         };
 
-        const result = await wixData.insert(COLLECTIONS.REPORTS, record, { suppressAuth: true });
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.parkingReports, record, { suppressAuth: true });
+        if (!result.success) throw new Error(result.error);
         
         // Trigger availability estimation update (async)
         updateEstimatedAvailability(locationId).catch(err => console.error('Failed to update estimation:', err));
 
-        return { success: true, reportId: result._id };
+        return { success: true, reportId: result.record._id };
     } catch (error) {
         console.error('[ParkingService] reportParkingAvailability failed:', error);
         return { success: false, error: error.message };
@@ -1334,22 +1277,26 @@ export async function reportParkingAvailability(locationId, report) {
 async function updateEstimatedAvailability(locationId) {
     const twoHoursAgo = new Date(Date.now() - 7200000);
     
-    const reports = await wixData.query(COLLECTIONS.REPORTS)
-        .eq('location_id', locationId)
-        .gt('reported_at', twoHoursAgo)
-        .descending('reported_at')
-        .limit(10)
-        .find({ suppressAuth: true });
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.parkingReports, {
+        filters: {
+            location_id: locationId,
+            reported_at: { gt: twoHoursAgo }
+        },
+        sort: [{ field: 'reported_at', direction: 'desc' }],
+        limit: 10,
+        suppressAuth: true
+    });
 
-    if (reports.items.length === 0) return;
+    const reports = result.items || [];
+    if (reports.length === 0) return;
 
     // Simple aggregation: average of recent reports weighted by recency
     let totalWeightedSpaces = 0;
     let totalWeight = 0;
     const now = Date.now();
 
-    reports.items.forEach(report => {
-        const ageHours = (now - report.reported_at.getTime()) / 3600000;
+    reports.forEach(report => {
+        const ageHours = (now - new Date(report.reported_at).getTime()) / 3600000;
         const weight = 1 / (ageHours + 0.5); // Decay weight
         totalWeightedSpaces += report.spaces_available * weight;
         totalWeight += weight;
@@ -1357,7 +1304,7 @@ async function updateEstimatedAvailability(locationId) {
 
     const estimatedSpaces = Math.round(totalWeightedSpaces / totalWeight);
 
-    await wixData.update(COLLECTIONS.LOCATIONS, {
+    await dataAccess.updateRecord(COLLECTION_KEYS.parkingLocations, {
         _id: locationId,
         available_spaces: estimatedSpaces,
         availability_confidence: 'estimated',

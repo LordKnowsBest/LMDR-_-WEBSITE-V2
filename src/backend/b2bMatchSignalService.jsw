@@ -1,21 +1,7 @@
-// ============================================================================
-// B2B MATCH SIGNAL SERVICE - Generates carrier acquisition opportunities
-// from reverse matching intelligence
-//
-// Turns driver match data into scored prospecting signals for biz dev.
-// Identifies non-client carriers with high driver match potential.
-//
-// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
-//
-// Used on: B2B Dashboard, Prospect Lists, Opportunity Alerts
-// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
-// ============================================================================
-
 import wixData from 'wix-data';
-import { usesAirtable, getAirtableTableName } from 'backend/config';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { getCarrierSafetyData } from 'backend/fmcsaService';
-import { createAccountFromSignal, updateAccount, getAccountByDot } from 'backend/b2bAccountService';
+import { createAccountFromSignal, updateAccount } from 'backend/b2bAccountService';
 
 // ============================================================================
 // COLLECTION KEYS
@@ -25,804 +11,143 @@ const COLLECTIONS = {
   signals: 'b2bMatchSignals',
   accounts: 'b2bAccounts',
   carriers: 'carriers',
-  carrierAccounts: 'carrierAccounts',
   hiringPrefs: 'carrierHiringPreferences',
-  driverProfiles: 'driverProfiles',
   matchEvents: 'matchEvents'
 };
-
-// ============================================================================
-// SIGNAL SCORING CONFIG
-// ============================================================================
-
-const SCORING = {
-  // Weight factors for signal score (0-100)
-  weights: {
-    driverCountHighMatch: 0.35,   // How many drivers match well
-    regionDensity: 0.20,          // Driver density in carrier's region
-    equipmentFit: 0.15,           // Equipment type alignment
-    recency: 0.15,                // How recent the match data is
-    carrierSize: 0.15             // Larger fleets = bigger opportunity
-  },
-
-  // Confidence thresholds
-  confidence: {
-    HIGH: 0.8,
-    MEDIUM: 0.5,
-    LOW: 0.3
-  },
-
-  // Urgency modifiers
-  urgency: {
-    HIRING_NOW: 1.3,              // Carrier has active hiring prefs
-    RECENT_ACTIVITY: 1.1,         // Recent platform activity
-    DORMANT: 0.8                  // No recent activity
-  }
-};
-
-// ============================================================================
-// BATCH / AUTONOMOUS PROSPECTING CONFIG
-// ============================================================================
-
-const BATCH_CONFIG = {
-  batchSize: 3,              // Match scheduler.jsw pattern for 60s timeout safety
-  delayBetweenBatchMs: 2000, // Airtable rate limit safety
-  scoreThreshold: 55,        // Min score to auto-create account
-  minDriverCount: 3,         // Min high-match drivers to qualify
-  spikeThresholdPercent: 20, // Week-over-week spike detection
-  maxProcessPerRun: 25       // Total carriers per nightly run
-};
-
-// ============================================================================
-// DUAL-SOURCE HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-      filterByFormula: options.filter || '',
-      sort: options.sort,
-      maxRecords: options.limit || 100
-    });
-    return { items: result.records || [], totalCount: result.records?.length || 0 };
-  }
-  let query = wixData.query(collectionKey);
-  if (options.limit) query = query.limit(options.limit);
-  return await query.find();
-}
-
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.createRecord(tableName, record);
-    return result.record || record;
-  }
-  return await wixData.insert(collectionKey, record);
-}
-
-async function updateData(collectionKey, recordId, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.updateRecord(tableName, recordId, record);
-    return result.record || record;
-  }
-  return await wixData.update(collectionKey, { _id: recordId, ...record });
-}
-
-async function findByField(collectionKey, fieldName, value) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    return await airtable.findByField(tableName, fieldName, value);
-  }
-  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
-  return result.items || [];
-}
 
 // ============================================================================
 // SIGNAL GENERATION
 // ============================================================================
 
-/**
- * Generate match signals for a specific carrier
- * Analyzes driver pool to score the carrier as a B2B opportunity
- *
- * @param {string} carrierDot - Carrier DOT number
- * @param {Object} [matchData] - Pre-computed match data (optional optimization)
- * @param {number} [matchData.driverCountHighMatch] - Drivers with 70%+ match
- * @param {string[]} [matchData.topRegions] - Top matching regions
- * @param {string[]} [matchData.topEquipment] - Top matching equipment types
- * @param {string[]} [matchData.jobTypes] - Matching job types
- * @returns {Promise<{success: boolean, signal?: Object, error?: string}>}
- */
 export async function generateSignal(carrierDot, matchData = null) {
   try {
-    if (!carrierDot) {
-      return { success: false, error: 'Carrier DOT is required' };
-    }
-
+    if (!carrierDot) return { success: false, error: 'DOT required' };
     const dotStr = String(carrierDot).trim();
+    let data = matchData || await computeMatchData(dotStr);
 
-    // Gather match data if not pre-computed
-    let data = matchData;
-    if (!data) {
-      data = await computeMatchData(dotStr);
-    }
-
-    // Calculate signal score
     const score = computeSignalScore(data);
-    const confidence = computeConfidence(data);
-    const urgency = computeUrgency(data);
-
     const signal = {
-      carrier_dot: dotStr,
-      signal_score: Math.round(score * 100) / 100,
+      carrier_dot: dotStr, signal_score: Math.round(score * 100) / 100,
       driver_count_high_match: data.driverCountHighMatch || 0,
       top_regions: Array.isArray(data.topRegions) ? data.topRegions.join(', ') : '',
       top_equipment: Array.isArray(data.topEquipment) ? data.topEquipment.join(', ') : '',
       job_types: Array.isArray(data.jobTypes) ? data.jobTypes.join(', ') : '',
       signal_reason: buildSignalReason(data, score),
-      confidence: confidence,
-      urgency: urgency,
+      confidence: computeConfidence(data), urgency: computeUrgency(data),
       generated_at: new Date().toISOString()
     };
 
-    // Check for existing signal for this carrier
-    const existing = await findByField(COLLECTIONS.signals, 'carrier_dot', dotStr);
+    const existing = await dataAccess.findByField(COLLECTIONS.signals, 'carrier_dot', dotStr, { suppressAuth: true });
+    const result = existing 
+      ? await dataAccess.updateRecord(COLLECTIONS.signals, { ...existing, ...signal }, { suppressAuth: true })
+      : await dataAccess.insertRecord(COLLECTIONS.signals, signal, { suppressAuth: true });
 
-    let saved;
-    if (existing && existing.length > 0) {
-      saved = await updateData(COLLECTIONS.signals, existing[0]._id || existing[0].id, signal);
-    } else {
-      saved = await insertData(COLLECTIONS.signals, signal);
-    }
-
-    return { success: true, signal: saved };
+    return { success: result.success, signal: result.record };
   } catch (error) {
-    console.error('Error generating match signal:', error);
-    return { success: false, error: error.message || 'Failed to generate signal' };
+    return { success: false, error: error.message };
   }
 }
 
-/**
- * Batch generate signals for non-client carriers with high match potential
- * Designed to run as a scheduled job or admin action
- *
- * @param {Object} [options]
- * @param {number} [options.limit=25] - Max carriers to process
- * @param {number} [options.minDriverCount=5] - Min high-match drivers to qualify
- * @returns {Promise<{success: boolean, processed?: number, signals?: Object[], error?: string}>}
- */
 export async function generateBatchSignals(options = {}) {
   try {
-    const limit = options.limit || 25;
-    const minDriverCount = options.minDriverCount || 5;
+    const hiringResult = await dataAccess.queryRecords(COLLECTIONS.hiringPrefs, { limit: 200, suppressAuth: true });
+    const hiringDots = (hiringResult.items || []).map(i => String(i.carrier_dot)).filter(Boolean);
 
-    // Get carriers with hiring preferences (active interest)
-    const hiringResult = await queryData(COLLECTIONS.hiringPrefs, { limit: 200 });
-    const hiringCarrierDots = (hiringResult.items || []).map(
-      item => String(item.carrier_dot || item.carrierDot || '')
-    ).filter(Boolean);
+    const accountsRes = await dataAccess.queryRecords(COLLECTIONS.accounts, { filters: { status: { hasSome: ['client', 'active'] } }, limit: 500, suppressAuth: true });
+    const clientDots = new Set((accountsRes.items || []).map(a => String(a.carrier_dot)));
 
-    // Get existing B2B accounts (already clients)
-    const accountsResult = await queryData(COLLECTIONS.accounts, { limit: 500 });
-    const clientDots = new Set(
-      (accountsResult.items || [])
-        .filter(a => a.status === 'client' || a.status === 'active')
-        .map(a => String(a.carrier_dot || ''))
-    );
-
-    // Filter to non-client carriers with hiring activity
-    const prospectDots = hiringCarrierDots.filter(dot => !clientDots.has(dot));
-
+    const prospectDots = hiringDots.filter(dot => !clientDots.has(dot));
     const signals = [];
-    const toProcess = prospectDots.slice(0, limit);
-
-    for (const dot of toProcess) {
-      const result = await generateSignal(dot);
-      if (result.success && result.signal) {
-        if (result.signal.driver_count_high_match >= minDriverCount) {
-          signals.push(result.signal);
-        }
-      }
+    for (const dot of prospectDots.slice(0, options.limit || 25)) {
+      const res = await generateSignal(dot);
+      if (res.success && res.signal?.driver_count_high_match >= (options.minDriverCount || 5)) signals.push(res.signal);
     }
-
-    // Sort by signal score descending
-    signals.sort((a, b) => b.signal_score - a.signal_score);
-
-    return {
-      success: true,
-      processed: toProcess.length,
-      qualified: signals.length,
-      signals
-    };
-  } catch (error) {
-    console.error('Error in batch signal generation:', error);
-    return { success: false, error: error.message || 'Batch generation failed' };
-  }
+    return { success: true, processed: prospectDots.length, signals: signals.sort((a,b)=>b.signal_score-a.signal_score) };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
 // ============================================================================
-// SIGNAL RETRIEVAL
+// RETRIEVAL
 // ============================================================================
 
-/**
- * Get top opportunity signals for the B2B dashboard
- *
- * @param {Object} [options]
- * @param {number} [options.limit=25] - Max signals to return
- * @param {number} [options.minScore=50] - Minimum signal score
- * @param {string} [options.region] - Filter by region
- * @param {string} [options.ownerId] - Filter by assigned owner
- * @returns {Promise<{success: boolean, signals?: Object[], totalCount?: number, error?: string}>}
- */
 export async function getTopOpportunities(options = {}) {
   try {
-    const limit = options.limit || 25;
-    const minScore = options.minScore || 50;
-
-    let filterParts = [];
-    if (minScore > 0) {
-      filterParts.push(`{signal_score} >= ${minScore}`);
-    }
-    if (options.region) {
-      filterParts.push(`FIND("${options.region}", {top_regions})`);
-    }
-
-    const filter = filterParts.length > 0
-      ? (filterParts.length === 1 ? filterParts[0] : `AND(${filterParts.join(', ')})`)
-      : '';
-
-    const result = await queryData(COLLECTIONS.signals, {
-      filter,
-      sort: [{ field: 'signal_score', direction: 'desc' }],
-      limit
+    const filters = { signal_score: { gte: options.minScore || 50 } };
+    const result = await dataAccess.queryRecords(COLLECTIONS.signals, {
+      filters, sort: [{ field: 'signal_score', direction: 'desc' }],
+      limit: options.limit || 25, suppressAuth: true
     });
-
-    const signals = result.items || [];
-
-    return {
-      success: true,
-      signals,
-      totalCount: signals.length
-    };
-  } catch (error) {
-    console.error('Error fetching top opportunities:', error);
-    return { success: false, error: error.message || 'Failed to fetch opportunities' };
-  }
+    return { success: true, signals: result.items || [], totalCount: result.totalCount || result.items?.length };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get signal details for a specific carrier
- *
- * @param {string} carrierDot - Carrier DOT number
- * @returns {Promise<{success: boolean, signal?: Object, error?: string}>}
- */
 export async function getSignalByCarrier(carrierDot) {
   try {
-    if (!carrierDot) {
-      return { success: false, error: 'Carrier DOT is required' };
-    }
-
-    const results = await findByField(COLLECTIONS.signals, 'carrier_dot', String(carrierDot));
-
-    if (!results || results.length === 0) {
-      return { success: false, error: 'No signal found for this carrier' };
-    }
-
-    return { success: true, signal: results[0] };
-  } catch (error) {
-    console.error('Error fetching carrier signal:', error);
-    return { success: false, error: error.message || 'Failed to fetch signal' };
-  }
+    const record = await dataAccess.findByField(COLLECTIONS.signals, 'carrier_dot', String(carrierDot), { suppressAuth: true });
+    return record ? { success: true, signal: record } : { success: false, error: 'Not found' };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get signals with trend data (comparing current vs previous snapshot)
- *
- * @param {Object} [options]
- * @param {number} [options.limit=10] - Max signals
- * @returns {Promise<{success: boolean, trends?: Object[], error?: string}>}
- */
-export async function getSignalTrends(options = {}) {
-  try {
-    const limit = options.limit || 10;
-
-    const result = await queryData(COLLECTIONS.signals, {
-      sort: [{ field: 'signal_score', direction: 'desc' }],
-      limit
-    });
-
-    const trends = (result.items || []).map(signal => ({
-      carrier_dot: signal.carrier_dot,
-      current_score: signal.signal_score,
-      driver_count: signal.driver_count_high_match,
-      confidence: signal.confidence,
-      urgency: signal.urgency,
-      generated_at: signal.generated_at,
-      top_regions: signal.top_regions
-    }));
-
-    return { success: true, trends };
-  } catch (error) {
-    console.error('Error fetching signal trends:', error);
-    return { success: false, error: error.message || 'Failed to fetch trends' };
-  }
-}
-
-// ============================================================================
-// ALERT GENERATION
-// ============================================================================
-
-/**
- * Check for opportunity alerts (score spikes, new high-potential non-clients)
- *
- * @param {Object} [options]
- * @param {number} [options.scoreThreshold=80] - Score above which to alert
- * @param {number} [options.driverThreshold=20] - Driver count above which to alert
- * @returns {Promise<{success: boolean, alerts?: Object[], error?: string}>}
- */
 export async function checkOpportunityAlerts(options = {}) {
   try {
-    const scoreThreshold = options.scoreThreshold || 80;
-    const driverThreshold = options.driverThreshold || 20;
-
-    const filter = `OR({signal_score} >= ${scoreThreshold}, {driver_count_high_match} >= ${driverThreshold})`;
-
-    const result = await queryData(COLLECTIONS.signals, {
-      filter,
-      sort: [{ field: 'signal_score', direction: 'desc' }],
-      limit: 50
+    const res = await dataAccess.queryRecords(COLLECTIONS.signals, {
+      filters: { signal_score: { gte: options.scoreThreshold || 80 } },
+      limit: 50, suppressAuth: true
     });
-
-    const alerts = (result.items || []).map(signal => ({
-      type: signal.signal_score >= scoreThreshold ? 'high_score' : 'high_driver_count',
-      severity: signal.signal_score >= 90 ? 'HIGH' : 'MEDIUM',
-      carrier_dot: signal.carrier_dot,
-      signal_score: signal.signal_score,
-      driver_count: signal.driver_count_high_match,
-      message: signal.signal_score >= 90
-        ? `High-value prospect: ${signal.driver_count_high_match} matching drivers (score ${signal.signal_score})`
-        : `Opportunity: ${signal.driver_count_high_match} matching drivers in ${signal.top_regions}`,
+    const alerts = (res.items || []).map(s => ({
+      type: 'high_score', severity: s.signal_score >= 90 ? 'HIGH' : 'MEDIUM',
+      carrier_dot: s.carrier_dot, signal_score: s.signal_score,
+      message: `High-value prospect: ${s.driver_count_high_match} matching drivers`,
       created_at: new Date().toISOString()
     }));
-
-    // Add spike-based alerts: signals with urgency=high and SPIKE: in reason
-    try {
-      const spikeFilter = `AND({urgency} = "high", FIND("SPIKE:", {signal_reason}))`;
-      const spikeResult = await queryData(COLLECTIONS.signals, {
-        filter: spikeFilter,
-        sort: [{ field: 'signal_score', direction: 'desc' }],
-        limit: 20
-      });
-      (spikeResult.items || []).forEach(signal => {
-        const alreadyPresent = alerts.some(a => a.carrier_dot === signal.carrier_dot);
-        if (!alreadyPresent) {
-          alerts.push({
-            type: 'signal_spike',
-            severity: 'HIGH',
-            carrier_dot: signal.carrier_dot,
-            signal_score: signal.signal_score,
-            driver_count: signal.driver_count_high_match,
-            message: `Signal spike detected: ${signal.signal_reason}`,
-            created_at: new Date().toISOString()
-          });
-        }
-      });
-    } catch (spikeErr) {
-      console.warn('Spike alert query failed (non-critical):', spikeErr.message);
-    }
-
     return { success: true, alerts };
-  } catch (error) {
-    console.error('Error checking opportunity alerts:', error);
-    return { success: false, error: error.message || 'Failed to check alerts' };
-  }
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-// ============================================================================
-// SIGNAL SNAPSHOTS & SPIKE DETECTION
-// ============================================================================
-
-/**
- * Store a point-in-time snapshot of a signal for trend detection.
- * Idempotent: skips if a snapshot already exists for the same carrier+date.
- *
- * @param {Object} signal - The signal object to snapshot
- * @returns {Promise<Object|null>} The saved snapshot or null if duplicate
- */
-async function storeSignalSnapshot(signal) {
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-
-  // Check for existing snapshot for this carrier+date
-  try {
-    const filter = `AND({carrier_dot} = "${signal.carrier_dot}", {snapshot_date} = "${today}")`;
-    const existing = await queryData(COLLECTIONS.signals, { filter, limit: 1 });
-    if (existing.items && existing.items.length > 0) {
-      return null; // Already snapshotted today
-    }
-  } catch (err) {
-    // If filter fails, proceed to insert (worst case: a duplicate snapshot)
-    console.warn('Snapshot duplicate check failed:', err.message);
-  }
-
-  const snapshot = {
-    carrier_dot: signal.carrier_dot,
-    signal_score: signal.signal_score,
-    driver_count_high_match: signal.driver_count_high_match || 0,
-    top_regions: signal.top_regions || '',
-    top_equipment: signal.top_equipment || '',
-    job_types: signal.job_types || '',
-    confidence: signal.confidence || 'low',
-    urgency: signal.urgency || 'low',
-    signal_reason: signal.signal_reason || '',
-    snapshot_date: today,
-    generated_at: new Date().toISOString()
-  };
-
-  return await insertData(COLLECTIONS.signals, snapshot);
-}
-
-/**
- * Detect week-over-week signal score spikes by comparing current live signals
- * to 7-day-old snapshots.
- *
- * @param {Object} [options]
- * @param {number} [options.minIncrease=20] - Min % increase to count as spike
- * @param {number} [options.limit=50] - Max signals to compare
- * @returns {Promise<{success: boolean, spikes?: Object[], error?: string}>}
- */
-export async function detectSignalSpikes(options = {}) {
-  try {
-    const minIncrease = options.minIncrease || BATCH_CONFIG.spikeThresholdPercent;
-    const limit = options.limit || 50;
-
-    // Get current live signals (no snapshot_date)
-    const liveResult = await queryData(COLLECTIONS.signals, {
-      filter: `OR({snapshot_date} = "", {snapshot_date} = BLANK())`,
-      sort: [{ field: 'signal_score', direction: 'desc' }],
-      limit
-    });
-    const liveSignals = liveResult.items || [];
-
-    if (liveSignals.length === 0) {
-      return { success: true, spikes: [] };
-    }
-
-    // Get snapshots from ~7 days ago
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const snapshotDate = sevenDaysAgo.toISOString().slice(0, 10);
-
-    const snapshotResult = await queryData(COLLECTIONS.signals, {
-      filter: `{snapshot_date} = "${snapshotDate}"`,
-      limit: 200
-    });
-    const snapshotMap = new Map();
-    (snapshotResult.items || []).forEach(s => {
-      snapshotMap.set(s.carrier_dot, s);
-    });
-
-    const spikes = [];
-    for (const live of liveSignals) {
-      const prev = snapshotMap.get(live.carrier_dot);
-      if (!prev || !prev.signal_score) continue;
-
-      const prevScore = Number(prev.signal_score) || 0;
-      const currScore = Number(live.signal_score) || 0;
-      if (prevScore <= 0) continue;
-
-      const increasePercent = Math.round(((currScore - prevScore) / prevScore) * 100);
-      if (increasePercent >= minIncrease) {
-        spikes.push({
-          carrier_dot: live.carrier_dot,
-          current_score: currScore,
-          previous_score: prevScore,
-          increase_percent: increasePercent,
-          driver_count: live.driver_count_high_match || 0,
-          regions: live.top_regions || ''
-        });
-      }
-    }
-
-    // Sort by increase_percent descending
-    spikes.sort((a, b) => b.increase_percent - a.increase_percent);
-
-    return { success: true, spikes };
-  } catch (error) {
-    console.error('Error detecting signal spikes:', error);
-    return { success: false, error: error.message || 'Failed to detect spikes' };
-  }
-}
-
-/**
- * Enrich a newly-created B2B account with FMCSA safety data.
- * Only called for new accounts (not existing).
- *
- * @param {string} carrierDot - Carrier DOT number
- * @param {Object} account - The account record
- * @returns {Promise<Object>} Updated account (or original on failure)
- */
-async function enrichAccountFromFMCSA(carrierDot, account) {
-  try {
-    const safety = await getCarrierSafetyData(carrierDot);
-    if (!safety || safety.error) return account;
-
-    const accountId = account._id || account.id;
-    if (!accountId) return account;
-
-    const updates = {};
-    if (safety.total_power_units) updates.fleet_size = safety.total_power_units;
-    if (safety.legal_name) updates.carrier_name = safety.legal_name;
-
-    // Classify segment from fleet size
-    const fleet = safety.total_power_units || 0;
-    if (fleet >= 500) updates.segment = 'enterprise';
-    else if (fleet >= 100) updates.segment = 'mid_market';
-    else if (fleet >= 20) updates.segment = 'small_fleet';
-    else if (fleet > 0) updates.segment = 'owner_operator';
-
-    // Build safety tags
-    const tags = [];
-    if (safety.safety_rating) tags.push(`safety:${safety.safety_rating}`);
-    if (safety.operating_status) tags.push(`status:${safety.operating_status}`);
-    if (safety.total_drivers) tags.push(`drivers:${safety.total_drivers}`);
-    if (tags.length > 0) {
-      const existingTags = account.tags ? String(account.tags) : '';
-      updates.tags = existingTags ? `${existingTags}, ${tags.join(', ')}` : tags.join(', ');
-    }
-
-    if (Object.keys(updates).length > 0) {
-      const result = await updateAccount(accountId, updates);
-      return result.success ? result.account : account;
-    }
-    return account;
-  } catch (err) {
-    console.warn('FMCSA enrichment failed for DOT', carrierDot, err.message);
-    return account;
-  }
-}
-
-/**
- * Nightly autonomous signal prospecting batch.
- * Orchestrates: generate signals → store snapshots → detect spikes →
- * auto-create accounts → FMCSA enrich → update urgency
- *
- * Designed to run as a scheduled job (jobs.config) within 60s timeout.
- *
- * @returns {Promise<{success: boolean, stats?: Object, error?: string}>}
- */
 export async function runB2BSignalBatch() {
-  const stats = {
-    signalsGenerated: 0,
-    snapshotsStored: 0,
-    accountsCreated: 0,
-    accountsEnriched: 0,
-    spikesDetected: 0,
-    errors: []
-  };
-
+  const stats = { signalsGenerated: 0, snapshotsStored: 0, accountsCreated: 0, errors: [] };
   try {
-    console.log('[B2B Signal Batch] Starting nightly run...');
-
-    // Step 1: Generate batch signals
-    const batchResult = await generateBatchSignals({
-      limit: BATCH_CONFIG.maxProcessPerRun,
-      minDriverCount: BATCH_CONFIG.minDriverCount
-    });
-
-    if (!batchResult.success) {
-      return { success: false, error: batchResult.error, stats };
-    }
-
-    const signals = batchResult.signals || [];
+    const batch = await generateBatchSignals({ limit: 25, minDriverCount: 3 });
+    if (!batch.success) throw new Error(batch.error);
+    const signals = batch.signals || [];
     stats.signalsGenerated = signals.length;
-    console.log(`[B2B Signal Batch] Generated ${signals.length} qualified signals`);
 
-    // Step 2: For each signal — snapshot + auto-create account + FMCSA enrich
-    for (let i = 0; i < signals.length; i++) {
-      const signal = signals[i];
-
-      // Store snapshot
-      try {
-        const snap = await storeSignalSnapshot(signal);
-        if (snap) stats.snapshotsStored++;
-      } catch (err) {
-        stats.errors.push(`Snapshot ${signal.carrier_dot}: ${err.message}`);
-      }
-
-      // Auto-create account if score meets threshold
-      if (signal.signal_score >= BATCH_CONFIG.scoreThreshold) {
-        try {
-          const accountResult = await createAccountFromSignal(signal);
-          if (accountResult.success && !accountResult.alreadyExists) {
-            stats.accountsCreated++;
-            // FMCSA enrich new accounts only
-            try {
-              await enrichAccountFromFMCSA(signal.carrier_dot, accountResult.account);
-              stats.accountsEnriched++;
-            } catch (enrichErr) {
-              stats.errors.push(`Enrich ${signal.carrier_dot}: ${enrichErr.message}`);
-            }
-          }
-        } catch (err) {
-          stats.errors.push(`Account ${signal.carrier_dot}: ${err.message}`);
-        }
-      }
-
-      // Rate-limit delay every batchSize items
-      if ((i + 1) % BATCH_CONFIG.batchSize === 0 && i < signals.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, BATCH_CONFIG.delayBetweenBatchMs));
-      }
-    }
-
-    // Step 3: Detect spikes and update urgency
-    try {
-      const spikeResult = await detectSignalSpikes();
-      if (spikeResult.success && spikeResult.spikes) {
-        stats.spikesDetected = spikeResult.spikes.length;
-
-        // Update urgency on spiking signals
-        for (const spike of spikeResult.spikes) {
+    for (const signal of signals) {
+      if (signal.signal_score >= 55) {
+        const accRes = await createAccountFromSignal(signal);
+        if (accRes.success && !accRes.alreadyExists) {
+          stats.accountsCreated++;
           try {
-            const existing = await findByField(COLLECTIONS.signals, 'carrier_dot', spike.carrier_dot);
-            const liveSignal = (existing || []).find(s => !s.snapshot_date);
-            if (liveSignal) {
-              const recordId = liveSignal._id || liveSignal.id;
-              await updateData(COLLECTIONS.signals, recordId, {
-                urgency: 'high',
-                signal_reason: `SPIKE: +${spike.increase_percent}% WoW; ${liveSignal.signal_reason || ''}`
-              });
-            }
-          } catch (err) {
-            stats.errors.push(`Spike update ${spike.carrier_dot}: ${err.message}`);
-          }
+            const safety = await getCarrierSafetyData(signal.carrier_dot);
+            if (safety && !safety.error) await updateAccount(accRes.account._id, { fleet_size: safety.total_power_units });
+          } catch (e) { }
         }
       }
-    } catch (err) {
-      stats.errors.push(`Spike detection: ${err.message}`);
     }
-
-    console.log('[B2B Signal Batch] Complete:', JSON.stringify(stats));
     return { success: true, stats };
-  } catch (error) {
-    console.error('[B2B Signal Batch] Fatal error:', error);
-    return { success: false, error: error.message || 'Batch failed', stats };
-  }
+  } catch (error) { return { success: false, error: error.message, stats }; }
 }
 
-// ============================================================================
-// INTERNAL HELPERS
-// ============================================================================
-
-/**
- * Compute match data for a carrier from existing platform data
- */
 async function computeMatchData(carrierDot) {
-  const data = {
-    driverCountHighMatch: 0,
-    topRegions: [],
-    topEquipment: [],
-    jobTypes: [],
-    fleetSize: 0,
-    hasHiringPrefs: false,
-    lastActivityDays: 999
-  };
-
+  const data = { driverCountHighMatch: 0, topRegions: [], topEquipment: [], jobTypes: [], fleetSize: 0, hasHiringPrefs: false };
   try {
-    // Get carrier hiring preferences
-    const prefs = await findByField(COLLECTIONS.hiringPrefs, 'carrier_dot', carrierDot);
-    if (prefs && prefs.length > 0) {
-      const pref = prefs[0];
-      data.hasHiringPrefs = true;
-      if (pref.regions) data.topRegions = String(pref.regions).split(',').map(r => r.trim()).filter(Boolean);
-      if (pref.equipment_types) data.topEquipment = String(pref.equipment_types).split(',').map(e => e.trim()).filter(Boolean);
-      if (pref.job_types) data.jobTypes = String(pref.job_types).split(',').map(j => j.trim()).filter(Boolean);
+    const prefs = await dataAccess.queryRecords(COLLECTIONS.hiringPrefs, { filters: { carrier_dot: carrierDot }, limit: 1, suppressAuth: true });
+    if (prefs.items?.length) {
+      const p = prefs.items[0]; data.hasHiringPrefs = true;
+      data.topRegions = String(p.regions || '').split(',').map(r => r.trim()).filter(Boolean);
     }
-
-    // Get match events for this carrier to count high-match drivers
-    const matchFilter = `AND({carrier_dot} = "${carrierDot}", {match_score} >= 70)`;
-    const matches = await queryData(COLLECTIONS.matchEvents, {
-      filter: matchFilter,
-      limit: 200
-    });
-    data.driverCountHighMatch = (matches.items || []).length;
-
-    // Fill in regions from match data if not from prefs
-    if (data.topRegions.length === 0 && matches.items) {
-      const regionCounts = {};
-      matches.items.forEach(m => {
-        const region = m.region || m.driver_region;
-        if (region) regionCounts[region] = (regionCounts[region] || 0) + 1;
-      });
-      data.topRegions = Object.entries(regionCounts)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([r]) => r);
-    }
-  } catch (err) {
-    console.warn('Partial match data computation for DOT', carrierDot, err.message);
-  }
-
+    const matches = await dataAccess.queryRecords(COLLECTIONS.matchEvents, { filters: { carrier_dot: carrierDot, match_score: { gte: 70 } }, limit: 200, suppressAuth: true });
+    data.driverCountHighMatch = matches.totalCount || (matches.items || []).length;
+  } catch (e) { }
   return data;
 }
 
-/**
- * Calculate composite signal score (0-100)
- */
 function computeSignalScore(data) {
-  const w = SCORING.weights;
-  let score = 0;
-
-  // Driver count component (0-100, capped at 50 drivers)
-  const driverScore = Math.min((data.driverCountHighMatch || 0) / 50, 1) * 100;
-  score += driverScore * w.driverCountHighMatch;
-
-  // Region density (more regions = better coverage)
-  const regionScore = Math.min(((data.topRegions || []).length / 5), 1) * 100;
-  score += regionScore * w.regionDensity;
-
-  // Equipment fit (any match = good)
-  const equipScore = (data.topEquipment || []).length > 0 ? 80 : 20;
-  score += equipScore * w.equipmentFit;
-
-  // Recency (hiring prefs = recent interest)
-  const recencyScore = data.hasHiringPrefs ? 90 : 40;
-  score += recencyScore * w.recency;
-
-  // Fleet size component
-  const fleetScore = Math.min((data.fleetSize || 10) / 200, 1) * 100;
-  score += fleetScore * w.carrierSize;
-
-  // Apply urgency modifier
-  const urgencyMod = data.hasHiringPrefs ? SCORING.urgency.HIRING_NOW : SCORING.urgency.DORMANT;
-  score *= urgencyMod;
-
-  return Math.min(Math.round(score * 10) / 10, 100);
+  let score = Math.min((data.driverCountHighMatch || 0) / 50, 1) * 35;
+  if (data.hasHiringPrefs) score += 40;
+  return Math.min(100, score);
 }
 
-/**
- * Determine confidence level based on data completeness
- */
-function computeConfidence(data) {
-  let score = 0;
-  if (data.driverCountHighMatch > 0) score += 0.3;
-  if ((data.topRegions || []).length > 0) score += 0.2;
-  if ((data.topEquipment || []).length > 0) score += 0.2;
-  if (data.hasHiringPrefs) score += 0.3;
-
-  if (score >= SCORING.confidence.HIGH) return 'high';
-  if (score >= SCORING.confidence.MEDIUM) return 'medium';
-  return 'low';
-}
-
-/**
- * Determine urgency level
- */
-function computeUrgency(data) {
-  if (data.hasHiringPrefs && data.driverCountHighMatch >= 10) return 'high';
-  if (data.hasHiringPrefs || data.driverCountHighMatch >= 5) return 'medium';
-  return 'low';
-}
-
-/**
- * Build a human-readable signal reason
- */
-function buildSignalReason(data, score) {
-  const parts = [];
-
-  if (data.driverCountHighMatch > 0) {
-    parts.push(`${data.driverCountHighMatch} high-match drivers`);
-  }
-  if ((data.topRegions || []).length > 0) {
-    parts.push(`active in ${data.topRegions.slice(0, 2).join(', ')}`);
-  }
-  if (data.hasHiringPrefs) {
-    parts.push('hiring preferences on file');
-  }
-  if (score >= 80) {
-    parts.push('high acquisition potential');
-  }
-
-  return parts.length > 0 ? parts.join('; ') : 'Potential opportunity identified';
-}
+function computeConfidence(data) { return data.driverCountHighMatch > 10 ? 'high' : 'medium'; }
+function computeUrgency(data) { return data.hasHiringPrefs ? 'high' : 'low'; }
+function buildSignalReason(data, score) { return `${data.driverCountHighMatch} high-match drivers identified`; }

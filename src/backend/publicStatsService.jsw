@@ -1,157 +1,82 @@
-/**
- * Public Stats Service
- * Provides public-facing platform statistics for homepage and landing pages
- *
- * @see docs/PAGE_DATA_IMPLEMENTATION_GUIDE.md
- */
+import * as dataAccess from 'backend/dataAccess';
 
-import wixData from 'wix-data';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
-
-// Collection keys for config.jsw
+// Collection keys for dataAccess
 const COLLECTION_KEYS = {
-  driverProfiles: 'driverProfiles',
+  drivers: 'driverProfiles',
   carriers: 'carriers',
-  driverCarrierInterests: 'driverCarrierInterests'
+  interests: 'driverCarrierInterests'
 };
 
 /**
  * Get public platform stats for drivers and general audience
- * Used on: Home page, About page
  */
 export async function getPublicStats() {
   try {
-    let driversCount, carriersCount, hiresCount, interestsItems;
+    const [driversCount, carriersCount, hiresCount, interestsRes] = await Promise.all([
+      dataAccess.countRecords(COLLECTION_KEYS.drivers, {}),
+      dataAccess.countRecords(COLLECTION_KEYS.carriers, { is_active: true }),
+      dataAccess.countRecords(COLLECTION_KEYS.interests, { status: 'hired' }),
+      dataAccess.queryRecords(COLLECTION_KEYS.interests, { limit: 1000, suppressAuth: true })
+    ]);
 
-    if (usesAirtable(COLLECTION_KEYS.driverProfiles)) {
-      // Airtable path - resolve table names via config before calling airtable functions
-      const driversTable = await getAirtableTableName(COLLECTION_KEYS.driverProfiles);
-      const carriersTable = await getAirtableTableName(COLLECTION_KEYS.carriers);
-      const interestsTable = await getAirtableTableName(COLLECTION_KEYS.driverCarrierInterests);
-
-      const [driversRes, carriersRes, hiresRes, interestsRes] = await Promise.all([
-        airtable.countRecords(driversTable),
-        airtable.countRecords(carriersTable),
-        airtable.countRecords(interestsTable, "{Status} = 'hired'"),
-        airtable.queryRecords(interestsTable, { maxRecords: 1000 })
-      ]);
-
-      // countRecords returns a number directly, queryRecords returns { records: [...] }
-      driversCount = driversRes || 0;
-      carriersCount = carriersRes || 0;
-      hiresCount = hiresRes || 0;
-      interestsItems = interestsRes.records || [];
-    } else {
-      // Wix Data path (original)
-      const [driversResult, carriersResult, hiresResult, interestsResult] = await Promise.all([
-        wixData.query('DriverProfiles').count(),
-        wixData.query('Carriers').eq('is_active', true).count(),
-        wixData.query('DriverCarrierInterests').eq('status', 'hired').count(),
-        wixData.query('DriverCarrierInterests').find({ limit: 1000 })
-      ]);
-
-      driversCount = driversResult;
-      carriersCount = carriersResult;
-      hiresCount = hiresResult;
-      interestsItems = interestsResult.items;
-    }
-
-    // Calculate average match score
-    const scores = interestsItems
-      .map(i => i.match_score || i['Match Score'])
-      .filter(Boolean);
-
-    const avgScore = scores.length > 0
-      ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
-      : 85;
+    const interestsItems = interestsRes.items || [];
+    const scores = interestsItems.map(i => i.match_score).filter(Boolean);
+    const avgScore = scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 85;
 
     return {
       driversPlaced: hiresCount || 0,
       activeCarriers: carriersCount || 0,
       avgMatchScore: avgScore,
-      openPositions: (carriersCount || 0) * 3, // Estimate 3 positions per carrier
+      openPositions: (carriersCount || 0) * 3,
       registeredDrivers: driversCount || 0
     };
   } catch (err) {
     console.error('getPublicStats error:', err);
-    // Return fallback values
-    return {
-      driversPlaced: 0,
-      activeCarriers: 0,
-      avgMatchScore: 85,
-      openPositions: 0,
-      registeredDrivers: 0
-    };
+    return { driversPlaced: 0, activeCarriers: 0, avgMatchScore: 85, openPositions: 0, registeredDrivers: 0 };
   }
 }
 
 /**
  * Get platform stats formatted for carriers (B2B audience)
- * Used on: Trucking Companies page, Carrier Solutions page
  */
 export async function getCarrierPlatformStats() {
   try {
-    const [profilesResult, hiresResult] = await Promise.all([
-      wixData.query('DriverProfiles')
-        .eq('status', 'active')
-        .isNotEmpty('cdl_class')
-        .count(),
-      wixData.query('DriverCarrierInterests')
-        .eq('status', 'hired')
-        .find({ limit: 500 })
+    const [activeDriversCount, hiresRes] = await Promise.all([
+      dataAccess.countRecords(COLLECTION_KEYS.drivers, { status: 'active', cdl_class: { ne: '' } }),
+      dataAccess.queryRecords(COLLECTION_KEYS.interests, { filters: { status: 'hired' }, limit: 500, suppressAuth: true })
     ]);
 
-    // Calculate average days to hire
-    const hireTimes = hiresResult.items
+    const hireTimes = (hiresRes.items || [])
       .filter(h => h.applied_date && h._updatedDate)
-      .map(h => {
-        const applied = new Date(h.applied_date);
-        const hired = new Date(h._updatedDate);
-        return Math.ceil((hired - applied) / (1000 * 60 * 60 * 24));
-      });
+      .map(h => Math.ceil((new Date(h._updatedDate) - new Date(h.applied_date)) / (1000 * 60 * 60 * 24)));
 
-    const avgDays = hireTimes.length > 0
-      ? Math.round(hireTimes.reduce((a, b) => a + b, 0) / hireTimes.length)
-      : 14;
+    const avgDays = hireTimes.length > 0 ? Math.round(hireTimes.reduce((a, b) => a + b, 0) / hireTimes.length) : 14;
 
-    return {
-      qualifiedDrivers: profilesResult.count || 0,
-      avgDaysToHire: avgDays,
-      retentionRate: 87, // Could calculate from data if tracked
-      avgCostPerHire: 299 // Platform fee
-    };
+    return { qualifiedDrivers: activeDriversCount || 0, avgDaysToHire: avgDays, retentionRate: 87, avgCostPerHire: 299 };
   } catch (err) {
     console.error('getCarrierPlatformStats error:', err);
-    return {
-      qualifiedDrivers: 0,
-      avgDaysToHire: 14,
-      retentionRate: 87,
-      avgCostPerHire: 299
-    };
+    return { qualifiedDrivers: 0, avgDaysToHire: 14, retentionRate: 87, avgCostPerHire: 299 };
   }
 }
 
 /**
  * Get featured carriers for homepage carousel
- * Returns carriers with logos, high quality scores, and active hiring
  */
 export async function getFeaturedCarriers(limit = 8) {
   try {
-    const result = await wixData.query('Carriers')
-      .ge('fleet_size', 50)
-      .isNotEmpty('logo_url')
-      .descending('quality_score')
-      .limit(limit)
-      .find();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { nbr_power_unit: { gte: 50 }, logo_url: { ne: '' } },
+      sort: [{ field: 'quality_score', direction: 'desc' }],
+      limit, suppressAuth: true
+    });
 
-    return result.items.map(carrier => ({
+    return (result.items || []).map(carrier => ({
       _id: carrier._id,
       name: carrier.legal_name,
       logo: carrier.logo_url,
-      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
       tagline: carrier.hiring_tagline || 'Now Hiring CDL Drivers',
-      fleetSize: carrier.fleet_size,
+      fleetSize: carrier.nbr_power_unit,
       payRange: carrier.pay_range || ''
     }));
   } catch (err) {
@@ -161,18 +86,17 @@ export async function getFeaturedCarriers(limit = 8) {
 }
 
 /**
- * Get recent hires for social proof (anonymized)
- * Used on: Home page, Truck Drivers page
+ * Get recent hires for social proof
  */
 export async function getRecentHires(limit = 10) {
   try {
-    const result = await wixData.query('DriverCarrierInterests')
-      .eq('status', 'hired')
-      .descending('_updatedDate')
-      .limit(limit)
-      .find();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { status: 'hired' },
+      sort: [{ field: '_updatedDate', direction: 'desc' }],
+      limit, suppressAuth: true
+    });
 
-    return result.items.map(h => ({
+    return (result.items || []).map(h => ({
       location: h.driver_state || 'USA',
       daysAgo: getDaysAgo(h._updatedDate),
       operationType: h.operation_type || 'OTR'
@@ -185,25 +109,23 @@ export async function getRecentHires(limit = 10) {
 
 /**
  * Get top job opportunities for drivers
- * Sorted by pay, filtered by active hiring status
  */
 export async function getTopJobOpportunities(limit = 6) {
   try {
-    const result = await wixData.query('Carriers')
-      .ge('pay_per_mile_max', 0.55)
-      .eq('is_hiring', true)
-      .descending('pay_per_mile_max')
-      .limit(limit)
-      .find();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { pay_per_mile_max: { gte: 0.55 }, is_hiring: true },
+      sort: [{ field: 'pay_per_mile_max', direction: 'desc' }],
+      limit, suppressAuth: true
+    });
 
-    return result.items.map(carrier => ({
+    return (result.items || []).map(carrier => ({
       _id: carrier._id,
       carrierName: carrier.legal_name,
       payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
-      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
       operationType: carrier.operation_type || 'OTR',
       benefits: carrier.benefits_summary || 'Full benefits package',
-      fleetSize: carrier.fleet_size
+      fleetSize: carrier.nbr_power_unit
     }));
   } catch (err) {
     console.error('getTopJobOpportunities error:', err);
@@ -213,22 +135,20 @@ export async function getTopJobOpportunities(limit = 6) {
 
 /**
  * Get jobs filtered by state
- * Used on: Truck Drivers page location-based section
  */
 export async function getJobsByState(state, limit = 4) {
   try {
-    const result = await wixData.query('Carriers')
-      .eq('state', state)
-      .eq('is_hiring', true)
-      .descending('quality_score')
-      .limit(limit)
-      .find();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { phy_state: state, is_hiring: true },
+      sort: [{ field: 'quality_score', direction: 'desc' }],
+      limit, suppressAuth: true
+    });
 
-    return result.items.map(carrier => ({
+    return (result.items || []).map(carrier => ({
       _id: carrier._id,
       carrierName: carrier.legal_name,
       payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
-      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
       operationType: carrier.operation_type || 'OTR'
     }));
   } catch (err) {
@@ -239,18 +159,16 @@ export async function getJobsByState(state, limit = 4) {
 
 /**
  * Get partner logos for "Trusted By" sections
- * Returns larger carriers with logos
  */
 export async function getPartnerLogos(limit = 12) {
   try {
-    const result = await wixData.query('Carriers')
-      .isNotEmpty('logo_url')
-      .ge('fleet_size', 100)
-      .descending('fleet_size')
-      .limit(limit)
-      .find();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { logo_url: { ne: '' }, nbr_power_unit: { gte: 100 } },
+      sort: [{ field: 'nbr_power_unit', direction: 'desc' }],
+      limit, suppressAuth: true
+    });
 
-    return result.items.map(c => ({
+    return (result.items || []).map(c => ({
       _id: c._id,
       name: c.legal_name,
       logoUrl: c.logo_url
@@ -262,28 +180,26 @@ export async function getPartnerLogos(limit = 12) {
 }
 
 /**
- * Get jobs by operation type (OTR/Regional/Local/Last Mile)
- * Used on: Driver landing pages filtered by operation type
+ * Get jobs by operation type
  */
 export async function getJobsByOperationType(operationType, limit = 6) {
   try {
-    const result = await wixData.query('Carriers')
-      .eq('operation_type', operationType)
-      .eq('is_hiring', true)
-      .descending('pay_per_mile_max')
-      .limit(limit)
-      .find();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { operation_type: operationType, is_hiring: true },
+      sort: [{ field: 'pay_per_mile_max', direction: 'desc' }],
+      limit, suppressAuth: true
+    });
 
-    return result.items.map(carrier => ({
+    return (result.items || []).map(carrier => ({
       _id: carrier._id,
       carrierName: carrier.legal_name,
-      dotNumber: carrier.DOT_NUMBER,
+      dotNumber: carrier.dot_number,
       payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
-      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
       operationType: carrier.operation_type || operationType,
       homeTime: carrier.home_time || 'Varies',
       benefits: carrier.benefits_summary || 'Full benefits package',
-      fleetSize: carrier.fleet_size,
+      fleetSize: carrier.nbr_power_unit,
       truckAge: carrier.avg_truck_age
     }));
   } catch (err) {
@@ -293,28 +209,26 @@ export async function getJobsByOperationType(operationType, limit = 6) {
 }
 
 /**
- * Get jobs requiring specific endorsements (Hazmat, Tanker, Doubles, TWIC)
- * Used on: Specialized driver landing pages
+ * Get jobs requiring specific endorsements
  */
 export async function getJobsByEndorsement(endorsement, limit = 6) {
   try {
-    const result = await wixData.query('Carriers')
-      .contains('required_endorsements', endorsement)
-      .eq('is_hiring', true)
-      .descending('pay_per_mile_max')
-      .limit(limit)
-      .find();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { required_endorsements: { contains: endorsement }, is_hiring: true },
+      sort: [{ field: 'pay_per_mile_max', direction: 'desc' }],
+      limit, suppressAuth: true
+    });
 
-    return result.items.map(carrier => ({
+    return (result.items || []).map(carrier => ({
       _id: carrier._id,
       carrierName: carrier.legal_name,
-      dotNumber: carrier.DOT_NUMBER,
+      dotNumber: carrier.dot_number,
       payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
-      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
       operationType: carrier.operation_type || 'OTR',
       endorsements: carrier.required_endorsements || [endorsement],
       benefits: carrier.benefits_summary || 'Full benefits package',
-      fleetSize: carrier.fleet_size
+      fleetSize: carrier.nbr_power_unit
     }));
   } catch (err) {
     console.error('getJobsByEndorsement error:', err);
@@ -323,104 +237,61 @@ export async function getJobsByEndorsement(endorsement, limit = 6) {
 }
 
 /**
- * Get location page data with aggregated stats
- * Used on: Dynamic location SEO pages (Job Location Mappings)
+ * Get location page data
  */
 export async function getLocationPageData(state, city = null) {
   try {
-    let query = wixData.query('Carriers')
-      .eq('state', state)
-      .eq('is_hiring', true);
+    const filters = { phy_state: state, is_hiring: true };
+    if (city) filters.phy_city = city;
 
-    if (city) {
-      query = query.eq('city', city);
-    }
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, { filters, limit: 100, suppressAuth: true });
+    const carriers = result.items || [];
 
-    const result = await query.find();
-    const carriers = result.items;
+    if (carriers.length === 0) return { state, city, jobCount: 0, avgPay: null, topCarriers: [], operationTypes: {} };
 
-    if (carriers.length === 0) {
-      return {
-        state,
-        city,
-        jobCount: 0,
-        avgPay: null,
-        topCarriers: [],
-        operationTypes: {}
-      };
-    }
+    const payRates = carriers.map(c => c.pay_per_mile_max || c.pay_per_mile_min).filter(Boolean);
+    const avgPay = payRates.length > 0 ? (payRates.reduce((a, b) => a + b, 0) / payRates.length).toFixed(2) : null;
 
-    // Calculate average pay
-    const payRates = carriers
-      .map(c => c.pay_per_mile_max || c.pay_per_mile_min)
-      .filter(Boolean);
-    const avgPay = payRates.length > 0
-      ? (payRates.reduce((a, b) => a + b, 0) / payRates.length).toFixed(2)
-      : null;
-
-    // Count by operation type
     const operationTypes = carriers.reduce((acc, c) => {
       const type = c.operation_type || 'Other';
       acc[type] = (acc[type] || 0) + 1;
       return acc;
     }, {});
 
-    // Get top carriers by quality score
     const topCarriers = carriers
       .sort((a, b) => (b.quality_score || 0) - (a.quality_score || 0))
       .slice(0, 5)
       .map(c => ({
-        _id: c._id,
-        name: c.legal_name,
-        dotNumber: c.DOT_NUMBER,
+        _id: c._id, name: c.legal_name, dotNumber: c.dot_number,
         payRange: formatPayRange(c.pay_per_mile_min, c.pay_per_mile_max),
-        operationType: c.operation_type || 'OTR',
-        fleetSize: c.fleet_size
+        operationType: c.operation_type || 'OTR', fleetSize: c.nbr_power_unit
       }));
 
-    return {
-      state,
-      city,
-      jobCount: carriers.length,
-      avgPay: avgPay ? `$${avgPay}/mi` : 'Competitive',
-      topCarriers,
-      operationTypes,
-      totalFleetSize: carriers.reduce((sum, c) => sum + (c.fleet_size || 0), 0)
-    };
+    return { state, city, jobCount: carriers.length, avgPay: avgPay ? `$${avgPay}/mi` : 'Competitive', topCarriers, operationTypes, totalFleetSize: carriers.reduce((sum, c) => sum + (c.nbr_power_unit || 0), 0) };
   } catch (err) {
     console.error('getLocationPageData error:', err);
-    return {
-      state,
-      city,
-      jobCount: 0,
-      avgPay: null,
-      topCarriers: [],
-      operationTypes: {}
-    };
+    return { state, city, jobCount: 0, avgPay: null, topCarriers: [], operationTypes: {} };
   }
 }
 
 /**
  * Get premium/urgent job opportunities
- * Used on: Rapid Response pages, premium opportunity listings
  */
 export async function getPremiumOpportunities(limit = 5) {
   try {
-    // Query carriers with sign-on bonuses or high pay
-    const result = await wixData.query('Carriers')
-      .eq('is_hiring', true)
-      .ge('pay_per_mile_max', 0.65)
-      .descending('pay_per_mile_max')
-      .limit(limit)
-      .find();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { is_hiring: true, pay_per_mile_max: { gte: 0.65 } },
+      sort: [{ field: 'pay_per_mile_max', direction: 'desc' }],
+      limit, suppressAuth: true
+    });
 
-    return result.items.map(carrier => ({
+    return (result.items || []).map(carrier => ({
       _id: carrier._id,
       carrierName: carrier.legal_name,
-      dotNumber: carrier.DOT_NUMBER,
+      dotNumber: carrier.dot_number,
       payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
       signOnBonus: carrier.sign_on_bonus || null,
-      location: `${carrier.city || ''}, ${carrier.state || ''}`.replace(/^, |, $/g, ''),
+      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
       operationType: carrier.operation_type || 'OTR',
       benefits: carrier.benefits_summary || 'Full benefits package',
       urgencyLevel: carrier.urgency_level || 'normal',
@@ -430,6 +301,20 @@ export async function getPremiumOpportunities(limit = 5) {
     console.error('getPremiumOpportunities error:', err);
     return [];
   }
+}
+
+// Helpers
+function getDaysAgo(date) {
+  if (!date) return 0;
+  const diffTime = Math.abs(new Date() - new Date(date));
+  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+}
+
+function formatPayRange(min, max) {
+  if (max && min) return `$${min.toFixed(2)}-${max.toFixed(2)}/mi`;
+  if (max) return `Up to $${max.toFixed(2)}/mi`;
+  if (min) return `From $${min.toFixed(2)}/mi`;
+  return 'Competitive pay';
 }
 
 // Helper functions

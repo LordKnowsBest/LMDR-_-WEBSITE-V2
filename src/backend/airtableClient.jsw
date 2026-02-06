@@ -957,9 +957,19 @@ const FIELD_MAPPINGS = {
 
   // AIUsageLog - v2_AI Usage Log table
   'AIUsageLog': {
-    'call_id': 'Call ID',
+    // Preferred fields (aiRouterService.jsw payload)
+    'functionId': 'Function Id',
     'provider': 'Provider',
     'model': 'Model',
+    'latencyMs': 'Latency Ms',
+    'tokensUsed': 'Tokens Used',
+    'inputTokens': 'Input Tokens',
+    'outputTokens': 'Output Tokens',
+    'error': 'Error',
+    'usedFallback': 'Used Fallback',
+    'timestamp': 'Timestamp',
+    // Legacy fields
+    'call_id': 'Call ID',
     'tokens_in': 'Tokens In',
     'tokens_out': 'Tokens Out',
     'cost_usd': 'Cost USD',
@@ -970,11 +980,19 @@ const FIELD_MAPPINGS = {
 
   // AdminAuditLog - v2_Audit Log table (NOTE: table name is v2_Audit Log, not v2_Admin Audit Log)
   'AdminAuditLog': {
-    'actor_id': 'Actor ID',
+    // Preferred fields (admin_* services payload)
+    'adminId': 'Admin Id',
+    'adminEmail': 'Admin Email',
     'action': 'Action',
+    'targetType': 'Target Type',
+    'targetId': 'Target Id',
+    'details': 'Details',
+    'timestamp': 'Timestamp',
+    'ipAddress': 'IP Address',
+    // Legacy fields
+    'actor_id': 'Actor ID',
     'category': 'Category',
     'target_id': 'Target ID',
-    'details': 'Details',
     'action_date': 'Action Date',
     'legacy_wix_id': 'Legacy Wix ID'
   },
@@ -1578,6 +1596,8 @@ export function toAirtableFormat(record, tableName) {
   const mappings = getFieldMappings(tableName);
   const airtableFields = {};
 
+  warnOnUnmappedFields(record, tableName, mappings);
+
   for (const [wixField, value] of Object.entries(record)) {
     // Skip internal Wix fields that Airtable manages
     if (['_id', '_createdDate', '_updatedDate', '_owner'].includes(wixField)) {
@@ -1601,6 +1621,49 @@ export function toAirtableFormat(record, tableName) {
   }
 
   return airtableFields;
+}
+
+/**
+ * Lightweight schema validation: warn if a record uses fields without explicit mappings.
+ * This helps catch Airtable column mismatches early.
+ *
+ * @param {Object} record - Wix-formatted record
+ * @param {string} tableName - Wix collection name
+ * @param {Object} mappings - Resolved field mappings for the table
+ */
+function warnOnUnmappedFields(record, tableName, mappings) {
+  if (!record || typeof record !== 'object') return;
+
+  // Only warn when a table has explicit mappings defined.
+  const hasExplicitMapping = !!FIELD_MAPPINGS[tableName] ||
+    Object.keys(FIELD_MAPPINGS).some(key => key !== '_common' && TABLE_NAMES[key] === (TABLE_NAMES[tableName] || tableName));
+
+  if (!hasExplicitMapping) return;
+
+  const strictTables = new Set([
+    'AIUsageLog',
+    'AdminAuditLog',
+    'SystemLogs',
+    'SystemErrors',
+    'SystemTraces',
+    'SystemMetrics'
+  ]);
+
+  const ignore = new Set(['_id', '_createdDate', '_updatedDate', '_owner']);
+  const unmapped = [];
+
+  for (const key of Object.keys(record)) {
+    if (ignore.has(key)) continue;
+    if (!mappings[key]) unmapped.push(key);
+  }
+
+  if (unmapped.length > 0) {
+    const message = `Airtable schema mismatch for ${tableName}. Unmapped fields: ${unmapped.join(', ')}.`;
+    if (strictTables.has(tableName)) {
+      throw new Error(message);
+    }
+    console.warn(`⚠️ ${message} These will be Title Cased.`);
+  }
 }
 
 /**
@@ -2148,6 +2211,11 @@ export async function bulkCreate(tableName, records) {
       console.error(`❌ Airtable bulkCreate error (${tableName}):`, error.message);
       errors.push({ chunk, error: error.message });
     }
+
+    // Rate limit between chunks (5 req/sec)
+    if (chunks.length > 1) {
+      await new Promise(r => setTimeout(r, 200));
+    }
   }
 
   console.log(`✅ Airtable: Bulk created ${allCreated.length}/${records.length} records in ${tableName}`);
@@ -2212,6 +2280,11 @@ export async function bulkUpdate(tableName, records) {
       console.error(`❌ Airtable bulkUpdate error (${tableName}):`, error.message);
       errors.push({ chunk, error: error.message });
     }
+
+    // Rate limit between chunks (5 req/sec)
+    if (chunks.length > 1) {
+      await new Promise(r => setTimeout(r, 200));
+    }
   }
 
   console.log(`✅ Airtable: Bulk updated ${allUpdated.length}/${records.length} records in ${tableName}`);
@@ -2265,6 +2338,11 @@ export async function bulkDelete(tableName, recordIds) {
       console.error(`❌ Airtable bulkDelete error (${tableName}):`, error.message);
       errors.push({ chunk, error: error.message });
     }
+
+    // Rate limit between chunks (5 req/sec)
+    if (chunks.length > 1) {
+      await new Promise(r => setTimeout(r, 200));
+    }
   }
 
   console.log(`✅ Airtable: Bulk deleted ${allDeleted.length}/${recordIds.length} records from ${tableName}`);
@@ -2305,6 +2383,22 @@ export function buildFilterFormula(conditions, tableName) {
   const clauses = [];
 
   for (const [wixField, value] of Object.entries(conditions)) {
+    // Special handling: _id maps to RECORD_ID() function, not a field reference
+    if (wixField === '_id') {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        for (const [op, operand] of Object.entries(value)) {
+          const opMap = { 'eq': '=', 'ne': '!=' };
+          const airtableOp = opMap[op] || '=';
+          const escaped = typeof operand === 'string' ? `'${operand.replace(/'/g, "\\'")}'` : String(operand);
+          clauses.push(`RECORD_ID() ${airtableOp} ${escaped}`);
+        }
+      } else {
+        const escaped = typeof value === 'string' ? `'${value.replace(/'/g, "\\'")}'` : String(value);
+        clauses.push(`RECORD_ID() = ${escaped}`);
+      }
+      continue;
+    }
+
     // Get Airtable field name
     let airtableField = mappings[wixField];
     if (!airtableField) {

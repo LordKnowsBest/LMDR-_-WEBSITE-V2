@@ -1,19 +1,8 @@
-// ============================================================================
-// SAVED SEARCH SERVICE - Backend for Recruiter Saved Searches & Alerts
-//
-// DUAL-SOURCE SUPPORT: Supports both Wix Data and Airtable based on config.jsw
-// ============================================================================
-
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
-import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
-
+// Collection keys for dataAccess
 const COLLECTION_KEYS = {
   savedSearches: 'savedSearches',
   savedSearchAlerts: 'savedSearchAlerts'
@@ -22,53 +11,7 @@ const COLLECTION_KEYS = {
 const VALID_FREQUENCIES = ['immediate', 'hourly', 'daily', 'weekly'];
 const VALID_CHANNELS = ['email', 'in_app', 'both'];
 
-// ============================================================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, airtableOptions = {}, wixQueryBuilder = null) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, airtableOptions);
-    return result.records || [];
-  }
-  if (wixQueryBuilder) {
-    const result = await wixQueryBuilder();
-    return result.items;
-  }
-  const result = await wixData.query(getWixCollectionName(collectionKey)).find({ suppressAuth: true });
-  return result.items;
-}
-
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.createRecord(tableName, record);
-  }
-  return await wixData.insert(getWixCollectionName(collectionKey), record, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.updateRecord(tableName, record._id || record.id, record);
-  }
-  return await wixData.update(getWixCollectionName(collectionKey), record, { suppressAuth: true });
-}
-
-async function getRecord(collectionKey, recordId) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    const result = await airtable.getRecord(tableName, recordId);
-    return (result && !result.error) ? result : null;
-  }
-  return await wixData.get(getWixCollectionName(collectionKey), recordId, { suppressAuth: true });
-}
-
-// ============================================================================
-// HELPER: Get current user ID
-// ============================================================================
-
+// Helper to get current user ID
 async function getCurrentUserId() {
   const currentUser = wixUsersBackend.currentUser;
   return currentUser.loggedIn ? currentUser.id : null;
@@ -78,56 +21,43 @@ async function getCurrentUserId() {
 // CREATE SAVED SEARCH
 // ============================================================================
 
-/**
- * Create a new saved search for a carrier
- * @param {string} carrierDot - Carrier DOT number
- * @param {Object} searchData - { searchName, criteria, alertFrequency, alertChannel }
- */
 export async function createSavedSearch(carrierDot, searchData) {
   try {
     const userId = await getCurrentUserId();
     if (!userId) return { success: false, error: 'Not authenticated' };
 
     const { searchName, criteria, alertFrequency, alertChannel } = searchData;
+    if (!searchName || !searchName.trim()) return { success: false, error: 'Search name is required' };
 
-    if (!searchName || !searchName.trim()) {
-      return { success: false, error: 'Search name is required' };
-    }
-
-    // Validate frequency and channel
     const frequency = VALID_FREQUENCIES.includes(alertFrequency) ? alertFrequency : 'daily';
     const channel = VALID_CHANNELS.includes(alertChannel) ? alertChannel : 'in_app';
 
-    // Check name uniqueness per carrier
-    const existing = await queryData(COLLECTION_KEYS.savedSearches, {
-      filterByFormula: `AND({Carrier DOT} = '${carrierDot}', {Recruiter ID} = '${userId}', {Search Name} = '${searchName.trim().replace(/'/g, "\\'")}', {Is Active} = TRUE())`,
-      maxRecords: 1
+    // Check name uniqueness per carrier/recruiter
+    const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.savedSearches, {
+      filters: {
+        carrier_dot: String(carrierDot),
+        recruiter_id: userId,
+        search_name: searchName.trim(),
+        is_active: true
+      },
+      limit: 1, suppressAuth: true
     });
 
-    if (existing.length > 0) {
+    if (existingResult.success && existingResult.items.length > 0) {
       return { success: false, error: 'A saved search with this name already exists' };
     }
 
     const record = {
-      carrier_dot: String(carrierDot),
-      recruiter_id: userId,
-      search_name: searchName.trim(),
-      criteria_json: JSON.stringify(criteria || {}),
-      alert_frequency: frequency,
-      alert_channel: channel,
-      last_run_date: null,
-      last_match_count: 0,
-      new_matches_since_last: 0,
-      is_active: true
+      carrier_dot: String(carrierDot), recruiter_id: userId, search_name: searchName.trim(),
+      criteria_json: JSON.stringify(criteria || {}), alert_frequency: frequency, alert_channel: channel,
+      last_run_date: null, last_match_count: 0, new_matches_since_last: 0, is_active: true
     };
 
-    const created = await insertData(COLLECTION_KEYS.savedSearches, record);
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.savedSearches, record, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error);
 
-    // Log feature interaction (non-blocking)
-    logFeatureInteraction('saved_search', userId, 'create', { carrierDot })
-      .catch(err => console.warn('Feature tracking failed:', err.message));
-
-    return { success: true, savedSearch: created };
+    logFeatureInteraction('saved_search', userId, 'create', { carrierDot }).catch(() => {});
+    return { success: true, savedSearch: result.record };
   } catch (error) {
     console.error('createSavedSearch error:', error);
     return { success: false, error: error.message };
@@ -143,13 +73,9 @@ export async function updateSavedSearch(searchId, updates) {
     const userId = await getCurrentUserId();
     if (!userId) return { success: false, error: 'Not authenticated' };
 
-    const existing = await getRecord(COLLECTION_KEYS.savedSearches, searchId);
+    const existing = await dataAccess.getRecord(COLLECTION_KEYS.savedSearches, searchId, { suppressAuth: true });
     if (!existing) return { success: false, error: 'Saved search not found' };
-
-    // Ownership verification
-    if (existing.recruiter_id !== userId) {
-      return { success: false, error: 'Not authorized to update this search' };
-    }
+    if (existing.recruiter_id !== userId) return { success: false, error: 'Not authorized' };
 
     const updatedRecord = {
       ...existing,
@@ -159,8 +85,9 @@ export async function updateSavedSearch(searchId, updates) {
       alert_channel: VALID_CHANNELS.includes(updates.alertChannel) ? updates.alertChannel : existing.alert_channel
     };
 
-    const updated = await updateData(COLLECTION_KEYS.savedSearches, updatedRecord);
-    return { success: true, savedSearch: updated };
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.savedSearches, updatedRecord, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error);
+    return { success: true, savedSearch: result.record };
   } catch (error) {
     console.error('updateSavedSearch error:', error);
     return { success: false, error: error.message };
@@ -168,7 +95,7 @@ export async function updateSavedSearch(searchId, updates) {
 }
 
 // ============================================================================
-// DELETE SAVED SEARCH (soft delete)
+// DELETE SAVED SEARCH
 // ============================================================================
 
 export async function deleteSavedSearch(searchId) {
@@ -176,14 +103,11 @@ export async function deleteSavedSearch(searchId) {
     const userId = await getCurrentUserId();
     if (!userId) return { success: false, error: 'Not authenticated' };
 
-    const existing = await getRecord(COLLECTION_KEYS.savedSearches, searchId);
+    const existing = await dataAccess.getRecord(COLLECTION_KEYS.savedSearches, searchId, { suppressAuth: true });
     if (!existing) return { success: false, error: 'Saved search not found' };
+    if (existing.recruiter_id !== userId) return { success: false, error: 'Not authorized' };
 
-    if (existing.recruiter_id !== userId) {
-      return { success: false, error: 'Not authorized to delete this search' };
-    }
-
-    await updateData(COLLECTION_KEYS.savedSearches, { ...existing, is_active: false });
+    await dataAccess.updateRecord(COLLECTION_KEYS.savedSearches, { ...existing, is_active: false }, { suppressAuth: true });
     return { success: true };
   } catch (error) {
     console.error('deleteSavedSearch error:', error);
@@ -200,17 +124,16 @@ export async function getSavedSearches(carrierDot) {
     const userId = await getCurrentUserId();
     if (!userId) return { success: false, error: 'Not authenticated' };
 
-    const searches = await queryData(COLLECTION_KEYS.savedSearches, {
-      filterByFormula: `AND({Carrier DOT} = '${carrierDot}', {Recruiter ID} = '${userId}', {Is Active} = TRUE())`,
-      sort: [{ field: 'Search Name', direction: 'asc' }],
-      maxRecords: 50
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.savedSearches, {
+      filters: { carrier_dot: String(carrierDot), recruiter_id: userId, is_active: true },
+      sort: [{ field: 'search_name', direction: 'asc' }],
+      limit: 50, suppressAuth: true
     });
 
     return {
       success: true,
-      searches: searches.map(s => ({
-        ...s,
-        criteria: s.criteria_json ? JSON.parse(s.criteria_json) : {}
+      searches: (result.items || []).map(s => ({
+        ...s, criteria: s.criteria_json ? JSON.parse(s.criteria_json) : {}
       }))
     };
   } catch (error) {
@@ -228,45 +151,30 @@ export async function executeSavedSearch(searchId) {
     const userId = await getCurrentUserId();
     if (!userId) return { success: false, error: 'Not authenticated' };
 
-    const search = await getRecord(COLLECTION_KEYS.savedSearches, searchId);
+    const search = await dataAccess.getRecord(COLLECTION_KEYS.savedSearches, searchId, { suppressAuth: true });
     if (!search) return { success: false, error: 'Saved search not found' };
-    if (search.recruiter_id !== userId) {
-      return { success: false, error: 'Not authorized' };
-    }
+    if (search.recruiter_id !== userId) return { success: false, error: 'Not authorized' };
 
-    // Parse criteria
     let criteria = {};
-    try {
-      criteria = search.criteria_json ? JSON.parse(search.criteria_json) : {};
-    } catch (e) {
-      criteria = {};
-    }
+    try { criteria = search.criteria_json ? JSON.parse(search.criteria_json) : {}; } catch (e) { }
 
-    // Lazy-load driverMatching to avoid circular deps
     const { findMatchingDrivers } = await import('backend/driverMatching.jsw');
     const result = await findMatchingDrivers(search.carrier_dot, criteria, {});
 
-    const currentMatchCount = result.success ? (result.drivers || []).length : 0;
+    const currentMatchCount = result.success ? (result.matches || []).length : 0;
     const previousMatchCount = search.last_match_count || 0;
     const newMatches = Math.max(0, currentMatchCount - previousMatchCount);
 
-    // Update search metadata
-    await updateData(COLLECTION_KEYS.savedSearches, {
-      ...search,
-      last_run_date: new Date().toISOString(),
-      last_match_count: currentMatchCount,
-      new_matches_since_last: newMatches
-    });
+    await dataAccess.updateRecord(COLLECTION_KEYS.savedSearches, {
+      ...search, last_run_date: new Date().toISOString(),
+      last_match_count: currentMatchCount, new_matches_since_last: newMatches
+    }, { suppressAuth: true });
 
-    // Log feature interaction (non-blocking)
-    logFeatureInteraction('saved_search', userId, 'execute', { searchId })
-      .catch(err => console.warn('Feature tracking failed:', err.message));
+    logFeatureInteraction('saved_search', userId, 'execute', { searchId }).catch(() => {});
 
     return {
-      success: true,
-      drivers: result.success ? result.drivers : [],
-      total: currentMatchCount,
-      newMatches
+      success: true, drivers: result.success ? result.matches : [],
+      total: currentMatchCount, newMatches
     };
   } catch (error) {
     console.error('executeSavedSearch error:', error);
@@ -275,30 +183,23 @@ export async function executeSavedSearch(searchId) {
 }
 
 // ============================================================================
-// PROCESS SAVED SEARCH ALERTS (Scheduler Job)
+// PROCESS SAVED SEARCH ALERTS
 // ============================================================================
 
 export async function processSavedSearchAlerts() {
-  console.log('[SavedSearchService] Starting alert processing...');
   const startTime = Date.now();
-
   try {
     const now = new Date();
-    let processedCount = 0;
-    let alertsSent = 0;
+    let processedCount = 0, alertsSent = 0;
 
-    // Get all active searches
-    const allSearches = await queryData(COLLECTION_KEYS.savedSearches, {
-      filterByFormula: `{Is Active} = TRUE()`,
-      maxRecords: 500
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.savedSearches, {
+      filters: { is_active: true }, limit: 500, suppressAuth: true
     });
 
-    // Filter by frequency due
+    const allSearches = result.items || [];
     const dueSearches = allSearches.filter(search => {
-      if (!search.last_run_date) return true; // Never run
-      const lastRun = new Date(search.last_run_date);
-      const hoursSince = (now - lastRun) / (1000 * 60 * 60);
-
+      if (!search.last_run_date) return true;
+      const hoursSince = (now - new Date(search.last_run_date)) / (1000 * 60 * 60);
       switch (search.alert_frequency) {
         case 'immediate': return true;
         case 'hourly': return hoursSince >= 1;
@@ -308,66 +209,37 @@ export async function processSavedSearchAlerts() {
       }
     });
 
-    console.log(`[SavedSearchService] ${dueSearches.length} searches due for processing`);
+    const { findMatchingDrivers } = await import('backend/driverMatching.jsw');
 
-    // Process in batches of 10 with 200ms delay
-    for (let i = 0; i < dueSearches.length; i += 10) {
-      const batch = dueSearches.slice(i, i + 10);
+    for (const search of dueSearches) {
+      try {
+        let criteria = {};
+        try { criteria = JSON.parse(search.criteria_json || '{}'); } catch (e) { }
 
-      for (const search of batch) {
-        try {
-          let criteria = {};
-          try { criteria = JSON.parse(search.criteria_json || '{}'); } catch (e) { /* skip */ }
+        const matchResult = await findMatchingDrivers(search.carrier_dot, criteria, {});
+        const currentCount = matchResult.success ? (matchResult.matches || []).length : 0;
+        const previousCount = search.last_match_count || 0;
+        const newMatches = Math.max(0, currentCount - previousCount);
 
-          const { findMatchingDrivers } = await import('backend/driverMatching.jsw');
-          const result = await findMatchingDrivers(search.carrier_dot, criteria, {});
+        await dataAccess.updateRecord(COLLECTION_KEYS.savedSearches, {
+          ...search, last_run_date: now.toISOString(),
+          last_match_count: currentCount, new_matches_since_last: newMatches
+        }, { suppressAuth: true });
 
-          const currentCount = result.success ? (result.drivers || []).length : 0;
-          const previousCount = search.last_match_count || 0;
-          const newMatches = Math.max(0, currentCount - previousCount);
-
-          // Update search
-          await updateData(COLLECTION_KEYS.savedSearches, {
-            ...search,
-            last_run_date: now.toISOString(),
-            last_match_count: currentCount,
-            new_matches_since_last: newMatches
-          });
-
-          // Create alert if new matches found
-          if (newMatches > 0) {
-            const newDriverIds = result.success
-              ? (result.drivers || []).slice(0, newMatches).map(d => d._id || d.driverId)
-              : [];
-
-            await insertData(COLLECTION_KEYS.savedSearchAlerts, {
-              saved_search_id: search._id,
-              recruiter_id: search.recruiter_id,
-              driver_ids_json: JSON.stringify(newDriverIds),
-              alert_status: 'pending',
-              sent_at: now.toISOString(),
-              channel_used: search.alert_channel || 'in_app'
-            });
-
-            alertsSent++;
-          }
-
-          processedCount++;
-        } catch (searchError) {
-          console.error(`[SavedSearchService] Error processing search ${search._id}:`, searchError.message);
+        if (newMatches > 0) {
+          const newDriverIds = matchResult.success ? (matchResult.matches || []).slice(0, newMatches).map(m => m.driver?._id) : [];
+          await dataAccess.insertRecord(COLLECTION_KEYS.savedSearchAlerts, {
+            saved_search_id: search._id, recruiter_id: search.recruiter_id,
+            driver_ids_json: JSON.stringify(newDriverIds), alert_status: 'pending',
+            sent_at: now.toISOString(), channel_used: search.alert_channel || 'in_app'
+          }, { suppressAuth: true });
+          alertsSent++;
         }
-      }
-
-      // Rate limiting delay between batches
-      if (i + 10 < dueSearches.length) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
+        processedCount++;
+      } catch (err) { /* skip */ }
     }
 
-    const duration = Date.now() - startTime;
-    console.log(`[SavedSearchService] Complete. Processed ${processedCount}, alerts sent ${alertsSent} in ${duration}ms`);
-
-    return { success: true, processed: processedCount, alertsSent, durationMs: duration };
+    return { success: true, processed: processedCount, alertsSent, durationMs: Date.now() - startTime };
   } catch (error) {
     console.error('[SavedSearchService] Alert processing failed:', error);
     return { success: false, error: error.message };

@@ -1,317 +1,85 @@
-/**
- * Carrier Preferences Service
- *
- * Manages carrier hiring preferences for the Reverse Matching Engine.
- * Provides CRUD operations for CarrierHiringPreferences collection.
- *
- * Collection: CarrierHiringPreferences
- *
- * Functions:
- * - createHiringPreferences(data) - Create new hiring preferences for a carrier
- * - updateHiringPreferences(preferenceId, data) - Update existing preferences
- * - getHiringPreferences(carrierDot) - Get active preferences for carrier
- * - getHiringPreferenceById(preferenceId) - Get specific preference by ID
- * - deactivateHiringPreferences(preferenceId) - Soft delete preferences
- * - validatePreferencesData(data) - Validate preference data
- */
-
-import wixData from 'wix-data';
 import { currentUser } from 'wix-users-backend';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
-const COLLECTION_NAME = 'CarrierHiringPreferences';
-const RECRUITER_ACCESS_COLLECTION = 'RecruiterCarrierAccess'; // For authorization checks
-
-// Collection keys for dual-source routing
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     hiringPreferences: 'carrierHiringPreferences',
-    recruiterAccess: 'recruiterCarrierAccess'
+    recruiterAccess: 'recruiterCarriers'
 };
-
-// ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.sort) {
-        query = options.sortDir === 'asc' ? query.ascending(options.sort) : query.descending(options.sort);
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function getRecord(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.getRecord(tableName, recordId);
-    }
-    return await wixData.get(wixCollectionName, recordId, { suppressAuth: true });
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
 
 const VALID_CDL_TYPES = ['A', 'B', 'C'];
 const VALID_URGENCY_VALUES = ['immediate', '30_day', 'ongoing'];
 
 /**
  * Validates the preference data
- * @param {Object} data - The preference data to validate
- * @param {boolean} isUpdate - Whether this is an update validation (allows partial data)
- * @returns {Object} - { isValid: boolean, errors: string[] }
  */
 export function validatePreferencesData(data, isUpdate = false) {
   const errors = [];
+  if (!data) return { isValid: false, errors: ['Data is required'] };
 
-  // Handle null/undefined input
-  if (data === null || data === undefined) {
-    return { isValid: false, errors: ['Preferences data is required'] };
-  }
-
-  // Required fields (only checked for create, not update)
   if (!isUpdate) {
-    // carrier_dot validation
-    if (!data.carrier_dot || data.carrier_dot === '') {
-      errors.push('carrier_dot is required');
-    }
-
-    // required_cdl_types validation
-    if (data.required_cdl_types === undefined || data.required_cdl_types === null) {
-      errors.push('required_cdl_types is required');
-    } else if (!Array.isArray(data.required_cdl_types)) {
-      errors.push('required_cdl_types must be an array');
-    } else if (data.required_cdl_types.length === 0) {
-      errors.push('required_cdl_types must contain at least one CDL type');
+    if (!data.carrier_dot) errors.push('carrier_dot is required');
+    if (!Array.isArray(data.required_cdl_types) || data.required_cdl_types.length === 0) {
+      errors.push('required_cdl_types must be a non-empty array');
     } else {
-      // Validate each CDL type
-      for (const cdlType of data.required_cdl_types) {
-        if (!VALID_CDL_TYPES.includes(cdlType)) {
-          errors.push(`Invalid CDL type: ${cdlType}. Valid types are A, B, C`);
-          break; // Only report the first invalid type
-        }
-      }
+      for (const t of data.required_cdl_types) if (!VALID_CDL_TYPES.includes(t)) errors.push(`Invalid CDL type: ${t}`);
     }
-
-    // target_radius_miles validation (required)
-    if (data.target_radius_miles === undefined || data.target_radius_miles === null) {
-      errors.push('target_radius_miles is required');
-    } else if (typeof data.target_radius_miles !== 'number') {
-      errors.push('target_radius_miles must be a number');
-    } else if (data.target_radius_miles <= 0) {
-      errors.push('target_radius_miles must be greater than 0');
+    if (typeof data.target_radius_miles !== 'number' || data.target_radius_miles <= 0) {
+      errors.push('target_radius_miles must be a positive number');
     }
   }
 
-  // Validation for update scenarios - validate if field is present
   if (isUpdate) {
-    // Validate required_cdl_types if provided in update
-    if (data.required_cdl_types !== undefined) {
-      if (!Array.isArray(data.required_cdl_types)) {
-        errors.push('required_cdl_types must be an array');
-      } else {
-        for (const cdlType of data.required_cdl_types) {
-          if (!VALID_CDL_TYPES.includes(cdlType)) {
-            errors.push(`Invalid CDL type: ${cdlType}. Valid types are A, B, C`);
-            break;
-          }
-        }
-      }
-    }
-
-    // Validate target_radius_miles if provided in update
-    if (data.target_radius_miles !== undefined && data.target_radius_miles !== null) {
-      if (typeof data.target_radius_miles !== 'number') {
-        errors.push('target_radius_miles must be a number');
-      } else if (data.target_radius_miles <= 0) {
-        errors.push('target_radius_miles must be greater than 0');
-      }
-    }
-
-    // Validate min_experience_years if provided
-    if (data.min_experience_years !== undefined && data.min_experience_years !== null) {
-      if (typeof data.min_experience_years !== 'number') {
-        errors.push('min_experience_years must be a number');
-      } else if (data.min_experience_years < 0) {
-        errors.push('min_experience_years cannot be negative');
-      }
+    if (data.required_cdl_types !== undefined && !Array.isArray(data.required_cdl_types)) errors.push('required_cdl_types must be an array');
+    if (data.target_radius_miles !== undefined && (typeof data.target_radius_miles !== 'number' || data.target_radius_miles <= 0)) {
+      errors.push('target_radius_miles must be a positive number');
     }
   }
 
-  // Optional field validations (apply to both create and update)
-
-  // min_experience_years validation (optional, but if provided must be valid)
-  if (!isUpdate && data.min_experience_years !== undefined && data.min_experience_years !== null) {
-    if (typeof data.min_experience_years !== 'number') {
-      errors.push('min_experience_years must be a number');
-    } else if (data.min_experience_years < 0) {
-      errors.push('min_experience_years cannot be negative');
-    }
+  if (data.offered_pay_min && data.offered_pay_max && data.offered_pay_max < data.offered_pay_min) {
+    errors.push('offered_pay_max must be >= offered_pay_min');
   }
 
-  // offered_pay_min validation
-  if (data.offered_pay_min !== undefined && data.offered_pay_min !== null) {
-    if (typeof data.offered_pay_min !== 'number') {
-      errors.push('offered_pay_min must be a number');
-    }
-  }
+  if (data.urgency && !VALID_URGENCY_VALUES.includes(data.urgency)) errors.push('Invalid urgency');
 
-  // offered_pay_max validation
-  if (data.offered_pay_max !== undefined && data.offered_pay_max !== null) {
-    if (typeof data.offered_pay_max !== 'number') {
-      errors.push('offered_pay_max must be a number');
-    }
-  }
-
-  // offered_pay_max must be >= offered_pay_min
-  if (data.offered_pay_min !== null && data.offered_pay_min !== undefined &&
-      data.offered_pay_max !== null && data.offered_pay_max !== undefined &&
-      typeof data.offered_pay_min === 'number' && typeof data.offered_pay_max === 'number') {
-    if (data.offered_pay_max < data.offered_pay_min) {
-      errors.push('offered_pay_max must be greater than or equal to offered_pay_min');
-    }
-  }
-
-  // urgency validation
-  if (data.urgency !== undefined && data.urgency !== null) {
-    if (!VALID_URGENCY_VALUES.includes(data.urgency)) {
-      errors.push('Invalid urgency value. Valid values are: immediate, 30_day, ongoing');
-    }
-  }
-
-  // Array field validations
-  const arrayFields = [
-    'target_zip_codes',
-    'target_states',
-    'route_types',
-    'equipment_types',
-    'required_endorsements'
-  ];
-
-  for (const field of arrayFields) {
-    if (data[field] !== undefined && data[field] !== null) {
-      if (!Array.isArray(data[field])) {
-        errors.push(`${field} must be an array`);
-      }
-    }
-  }
-
-  // positions_open validation
-  if (data.positions_open !== undefined && data.positions_open !== null) {
-    if (typeof data.positions_open !== 'number') {
-      errors.push('positions_open must be a number');
-    } else if (data.positions_open < 0) {
-      errors.push('positions_open cannot be negative');
-    }
-  }
-
-  return {
-    isValid: errors.length === 0,
-    errors
-  };
+  return { isValid: errors.length === 0, errors };
 }
 
 /**
  * Check if current user has access to the specified carrier
- * @param {string} carrierDot - The carrier DOT number
- * @returns {Promise<boolean>} - True if user has access
  */
 async function checkCarrierAccess(carrierDot) {
   const userId = currentUser.id;
-
-  // Dual-source query for recruiter access
-  let accessItems = [];
-  if (usesAirtable(COLLECTION_KEYS.recruiterAccess)) {
-    const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterAccess);
-    const filter = `AND({Recruiter ID} = '${userId}', {Carrier DOT} = '${carrierDot}', {Is Active} = TRUE())`;
-    const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-    accessItems = result.records || [];
-  } else {
-    const result = await wixData.query(RECRUITER_ACCESS_COLLECTION)
-      .eq('recruiter_id', userId)
-      .eq('carrier_dot', carrierDot)
-      .eq('is_active', true)
-      .find({ suppressAuth: true });
-    accessItems = result.items;
-  }
-
-  return accessItems.length > 0;
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterAccess, {
+    filters: { recruiter_id: userId, carrier_dot: String(carrierDot), is_active: true },
+    limit: 1, suppressAuth: true
+  });
+  return result.success && result.items.length > 0;
 }
 
 /**
  * Create new hiring preferences for a carrier
- * @param {Object} data - The preference data
- * @returns {Promise<Object>} - { success: boolean, preferences?: Object, error?: string }
  */
 export async function createHiringPreferences(data) {
   try {
-    // Check if user is logged in
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+    const val = validatePreferencesData(data);
+    if (!val.isValid) return { success: false, error: val.errors[0] };
 
-    // Validate the data first
-    const validation = validatePreferencesData(data);
-    if (!validation.isValid) {
-      return { success: false, error: validation.errors[0] };
-    }
+    if (!await checkCarrierAccess(data.carrier_dot)) return { success: false, error: 'Not authorized' };
 
-    // Check if user has access to this carrier
-    const hasAccess = await checkCarrierAccess(data.carrier_dot);
-    if (!hasAccess) {
-      return { success: false, error: 'Not authorized for this carrier' };
-    }
-
-    // Build the preference object with defaults
     const preferenceData = {
-      carrier_dot: data.carrier_dot,
-      recruiter_id: currentUser.id,
-      required_cdl_types: data.required_cdl_types,
-      required_endorsements: data.required_endorsements || [],
-      min_experience_years: data.min_experience_years ?? null,
-      max_experience_years: data.max_experience_years ?? null,
-      target_zip_codes: data.target_zip_codes || [],
-      target_radius_miles: data.target_radius_miles,
-      target_states: data.target_states || [],
-      offered_pay_min: data.offered_pay_min ?? null,
-      offered_pay_max: data.offered_pay_max ?? null,
-      route_types: data.route_types || [],
-      equipment_types: data.equipment_types || [],
-      urgency: data.urgency ?? null,
-      positions_open: data.positions_open ?? null,
-      is_active: true
+      carrier_dot: String(data.carrier_dot), recruiter_id: currentUser.id,
+      required_cdl_types: data.required_cdl_types, required_endorsements: data.required_endorsements || [],
+      min_experience_years: data.min_experience_years ?? null, target_zip_codes: data.target_zip_codes || [],
+      target_radius_miles: data.target_radius_miles, target_states: data.target_states || [],
+      offered_pay_min: data.offered_pay_min ?? null, offered_pay_max: data.offered_pay_max ?? null,
+      route_types: data.route_types || [], equipment_types: data.equipment_types || [],
+      urgency: data.urgency ?? null, positions_open: data.positions_open ?? null, is_active: true
     };
 
-    // Insert into collection (dual-source)
-    const result = await insertData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, preferenceData);
-
-    return { success: true, preferences: result };
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.hiringPreferences, preferenceData, { suppressAuth: true });
+    return { success: result.success, preferences: result.record, error: result.error };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -319,49 +87,21 @@ export async function createHiringPreferences(data) {
 
 /**
  * Update existing hiring preferences
- * @param {string} preferenceId - The preference ID to update
- * @param {Object} data - The fields to update
- * @returns {Promise<Object>} - { success: boolean, preferences?: Object, error?: string }
  */
 export async function updateHiringPreferences(preferenceId, data) {
   try {
-    // Check if user is logged in
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+    const val = validatePreferencesData(data, true);
+    if (!val.isValid) return { success: false, error: val.errors[0] };
 
-    // Validate the update data
-    const validation = validatePreferencesData(data, true);
-    if (!validation.isValid) {
-      return { success: false, error: validation.errors[0] };
-    }
+    const existing = await dataAccess.getRecord(COLLECTION_KEYS.hiringPreferences, preferenceId, { suppressAuth: true });
+    if (!existing) return { success: false, error: 'Not found' };
 
-    // Get the existing preference (dual-source)
-    const existingPref = await getRecord(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, preferenceId);
-    if (!existingPref) {
-      return { success: false, error: 'Preference not found' };
-    }
+    if (!await checkCarrierAccess(existing.carrier_dot)) return { success: false, error: 'Not authorized' };
 
-    // Check if user has access to this carrier
-    const hasAccess = await checkCarrierAccess(existingPref.carrier_dot);
-    if (!hasAccess) {
-      return { success: false, error: 'Not authorized to update this preference' };
-    }
-
-    // Build the updated preference (merge existing with updates)
-    // Important: carrier_dot cannot be changed
-    const updatedPref = {
-      ...existingPref,
-      ...data,
-      carrier_dot: existingPref.carrier_dot, // Prevent carrier_dot change
-      _id: existingPref._id, // Preserve ID
-      _updatedDate: new Date()
-    };
-
-    // Update in collection (dual-source)
-    const result = await updateData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, updatedPref);
-
-    return { success: true, preferences: result };
+    const updatedPref = { ...existing, ...data, _id: preferenceId, _updatedDate: new Date() };
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.hiringPreferences, updatedPref, { suppressAuth: true });
+    return { success: result.success, preferences: result.record, error: result.error };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -369,67 +109,23 @@ export async function updateHiringPreferences(preferenceId, data) {
 
 /**
  * Get active hiring preferences for a carrier
- * @param {string} carrierDot - The carrier DOT number
- * @returns {Promise<Object>} - { success: boolean, preferences?: Object|null, error?: string }
  */
 export async function getHiringPreferences(carrierDot) {
   try {
-    // Query for active preferences for this carrier (dual-source)
-    let prefItems = [];
-    if (usesAirtable(COLLECTION_KEYS.hiringPreferences)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.hiringPreferences);
-      const filter = `AND({Carrier DOT} = '${carrierDot}', {Is Active} = TRUE())`;
-      const result = await airtable.queryRecords(tableName, {
-        filterByFormula: filter,
-        sort: [{ field: 'Created Date', direction: 'desc' }],
-        maxRecords: 1
-      });
-      prefItems = result.records || [];
-    } else {
-      let query = wixData.query(COLLECTION_NAME)
-        .eq('carrier_dot', carrierDot)
-        .eq('is_active', true);
-
-      if (typeof query.descending === 'function') {
-        query = query.descending('_createdDate');
-      }
-      if (typeof query.limit === 'function') {
-        query = query.limit(1);
-      }
-
-      const result = await query.find({ suppressAuth: true });
-      prefItems = result.items;
-    }
-
-    if (prefItems.length === 0) {
-      return { success: true, preferences: null };
-    }
-
-    return { success: true, preferences: prefItems[0] };
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.hiringPreferences, {
+      filters: { carrier_dot: String(carrierDot), is_active: true },
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit: 1, suppressAuth: true
+    });
+    return { success: true, preferences: result.items?.[0] || null };
   } catch (error) {
     return { success: false, error: error.message };
   }
 }
 
-/**
- * Get a specific preference by ID
- * @param {string} preferenceId - The preference ID
- * @returns {Promise<Object>} - { success: boolean, preferences?: Object|null, error?: string }
- */
 export async function getHiringPreferenceById(preferenceId) {
   try {
-    // Validate preference ID
-    if (!preferenceId || preferenceId === '') {
-      return { success: false, error: 'Invalid preference ID' };
-    }
-
-    // Get the preference (dual-source)
-    const result = await getRecord(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, preferenceId);
-
-    if (!result) {
-      return { success: true, preferences: null };
-    }
-
+    const result = await dataAccess.getRecord(COLLECTION_KEYS.hiringPreferences, preferenceId, { suppressAuth: true });
     return { success: true, preferences: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -438,44 +134,30 @@ export async function getHiringPreferenceById(preferenceId) {
 
 /**
  * Get weight preferences for a carrier
- * Used by the Reverse Matching Engine for dynamic scoring
- * @param {string} carrierDot - The carrier DOT number
- * @returns {Promise<Object>} - { success: boolean, weights?: Object, error?: string }
  */
 export async function getWeightPreferences(carrierDot) {
   try {
-    // Get active preferences for this carrier
-    const result = await getHiringPreferences(carrierDot);
+    const res = await getHiringPreferences(carrierDot);
+    if (!res.success) return res;
 
-    if (!result.success) {
-      return { success: false, error: result.error };
-    }
-
-    // Default weights if no preferences exist
     const defaultWeights = {
-      weight_qualifications: 30,
-      weight_experience: 20,
-      weight_location: 20,
-      weight_availability: 15,
-      weight_salaryFit: 10,
-      weight_engagement: 5
+      weight_qualifications: 30, weight_experience: 20, weight_location: 20,
+      weight_availability: 15, weight_salaryFit: 10, weight_engagement: 5
     };
 
-    if (!result.preferences) {
-      return { success: true, weights: defaultWeights, isDefault: true };
-    }
+    if (!res.preferences) return { success: true, weights: defaultWeights, isDefault: true };
 
-    // Extract weight fields from preferences
+    const p = res.preferences;
     const weights = {
-      weight_qualifications: result.preferences.weight_qualifications ?? defaultWeights.weight_qualifications,
-      weight_experience: result.preferences.weight_experience ?? defaultWeights.weight_experience,
-      weight_location: result.preferences.weight_location ?? defaultWeights.weight_location,
-      weight_availability: result.preferences.weight_availability ?? defaultWeights.weight_availability,
-      weight_salaryFit: result.preferences.weight_salaryFit ?? defaultWeights.weight_salaryFit,
-      weight_engagement: result.preferences.weight_engagement ?? defaultWeights.weight_engagement
+      weight_qualifications: p.weight_qualifications ?? defaultWeights.weight_qualifications,
+      weight_experience: p.weight_experience ?? defaultWeights.weight_experience,
+      weight_location: p.weight_location ?? defaultWeights.weight_location,
+      weight_availability: p.weight_availability ?? defaultWeights.weight_availability,
+      weight_salaryFit: p.weight_salaryFit ?? defaultWeights.weight_salaryFit,
+      weight_engagement: p.weight_engagement ?? defaultWeights.weight_engagement
     };
 
-    return { success: true, weights, isDefault: false, preferenceId: result.preferences._id };
+    return { success: true, weights, isDefault: false, preferenceId: p._id };
   } catch (error) {
     console.error('[carrierPreferences] getWeightPreferences error:', error);
     return { success: false, error: error.message };
@@ -484,163 +166,39 @@ export async function getWeightPreferences(carrierDot) {
 
 /**
  * Save weight preferences for a carrier
- * Updates the CarrierHiringPreferences collection with new weight values
- * @param {string} carrierDot - The carrier DOT number
- * @param {Object} weights - The weight preferences to save
- * @returns {Promise<Object>} - { success: boolean, weights?: Object, error?: string }
  */
 export async function saveWeightPreferences(carrierDot, weights) {
   try {
-    // Check if user is logged in
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
-
-    // Validate weights
-    const validationError = validateWeights(weights);
-    if (validationError) {
-      return { success: false, error: validationError };
-    }
-
-    // Get existing preferences
-    const existingResult = await getHiringPreferences(carrierDot);
-
-    if (existingResult.success && existingResult.preferences) {
-      // Update existing preferences with new weights
-      const updatedPref = {
-        ...existingResult.preferences,
-        weight_qualifications: weights.weight_qualifications,
-        weight_experience: weights.weight_experience,
-        weight_location: weights.weight_location,
-        weight_availability: weights.weight_availability,
-        weight_salaryFit: weights.weight_salaryFit,
-        weight_engagement: weights.weight_engagement,
-        _updatedDate: new Date()
-      };
-
-      const result = await updateData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, updatedPref);
-      console.log('[carrierPreferences] Updated weight preferences for carrier:', carrierDot);
-
-      return {
-        success: true,
-        weights: {
-          weight_qualifications: result.weight_qualifications,
-          weight_experience: result.weight_experience,
-          weight_location: result.weight_location,
-          weight_availability: result.weight_availability,
-          weight_salaryFit: result.weight_salaryFit,
-          weight_engagement: result.weight_engagement
-        }
-      };
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+    
+    const existing = await getHiringPreferences(carrierDot);
+    if (existing.success && existing.preferences) {
+      const updated = { ...existing.preferences, ...weights, _updatedDate: new Date() };
+      const res = await dataAccess.updateRecord(COLLECTION_KEYS.hiringPreferences, updated, { suppressAuth: true });
+      return { success: res.success, weights: res.record };
     } else {
-      // Create new preferences with weights (and minimum required fields)
-      const newPref = {
-        carrier_dot: carrierDot,
-        recruiter_id: currentUser.id,
-        required_cdl_types: ['A'], // Default required field
-        target_radius_miles: 100, // Default required field
-        weight_qualifications: weights.weight_qualifications,
-        weight_experience: weights.weight_experience,
-        weight_location: weights.weight_location,
-        weight_availability: weights.weight_availability,
-        weight_salaryFit: weights.weight_salaryFit,
-        weight_engagement: weights.weight_engagement,
-        is_active: true
-      };
-
-      const result = await insertData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, newPref);
-      console.log('[carrierPreferences] Created new preferences with weights for carrier:', carrierDot);
-
-      return {
-        success: true,
-        weights: {
-          weight_qualifications: result.weight_qualifications,
-          weight_experience: result.weight_experience,
-          weight_location: result.weight_location,
-          weight_availability: result.weight_availability,
-          weight_salaryFit: result.weight_salaryFit,
-          weight_engagement: result.weight_engagement
-        }
-      };
+      const newPref = { carrier_dot: String(carrierDot), recruiter_id: currentUser.id, required_cdl_types: ['A'], target_radius_miles: 100, ...weights, is_active: true };
+      const res = await dataAccess.insertRecord(COLLECTION_KEYS.hiringPreferences, newPref, { suppressAuth: true });
+      return { success: res.success, weights: res.record };
     }
   } catch (error) {
-    console.error('[carrierPreferences] saveWeightPreferences error:', error);
     return { success: false, error: error.message };
   }
 }
 
 /**
- * Validate weight preferences
- * @param {Object} weights - The weights to validate
- * @returns {string|null} - Error message or null if valid
- */
-function validateWeights(weights) {
-  const weightFields = [
-    'weight_qualifications',
-    'weight_experience',
-    'weight_location',
-    'weight_availability',
-    'weight_salaryFit',
-    'weight_engagement'
-  ];
-
-  // Check all required fields exist
-  for (const field of weightFields) {
-    if (weights[field] === undefined || weights[field] === null) {
-      return `Missing required weight field: ${field}`;
-    }
-    if (typeof weights[field] !== 'number') {
-      return `Weight field ${field} must be a number`;
-    }
-    if (weights[field] < 0 || weights[field] > 100) {
-      return `Weight field ${field} must be between 0 and 100`;
-    }
-  }
-
-  // Check total is reasonable (allow some flexibility due to normalization)
-  const total = weightFields.reduce((sum, field) => sum + weights[field], 0);
-  if (total <= 0) {
-    return 'Total weight must be greater than 0';
-  }
-
-  return null;
-}
-
-/**
- * Deactivate (soft delete) hiring preferences
- * @param {string} preferenceId - The preference ID to deactivate
- * @returns {Promise<Object>} - { success: boolean, preferences?: Object, error?: string }
+ * Deactivate hiring preferences
  */
 export async function deactivateHiringPreferences(preferenceId) {
   try {
-    // Check if user is logged in
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+    const existing = await dataAccess.getRecord(COLLECTION_KEYS.hiringPreferences, preferenceId, { suppressAuth: true });
+    if (!existing) return { success: false, error: 'Not found' };
 
-    // Get the existing preference (dual-source)
-    const existingPref = await getRecord(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, preferenceId);
-    if (!existingPref) {
-      return { success: false, error: 'Preference not found' };
-    }
+    if (!await checkCarrierAccess(existing.carrier_dot)) return { success: false, error: 'Not authorized' };
 
-    // Check if user has access to this carrier
-    const hasAccess = await checkCarrierAccess(existingPref.carrier_dot);
-    if (!hasAccess) {
-      return { success: false, error: 'Not authorized to deactivate this preference' };
-    }
-
-    // Set is_active to false
-    const updatedPref = {
-      ...existingPref,
-      is_active: false,
-      _updatedDate: new Date()
-    };
-
-    // Update in collection (dual-source)
-    const result = await updateData(COLLECTION_KEYS.hiringPreferences, COLLECTION_NAME, updatedPref);
-
-    return { success: true, preferences: result };
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.hiringPreferences, { ...existing, is_active: false, _updatedDate: new Date() }, { suppressAuth: true });
+    return { success: result.success, preferences: result.record };
   } catch (error) {
     return { success: false, error: error.message };
   }

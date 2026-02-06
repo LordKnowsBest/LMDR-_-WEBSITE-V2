@@ -1,15 +1,13 @@
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
 import { mediaManager } from 'wix-media-backend';
 import { extractInfoFromDocument } from 'backend/ocrService.jsw';
-
-// Dual-source data access
-import { usesAirtable, getWixCollectionName } from 'backend/configData';
 import * as dataAccess from 'backend/dataAccess';
-import * as airtable from 'backend/airtableClient';
 
 // Gamification hooks
 import { checkProfileAchievements } from 'backend/achievementService';
+
+// Analytics hooks
+import { convertSessionToDriver } from 'backend/recruiterAnalyticsService';
 
 // Lazy-loaded gamification services to avoid circular dependencies
 async function getGamificationService() {
@@ -31,24 +29,22 @@ async function awardXPNonBlocking(driverId, action, metadata = {}) {
 // ============================================================================
 
 const CONFIG = {
-  profilesCollection: 'DriverProfiles',
-  interestsCollection: 'DriverCarrierInterests',
   mediaFolder: '/driver-documents',
-  
+
   // Profile Status Values
   STATUS: {
     ACTIVE: 'active',
     INCOMPLETE: 'incomplete',
     DORMANT: 'dormant'
   },
-  
+
   // Completeness scoring weights (Spec: Base 20%, Exp 30%, Docs 30%, Prefs 20%)
   COMPLETENESS_WEIGHTS: {
     // Base Info (20%)
     display_name: 10,
     email: 5,
     phone: 5,
-    
+
     // Experience (30%)
     years_experience: 10,
     cdl_class: 10,
@@ -69,136 +65,87 @@ const CONFIG = {
   }
 };
 
+const COLLECTION_KEYS = {
+  profiles: 'driverProfiles',
+  interests: 'driverCarrierInterests',
+  views: 'carrierDriverViews',
+  carriers: 'carriers'
+};
+
 // ============================================================================
-// DOCUMENT UPLOAD HELPERS (Phase 4H)
+// DOCUMENT UPLOAD HELPERS
 // ============================================================================
 
-/**
- * Upload base64 encoded file to Wix Media Manager
- * 
- * @param {Object} fileObj { data: base64, name: string, type: string }
- * @param {string} userId
- * @returns {Promise<string>} File URL
- */
 async function uploadToMediaManager(fileObj, userId) {
-    if (!fileObj || !fileObj.data) return null;
+  if (!fileObj || !fileObj.data) return null;
 
-    try {
-        // Strip base64 prefix if present
-        const base64Content = fileObj.data.split(';base64,').pop();
-        const buffer = Buffer.from(base64Content, 'base64');
+  try {
+    const base64Content = fileObj.data.split(';base64,').pop();
+    const buffer = Buffer.from(base64Content, 'base64');
+    const fileName = `${Date.now()}_${fileObj.name.replace(/\s+/g, '_')}`;
+    const filePath = `${CONFIG.mediaFolder}/${userId}`;
+    const mimeType = fileObj.type || 'application/octet-stream';
+    
+    let mediaType = 'document';
+    if (mimeType.startsWith('image/')) mediaType = 'image';
+    else if (mimeType.startsWith('video/')) mediaType = 'video';
+    else if (mimeType.startsWith('audio/')) mediaType = 'audio';
 
-        // Define path in media manager: /driver-documents/{userId}/{filename}
-        const fileName = `${Date.now()}_${fileObj.name.replace(/\s+/g, '_')}`;
-        const filePath = `${CONFIG.mediaFolder}/${userId}`;
+    console.log(`📤 Uploading ${fileName} as ${mediaType} (${mimeType})`);
 
-        // Determine mediaType based on file mime type
-        // Wix requires 'image' for images, 'document' for PDFs/docs
-        const mimeType = fileObj.type || 'application/octet-stream';
-        let mediaType = 'document';
-        if (mimeType.startsWith('image/')) {
-            mediaType = 'image';
-        } else if (mimeType.startsWith('video/')) {
-            mediaType = 'video';
-        } else if (mimeType.startsWith('audio/')) {
-            mediaType = 'audio';
-        }
+    const uploadResult = await mediaManager.upload(
+      filePath,
+      buffer,
+      fileName,
+      {
+        mediaOptions: { mimeType, mediaType },
+        metadataOptions: { isPrivate: false, isVisitorUpload: false }
+      }
+    );
 
-        console.log(`📤 Uploading ${fileName} as ${mediaType} (${mimeType})`);
-
-        const uploadResult = await mediaManager.upload(
-            filePath,
-            buffer,
-            fileName,
-            {
-                mediaOptions: {
-                    mimeType: mimeType,
-                    mediaType: mediaType
-                },
-                metadataOptions: {
-                    isPrivate: false,
-                    isVisitorUpload: false
-                }
-            }
-        );
-
-        console.log(`✅ Uploaded: ${uploadResult.fileUrl}`);
-        return uploadResult.fileUrl;
-    } catch (error) {
-        console.error('❌ Media upload error:', error);
-        throw new Error('Failed to upload document to Media Manager');
-    }
+    console.log(`✅ Uploaded: ${uploadResult.fileUrl}`);
+    return uploadResult.fileUrl;
+  } catch (error) {
+    console.error('❌ Media upload error:', error);
+    throw new Error('Failed to upload document to Media Manager');
+  }
 }
 
 // ============================================================================
 // PROFILE RETRIEVAL
 // ============================================================================
 
-/**
- * Get or create a driver profile for the current logged-in user
- * This is the main entry point for driver identity
- * 
- * @returns {Promise<Object>} Driver profile with computed fields
- */
-export async function getOrCreateDriverProfile() {
+export async function getOrCreateDriverProfile(sessionId) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      return { 
-        success: false, 
-        error: 'User not logged in',
-        profile: null 
-      };
-    }
-    
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in', profile: null };
+
     const userId = currentUser.id;
-    console.log(`👤 Getting profile for user: ${userId}`);
-    
-    // Check for existing profile
     const existingProfile = await getProfileByUserId(userId);
-    
+
     if (existingProfile) {
-      console.log(`✅ Found existing profile for user ${userId}`);
-      return {
-        success: true,
-        profile: enrichProfile(existingProfile),
-        isNew: false
-      };
+      return { success: true, profile: enrichProfile(existingProfile), isNew: false };
     }
-    
-    // Create new profile for first-time user
-    console.log(`📝 Creating new profile for user ${userId}`);
+
     const newProfile = await createNewProfile(userId, currentUser);
-    
-    return {
-      success: true,
-      profile: enrichProfile(newProfile),
-      isNew: true
-    };
-    
+    if (sessionId) {
+      convertSessionToDriver(sessionId, newProfile._id).catch(() => {});
+    }
+
+    return { success: true, profile: enrichProfile(newProfile), isNew: true };
   } catch (error) {
     console.error('❌ Error in getOrCreateDriverProfile:', error);
-    return {
-      success: false,
-      error: error.message,
-      profile: null
-    };
+    return { success: false, error: error.message, profile: null };
   }
 }
 
-/**
- * Get profile by Wix user ID
- * Supports dual data sources via config.jsw
- */
 async function getProfileByUserId(userId) {
   try {
-    const result = await dataAccess.queryRecords('driverProfiles', {
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.profiles, {
       filters: { _owner: userId },
       limit: 1,
       suppressAuth: true
     });
-
     return result.success && result.items.length > 0 ? result.items[0] : null;
   } catch (error) {
     console.error('Profile lookup error:', error);
@@ -206,13 +153,9 @@ async function getProfileByUserId(userId) {
   }
 }
 
-/**
- * Get profile by profile ID (for admin/internal use)
- * Supports dual data sources via config.jsw
- */
 export async function getProfileById(profileId) {
   try {
-    const result = await dataAccess.getRecord('driverProfiles', profileId, { suppressAuth: true });
+    const result = await dataAccess.getRecord(COLLECTION_KEYS.profiles, profileId, { suppressAuth: true });
     return result ? enrichProfile(result) : null;
   } catch (error) {
     console.error('Profile get error:', error);
@@ -224,28 +167,16 @@ export async function getProfileById(profileId) {
 // PROFILE CREATION
 // ============================================================================
 
-/**
- * Create a new driver profile for a user
- */
 async function createNewProfile(userId, userObject) {
   let userEmail = '';
-  
-  try {
-    userEmail = await userObject.getEmail();
-  } catch (e) {
-    console.log('Could not retrieve user email');
-  }
-  
+  try { userEmail = await userObject.getEmail(); } catch (e) { /* ignore */ }
+
   const now = new Date();
-  
   const profileData = {
-    // Identity - linked to Wix user via Wix Member ID field
     wix_member_id: userId,
     display_name: '',
     email: userEmail,
     phone: '',
-    
-    // Preferences - empty until first search
     home_zip: '',
     max_commute_miles: 50,
     min_cpm: 0.50,
@@ -253,73 +184,43 @@ async function createNewProfile(userId, userObject) {
     max_turnover_percent: 90,
     max_truck_age_years: 5,
     fleet_size_preference: 'no_preference',
-    
-    // Qualifications - for future reverse matching
     years_experience: null,
     cdl_class: '',
     endorsements: [],
     clean_mvr: null,
     accidents_last_3_years: null,
     violations_last_3_years: null,
-    
-    // Persistent Documents (Phase 4C) - Image fields
     cdl_front_image: null,
     cdl_back_image: null,
     med_card_image: null,
     resume_file: null,
-    
-    // Engagement tracking
     last_search_date: null,
     total_searches: 0,
     profile_completeness_score: 0,
-    
-    // Status
     profile_status: CONFIG.STATUS.INCOMPLETE,
-    is_discoverable: false, // Opt-in privacy model
-    
-    // Timestamps
+    is_discoverable: false,
     created_date: now,
     updated_date: now
   };
-  
-  // Use dual-source data access for insert
-  const insertResult = await dataAccess.insertRecord('driverProfiles', profileData, { suppressAuth: true });
 
-  if (!insertResult.success) {
-    throw new Error(insertResult.error || 'Failed to create profile');
-  }
-
-  const inserted = insertResult.record;
-  console.log(`✅ Created new profile with ID: ${inserted._id}`);
-  return inserted;
+  const result = await dataAccess.insertRecord(COLLECTION_KEYS.profiles, profileData, { suppressAuth: true });
+  if (!result.success) throw new Error(result.error || 'Failed to create profile');
+  return result.record;
 }
 
 // ============================================================================
 // PROFILE UPDATES
 // ============================================================================
 
-/**
- * Update driver preferences (from search form)
- * Called every time a driver searches
- */
 export async function updateDriverPreferences(preferences) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
-    
-    const userId = currentUser.id;
-    const profile = await getProfileByUserId(userId);
-    
-    if (!profile) {
-      return { success: false, error: 'Profile not found' };
-    }
-    
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+
+    const profile = await getProfileByUserId(currentUser.id);
+    if (!profile) return { success: false, error: 'Profile not found' };
+
     const now = new Date();
-    
-    // Update preferences
     const updatedData = {
       ...profile,
       home_zip: preferences.homeZip || profile.home_zip,
@@ -329,225 +230,118 @@ export async function updateDriverPreferences(preferences) {
       max_turnover_percent: preferences.maxTurnover || profile.max_turnover_percent,
       max_truck_age_years: preferences.maxTruckAge || profile.max_truck_age_years,
       fleet_size_preference: preferences.fleetSize || profile.fleet_size_preference,
-      
-      // Update display name if provided
       display_name: preferences.driverName || profile.display_name,
-      
-      // Engagement metrics
       last_search_date: now,
       total_searches: (profile.total_searches || 0) + 1,
       updated_date: now
     };
-    
-    // Recalculate completeness
+
     updatedData.profile_completeness_score = calculateCompleteness(updatedData);
-    
-    // Update status based on completeness
-    if (updatedData.profile_completeness_score >= 80) {
-      updatedData.profile_status = CONFIG.STATUS.ACTIVE;
-    } else if (updatedData.profile_completeness_score >= 30) {
-      updatedData.profile_status = CONFIG.STATUS.INCOMPLETE;
-    }
-    
-    // Use dual-source data access for update
-    const updateResult = await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
+    if (updatedData.profile_completeness_score >= 80) updatedData.profile_status = CONFIG.STATUS.ACTIVE;
+    else if (updatedData.profile_completeness_score >= 30) updatedData.profile_status = CONFIG.STATUS.INCOMPLETE;
 
-    if (!updateResult.success) {
-      throw new Error(updateResult.error || 'Failed to update preferences');
-    }
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.profiles, updatedData, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error || 'Failed to update preferences');
 
-    const updated = updateResult.record;
-    console.log(`✅ Updated preferences for user ${userId}`);
-
-    // Check for profile-related achievements (non-blocking)
     checkProfileAchievements(profile._id, {
       profileCompletion: updatedData.profile_completeness_score,
       hasPhoto: !!updatedData.cdl_front_image,
       hasCDL: !!updatedData.cdl_class,
-      cdlVerified: false,
-      bioLength: 0
-    }).catch(err => console.warn('Achievement check failed:', err.message));
+      cdlVerified: false, bioLength: 0
+    }).catch(() => {});
 
-    // Award XP for profile update (non-blocking)
     awardXPNonBlocking(profile._id, 'update_profile', {
       completenessScore: updatedData.profile_completeness_score,
       searchCount: updatedData.total_searches
     });
 
-    return {
-      success: true,
-      profile: enrichProfile(updated)
-    };
-
+    return { success: true, profile: enrichProfile(result.record) };
   } catch (error) {
     console.error('❌ Error updating preferences:', error);
     return { success: false, error: error.message };
   }
 }
 
-/**
- * Update driver persistent documents
- * Called after successful upload or application submission
- */
 export async function updateDriverDocuments(docData) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
-    
-    const userId = currentUser.id;
-    const profile = await getProfileByUserId(userId);
-    
-    if (!profile) {
-      return { success: false, error: 'Profile not found' };
-    }
-    
-    const now = new Date();
-    
-    const updatedData = {
-      ...profile,
-      updated_date: now
-    };
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
 
-    // Upload files to Media Manager and store in image fields (Phase 4H)
-    if (docData.cdlFront && docData.cdlFront.data) {
-      updatedData.cdl_front_image = await uploadToMediaManager(docData.cdlFront, userId);
-    } else if (typeof docData.cdlFront === 'string') {
-      updatedData.cdl_front_image = docData.cdlFront;
-    }
+    const profile = await getProfileByUserId(currentUser.id);
+    if (!profile) return { success: false, error: 'Profile not found' };
 
-    if (docData.cdlBack && docData.cdlBack.data) {
-      updatedData.cdl_back_image = await uploadToMediaManager(docData.cdlBack, userId);
-    } else if (typeof docData.cdlBack === 'string') {
-      updatedData.cdl_back_image = docData.cdlBack;
-    }
+    const updatedData = { ...profile, updated_date: new Date() };
 
-    if (docData.medCard && docData.medCard.data) {
-      updatedData.med_card_image = await uploadToMediaManager(docData.medCard, userId);
-    } else if (typeof docData.medCard === 'string') {
-      updatedData.med_card_image = docData.medCard;
-    }
+    if (docData.cdlFront?.data) updatedData.cdl_front_image = await uploadToMediaManager(docData.cdlFront, currentUser.id);
+    else if (typeof docData.cdlFront === 'string') updatedData.cdl_front_image = docData.cdlFront;
 
-    if (docData.resume && docData.resume.data) {
-      updatedData.resume_file = await uploadToMediaManager(docData.resume, userId);
-    } else if (typeof docData.resume === 'string') {
-      updatedData.resume_file = docData.resume;
-    }
-    
-    // Recalculate completeness
+    if (docData.cdlBack?.data) updatedData.cdl_back_image = await uploadToMediaManager(docData.cdlBack, currentUser.id);
+    else if (typeof docData.cdlBack === 'string') updatedData.cdl_back_image = docData.cdlBack;
+
+    if (docData.medCard?.data) updatedData.med_card_image = await uploadToMediaManager(docData.medCard, currentUser.id);
+    else if (typeof docData.medCard === 'string') updatedData.med_card_image = docData.medCard;
+
+    if (docData.resume?.data) updatedData.resume_file = await uploadToMediaManager(docData.resume, currentUser.id);
+    else if (typeof docData.resume === 'string') updatedData.resume_file = docData.resume;
+
     updatedData.profile_completeness_score = calculateCompleteness(updatedData);
-    
-    // Update status
-    if (updatedData.profile_completeness_score >= 80) {
-      updatedData.profile_status = CONFIG.STATUS.ACTIVE;
-    }
-    
-    // Use dual-source data access for update
-    const updateResult = await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
+    if (updatedData.profile_completeness_score >= 80) updatedData.profile_status = CONFIG.STATUS.ACTIVE;
 
-    if (!updateResult.success) {
-      throw new Error(updateResult.error || 'Failed to update documents');
-    }
-
-    const updated = updateResult.record;
-    console.log(`✅ Updated documents for user ${userId}`);
-    
-    // OCR Processing (New for Phase 7)
-    // We run this AFTER storing the URLs so the user definitely has the docs saved
-    // but the extraction helps populate profile fields
+    // OCR Processing
     const ocrPromises = [];
-
-    if (docData.cdlFront && docData.cdlFront.data) {
-        const base64 = docData.cdlFront.data.split(';base64,').pop();
-        ocrPromises.push(extractInfoFromDocument(base64, docData.cdlFront.type, 'CDL_FRONT'));
+    if (docData.cdlFront?.data) {
+      ocrPromises.push(extractInfoFromDocument(docData.cdlFront.data.split(';base64,').pop(), docData.cdlFront.type, 'CDL_FRONT'));
     }
-
-    if (docData.medCard && docData.medCard.data) {
-        const base64 = docData.medCard.data.split(';base64,').pop();
-        ocrPromises.push(extractInfoFromDocument(base64, docData.medCard.type, 'MED_CARD'));
+    if (docData.medCard?.data) {
+      ocrPromises.push(extractInfoFromDocument(docData.medCard.data.split(';base64,').pop(), docData.medCard.type, 'MED_CARD'));
     }
 
     if (ocrPromises.length > 0) {
-        console.log(`🧠 Triggering OCR for ${ocrPromises.length} documents...`);
-        const ocrResults = await Promise.all(ocrPromises);
-        
-        ocrResults.forEach(res => {
-            if (res && !res.error) {
-                // CDL Data Mapping
-                if (res.licenseNumber) {
-                    if (!updatedData.display_name && res.fullName) updatedData.display_name = res.fullName;
-                    if (res.cdlClass) updatedData.cdl_class = res.cdlClass;
-                    if (res.expirationDate) updatedData.cdl_expiration_date = res.expirationDate;
-                    if (res.endorsements) updatedData.endorsements = res.endorsements;
-                }
-                // Med Card Data Mapping
-                if (res.certificateExpirationDate) {
-                    updatedData.med_card_expiration_date = res.certificateExpirationDate;
-                }
-            }
-        });
-
-        // Final save with OCR data using dual-source data access
-        updatedData.profile_completeness_score = calculateCompleteness(updatedData);
-        if (updatedData.profile_completeness_score >= 80) updatedData.profile_status = CONFIG.STATUS.ACTIVE;
-
-        await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
-        console.log('✅ Profile enriched via OCR extraction');
+      const ocrResults = await Promise.all(ocrPromises);
+      ocrResults.forEach(res => {
+        if (res && !res.error) {
+          if (res.licenseNumber) {
+            if (!updatedData.display_name && res.fullName) updatedData.display_name = res.fullName;
+            if (res.cdlClass) updatedData.cdl_class = res.cdlClass;
+            if (res.expirationDate) updatedData.cdl_expiration_date = res.expirationDate;
+            if (res.endorsements) updatedData.endorsements = res.endorsements;
+          }
+          if (res.certificateExpirationDate) updatedData.med_card_expiration_date = res.certificateExpirationDate;
+        }
+      });
+      updatedData.profile_completeness_score = calculateCompleteness(updatedData);
+      if (updatedData.profile_completeness_score >= 80) updatedData.profile_status = CONFIG.STATUS.ACTIVE;
     }
 
-    // Check for profile-related achievements (non-blocking)
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.profiles, updatedData, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error || 'Failed to update documents');
+
     checkProfileAchievements(profile._id, {
       profileCompletion: updatedData.profile_completeness_score,
       hasPhoto: !!(updatedData.cdl_front_image || updatedData.med_card_image),
       hasCDL: !!updatedData.cdl_class,
-      cdlVerified: false,
-      bioLength: 0
-    }).catch(err => console.warn('Achievement check failed:', err.message));
+      cdlVerified: false, bioLength: 0
+    }).catch(() => {});
 
-    // Award XP for document upload (non-blocking)
     awardXPNonBlocking(profile._id, 'upload_document', {
-      documentCount: [
-        updatedData.cdl_front_image,
-        updatedData.cdl_back_image,
-        updatedData.med_card_image,
-        updatedData.resume_file
-      ].filter(Boolean).length
+      documentCount: [updatedData.cdl_front_image, updatedData.cdl_back_image, updatedData.med_card_image, updatedData.resume_file].filter(Boolean).length
     });
 
-    return {
-      success: true,
-      profile: enrichProfile(updatedData)
-    };
-
+    return { success: true, profile: enrichProfile(result.record) };
   } catch (error) {
     console.error('❌ Error updating documents:', error);
     return { success: false, error: error.message };
   }
 }
 
-/**
- * Update driver qualifications (from profile page)
- * Used for reverse matching
- */
 export async function updateDriverQualifications(qualifications) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
-    
-    const userId = currentUser.id;
-    const profile = await getProfileByUserId(userId);
-    
-    if (!profile) {
-      return { success: false, error: 'Profile not found' };
-    }
-    
-    const now = new Date();
-    
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+
+    const profile = await getProfileByUserId(currentUser.id);
+    if (!profile) return { success: false, error: 'Profile not found' };
+
     const updatedData = {
       ...profile,
       years_experience: qualifications.yearsExperience ?? profile.years_experience,
@@ -556,83 +350,43 @@ export async function updateDriverQualifications(qualifications) {
       clean_mvr: qualifications.cleanMVR ?? profile.clean_mvr,
       accidents_last_3_years: qualifications.accidentsLast3Years ?? profile.accidents_last_3_years,
       violations_last_3_years: qualifications.violationsLast3Years ?? profile.violations_last_3_years,
-      updated_date: now
+      updated_date: new Date()
     };
-    
-    // Recalculate completeness
+
     updatedData.profile_completeness_score = calculateCompleteness(updatedData);
-    
-    // Update status
-    if (updatedData.profile_completeness_score >= 80) {
-      updatedData.profile_status = CONFIG.STATUS.ACTIVE;
-    }
-    
-    // Use dual-source data access for update
-    const updateResult = await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
+    if (updatedData.profile_completeness_score >= 80) updatedData.profile_status = CONFIG.STATUS.ACTIVE;
 
-    if (!updateResult.success) {
-      throw new Error(updateResult.error || 'Failed to update qualifications');
-    }
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.profiles, updatedData, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error || 'Failed to update qualifications');
 
-    const updated = updateResult.record;
-    console.log(`✅ Updated qualifications for user ${userId}`);
-
-    // Award XP for qualification update (non-blocking)
     awardXPNonBlocking(profile._id, 'update_profile', {
       completenessScore: updatedData.profile_completeness_score,
       hasQualifications: !!(updatedData.years_experience && updatedData.cdl_class)
     });
 
-    return {
-      success: true,
-      profile: enrichProfile(updated)
-    };
-
+    return { success: true, profile: enrichProfile(result.record) };
   } catch (error) {
     console.error('❌ Error updating qualifications:', error);
     return { success: false, error: error.message };
   }
 }
 
-/**
- * Toggle driver discoverability (opt-in for recruiters)
- */
 export async function setDiscoverability(isDiscoverable) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
-    
-    const userId = currentUser.id;
-    const profile = await getProfileByUserId(userId);
-    
-    if (!profile) {
-      return { success: false, error: 'Profile not found' };
-    }
-    
-    const updatedData = {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+
+    const profile = await getProfileByUserId(currentUser.id);
+    if (!profile) return { success: false, error: 'Profile not found' };
+
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.profiles, {
       ...profile,
       is_discoverable: Boolean(isDiscoverable),
       updated_date: new Date()
-    };
+    }, { suppressAuth: true });
 
-    // Use dual-source data access for update
-    const updateResult = await dataAccess.updateRecord('driverProfiles', updatedData, { suppressAuth: true });
-
-    if (!updateResult.success) {
-      throw new Error(updateResult.error || 'Failed to update discoverability');
-    }
-
-    const updated = updateResult.record;
-    console.log(`✅ Set discoverability to ${isDiscoverable} for user ${userId}`);
-
-    return {
-      success: true,
-      profile: enrichProfile(updated)
-    };
-
+    if (!result.success) throw new Error(result.error || 'Failed to update discoverability');
+    return { success: true, profile: enrichProfile(result.record) };
   } catch (error) {
     console.error('❌ Error setting discoverability:', error);
     return { success: false, error: error.message };
@@ -643,55 +397,32 @@ export async function setDiscoverability(isDiscoverable) {
 // CARRIER INTEREST MANAGEMENT
 // ============================================================================
 
-/**
- * Log when a driver expresses interest in a carrier
- * Replaces the anonymous MatchEvents logging
- */
 export async function logCarrierInterest(carrierData) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      // Fallback to anonymous logging for non-logged-in users
-      return { success: false, error: 'User not logged in', isAnonymous: true };
-    }
-    
-    const userId = currentUser.id;
-    const profile = await getProfileByUserId(userId);
-    
-    if (!profile) {
-      return { success: false, error: 'Profile not found' };
-    }
-    
-    // Format date as YYYY-MM-DD for Airtable date fields (not datetime)
-    const now = new Date();
-    const formattedDate = now.toISOString().split('T')[0];
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in', isAnonymous: true };
 
-    // Check for existing interest record using dual-source data access
-    const existingResult = await dataAccess.queryRecords('driverCarrierInterests', {
-      filters: {
-        driver_id: profile._id,
-        carrier_dot: String(carrierData.carrierDOT)
-      },
+    const profile = await getProfileByUserId(currentUser.id);
+    if (!profile) return { success: false, error: 'Profile not found' };
+
+    const formattedDate = new Date().toISOString().split('T')[0];
+    const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { driver_id: profile._id, carrier_dot: String(carrierData.carrierDOT) },
       limit: 1,
       suppressAuth: true
     });
 
     if (existingResult.success && existingResult.items.length > 0) {
-      // Update existing record with new timestamp
       const existing = existingResult.items[0];
-      const updateResult = await dataAccess.updateRecord('driverCarrierInterests', {
+      const result = await dataAccess.updateRecord(COLLECTION_KEYS.interests, {
         ...existing,
         match_score: carrierData.matchScore || existing.match_score,
         action: carrierData.action || 'interested',
         action_timestamp: formattedDate
       }, { suppressAuth: true });
-
-      console.log(`📝 Updated existing interest for DOT ${carrierData.carrierDOT}`);
-      return { success: true, interest: updateResult.record, isUpdate: true };
+      return { success: true, interest: result.record, isUpdate: true };
     }
-    
-    // Create new interest record
+
     const interestData = {
       driver_id: profile._id,
       carrier_dot: String(carrierData.carrierDOT),
@@ -700,115 +431,61 @@ export async function logCarrierInterest(carrierData) {
       action: carrierData.action || 'interested',
       action_timestamp: formattedDate,
       driver_zip_at_match: profile.home_zip || '',
-      outcome: null,
-      outcome_date: null,
-      notes: null
-    };
-    
-    // Use dual-source data access for insert
-    const insertResult = await dataAccess.insertRecord('driverCarrierInterests', interestData, { suppressAuth: true });
-
-    if (!insertResult.success) {
-      throw new Error(insertResult.error || 'Failed to log interest');
-    }
-
-    console.log(`✅ Logged interest: Driver ${profile._id} → Carrier DOT ${carrierData.carrierDOT}`);
-
-    return {
-      success: true,
-      interest: insertResult.record,
-      isNew: true
+      outcome: null, outcome_date: null, notes: null
     };
 
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.interests, interestData, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error || 'Failed to log interest');
+
+    return { success: true, interest: result.record, isNew: true };
   } catch (error) {
     console.error('❌ Error logging carrier interest:', error);
     return { success: false, error: error.message };
   }
 }
 
-/**
- * Get all carriers a driver has expressed interest in
- */
 export async function getDriverInterests() {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in', interests: [] };
-    }
-    
-    const userId = currentUser.id;
-    const profile = await getProfileByUserId(userId);
-    
-    if (!profile) {
-      return { success: false, error: 'Profile not found', interests: [] };
-    }
-    
-    const result = await dataAccess.queryRecords('driverCarrierInterests', {
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in', interests: [] };
+
+    const profile = await getProfileByUserId(currentUser.id);
+    if (!profile) return { success: false, error: 'Profile not found', interests: [] };
+
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
       filters: { driver_id: profile._id },
       sort: [{ field: 'action_timestamp', direction: 'desc' }],
       limit: 100,
       suppressAuth: true
     });
 
-    if (!result.success) {
-      return { success: false, error: result.error, interests: [] };
-    }
-
-    console.log(`📋 Found ${result.items.length} interests for driver ${profile._id}`);
-
-    return {
-      success: true,
-      interests: result.items,
-      totalCount: result.totalCount || result.items.length
-    };
-    
+    if (!result.success) return { success: false, error: result.error, interests: [] };
+    return { success: true, interests: result.items, totalCount: result.totalCount || result.items.length };
   } catch (error) {
     console.error('❌ Error getting driver interests:', error);
     return { success: false, error: error.message, interests: [] };
   }
 }
 
-/**
- * Remove interest in a carrier
- */
 export async function removeCarrierInterest(carrierDOT) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
-    
-    const userId = currentUser.id;
-    const profile = await getProfileByUserId(userId);
-    
-    if (!profile) {
-      return { success: false, error: 'Profile not found' };
-    }
-    
-    const existingResult = await dataAccess.queryRecords('driverCarrierInterests', {
-      filters: {
-        driver_id: profile._id,
-        carrier_dot: String(carrierDOT)
-      },
-      limit: 1,
-      suppressAuth: true
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in' };
+
+    const profile = await getProfileByUserId(currentUser.id);
+    if (!profile) return { success: false, error: 'Profile not found' };
+
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { driver_id: profile._id, carrier_dot: String(carrierDOT) },
+      limit: 1, suppressAuth: true
     });
 
-    if (!existingResult.success || existingResult.items.length === 0) {
-      return { success: false, error: 'Interest not found' };
-    }
+    if (!result.success || result.items.length === 0) return { success: false, error: 'Interest not found' };
 
-    const deleteResult = await dataAccess.deleteRecord('driverCarrierInterests', existingResult.items[0]._id, { suppressAuth: true });
+    const delResult = await dataAccess.removeRecord(COLLECTION_KEYS.interests, result.items[0]._id, { suppressAuth: true });
+    if (!delResult.success) throw new Error(delResult.error || 'Failed to remove interest');
 
-    if (!deleteResult.success) {
-      throw new Error(deleteResult.error || 'Failed to remove interest');
-    }
-
-    console.log(`🗑️ Removed interest for DOT ${carrierDOT}`);
     return { success: true };
-    
   } catch (error) {
     console.error('❌ Error removing interest:', error);
     return { success: false, error: error.message };
@@ -819,143 +496,89 @@ export async function removeCarrierInterest(carrierDOT) {
 // ADMIN/ANALYTICS FUNCTIONS
 // ============================================================================
 
-/**
- * Get interest signals for a specific carrier (for carrier dashboard)
- * Only returns aggregate data, not individual driver info (privacy)
- */
 export async function getCarrierInterestStats(carrierDOT) {
   try {
-    const dotString = String(carrierDOT);
-
-    const result = await dataAccess.queryRecords('driverCarrierInterests', {
-      filters: { carrier_dot: dotString },
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { carrier_dot: String(carrierDOT) },
       suppressAuth: true
     });
 
-    if (!result.success) {
-      return { success: false, error: result.error };
-    }
+    if (!result.success) return { success: false, error: result.error };
+    const interests = result.items || [];
 
-    const interests = result.items;
-    
-    // Aggregate stats (no PII)
     const stats = {
-      carrier_dot: dotString,
+      carrier_dot: String(carrierDOT),
       total_interests: interests.length,
       interests_last_30_days: 0,
       interests_last_7_days: 0,
       avg_match_score: 0,
       top_driver_zips: {}
     };
-    
+
     const now = new Date();
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    
+
     let totalScore = 0;
-    
-    for (const interest of interests) {
+    interests.forEach(interest => {
       const actionDate = new Date(interest.action_timestamp);
-      
       if (actionDate >= thirtyDaysAgo) stats.interests_last_30_days++;
       if (actionDate >= sevenDaysAgo) stats.interests_last_7_days++;
-      
       totalScore += interest.match_score || 0;
-      
-      // Aggregate ZIPs (first 3 digits only for privacy)
       const zipPrefix = (interest.driver_zip_at_match || '').substring(0, 3);
-      if (zipPrefix) {
-        stats.top_driver_zips[zipPrefix] = (stats.top_driver_zips[zipPrefix] || 0) + 1;
-      }
-    }
-    
-    stats.avg_match_score = interests.length > 0 
-      ? Math.round(totalScore / interests.length) 
-      : 0;
-    
-    // Convert ZIP counts to sorted array
+      if (zipPrefix) stats.top_driver_zips[zipPrefix] = (stats.top_driver_zips[zipPrefix] || 0) + 1;
+    });
+
+    stats.avg_match_score = interests.length > 0 ? Math.round(totalScore / interests.length) : 0;
     stats.top_driver_zips = Object.entries(stats.top_driver_zips)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5)
       .map(([zip, count]) => ({ zip_prefix: zip, count }));
-    
+
     return { success: true, stats };
-    
   } catch (error) {
     console.error('❌ Error getting carrier stats:', error);
     return { success: false, error: error.message };
   }
 }
 
-/**
- * Get platform-wide driver activity stats (for admin dashboard)
- */
 export async function getDriverActivityStats() {
   try {
+    const profiles = await dataAccess.getAllRecords(COLLECTION_KEYS.profiles, { suppressAuth: true });
+    
     const now = new Date();
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-    // Get all profiles using dual-source data access
-    const profileResult = await dataAccess.getAllRecords('driverProfiles', { suppressAuth: true });
-
-    const profiles = profileResult || [];
-    
-    // Calculate stats
     const stats = {
-      total_profiles: profiles.length,
-      active_last_30_days: 0,
-      active_last_7_days: 0,
-      discoverable_profiles: 0,
-      complete_profiles: 0,
-      avg_completeness: 0,
-      avg_searches_per_driver: 0,
-      profile_status_breakdown: {
-        active: 0,
-        incomplete: 0,
-        dormant: 0
-      }
+      total_profiles: profiles.length, active_last_30_days: 0, active_last_7_days: 0,
+      discoverable_profiles: 0, complete_profiles: 0, avg_completeness: 0, avg_searches_per_driver: 0,
+      profile_status_breakdown: { active: 0, incomplete: 0, dormant: 0 }
     };
-    
-    let totalCompleteness = 0;
-    let totalSearches = 0;
-    
-    for (const profile of profiles) {
+
+    let totalCompleteness = 0, totalSearches = 0;
+    profiles.forEach(profile => {
       const lastSearch = profile.last_search_date ? new Date(profile.last_search_date) : null;
-      
       if (lastSearch && lastSearch >= thirtyDaysAgo) stats.active_last_30_days++;
       if (lastSearch && lastSearch >= sevenDaysAgo) stats.active_last_7_days++;
-      
       if (profile.is_discoverable) stats.discoverable_profiles++;
       if (profile.profile_completeness_score >= 80) stats.complete_profiles++;
-      
       totalCompleteness += profile.profile_completeness_score || 0;
       totalSearches += profile.total_searches || 0;
-      
       const status = profile.profile_status || 'incomplete';
       stats.profile_status_breakdown[status] = (stats.profile_status_breakdown[status] || 0) + 1;
-    }
-    
-    stats.avg_completeness = profiles.length > 0 
-      ? Math.round(totalCompleteness / profiles.length) 
-      : 0;
-    
-    stats.avg_searches_per_driver = profiles.length > 0 
-      ? Math.round((totalSearches / profiles.length) * 10) / 10 
-      : 0;
-    
-    // Get interest stats using dual-source data access
-    const interestResult = await dataAccess.queryRecords('driverCarrierInterests', {
-      filters: {
-        action_timestamp: { gte: thirtyDaysAgo }
-      },
-      suppressAuth: true
     });
 
+    stats.avg_completeness = profiles.length > 0 ? Math.round(totalCompleteness / profiles.length) : 0;
+    stats.avg_searches_per_driver = profiles.length > 0 ? Math.round((totalSearches / profiles.length) * 10) / 10 : 0;
+
+    const interestResult = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { action_timestamp: { gte: thirtyDaysAgo } },
+      suppressAuth: true
+    });
     stats.total_interests_30_days = interestResult.success ? (interestResult.totalCount || interestResult.items.length) : 0;
-    
+
     return { success: true, stats };
-    
   } catch (error) {
     console.error('❌ Error getting activity stats:', error);
     return { success: false, error: error.message };
@@ -963,212 +586,95 @@ export async function getDriverActivityStats() {
 }
 
 // ============================================================================
-// HELPER FUNCTIONS
+// HELPERS
 // ============================================================================
 
-/**
- * Calculate profile completeness score (0-100)
- */
-/**
- * Calculate profile completeness score (0-100)
- */
 function calculateCompleteness(profile) {
   let score = 0;
   const weights = CONFIG.COMPLETENESS_WEIGHTS;
-  
-  // Base Info (20%)
-  if (profile.display_name && profile.display_name.trim().length > 0) score += weights.display_name;
-  if (profile.email && profile.email.includes('@')) score += weights.email;
-  if (profile.phone && profile.phone.length >= 10) score += weights.phone;
-  
-  // Experience (30%)
+  if (profile.display_name?.trim().length > 0) score += weights.display_name;
+  if (profile.email?.includes('@')) score += weights.email;
+  if (profile.phone?.length >= 10) score += weights.phone;
   if (profile.years_experience !== null && profile.years_experience >= 0) score += weights.years_experience;
-  if (profile.cdl_class && profile.cdl_class.length > 0) score += weights.cdl_class;
-  if (profile.endorsements && profile.endorsements.length > 0) score += weights.endorsements;
+  if (profile.cdl_class) score += weights.cdl_class;
+  if (profile.endorsements?.length > 0) score += weights.endorsements;
   if (profile.clean_mvr !== null) score += weights.clean_mvr;
   if (profile.accidents_last_3_years !== null) score += weights.accidents_last_3_years;
   if (profile.violations_last_3_years !== null) score += weights.violations_last_3_years;
-
-  // Documents (30%)
   if (profile.cdl_front_image && profile.cdl_back_image) score += weights.cdl_images;
   if (profile.med_card_image) score += weights.med_card_image;
-  
-  // Preferences (20%)
-  if (profile.home_zip && profile.home_zip.length >= 5) score += weights.home_zip;
+  if (profile.home_zip?.length >= 5) score += weights.home_zip;
   if (profile.preferred_operation_type && profile.preferred_operation_type !== 'no_preference') score += weights.preferred_operation_type;
-  if (profile.min_cpm && profile.min_cpm > 0) score += weights.min_cpm;
+  if (profile.min_cpm > 0) score += weights.min_cpm;
   if (profile.fleet_size_preference && profile.fleet_size_preference !== 'no_preference') score += weights.fleet_size_preference;
-
   return Math.min(100, score);
 }
 
-/**
- * Enrich profile with computed fields for frontend
- */
-/**
- * Enrich profile with computed fields for frontend
- */
 function enrichProfile(profile) {
   if (!profile) return null;
-  
   const completeness = calculateCompleteness(profile);
   const weights = CONFIG.COMPLETENESS_WEIGHTS;
-  
-  // Create detailed suggestions list with point values
   const suggestions = [];
-  
-  // Base Info
   if (!profile.display_name) suggestions.push({ label: 'Add your name', points: weights.display_name, action: 'edit_profile' });
   if (!profile.phone) suggestions.push({ label: 'Add phone number', points: weights.phone, action: 'edit_profile' });
-  
-  // Experience
   if (profile.years_experience === null) suggestions.push({ label: 'Set years of experience', points: weights.years_experience, action: 'edit_experience' });
   if (!profile.cdl_class) suggestions.push({ label: 'Set CDL Class', points: weights.cdl_class, action: 'edit_experience' });
-  
-  // Documents
-  if (!profile.cdl_front_image || !profile.cdl_back_image) {
-    suggestions.push({ label: 'Upload CDL Photos', points: weights.cdl_images, action: 'upload_documents' });
-  }
-  if (!profile.med_card_image) {
-    suggestions.push({ label: 'Upload Medical Card', points: weights.med_card_image, action: 'upload_documents' });
-  }
-  
-  // Preferences
+  if (!profile.cdl_front_image || !profile.cdl_back_image) suggestions.push({ label: 'Upload CDL Photos', points: weights.cdl_images, action: 'upload_documents' });
+  if (!profile.med_card_image) suggestions.push({ label: 'Upload Medical Card', points: weights.med_card_image, action: 'upload_documents' });
   if (!profile.home_zip) suggestions.push({ label: 'Set Home ZIP', points: weights.home_zip, action: 'edit_preferences' });
   if (!profile.min_cpm) suggestions.push({ label: 'Set Pay Expectations', points: weights.min_cpm, action: 'edit_preferences' });
-  
-  // Backward compatibility for existing frontend code that uses missing_fields array of strings
-  const missingFields = suggestions.map(s => s.label);
-  
+
   return {
-    ...profile,
-    profile_completeness_score: completeness,
-    missing_fields: missingFields,
-    suggestions: suggestions,
-    is_complete: completeness >= 80,
-    can_be_discovered: profile.is_discoverable && completeness >= 50
+    ...profile, profile_completeness_score: completeness, missing_fields: suggestions.map(s => s.label),
+    suggestions, is_complete: completeness >= 80, can_be_discovered: profile.is_discoverable && completeness >= 50
   };
 }
 
-// ============================================================================
-// PROFILE INSIGHTS
-// ============================================================================
-
-/**
- * Get list of carriers who viewed the driver's profile
- * Used for "Who's Viewed You" dashboard widget
- */
 export async function getDriverProfileViews(limit = 10) {
   try {
-    const currentUser = await wixUsersBackend.currentUser;
-    
-    if (!currentUser.loggedIn) {
-      return { success: false, error: 'User not logged in', views: [] };
-    }
-    
-    // Get driver profile first
-    const driverProfile = await getProfileByUserId(currentUser.id);
-    if (!driverProfile) {
-      return { success: false, error: 'Driver profile not found', views: [] };
-    }
-    
-    console.log(`👀 Getting profile views for driver ${driverProfile._id}`);
+    const currentUser = wixUsersBackend.currentUser;
+    if (!currentUser.loggedIn) return { success: false, error: 'User not logged in', views: [] };
 
-    // Query views
-    const viewsResult = await dataAccess.queryRecords('carrierDriverViews', {
-      filters: {
-        driver_id: driverProfile._id
-      },
-      sort: [{ field: '_createdDate', direction: 'desc' }], // Wix field
-      limit: limit,
-      suppressAuth: true
+    const profile = await getProfileByUserId(currentUser.id);
+    if (!profile) return { success: false, error: 'Driver profile not found', views: [] };
+
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.views, {
+      filters: { driver_id: profile._id },
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit, suppressAuth: true
     });
 
-    if (!viewsResult.success || viewsResult.items.length === 0) {
-      return { success: true, views: [], totalCount: 0 };
-    }
-    
-    const views = viewsResult.items;
-    
-    // Extract unique carrier DOTs to fetch company details
+    if (!result.success || !result.items?.length) return { success: true, views: [], totalCount: 0 };
+    const views = result.items;
     const uniqueDots = [...new Set(views.map(v => v.carrier_dot))];
-    
-    // Fetch carrier details
-    // Note: We can't do a simple "IN" query easily with dataAccess if it doesn't support it strictly
-    // So we'll fetch them individually or use a filter query if the list is small
-    
-    let carriers = [];
-    if (uniqueDots.length > 0) {
-       // Only fetch what we need (Company Name, Location)
-       // Using a promise.all for specific DOTs or a larger query if possible
-       // For now, let's assume we can query by DOT
-       // If uniqueDots is large, we might want to optimize this. For limit=10, it's fine.
-       
-       const carrierPromises = uniqueDots.map(dot => 
-         dataAccess.queryRecords('carriers', {
-           filters: { dot_number: parseInt(dot) }, // Ensure number type for DOT if required
-           limit: 1,
-           suppressAuth: true
-         })
-       );
-       
-       const carrierResults = await Promise.all(carrierPromises);
-       carriers = carrierResults
-         .filter(r => r.success && r.items.length > 0)
-         .map(r => r.items[0]);
-    }
-    
-    // Map details back to views
+
+    const carrierPromises = uniqueDots.map(dot => dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { dot_number: parseInt(dot) }, limit: 1, suppressAuth: true
+    }));
+
+    const carrierResults = await Promise.all(carrierPromises);
+    const carriers = carrierResults.filter(r => r.success && r.items?.length).map(r => r.items[0]);
+
     const enrichedViews = views.map(view => {
       const carrier = carriers.find(c => String(c.dot_number) === String(view.carrier_dot));
       return {
-        view_id: view._id,
-        carrier_dot: view.carrier_dot,
-        carrier_name: carrier ? carrier.company_name : 'Unknown Carrier',
-        carrier_city: carrier ? carrier.city : '',
-        carrier_state: carrier ? carrier.state : '',
-        viewed_at: view._createdDate || view['Created Time'], // Handle both Wix/Airtable
-        view_type: view.view_type || 'full_profile'
+        view_id: view._id, carrier_dot: view.carrier_dot, carrier_name: carrier ? (carrier.legal_name || carrier.company_name) : 'Unknown Carrier',
+        carrier_city: carrier?.city || '', carrier_state: carrier?.state || '', viewed_at: view._createdDate, view_type: view.view_type || 'full_profile'
       };
     });
 
-    return {
-      success: true,
-      views: enrichedViews,
-      totalCount: viewsResult.totalCount || enrichedViews.length
-    };
-
+    return { success: true, views: enrichedViews, totalCount: result.totalCount || enrichedViews.length };
   } catch (error) {
     console.error('❌ Error getting profile views:', error);
     return { success: false, error: error.message, views: [] };
   }
 }
 
-// ============================================================================
-// TESTING
-// ============================================================================
-
-/**
- * Test the driver profile system
- */
 export async function testDriverProfileSystem() {
-  console.log('=== DRIVER PROFILE SYSTEM TEST ===');
-  
   try {
-    // Test getOrCreate
     const result = await getOrCreateDriverProfile();
-    console.log('getOrCreateDriverProfile:', result.success ? 'PASS' : 'FAIL');
-    
-    if (result.success) {
-      console.log('Profile ID:', result.profile._id);
-      console.log('Is New:', result.isNew);
-      console.log('Completeness:', result.profile.profile_completeness_score);
-    }
-    
     return result;
-    
   } catch (error) {
-    console.error('Test failed:', error);
     return { success: false, error: error.message };
   }
 }

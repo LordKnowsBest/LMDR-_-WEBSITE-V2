@@ -1,22 +1,7 @@
-/**
- * Rest Stop Service - Community reviews and condition reporting
- * Phase 4 of Driver Road Utilities
- */
-
-import wixData from 'wix-data';
 import wixUsers from 'wix-users-backend';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
-// ============================================
-// COLLECTIONS
-// ============================================
-const COLLECTIONS = {
-    REVIEWS: 'RestStopReviews',
-    CONDITIONS: 'RestStopConditionReports',
-    LOCATIONS: 'ParkingLocations' // Reference to Phase 1 collection
-};
-
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     restStopReviews: 'restStopReviews',
     restStopConditionReports: 'restStopConditionReports',
@@ -24,251 +9,109 @@ const COLLECTION_KEYS = {
 };
 
 // ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.eq) {
-        for (const [field, value] of Object.entries(options.eq)) {
-            query = query.eq(field, value);
-        }
-    }
-    if (options.gt) {
-        for (const [field, value] of Object.entries(options.gt)) {
-            query = query.gt(field, value);
-        }
-    }
-    if (options.descending) {
-        query = query.descending(options.descending);
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    return (await query.find({ suppressAuth: true })).items;
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
-
-// ============================================
 // SERVICE FUNCTIONS
 // ============================================
 
-/**
- * Get reviews for a specific location
- * @param {string} locationId - The ID of the parking location
- * @param {Object} options - { limit, offset, sort }
- */
 export async function getLocationReviews(locationId, options = {}) {
-    if (!locationId) return { success: false, error: 'Location ID is required' };
-
+    if (!locationId) return { success: false, error: 'Location ID required' };
     try {
-        const limit = options.limit || 20;
-        const sort = options.sort || 'recent'; // recent, helpful, rating
-
-        // Query reviews
-        let query = wixData.query(COLLECTIONS.REVIEWS).eq('location_id', locationId);
-
-        if (sort === 'helpful') {
-            query = query.descending('helpful_votes');
-        } else if (sort === 'rating') {
-            query = query.descending('overall_rating');
-        } else {
-            query = query.descending('created_at');
-        }
-
-        const result = await query.limit(limit).find({ suppressAuth: true });
+        const sort = options.sort || 'recent';
+        const queryOptions = { filters: { location_id: locationId }, limit: options.limit || 20, suppressAuth: true };
         
-        // Calculate aggregate stats if needed (could be cached on location record)
-        const stats = await calculateLocationStats(locationId);
+        if (sort === 'helpful') queryOptions.sort = [{ field: 'helpful_votes', direction: 'desc' }];
+        else if (sort === 'rating') queryOptions.sort = [{ field: 'overall_rating', direction: 'desc' }];
+        else queryOptions.sort = [{ field: '_createdDate', direction: 'desc' }];
 
-        return {
-            success: true,
-            reviews: result.items,
-            stats: stats
-        };
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.restStopReviews, queryOptions);
+        const stats = await calculateLocationStats(locationId);
+        return { success: true, reviews: result.items || [], stats };
     } catch (error) {
-        console.error('[RestStopService] getLocationReviews failed:', error);
         return { success: false, error: error.message };
     }
 }
 
-/**
- * Submit a new review
- * @param {string} locationId 
- * @param {Object} reviewData - { overall_rating, ratings: {}, text, photos: [] }
- */
 export async function submitReview(locationId, reviewData) {
     const user = wixUsers.currentUser;
     if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
     
-    // Check for duplicate review in last 30 days
-    const recentReviews = await wixData.query(COLLECTIONS.REVIEWS)
-        .eq('location_id', locationId)
-        .eq('driver_id', user.id)
-        .gt('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
-        .find({ suppressAuth: true });
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const recentRes = await dataAccess.queryRecords(COLLECTION_KEYS.restStopReviews, {
+        filters: { location_id: locationId, driver_id: user.id, _createdDate: { gt: thirtyDaysAgo } },
+        limit: 1, suppressAuth: true
+    });
 
-    if (recentReviews.items.length > 0) {
-        return { success: false, error: 'You have already reviewed this location recently.' };
-    }
+    if (recentRes.items?.length) return { success: false, error: 'Already reviewed recently' };
 
-    // Prepare review object
-    const newReview = {
-        location_id: locationId,
-        driver_id: user.id,
-        overall_rating: reviewData.overall_rating,
-        ratings: reviewData.ratings || {}, // { cleanliness: 5, safety: 4, ... }
-        review_text: reviewData.text,
-        photos: reviewData.photos || [],
-        helpful_votes: 0,
-        is_verified: false, // Could integrate geolocation check here
-        created_at: new Date(),
-        updated_at: new Date()
+    const record = {
+        location_id: locationId, driver_id: user.id, overall_rating: reviewData.overall_rating,
+        ratings: JSON.stringify(reviewData.ratings || {}), review_text: reviewData.text,
+        photos: JSON.stringify(reviewData.photos || []), helpful_votes: 0, is_verified: false,
+        _createdDate: new Date()
     };
 
-    try {
-        const result = await wixData.insert(COLLECTIONS.REVIEWS, newReview, { suppressAuth: true });
-        
-        // Update aggregated stats logic would go here or be scheduled
-        
-        return { success: true, review: result };
-    } catch (error) {
-        console.error('[RestStopService] submitReview failed:', error);
-        return { success: false, error: error.message };
-    }
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.restStopReviews, record, { suppressAuth: true });
+    return { success: result.success, review: result.record };
 }
 
-/**
- * Submit a real-time condition report (e.g., "Showers broken", "Lot full")
- * @param {string} locationId
- * @param {Object} reportData - { type, details }
- */
 export async function submitConditionReport(locationId, reportData) {
     const user = wixUsers.currentUser;
     if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
 
-    const report = {
-        location_id: locationId,
-        report_type: reportData.type, // 'shower_wait', 'lot_full', 'hazard', 'cleanliness'
-        details: reportData.details,
-        reporter_id: user.id,
-        confirmations: 0,
-        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hour TTL
-        created_at: new Date()
+    const record = {
+        location_id: locationId, report_type: reportData.type, details: reportData.details,
+        reporter_id: user.id, confirmations: 0,
+        expires_at: new Date(Date.now() + 24 * 3600000).toISOString(), _createdDate: new Date()
     };
 
-    try {
-        const result = await wixData.insert(COLLECTIONS.CONDITIONS, report, { suppressAuth: true });
-        return { success: true, report: result };
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.restStopConditionReports, record, { suppressAuth: true });
+    return { success: result.success, report: result.record };
 }
 
-/**
- * Vote on a review's helpfulness
- */
 export async function voteReview(reviewId, isHelpful) {
     const user = wixUsers.currentUser;
     if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
 
     try {
-        // Ideally we'd track votes in a separate collection to prevent double voting
-        // For simplicity, we just increment counter
-        const review = await wixData.get(COLLECTIONS.REVIEWS, reviewId, { suppressAuth: true });
-        if (!review) return { success: false, error: 'Review not found' };
+        const review = await dataAccess.getRecord(COLLECTION_KEYS.restStopReviews, reviewId, { suppressAuth: true });
+        if (!review) return { success: false, error: 'Not found' };
 
-        const update = {
-            ...review,
-            helpful_votes: (review.helpful_votes || 0) + (isHelpful ? 1 : -1)
-        };
-
-        await wixData.update(COLLECTIONS.REVIEWS, update, { suppressAuth: true });
+        const update = { ...review, _id: reviewId, helpful_votes: (review.helpful_votes || 0) + (isHelpful ? 1 : -1) };
+        await dataAccess.updateRecord(COLLECTION_KEYS.restStopReviews, update, { suppressAuth: true });
         return { success: true, helpful_votes: update.helpful_votes };
     } catch (error) {
         return { success: false, error: error.message };
     }
 }
 
-/**
- * Get top rated stops in an area
- */
 export async function getTopRatedStops(lat, lng, radius, filters = {}) {
-    // This is complex because we need to join Locations with Reviews (or aggregated stats)
-    // For MVP, we assume ParkingLocations has avg_rating field updated by a scheduled job
-    // or we query top rated and then filter by distance.
-    
-    // For now, let's just query locations and sort by rating if available
-    // Assuming 'avg_rating' exists on ParkingLocations from the parkingService logic (it was in normalize functions!)
-    
     try {
-        // Reuse parking service logic or direct query
-        // Direct query for MVP
-        const locations = await wixData.query(COLLECTIONS.LOCATIONS)
-            .gt('avg_rating', 4)
-            .limit(50)
-            .find({ suppressAuth: true });
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.parkingLocations, {
+            filters: { avg_rating: { gt: 4 } }, limit: 50, suppressAuth: true
+        });
+        const locations = result.items || [];
             
-        // Filter by distance (Haversine) - reuse logic if possible or reimplement
-        const R = 3958.8; // Radius of Earth in miles
-        const items = locations.items.filter(loc => {
+        const R = 3958.8;
+        const items = locations.filter(loc => {
             if (!loc.location) return false;
             const dLat = (loc.location.lat - lat) * Math.PI / 180;
             const dLon = (loc.location.lng - lng) * Math.PI / 180;
-            const a = 
-                Math.sin(dLat/2) * Math.sin(dLat/2) +
-                Math.cos(lat * Math.PI / 180) * Math.cos(loc.location.lat * Math.PI / 180) * 
-                Math.sin(dLon/2) * Math.sin(dLon/2);
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat * Math.PI / 180) * Math.cos(loc.location.lat * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
             const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-            const d = R * c;
-            return d <= radius;
+            return (R * c) <= radius;
         });
 
-        // Sort by rating desc
         items.sort((a,b) => (b.avg_rating || 0) - (a.avg_rating || 0));
-
-        return { success: true, items: items };
-
+        return { success: true, items };
     } catch (error) {
         return { success: false, error: error.message };
     }
 }
 
-// Helper to calculate stats on the fly if needed
 async function calculateLocationStats(locationId) {
-    const reviews = await wixData.query(COLLECTIONS.REVIEWS)
-        .eq('location_id', locationId)
-        .find({ suppressAuth: true });
-        
-    if (reviews.totalCount === 0) return { avg_rating: 0, count: 0 };
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.restStopReviews, { filters: { location_id: locationId }, limit: 500, suppressAuth: true });
+    const items = result.items || [];
+    if (!items.length) return { avg_rating: 0, count: 0 };
     
-    const sum = reviews.items.reduce((acc, curr) => acc + (curr.overall_rating || 0), 0);
-    return {
-        avg_rating: (sum / reviews.totalCount).toFixed(1),
-        count: reviews.totalCount
-    };
+    const sum = items.reduce((acc, curr) => acc + (curr.overall_rating || 0), 0);
+    return { avg_rating: (sum / items.length).toFixed(1), count: items.length };
 }

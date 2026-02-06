@@ -1,19 +1,3 @@
-/**
- * Subscription Service - Carrier Subscription and Quota Management
- *
- * Manages subscription tiers, view quotas, and usage tracking for the
- * Reverse Matching Engine. Carriers must have active subscriptions to
- * search and view driver profiles.
- *
- * Subscription Tiers:
- * - free: No search, no views
- * - pro: Search allowed, 25 views/month
- * - enterprise: Unlimited everything (-1 for quota means unlimited)
- *
- * @see conductor/tracks/reverse_matching_20251225/spec.md
- */
-
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
 import { log } from 'backend/observabilityService';
 import {
@@ -23,20 +7,14 @@ import {
   createPlacementDepositCheckout,
   getPublishableKey
 } from 'backend/stripeService';
-
-// ============================================================================
-// Data Source Configuration
-// ============================================================================
-import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // Collection keys (camelCase, matching config.jsw)
-const SUBSCRIPTIONS_KEY = 'carrierSubscriptions';
-const VIEWS_KEY = 'carrierDriverViews';
-
-// Legacy collection names for wixData (kept for backward compatibility)
-const SUBSCRIPTIONS_COLLECTION = 'CarrierSubscriptions';
-const VIEWS_COLLECTION = 'CarrierDriverViews';
+const COLLECTION_KEYS = {
+  subscriptions: 'carrierSubscriptions',
+  views: 'carrierDriverViews',
+  carrierAccounts: 'carriers'
+};
 
 // Default free tier subscription object
 const DEFAULT_FREE_SUBSCRIPTION = {
@@ -52,8 +30,6 @@ const DEFAULT_FREE_SUBSCRIPTION = {
 
 /**
  * Checks if a subscription has valid data (not malformed)
- * @param {Object} subscription
- * @returns {boolean}
  */
 function isValidSubscription(subscription) {
   return subscription &&
@@ -62,40 +38,22 @@ function isValidSubscription(subscription) {
     typeof subscription.is_active === 'boolean';
 }
 
-/**
- * Gets the start of today (midnight) for date comparisons
- * @returns {Date}
- */
 function getStartOfToday() {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
 }
 
-/**
- * Gets a date one month from now
- * @returns {Date}
- */
 function getOneMonthFromNow() {
   const date = new Date();
   date.setMonth(date.getMonth() + 1);
   return date;
 }
 
-/**
- * Calculates days between two dates
- * @param {Date} from
- * @param {Date} to
- * @returns {number}
- */
 function daysBetween(from, to) {
   const msPerDay = 1000 * 60 * 60 * 24;
   return Math.ceil((to - from) / msPerDay);
 }
 
-/**
- * Gets the current billing period string (YYYY-MM format)
- * @returns {string}
- */
 function getCurrentBillingPeriod() {
   const now = new Date();
   const year = now.getFullYear();
@@ -103,575 +61,305 @@ function getCurrentBillingPeriod() {
   return `${year}-${month}`;
 }
 
-/**
- * Calculates remaining views for a subscription
- * @param {Object} subscription
- * @returns {number} - Remaining views (-1 for unlimited, 0 or positive for limited)
- */
 function calculateRemaining(subscription) {
-  if (!subscription || !subscription.is_active) {
-    return 0;
-  }
-  if (subscription.monthly_view_quota === -1) {
-    return -1; // Unlimited
-  }
+  if (!subscription || !subscription.is_active) return 0;
+  if (subscription.monthly_view_quota === -1) return -1;
   return Math.max(0, subscription.monthly_view_quota - subscription.views_used_this_month);
 }
 
 // ============================================================================
-// Data Abstraction Layer Helpers
-// ============================================================================
-
-/**
- * Query records from the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Function} wixQueryBuilder - Function that builds and executes wixData query
- * @param {Object} airtableOptions - Options for Airtable query
- * @returns {Promise<Object>} Query result with items array
- */
-async function queryData(collectionKey, wixQueryBuilder, airtableOptions = {}) {
-  if (usesAirtable(collectionKey)) {
-    try {
-      const tableName = getAirtableTableName(collectionKey);
-      const result = await airtable.queryRecords(tableName, airtableOptions);
-      return { items: result.records || [], totalCount: (result.records || []).length };
-    } catch (error) {
-      console.error(`[SubscriptionService] Airtable query error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  return await wixQueryBuilder();
-}
-
-/**
- * Insert a record into the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Object} record - Record to insert
- * @returns {Promise<Object>} Inserted record
- */
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    try {
-      const tableName = getAirtableTableName(collectionKey);
-      return await airtable.createRecord(tableName, record);
-    } catch (error) {
-      console.error(`[SubscriptionService] Airtable insert error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  const wixCollection = getWixCollectionName(collectionKey);
-  return await wixData.insert(wixCollection, record, { suppressAuth: true });
-}
-
-/**
- * Update a record in the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Object} record - Record with _id to update
- * @returns {Promise<Object>} Updated record
- */
-async function updateData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    try {
-      const tableName = getAirtableTableName(collectionKey);
-      const { _id, ...fields } = record;
-      return await airtable.updateRecord(tableName, _id, fields);
-    } catch (error) {
-      console.error(`[SubscriptionService] Airtable update error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  const wixCollection = getWixCollectionName(collectionKey);
-  return await wixData.update(wixCollection, record, { suppressAuth: true });
-}
-
-// ============================================================================
-// 1. getSubscription(carrierDot)
+// MAIN FUNCTIONS
 // ============================================================================
 
 /**
  * Gets the active subscription for a carrier
- *
- * @param {string} carrierDot - The carrier's DOT number
- * @returns {Promise<Object>} - Subscription object (defaults to free tier if not found)
  */
 export async function getSubscription(carrierDot) {
   try {
-    // Handle null/undefined carrierDot
-    if (!carrierDot) {
+    if (!carrierDot) return { ...DEFAULT_FREE_SUBSCRIPTION };
+
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.subscriptions, {
+      filters: { 
+        carrier_dot: carrierDot, 
+        is_active: true 
+      },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (!result.success || result.items.length === 0) {
       return { ...DEFAULT_FREE_SUBSCRIPTION };
     }
 
-    let items = [];
-
-    if (usesAirtable(SUBSCRIPTIONS_KEY)) {
-      // Airtable query
-      const filter = `AND({Carrier DOT} = '${carrierDot}', {Is Active} = TRUE())`;
-      const result = await airtable.queryRecords(getAirtableTableName(SUBSCRIPTIONS_KEY), {
-        filterByFormula: filter,
-        maxRecords: 1
-      });
-      items = result.records || [];
-    } else {
-      // Wix query
-      const result = await wixData.query(SUBSCRIPTIONS_COLLECTION)
-        .eq('carrier_dot', carrierDot)
-        .eq('is_active', true)
-        .find();
-      items = result.items;
-    }
-
-    if (items.length === 0) {
-      return { ...DEFAULT_FREE_SUBSCRIPTION };
-    }
-
-    const subscription = items[0];
-
-    // Check if subscription data is valid
-    if (!isValidSubscription(subscription)) {
-      return { ...DEFAULT_FREE_SUBSCRIPTION };
-    }
-
-    // If subscription is inactive, treat as free tier
-    if (!subscription.is_active) {
+    const subscription = result.items[0];
+    if (!isValidSubscription(subscription) || !subscription.is_active) {
       return { ...DEFAULT_FREE_SUBSCRIPTION };
     }
 
     return subscription;
   } catch (error) {
-    // Log error but fallback to safe default
     console.error('getSubscription error:', error);
-    try {
-      await log({
-        level: 'ERROR',
-        source: 'subscription-service',
-        message: `Failed to get subscription for ${carrierDot}`,
-        details: { error: error.message }
-      });
-    } catch (e) { /* ignore log failure */ }
-
+    log({ level: 'ERROR', source: 'subscription-service', message: `Failed to get subscription for ${carrierDot}`, details: { error: error.message } }).catch(() => {});
     return { ...DEFAULT_FREE_SUBSCRIPTION };
   }
 }
 
-// ============================================================================
-// 2. checkViewQuota(carrierDot)
-// ============================================================================
-
 /**
  * Checks if a carrier has view quota remaining
- *
- * @param {string} carrierDot - The carrier's DOT number
- * @returns {Promise<Object>} - { hasQuota, remaining, resetDate }
  */
 export async function checkViewQuota(carrierDot) {
   try {
     const subscription = await getSubscription(carrierDot);
-
-    // Check if quota reset is needed and apply it
     const resetResult = await resetQuotaIfNeeded(subscription);
     const currentSub = resetResult.wasReset ? resetResult.subscription : subscription;
 
-    // Free tier - no quota
     if (currentSub.plan_type === 'free') {
-      return {
-        hasQuota: false,
-        remaining: 0,
-        resetDate: currentSub.quota_reset_date || null
-      };
+      return { hasQuota: false, remaining: 0, resetDate: currentSub.quota_reset_date || null };
     }
 
-    // Enterprise tier - unlimited
     if (currentSub.monthly_view_quota === -1) {
-      return {
-        hasQuota: true,
-        remaining: -1,
-        resetDate: currentSub.quota_reset_date
-      };
+      return { hasQuota: true, remaining: -1, resetDate: currentSub.quota_reset_date };
     }
 
-    // Pro tier - check remaining quota
     const remaining = calculateRemaining(currentSub);
-    return {
-      hasQuota: remaining > 0,
-      remaining,
-      resetDate: currentSub.quota_reset_date
-    };
+    return { hasQuota: remaining > 0, remaining, resetDate: currentSub.quota_reset_date };
   } catch (error) {
     console.error('checkViewQuota error:', error);
-    try {
-      await log({
-        level: 'ERROR',
-        source: 'subscription-service',
-        message: `checkViewQuota failed for ${carrierDot}`,
-        details: { error: error.message }
-      });
-    } catch (e) { /* ignore log failure */ }
-
-    // Fail safe - assume no quota on error to prevent exploitation
-    return {
-      hasQuota: false,
-      remaining: 0,
-      resetDate: null,
-      error: 'system_error'
-    };
+    log({ level: 'ERROR', source: 'subscription-service', message: `checkViewQuota failed for ${carrierDot}`, details: { error: error.message } }).catch(() => {});
+    return { hasQuota: false, remaining: 0, resetDate: null, error: 'system_error' };
   }
 }
 
-// ============================================================================
-// 3. recordProfileView(carrierDot, driverId, viewType, options)
-// ============================================================================
-
 /**
  * Records a profile view and increments the view count
- *
- * @param {string} carrierDot - The carrier's DOT number
- * @param {string} driverId - The driver profile ID being viewed
- * @param {string} viewType - Type of view ('match_list', 'full_profile', 'contact_reveal')
- * @param {Object} options - Additional options
- * @param {number} options.matchScore - Match score at time of view
- * @param {string} options.recruiterId - Recruiter who viewed
- * @returns {Promise<Object>} - { success, viewsUsed, remaining, error, alreadyViewed, viewId }
  */
 export async function recordProfileView(carrierDot, driverId, viewType, options = {}) {
   try {
     const subscription = await getSubscription(carrierDot);
+    if (subscription.plan_type === 'free') return { success: false, error: 'tier_not_allowed' };
 
-    // Free tier cannot view profiles
-    if (subscription.plan_type === 'free') {
-      return {
-        success: false,
-        error: 'tier_not_allowed'
-      };
-    }
-
-    // Check quota for non-enterprise tiers
     const isUnlimited = subscription.monthly_view_quota === -1;
     const remaining = calculateRemaining(subscription);
 
     if (!isUnlimited && remaining <= 0) {
-      return {
-        success: false,
-        error: 'quota_exhausted',
-        remaining: 0,
-        resetDate: subscription.quota_reset_date
-      };
+      return { success: false, error: 'quota_exhausted', remaining: 0, resetDate: subscription.quota_reset_date };
     }
 
-    // Check for existing view today (prevent duplicate counting)
+    // Check for existing view today
     const startOfToday = getStartOfToday();
-    let existingViewItems = [];
+    const existingViewResult = await dataAccess.queryRecords(COLLECTION_KEYS.views, {
+      filters: {
+        carrier_dot: carrierDot,
+        driver_id: driverId,
+        _createdDate: { gte: startOfToday }
+      },
+      limit: 1,
+      suppressAuth: true
+    });
 
-    if (usesAirtable(VIEWS_KEY)) {
-      // Airtable: Use formula to filter by date
-      const todayIso = startOfToday.toISOString().split('T')[0];
-      const filter = `AND({Carrier DOT} = '${carrierDot}', {Driver ID} = '${driverId}', IS_AFTER(CREATED_TIME(), '${todayIso}'))`;
-      const result = await airtable.queryRecords(getAirtableTableName(VIEWS_KEY), {
-        filterByFormula: filter,
-        maxRecords: 1
-      });
-      existingViewItems = result.records || [];
-    } else {
-      // Wix query
-      const existingViewResult = await wixData.query(VIEWS_COLLECTION)
-        .eq('carrier_dot', carrierDot)
-        .eq('driver_id', driverId)
-        .ge('_createdDate', startOfToday)
-        .find();
-      existingViewItems = existingViewResult.items;
+    if (existingViewResult.success && existingViewResult.items.length > 0) {
+      return { success: true, alreadyViewed: true, viewId: existingViewResult.items[0]._id };
     }
 
-    if (existingViewItems.length > 0) {
-      // Already viewed today, don't count again
-      return {
-        success: true,
-        alreadyViewed: true,
-        viewId: existingViewItems[0]._id
-      };
-    }
-
-    // Create the view record
     const viewRecord = {
       carrier_dot: carrierDot,
       driver_id: driverId,
       view_type: viewType,
-      billing_period: getCurrentBillingPeriod()
+      billing_period: getCurrentBillingPeriod(),
+      _createdDate: new Date()
     };
 
-    // Add optional fields if provided
-    if (options.matchScore !== undefined) {
-      viewRecord.match_score = options.matchScore;
-    }
-    if (options.recruiterId) {
-      viewRecord.recruiter_id = options.recruiterId;
-    }
+    if (options.matchScore !== undefined) viewRecord.match_score = options.matchScore;
+    if (options.recruiterId) viewRecord.recruiter_id = options.recruiterId;
 
-    await insertData(VIEWS_KEY, viewRecord);
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.views, viewRecord, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error);
 
-    // Increment the views_used_this_month counter
+    // Increment views counter
     const newViewsUsed = subscription.views_used_this_month + 1;
-    await updateData(SUBSCRIPTIONS_KEY, {
+    await dataAccess.updateRecord(COLLECTION_KEYS.subscriptions, {
       ...subscription,
       views_used_this_month: newViewsUsed
-    });
-
-    // Calculate new remaining
-    const newRemaining = isUnlimited ? -1 : Math.max(0, subscription.monthly_view_quota - newViewsUsed);
+    }, { suppressAuth: true });
 
     return {
       success: true,
       viewsUsed: newViewsUsed,
-      remaining: newRemaining
+      remaining: isUnlimited ? -1 : Math.max(0, subscription.monthly_view_quota - newViewsUsed)
     };
   } catch (error) {
     console.error('recordProfileView error:', error);
-    try {
-      await log({
-        level: 'ERROR',
-        source: 'subscription-service',
-        message: `recordProfileView failed for ${carrierDot}`,
-        details: { error: error.message, driverId, viewType }
-      });
-    } catch (e) { /* ignore log failure */ }
-
-    return {
-      success: false,
-      error: 'system_error'
-    };
+    log({ level: 'ERROR', source: 'subscription-service', message: `recordProfileView failed for ${carrierDot}`, details: { error: error.message, driverId, viewType } }).catch(() => {});
+    return { success: false, error: 'system_error' };
   }
 }
 
-// ============================================================================
-// 4. getUsageStats(carrierDot)
-// ============================================================================
-
 /**
  * Gets usage statistics for the current billing period
- *
- * @param {string} carrierDot - The carrier's DOT number
- * @returns {Promise<Object>} - Usage stats object
  */
 export async function getUsageStats(carrierDot) {
   try {
     const subscription = await getSubscription(carrierDot);
-
     const used = subscription.views_used_this_month || 0;
     const quota = subscription.monthly_view_quota || 0;
     const isUnlimited = quota === -1;
     const remaining = isUnlimited ? -1 : Math.max(0, quota - used);
     const isExhausted = !isUnlimited && used >= quota && quota > 0;
 
-    // Calculate days until reset
     let daysUntilReset = 0;
     if (subscription.quota_reset_date) {
-      const now = new Date();
-      const resetDate = new Date(subscription.quota_reset_date);
-      daysUntilReset = Math.max(0, daysBetween(now, resetDate));
+      daysUntilReset = Math.max(0, daysBetween(new Date(), new Date(subscription.quota_reset_date)));
     }
 
     return {
-      used,
-      quota,
-      remaining,
-      plan_type: subscription.plan_type,
-      isUnlimited,
-      isExhausted,
-      daysUntilReset,
-      resetDate: subscription.quota_reset_date
+      used, quota, remaining, plan_type: subscription.plan_type,
+      isUnlimited, isExhausted, daysUntilReset, resetDate: subscription.quota_reset_date
     };
   } catch (error) {
     console.error('getUsageStats error:', error);
-    // Return zero/empty stats on error
-    return {
-      used: 0,
-      quota: 0,
-      remaining: 0,
-      plan_type: 'unknown',
-      isUnlimited: false,
-      isExhausted: true, // Safe default
-      daysUntilReset: 0,
-      resetDate: null,
-      error: 'system_error'
-    };
+    return { used: 0, quota: 0, remaining: 0, plan_type: 'unknown', isUnlimited: false, isExhausted: true, daysUntilReset: 0, resetDate: null, error: 'system_error' };
   }
 }
 
-// ============================================================================
-// 5. canSearchDrivers(subscription)
-// ============================================================================
-
-/**
- * Checks if a subscription allows driver search
- *
- * @param {Object} subscription - Subscription object
- * @returns {boolean} - True if search is allowed
- */
 export function canSearchDrivers(subscription) {
-  if (!subscription) {
-    return false;
-  }
-
-  if (!subscription.is_active) {
-    return false;
-  }
-
-  // Free tier cannot search
-  if (subscription.plan_type === 'free') {
-    return false;
-  }
-
-  // Pro and Enterprise can search
-  return ['pro', 'enterprise'].includes(subscription.plan_type);
+  return subscription?.is_active && ['pro', 'enterprise'].includes(subscription.plan_type);
 }
 
-// ============================================================================
-// 6. canViewProfile(subscription)
-// ============================================================================
-
-/**
- * Checks if a subscription allows profile viewing (has quota available)
- *
- * @param {Object} subscription - Subscription object
- * @returns {boolean} - True if profile viewing is allowed
- */
 export function canViewProfile(subscription) {
-  if (!subscription) {
-    return false;
-  }
-
-  if (!subscription.is_active) {
-    return false;
-  }
-
-  // Free tier cannot view profiles
-  if (subscription.plan_type === 'free') {
-    return false;
-  }
-
-  // Enterprise has unlimited views
-  if (subscription.monthly_view_quota === -1) {
-    return true;
-  }
-
-  // Pro tier - check if quota is available
-  const remaining = calculateRemaining(subscription);
-  return remaining > 0;
+  if (!subscription?.is_active || subscription.plan_type === 'free') return false;
+  if (subscription.monthly_view_quota === -1) return true;
+  return calculateRemaining(subscription) > 0;
 }
-
-// ============================================================================
-// 7. resetQuotaIfNeeded(subscription)
-// ============================================================================
 
 /**
  * Resets quota if the billing cycle has passed
- *
- * @param {Object} subscription - Subscription object
- * @returns {Promise<Object>} - { wasReset, subscription }
  */
 export async function resetQuotaIfNeeded(subscription) {
   try {
-    // Handle null/undefined subscription
-    if (!subscription) {
-      return { wasReset: false, subscription: null };
-    }
-
-    // Free tier doesn't have quota to reset
-    if (subscription.plan_type === 'free') {
-      return { wasReset: false, subscription };
-    }
-
-    // Enterprise tier doesn't need quota reset (unlimited)
-    if (subscription.monthly_view_quota === -1) {
+    if (!subscription || subscription.plan_type === 'free' || subscription.monthly_view_quota === -1) {
       return { wasReset: false, subscription };
     }
 
     const now = new Date();
     const resetDate = subscription.quota_reset_date ? new Date(subscription.quota_reset_date) : null;
 
-    // Check if reset is needed (reset date is null or in the past)
-    const needsReset = !resetDate || resetDate <= now;
+    if (resetDate && resetDate > now) return { wasReset: false, subscription };
 
-    if (!needsReset) {
-      return { wasReset: false, subscription };
-    }
-
-    // Reset the quota
     const updatedSubscription = {
       ...subscription,
       views_used_this_month: 0,
       quota_reset_date: getOneMonthFromNow()
     };
 
-    await updateData(SUBSCRIPTIONS_KEY, updatedSubscription);
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.subscriptions, updatedSubscription, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error);
 
-    return {
-      wasReset: true,
-      subscription: updatedSubscription
-    };
+    return { wasReset: true, subscription: result.record };
   } catch (error) {
     console.error('resetQuotaIfNeeded error:', error);
-    // Log error but don't fail hard, just return no reset
-    try {
-      await log({
-        level: 'ERROR',
-        source: 'subscription-service',
-        message: `resetQuotaIfNeeded failed`,
-        details: { error: error.message }
-      });
-    } catch (e) { /* ignore log failure */ }
-
+    log({ level: 'ERROR', source: 'subscription-service', message: `resetQuotaIfNeeded failed`, details: { error: error.message } }).catch(() => {});
     return { wasReset: false, subscription };
   }
 }
 
 // ============================================================================
-// 8. Stripe Bridge Functions (Frontend Adapters)
+// Stripe Bridge Functions
 // ============================================================================
 
-/**
- * Helper to get current user's carrier DOT from profile
- */
 async function getCurrentCarrier() {
   const user = wixUsersBackend.currentUser;
-  if (!user.loggedIn) {
-    throw new Error('User not logged in');
-  }
+  if (!user.loggedIn) throw new Error('User not logged in');
 
   const email = await user.getEmail();
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.carrierAccounts, {
+    filters: { _owner: user.id },
+    limit: 1,
+    suppressAuth: true
+  });
 
-  // Query v2_Carriers (carrier accounts) by Owner
-  try {
-    let carrierItems = [];
-
-    if (usesAirtable('carrierAccounts')) {
-      const filter = `{Owner} = '${user.id}'`;
-      const result = await airtable.queryRecords(getAirtableTableName('carrierAccounts'), {
-        filterByFormula: filter,
-        maxRecords: 1
-      });
-      carrierItems = result.records || [];
-    } else {
-      const carrierResult = await wixData.query('Carriers')
-        .eq('_owner', user.id)
-        .limit(1)
-        .find({ suppressAuth: true });
-      carrierItems = carrierResult.items;
-    }
-
-    if (carrierItems.length > 0) {
-      const c = carrierItems[0];
-      return {
-        dotNumber: String(c.dot_number),
-        email: email
-      };
-    }
-  } catch (e) {
-    console.warn('Failed to find carrier by owner', e);
+  if (result.success && result.items.length > 0) {
+    return { dotNumber: String(result.items[0].dot_number), email };
   }
-
   throw new Error('No carrier profile found for this user');
+}
+
+export async function getAllPlanInfo() {
+  return {
+    pro: { id: 'pro', name: 'Pro', price: 24900, currency: 'usd', interval: 'month', quota: 25 },
+    enterprise: { id: 'enterprise', name: 'Enterprise', price: 74900, currency: 'usd', interval: 'month', quota: -1 }
+  };
+}
+
+export async function getStripePublishableKey() {
+  return await getPublishableKey();
+}
+
+export async function getFullSubscriptionStatus(carrierDot) {
+  let dot = carrierDot;
+  if (!dot) {
+    try {
+      const carrier = await getCurrentCarrier();
+      dot = carrier.dotNumber;
+    } catch (e) {
+      console.error('getFullSubscriptionStatus: No carrier context');
+      return { success: false, error: 'No carrier profile found' };
+    }
+  }
+  return await getSubscriptionDetails(dot);
+}
+
+export async function startCheckout(priceId, billingPeriod = 'monthly', fallbackEmail = null, fallbackDot = null) {
+  try {
+    let carrier;
+    try {
+      carrier = await getCurrentCarrier();
+    } catch (carrierError) {
+      let email = fallbackEmail;
+      if (!email) {
+        const user = wixUsersBackend.currentUser;
+        if (user.loggedIn) email = await user.getEmail();
+      }
+      if (email) carrier = { dotNumber: fallbackDot || 'PENDING', email };
+      else throw carrierError;
+    }
+
+    const baseUrl = 'https://www.lastmiledr.app';
+    const successUrl = `${baseUrl}/subscription-success?session_id={CHECKOUT_SESSION_ID}&plan=${priceId}`;
+    const cancelUrl = `${baseUrl}/subscription-canceled?plan=${priceId}`;
+
+    return await createCheckoutSession(priceId, carrier.dotNumber, carrier.email, successUrl, cancelUrl, billingPeriod);
+  } catch (error) {
+    console.error('startCheckout error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+export async function startPlacementCheckout(driverCount, formData = {}) {
+  try {
+    const email = formData.email;
+    if (!email) return { success: false, error: 'Email required for checkout' };
+
+    const carrierDot = formData.dotNumber || formData.carrierDot || 'PENDING';
+    const baseUrl = 'https://www.lastmiledr.app';
+    const successUrl = `${baseUrl}/placement-success?session_id={CHECKOUT_SESSION_ID}&drivers=${driverCount}`;
+    const cancelUrl = `${baseUrl}/subscription-canceled?service=placement`;
+
+    return await createPlacementDepositCheckout(carrierDot, email, driverCount, successUrl, cancelUrl, formData);
+  } catch (error) {
+    console.error('startPlacementCheckout error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+export async function openBillingPortal() {
+  try {
+    const carrier = await getCurrentCarrier();
+    const returnUrl = 'https://www.lastmiledr.app/carrier-dashboard';
+    return await createPortalSession(carrier.dotNumber, returnUrl);
+  } catch (error) {
+    console.error('openBillingPortal error:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 /**

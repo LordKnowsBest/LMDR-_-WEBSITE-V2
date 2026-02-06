@@ -1,100 +1,19 @@
-// ============================================================================
-// DOCUMENT COLLECTION SERVICE
-// ============================================================================
-// Handles document collection workflow for driver onboarding.
-// Features:
-// - Secure upload token generation with 48-hour expiry
-// - File type validation (PDF, JPG, PNG only, max 10MB)
-// - Document status state machine (REQUESTED -> UPLOADED -> VERIFIED/REJECTED)
-// - Reminder tracking (day 2, 5, 7 sequence)
-// - Expiration detection for CDL, Medical Card
-// ============================================================================
-
-import wixData from 'wix-data';
 import { v4 as uuidv4 } from 'uuid';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import * as emailService from 'backend/emailService';
 
-// Collection keys for dual-source routing
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     documentRequests: 'documentRequests',
     onboardingWorkflows: 'onboardingWorkflows',
     driverProfiles: 'driverProfiles'
 };
 
-// ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.eq) {
-        for (const [field, value] of Object.entries(options.eq)) {
-            query = query.eq(field, value);
-        }
-    }
-    if (options.hasSome) {
-        for (const [field, value] of Object.entries(options.hasSome)) {
-            query = query.hasSome(field, value);
-        }
-    }
-    if (options.lt) {
-        for (const [field, value] of Object.entries(options.lt)) {
-            query = query.lt(field, value);
-        }
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function getRecord(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.getRecord(tableName, recordId);
-    }
-    return await wixData.get(wixCollectionName, recordId, { suppressAuth: true });
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
-
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
 
 const CONFIG = {
-    collections: {
-        documentRequests: 'DocumentRequests',
-        onboardingWorkflows: 'OnboardingWorkflows',
-        driverProfiles: 'DriverProfiles'
-    },
-
     // Document types enum
     documentTypes: {
         CDL_FRONT: 'cdl_front',
@@ -146,157 +65,50 @@ const CONFIG = {
 // ============================================================================
 
 const DOCUMENT_METADATA = {
-    cdl_front: {
-        displayName: 'CDL Front',
-        description: 'Please upload a clear photo of the front of your CDL',
-        isRequired: true,
-        hasExpiration: true
-    },
-    cdl_back: {
-        displayName: 'CDL Back',
-        description: 'Please upload a clear photo of the back of your CDL',
-        isRequired: true,
-        hasExpiration: true
-    },
-    mvr: {
-        displayName: 'Motor Vehicle Record (MVR)',
-        description: 'Request your Motor Vehicle Record from your state DMV',
-        isRequired: true,
-        hasExpiration: false
-    },
-    psp: {
-        displayName: 'Pre-Employment Screening Program (PSP)',
-        description: 'Request your PSP report from psp.fmcsa.dot.gov (~$10 fee)',
-        isRequired: false,
-        hasExpiration: false
-    },
-    medical_card: {
-        displayName: 'DOT Medical Card',
-        description: 'Upload your current DOT Medical Card',
-        isRequired: true,
-        hasExpiration: true
-    },
-    drug_test_consent: {
-        displayName: 'Drug Test Consent Form',
-        description: 'Sign and upload the drug test consent form',
-        isRequired: false,
-        hasExpiration: false
-    },
-    employment_app: {
-        displayName: 'Employment Application',
-        description: 'Complete and upload the employment application',
-        isRequired: false,
-        hasExpiration: false
-    },
-    w4: {
-        displayName: 'W-4 Tax Form',
-        description: 'Complete and upload your W-4 tax form',
-        isRequired: false,
-        hasExpiration: false
-    },
-    i9: {
-        displayName: 'I-9 Employment Eligibility',
-        description: 'Complete and upload your I-9 Employment Eligibility form',
-        isRequired: false,
-        hasExpiration: false
-    },
-    direct_deposit: {
-        displayName: 'Direct Deposit Authorization',
-        description: 'Upload direct deposit authorization with a voided check',
-        isRequired: false,
-        hasExpiration: false
-    },
-    social_security: {
-        displayName: 'Social Security Card',
-        description: 'Upload a copy of your Social Security Card',
-        isRequired: false,
-        hasExpiration: false
-    },
-    employment_history: {
-        displayName: 'Employment History (10 years)',
-        description: 'Provide your employment history for the last 10 years',
-        isRequired: false,
-        hasExpiration: false
-    },
-    proof_of_address: {
-        displayName: 'Proof of Address',
-        description: 'Upload a utility bill or bank statement showing your current address',
-        isRequired: false,
-        hasExpiration: false
-    },
-    custom: {
-        displayName: 'Custom Document',
-        description: 'Please upload the requested document',
-        isRequired: false,
-        hasExpiration: false
-    }
+    cdl_front: { displayName: 'CDL Front', description: 'Please upload a clear photo of the front of your CDL', isRequired: true, hasExpiration: true },
+    cdl_back: { displayName: 'CDL Back', description: 'Please upload a clear photo of the back of your CDL', isRequired: true, hasExpiration: true },
+    mvr: { displayName: 'Motor Vehicle Record (MVR)', description: 'Request your Motor Vehicle Record from your state DMV', isRequired: true, hasExpiration: false },
+    psp: { displayName: 'Pre-Employment Screening Program (PSP)', description: 'Request your PSP report from psp.fmcsa.dot.gov', isRequired: false, hasExpiration: false },
+    medical_card: { displayName: 'DOT Medical Card', description: 'Upload your current DOT Medical Card', isRequired: true, hasExpiration: true },
+    drug_test_consent: { displayName: 'Drug Test Consent Form', description: 'Sign and upload the drug test consent form', isRequired: false, hasExpiration: false },
+    employment_app: { displayName: 'Employment Application', description: 'Complete and upload the employment application', isRequired: false, hasExpiration: false },
+    w4: { displayName: 'W-4 Tax Form', description: 'Complete and upload your W-4 tax form', isRequired: false, hasExpiration: false },
+    i9: { displayName: 'I-9 Employment Eligibility', description: 'Complete and upload your I-9 Employment Eligibility form', isRequired: false, hasExpiration: false },
+    direct_deposit: { displayName: 'Direct Deposit Authorization', description: 'Upload direct deposit authorization', isRequired: false, hasExpiration: false },
+    social_security: { displayName: 'Social Security Card', description: 'Upload a copy of your Social Security Card', isRequired: false, hasExpiration: false },
+    employment_history: { displayName: 'Employment History (10 years)', description: 'Provide your employment history for the last 10 years', isRequired: false, hasExpiration: false },
+    proof_of_address: { displayName: 'Proof of Address', description: 'Upload a utility bill or bank statement', isRequired: false, hasExpiration: false },
+    custom: { displayName: 'Custom Document', description: 'Please upload the requested document', isRequired: false, hasExpiration: false }
 };
 
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
-/**
- * Generate a secure upload token with UUID and expiry
- * @param {number} expiryHours - Hours until token expires (default: 48)
- * @returns {Object} Token data with token string and expiry timestamp
- */
 function generateUploadToken(expiryHours = CONFIG.tokenExpiryHours) {
     const token = `tok_${Date.now()}_${uuidv4().replace(/-/g, '')}`;
     const expiry = new Date();
     expiry.setHours(expiry.getHours() + expiryHours);
-
-    return {
-        token,
-        expiry: expiry.toISOString()
-    };
+    return { token, expiry: expiry.toISOString() };
 }
 
-/**
- * Validate if an upload token is still valid
- * @param {string} tokenExpiry - ISO string of token expiry
- * @returns {boolean} True if token is valid
- */
 function isTokenValid(tokenExpiry) {
-    if (!tokenExpiry) return false;
-    const expiryDate = new Date(tokenExpiry);
-    return expiryDate > new Date();
+    return tokenExpiry ? new Date(tokenExpiry) > new Date() : false;
 }
 
-/**
- * Validate file MIME type
- * @param {string} mimeType - File MIME type
- * @returns {boolean} True if file type is allowed
- */
 function isValidFileType(mimeType) {
     return CONFIG.allowedMimeTypes.includes(mimeType);
 }
 
-/**
- * Validate file size
- * @param {number} sizeBytes - File size in bytes
- * @returns {boolean} True if file size is within limit
- */
 function isValidFileSize(sizeBytes) {
     return sizeBytes > 0 && sizeBytes <= CONFIG.maxFileSizeBytes;
 }
 
-/**
- * Get document metadata by type
- * @param {string} docType - Document type
- * @returns {Object} Document metadata
- */
 function getDocumentMetadata(docType) {
     return DOCUMENT_METADATA[docType] || DOCUMENT_METADATA.custom;
 }
 
-/**
- * Generate a SHA256-like hash (simplified for Wix)
- * @param {string} data - Data to hash
- * @returns {string} Hash string
- */
 function generateFileHash(data) {
-    // In production, use crypto library for real SHA256
     return `sha256_${Date.now()}_${Math.random().toString(36).substr(2, 16)}`;
 }
 
@@ -304,100 +116,37 @@ function generateFileHash(data) {
 // REQUEST DOCUMENTS
 // ============================================================================
 
-/**
- * Request documents from a driver for an onboarding workflow
- * Creates DocumentRequest records and generates secure upload link
- *
- * @param {string} workflowId - Onboarding workflow ID
- * @param {Array<string>} documentTypes - Array of document types to request
- * @returns {Object} Result with requestIds and upload portal URL
- */
 export async function requestDocuments(workflowId, documentTypes) {
-    // Validate inputs
-    if (!workflowId || typeof workflowId !== 'string') {
-        return { success: false, error: 'workflowId is required' };
-    }
+    if (!workflowId || !Array.isArray(documentTypes) || documentTypes.length === 0) return { success: false, error: 'Missing required fields' };
 
-    if (!Array.isArray(documentTypes) || documentTypes.length === 0) {
-        return { success: false, error: 'documentTypes array is required and must not be empty' };
-    }
-
-    // Validate all document types
     const validTypes = Object.values(CONFIG.documentTypes);
-    for (const docType of documentTypes) {
-        if (!validTypes.includes(docType)) {
-            return { success: false, error: `Invalid document type: ${docType}` };
-        }
-    }
+    for (const docType of documentTypes) if (!validTypes.includes(docType)) return { success: false, error: `Invalid document type: ${docType}` };
 
     try {
-        // Verify workflow exists - use dual-source routing
-        const workflow = await getRecord(COLLECTION_KEYS.onboardingWorkflows, CONFIG.collections.onboardingWorkflows, workflowId);
-
-        if (!workflow) {
-            return { success: false, error: 'Workflow not found' };
-        }
+        const workflow = await dataAccess.getRecord(COLLECTION_KEYS.onboardingWorkflows, workflowId, { suppressAuth: true });
+        if (!workflow) return { success: false, error: 'Workflow not found' };
 
         const now = new Date();
         const requestIds = [];
-
-        // Generate upload token for this batch
         const { token, expiry } = generateUploadToken();
 
-        // Create document request records - use dual-source routing
         for (const docType of documentTypes) {
             const metadata = getDocumentMetadata(docType);
-
             const docRequest = {
-                workflow_id: workflowId,
-                driver_id: workflow.driver_id,
-                document_type: docType,
-                display_name: metadata.displayName,
-                description: metadata.description,
-                is_required: CONFIG.requiredDocTypes.includes(docType),
-                status: CONFIG.status.REQUESTED,
-                rejection_reason: null,
-                file_url: null,
-                file_hash: null,
-                submitted_date: null,
-                verified_date: null,
-                verified_by: null,
-                ocr_data: null,
-                expiration_date: null,
-                reminder_sent_count: 0,
-                last_reminder_date: null,
-                upload_token: token,
-                upload_token_expiry: expiry,
-                _createdDate: now,
-                _updatedDate: now
+                workflow_id: workflowId, driver_id: workflow.driver_id, document_type: docType,
+                display_name: metadata.displayName, description: metadata.description,
+                is_required: CONFIG.requiredDocTypes.includes(docType), status: CONFIG.status.REQUESTED,
+                upload_token: token, upload_token_expiry: expiry, _createdDate: now, _updatedDate: now
             };
-
-            const inserted = await insertData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, docRequest);
-            requestIds.push(inserted._id || inserted.id);
+            const inserted = await dataAccess.insertRecord(COLLECTION_KEYS.documentRequests, docRequest, { suppressAuth: true });
+            if (inserted.success) requestIds.push(inserted.record._id);
         }
 
-        // Update workflow status - use dual-source routing
-        await updateData(COLLECTION_KEYS.onboardingWorkflows, CONFIG.collections.onboardingWorkflows, {
-            ...workflow,
-            _id: workflow._id || workflow.id,
-            documents_status: 'pending',
-            status: 'documents_requested',
-            _updatedDate: now
-        });
+        await dataAccess.updateRecord(COLLECTION_KEYS.onboardingWorkflows, {
+            ...workflow, documents_status: 'pending', status: 'documents_requested', _updatedDate: now
+        }, { suppressAuth: true });
 
-        // Generate upload portal URL
-        const uploadPortalUrl = `https://lastmilecdl.com/document-upload?token=${token}`;
-
-        console.log(`[DocumentCollection] Created ${requestIds.length} document requests for workflow ${workflowId}`);
-
-        return {
-            success: true,
-            requestIds,
-            uploadPortalUrl,
-            token,
-            tokenExpiry: expiry
-        };
-
+        return { success: true, requestIds, uploadPortalUrl: `https://lastmilecdl.com/document-upload?token=${token}`, token, tokenExpiry: expiry };
     } catch (error) {
         console.error('[DocumentCollection] Error requesting documents:', error);
         return { success: false, error: error.message };
@@ -408,61 +157,25 @@ export async function requestDocuments(workflowId, documentTypes) {
 // GET DOCUMENT STATUS
 // ============================================================================
 
-/**
- * Get all document requests and their status for a workflow
- *
- * @param {string} workflowId - Onboarding workflow ID
- * @returns {Object} Result with documents array and summary
- */
 export async function getDocumentStatus(workflowId) {
-    if (!workflowId) {
-        return { success: false, error: 'workflowId is required' };
-    }
-
+    if (!workflowId) return { success: false, error: 'workflowId is required' };
     try {
-        // Use dual-source routing
-        let documents = [];
-        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
-            const filter = `{Workflow Id} = '${workflowId}'`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter });
-            documents = result.records || [];
-        } else {
-            const result = await wixData.query(CONFIG.collections.documentRequests)
-                .eq('workflow_id', workflowId)
-                .find({ suppressAuth: true });
-            documents = result.items || [];
-        }
-
-        // Calculate summary
-        const total = documents.length;
-        const requested = documents.filter(d => d.status === CONFIG.status.REQUESTED).length;
-        const uploaded = documents.filter(d => d.status === CONFIG.status.UPLOADED).length;
-        const verified = documents.filter(d => d.status === CONFIG.status.VERIFIED).length;
-        const rejected = documents.filter(d => d.status === CONFIG.status.REJECTED).length;
-
-        // Complete means all required docs are verified and no rejections
-        const requiredDocs = documents.filter(d => d.is_required);
-        const requiredVerified = requiredDocs.filter(d => d.status === CONFIG.status.VERIFIED).length;
-        const isComplete = requiredDocs.length > 0 && requiredVerified === requiredDocs.length;
-        const hasRejections = rejected > 0;
-
-        return {
-            success: true,
-            documents,
-            summary: {
-                total,
-                requested,
-                uploaded,
-                verified,
-                rejected,
-                isComplete,
-                hasRejections,
-                requiredCount: requiredDocs.length,
-                requiredVerified
-            }
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.documentRequests, { filters: { workflow_id: workflowId }, suppressAuth: true });
+        const documents = result.items || [];
+        
+        const summary = {
+            total: documents.length,
+            requested: documents.filter(d => d.status === CONFIG.status.REQUESTED).length,
+            uploaded: documents.filter(d => d.status === CONFIG.status.UPLOADED).length,
+            verified: documents.filter(d => d.status === CONFIG.status.VERIFIED).length,
+            rejected: documents.filter(d => d.status === CONFIG.status.REJECTED).length
         };
 
+        const requiredDocs = documents.filter(d => d.is_required);
+        summary.isComplete = requiredDocs.length > 0 && requiredDocs.every(d => d.status === CONFIG.status.VERIFIED);
+        summary.hasRejections = summary.rejected > 0;
+
+        return { success: true, documents, summary };
     } catch (error) {
         console.error('[DocumentCollection] Error getting document status:', error);
         return { success: false, error: error.message };
@@ -473,104 +186,33 @@ export async function getDocumentStatus(workflowId) {
 // UPLOAD DOCUMENT
 // ============================================================================
 
-/**
- * Upload a document with secure token validation
- * Called from the driver upload portal
- *
- * @param {string} token - Upload token from request email
- * @param {string} documentType - Type of document being uploaded
- * @param {Object} fileData - File data with mimeType, size, url/content
- * @returns {Object} Result with documentId and verification status
- */
 export async function uploadDocument(token, documentType, fileData) {
-    // Validate token
-    if (!token || typeof token !== 'string') {
-        return { success: false, error: 'Upload token is required' };
-    }
-
-    // Validate document type
-    if (!documentType || !Object.values(CONFIG.documentTypes).includes(documentType)) {
-        return { success: false, error: 'Invalid document type' };
-    }
-
-    // Validate file data
-    if (!fileData) {
-        return { success: false, error: 'File data is required' };
-    }
-
-    if (!fileData.mimeType || !isValidFileType(fileData.mimeType)) {
-        return {
-            success: false,
-            error: `Invalid file type. Allowed: ${CONFIG.allowedMimeTypes.join(', ')}`
-        };
-    }
-
-    if (!fileData.size || !isValidFileSize(fileData.size)) {
-        return {
-            success: false,
-            error: `File size must be between 0 and ${CONFIG.maxFileSizeBytes / (1024 * 1024)}MB`
-        };
-    }
+    if (!token || !documentType || !fileData) return { success: false, error: 'Missing required fields' };
+    if (!isValidFileType(fileData.mimeType)) return { success: false, error: 'Invalid file type' };
+    if (!isValidFileSize(fileData.size)) return { success: false, error: 'Invalid file size' };
 
     try {
-        // Find document request by token and type - use dual-source routing
-        let docRequestItems = [];
-        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
-            const filter = `AND({Upload Token} = '${token}', {Document Type} = '${documentType}')`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-            docRequestItems = result.records || [];
-        } else {
-            const result = await wixData.query(CONFIG.collections.documentRequests)
-                .eq('upload_token', token)
-                .eq('document_type', documentType)
-                .limit(1)
-                .find({ suppressAuth: true });
-            docRequestItems = result.items;
-        }
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.documentRequests, {
+            filters: { upload_token: token, document_type: documentType },
+            limit: 1, suppressAuth: true
+        });
 
-        if (docRequestItems.length === 0) {
-            return { success: false, error: 'Invalid token or document type' };
-        }
+        if (!result.success || result.items.length === 0) return { success: false, error: 'Invalid token or document type' };
+        const docRequest = result.items[0];
 
-        const docRequest = docRequestItems[0];
+        if (!isTokenValid(docRequest.upload_token_expiry)) return { success: false, error: 'Upload token has expired' };
+        if (docRequest.status === CONFIG.status.VERIFIED) return { success: false, error: 'Document already verified' };
 
-        // Check token expiry
-        if (!isTokenValid(docRequest.upload_token_expiry)) {
-            return { success: false, error: 'Upload token has expired' };
-        }
-
-        // Check if already verified (can't re-upload verified docs)
-        if (docRequest.status === CONFIG.status.VERIFIED) {
-            return { success: false, error: 'Document has already been verified' };
-        }
-
-        // Generate file hash for integrity
         const fileHash = generateFileHash(fileData.url || fileData.content);
-
-        // Update document request
         const now = new Date();
         const updatedDoc = {
-            ...docRequest,
-            status: CONFIG.status.UPLOADED,
+            ...docRequest, status: CONFIG.status.UPLOADED, 
             file_url: fileData.url || `https://media.wix.com/v1/${fileHash}`,
-            file_hash: fileHash,
-            submitted_date: now,
-            _updatedDate: now
+            file_hash: fileHash, submitted_date: now, _updatedDate: now
         };
 
-        // Use dual-source routing for update
-        await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, updatedDoc);
-
-        console.log(`[DocumentCollection] Document uploaded: ${documentType} for workflow ${docRequest.workflow_id}`);
-
-        return {
-            success: true,
-            documentId: docRequest._id,
-            status: CONFIG.status.UPLOADED,
-            verificationStatus: 'pending_review'
-        };
-
+        await dataAccess.updateRecord(COLLECTION_KEYS.documentRequests, updatedDoc, { suppressAuth: true });
+        return { success: true, documentId: docRequest._id, status: CONFIG.status.UPLOADED, verificationStatus: 'pending_review' };
     } catch (error) {
         console.error('[DocumentCollection] Error uploading document:', error);
         return { success: false, error: error.message };
@@ -581,74 +223,21 @@ export async function uploadDocument(token, documentType, fileData) {
 // VERIFY DOCUMENT
 // ============================================================================
 
-/**
- * Verify or reject a document (recruiter action)
- *
- * @param {string} documentId - Document request ID
- * @param {string} verifierId - Recruiter/verifier ID
- * @param {string} status - 'verified' or 'rejected'
- * @param {string} notes - Required for rejection, optional for verification
- * @returns {Object} Result with verification details
- */
 export async function verifyDocument(documentId, verifierId, status, notes = null) {
-    // Validate inputs
-    if (!documentId) {
-        return { success: false, error: 'documentId is required' };
-    }
-
-    if (!verifierId) {
-        return { success: false, error: 'verifierId is required' };
-    }
-
-    if (!status || ![CONFIG.status.VERIFIED, CONFIG.status.REJECTED].includes(status)) {
-        return { success: false, error: 'status must be either "verified" or "rejected"' };
-    }
-
-    // Rejection requires notes/reason
-    if (status === CONFIG.status.REJECTED && !notes) {
-        return { success: false, error: 'Rejection reason is required' };
-    }
+    if (!documentId || !verifierId || !status) return { success: false, error: 'Missing required fields' };
+    if (status === CONFIG.status.REJECTED && !notes) return { success: false, error: 'Rejection reason required' };
 
     try {
-        // Get document request using dual-source routing
-        const docRequest = await getRecord(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, documentId);
+        const docRequest = await dataAccess.getRecord(COLLECTION_KEYS.documentRequests, documentId, { suppressAuth: true });
+        if (!docRequest) return { success: false, error: 'Document not found' };
+        if (docRequest.status !== CONFIG.status.UPLOADED) return { success: false, error: 'Document not in uploaded state' };
 
-        if (!docRequest) {
-            return { success: false, error: 'Document not found' };
-        }
-
-        // Can only verify uploaded documents
-        if (docRequest.status !== CONFIG.status.UPLOADED) {
-            return { success: false, error: `Cannot verify document with status: ${docRequest.status}` };
-        }
-
-        // Update document
         const now = new Date();
-        const updatedDoc = {
-            ...docRequest,
-            status,
-            verified_date: now,
-            verified_by: verifierId,
-            rejection_reason: status === CONFIG.status.REJECTED ? notes : null,
-            _updatedDate: now
-        };
+        const updatedDoc = { ...docRequest, status, verified_date: now, verified_by: verifierId, rejection_reason: status === CONFIG.status.REJECTED ? notes : null, _updatedDate: now };
+        await dataAccess.updateRecord(COLLECTION_KEYS.documentRequests, updatedDoc, { suppressAuth: true });
 
-        // Use dual-source routing for update
-        await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, updatedDoc);
-
-        // Check if all required documents are now verified
         await updateWorkflowDocumentStatus(docRequest.workflow_id);
-
-        console.log(`[DocumentCollection] Document ${status}: ${documentId} by ${verifierId}`);
-
-        return {
-            success: true,
-            documentId,
-            status,
-            verifiedBy: verifierId,
-            verifiedAt: now.toISOString()
-        };
-
+        return { success: true, documentId, status, verifiedBy: verifierId, verifiedAt: now.toISOString() };
     } catch (error) {
         console.error('[DocumentCollection] Error verifying document:', error);
         return { success: false, error: error.message };
@@ -659,89 +248,31 @@ export async function verifyDocument(documentId, verifierId, status, notes = nul
 // SEND DOCUMENT REMINDER
 // ============================================================================
 
-/**
- * Send a reminder for a pending document
- * Follows day 2, 5, 7 reminder sequence
- *
- * @param {string} documentId - Document request ID
- * @returns {Object} Result with reminder details
- */
 export async function sendDocumentReminder(documentId) {
-    if (!documentId) {
-        return { success: false, error: 'documentId is required' };
-    }
-
+    if (!documentId) return { success: false, error: 'documentId is required' };
     try {
-        // Get document request using dual-source routing
-        const docRequest = await getRecord(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, documentId);
+        const docRequest = await dataAccess.getRecord(COLLECTION_KEYS.documentRequests, documentId, { suppressAuth: true });
+        if (!docRequest) return { success: false, error: 'Document not found' };
+        if (![CONFIG.status.REQUESTED, CONFIG.status.REJECTED].includes(docRequest.status)) return { success: false, error: 'Invalid state for reminder' };
 
-        if (!docRequest) {
-            return { success: false, error: 'Document not found' };
-        }
+        const currentCount = docRequest.reminder_sent_count || 0;
+        if (currentCount >= CONFIG.reminderSequence.length) return { success: false, error: 'Max reminders reached' };
 
-        // Can only remind for requested or rejected documents
-        if (![CONFIG.status.REQUESTED, CONFIG.status.REJECTED].includes(docRequest.status)) {
-            return { success: false, error: `Cannot send reminder for document with status: ${docRequest.status}` };
-        }
-
-        // Check reminder sequence
-        const currentReminderIndex = docRequest.reminder_sent_count || 0;
-
-        if (currentReminderIndex >= CONFIG.reminderSequence.length) {
-            return {
-                success: false,
-                error: 'Maximum reminders sent',
-                remindersSent: currentReminderIndex
-            };
-        }
-
-        // Generate new upload token for the reminder (48h expiry)
         const { token, expiry } = generateUploadToken(48);
-        const uploadPortalUrl = `https://lastmilecdl.com/document-upload?token=${token}`;
-
-        // Update reminder count and token
         const now = new Date();
-        const updatedDoc = {
-            ...docRequest,
-            reminder_sent_count: currentReminderIndex + 1,
-            last_reminder_date: now,
-            upload_token: token,
-            upload_token_expiry: expiry,
-            _updatedDate: now
-        };
+        const updatedDoc = { ...docRequest, reminder_sent_count: currentCount + 1, last_reminder_date: now, upload_token: token, upload_token_expiry: expiry, _updatedDate: now };
+        await dataAccess.updateRecord(COLLECTION_KEYS.documentRequests, updatedDoc, { suppressAuth: true });
 
-        // Use dual-source routing for update
-        await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, updatedDoc);
-
-        // Get driver profile to send email
-        try {
-            const driverProfile = await getRecord(COLLECTION_KEYS.driverProfiles, CONFIG.collections.driverProfiles, docRequest.driver_id);
-
-            if (driverProfile && driverProfile.wix_member_id) {
-                await emailService.sendDocumentReminderEmail(driverProfile.wix_member_id, {
-                    documentName: docRequest.display_name,
-                    uploadUrl: uploadPortalUrl,
-                    driverName: driverProfile.display_name || 'Driver'
-                });
-            } else {
-                console.warn(`[DocumentCollection] Cannot send reminder email: Driver profile or Wix ID not found for driver ${docRequest.driver_id}`);
-            }
-        } catch (emailError) {
-            console.error('[DocumentCollection] Error sending reminder email:', emailError);
-            // Continue execution, don't fail the reminder update
+        const driverProfile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, docRequest.driver_id, { suppressAuth: true });
+        if (driverProfile?.wix_member_id) {
+            await emailService.sendDocumentReminderEmail(driverProfile.wix_member_id, {
+                documentName: docRequest.display_name,
+                uploadUrl: `https://lastmilecdl.com/document-upload?token=${token}`,
+                driverName: driverProfile.display_name || 'Driver'
+            });
         }
 
-        console.log(`[DocumentCollection] Reminder #${currentReminderIndex + 1} sent for document ${documentId}`);
-
-        return {
-            success: true,
-            documentId,
-            reminderNumber: currentReminderIndex + 1,
-            maxReminders: CONFIG.reminderSequence.length,
-            nextReminderDay: CONFIG.reminderSequence[currentReminderIndex] || null,
-            sentAt: now.toISOString()
-        };
-
+        return { success: true, documentId, reminderNumber: currentCount + 1 };
     } catch (error) {
         console.error('[DocumentCollection] Error sending reminder:', error);
         return { success: false, error: error.message };
@@ -752,75 +283,19 @@ export async function sendDocumentReminder(documentId) {
 // CHECK DOCUMENT EXPIRATION
 // ============================================================================
 
-/**
- * Check if a document is expired or expiring soon
- * Applies to CDL and Medical Card
- *
- * @param {string} documentId - Document request ID
- * @returns {Object} Result with expiration status
- */
 export async function checkDocumentExpiration(documentId) {
-    if (!documentId) {
-        return { success: false, error: 'documentId is required' };
-    }
-
+    if (!documentId) return { success: false, error: 'documentId is required' };
     try {
-        // Get document request using dual-source routing
-        const docRequest = await getRecord(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, documentId);
+        const docRequest = await dataAccess.getRecord(COLLECTION_KEYS.documentRequests, documentId, { suppressAuth: true });
+        if (!docRequest) return { success: false, error: 'Document not found' };
+        if (!CONFIG.expiringDocTypes.includes(docRequest.document_type)) return { success: true, hasExpiration: false };
 
-        if (!docRequest) {
-            return { success: false, error: 'Document not found' };
-        }
+        if (!docRequest.expiration_date) return { success: true, hasExpiration: true, message: 'Expiration not set' };
 
-        // Check if this document type has expiration
-        if (!CONFIG.expiringDocTypes.includes(docRequest.document_type)) {
-            return {
-                success: true,
-                documentId,
-                hasExpiration: false,
-                isExpired: false,
-                isExpiringSoon: false,
-                expirationDate: null
-            };
-        }
+        const daysUntil = Math.ceil((new Date(docRequest.expiration_date) - new Date()) / (1000 * 60 * 60 * 24));
+        const status = daysUntil < 0 ? 'expired' : (daysUntil <= CONFIG.expirationWarningDays ? 'expiring_soon' : 'valid');
 
-        // Check if expiration date is set
-        if (!docRequest.expiration_date) {
-            return {
-                success: true,
-                documentId,
-                documentType: docRequest.document_type,
-                hasExpiration: true,
-                isExpired: false,
-                isExpiringSoon: false,
-                expirationDate: null,
-                message: 'Expiration date not set'
-            };
-        }
-
-        const now = new Date();
-        const expirationDate = new Date(docRequest.expiration_date);
-        const daysUntilExpiry = Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24));
-
-        const isExpired = daysUntilExpiry < 0;
-        const isExpiringSoon = !isExpired && daysUntilExpiry <= CONFIG.expirationWarningDays;
-
-        let status = 'valid';
-        if (isExpired) status = 'expired';
-        else if (isExpiringSoon) status = 'expiring_soon';
-
-        return {
-            success: true,
-            documentId,
-            documentType: docRequest.document_type,
-            hasExpiration: true,
-            isExpired,
-            isExpiringSoon,
-            expirationDate: expirationDate.toISOString(),
-            daysUntilExpiry: isExpired ? 0 : daysUntilExpiry,
-            status
-        };
-
+        return { success: true, documentId, hasExpiration: true, status, daysUntilExpiry: Math.max(0, daysUntil) };
     } catch (error) {
         console.error('[DocumentCollection] Error checking expiration:', error);
         return { success: false, error: error.message };
@@ -831,33 +306,12 @@ export async function checkDocumentExpiration(documentId) {
 // GET OCR EXTRACTED DATA
 // ============================================================================
 
-/**
- * Get OCR-extracted data from a document
- *
- * @param {string} documentId - Document request ID
- * @returns {Object} Result with OCR data
- */
 export async function getDocumentOcrData(documentId) {
-    if (!documentId) {
-        return { success: false, error: 'documentId is required' };
-    }
-
+    if (!documentId) return { success: false, error: 'documentId is required' };
     try {
-        // Use dual-source routing for get
-        const docRequest = await getRecord(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, documentId);
-
-        if (!docRequest) {
-            return { success: false, error: 'Document not found' };
-        }
-
-        return {
-            success: true,
-            documentId,
-            documentType: docRequest.document_type,
-            ocrData: docRequest.ocr_data || null,
-            hasOcrData: !!docRequest.ocr_data
-        };
-
+        const docRequest = await dataAccess.getRecord(COLLECTION_KEYS.documentRequests, documentId, { suppressAuth: true });
+        if (!docRequest) return { success: false, error: 'Document not found' };
+        return { success: true, documentId, ocrData: docRequest.ocr_data || null, hasOcrData: !!docRequest.ocr_data };
     } catch (error) {
         console.error('[DocumentCollection] Error getting OCR data:', error);
         return { success: false, error: error.message };
@@ -868,74 +322,24 @@ export async function getDocumentOcrData(documentId) {
 // CHECK DRIVER DOCUMENT EXPIRATIONS
 // ============================================================================
 
-/**
- * Check all expiring documents for a driver
- * Used for compliance monitoring
- *
- * @param {string} driverId - Driver profile ID
- * @returns {Object} Result with array of expiring/expired documents
- */
 export async function checkDriverDocumentExpirations(driverId) {
-    if (!driverId) {
-        return { success: false, error: 'driverId is required' };
-    }
-
+    if (!driverId) return { success: false, error: 'driverId is required' };
     try {
-        // Get all documents for this driver with expiration-capable types using dual-source routing
-        let documents = [];
-        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
-            // Build OR filter for expiring doc types
-            const typeFilters = CONFIG.expiringDocTypes.map(t => `{Document Type} = '${t}'`).join(', ');
-            const filter = `AND({Driver Id} = '${driverId}', {Status} = '${CONFIG.status.VERIFIED}', OR(${typeFilters}))`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 100 });
-            documents = result.records || [];
-        } else {
-            const result = await wixData.query(CONFIG.collections.documentRequests)
-                .eq('driver_id', driverId)
-                .hasSome('document_type', CONFIG.expiringDocTypes)
-                .eq('status', CONFIG.status.VERIFIED)
-                .find({ suppressAuth: true });
-            documents = result.items || [];
-        }
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.documentRequests, {
+            filters: { driver_id: driverId, status: CONFIG.status.VERIFIED, document_type: { hasSome: CONFIG.expiringDocTypes } },
+            suppressAuth: true
+        });
+        
         const now = new Date();
-        const expiringDocs = [];
-        const expiredDocs = [];
+        const expiring = [], expired = [];
+        (result.items || []).forEach(doc => {
+            if (!doc.expiration_date) return;
+            const daysUntil = Math.ceil((new Date(doc.expiration_date) - now) / (1000 * 60 * 60 * 24));
+            if (daysUntil < 0) expired.push({ documentId: doc._id, type: doc.document_type, name: doc.display_name, daysExpired: Math.abs(daysUntil) });
+            else if (daysUntil <= CONFIG.expirationWarningDays) expiring.push({ documentId: doc._id, type: doc.document_type, name: doc.display_name, daysUntil });
+        });
 
-        for (const doc of documents) {
-            if (!doc.expiration_date) continue;
-
-            const expirationDate = new Date(doc.expiration_date);
-            const daysUntilExpiry = Math.ceil((expirationDate - now) / (1000 * 60 * 60 * 24));
-
-            if (daysUntilExpiry < 0) {
-                expiredDocs.push({
-                    documentId: doc._id,
-                    documentType: doc.document_type,
-                    displayName: doc.display_name,
-                    expirationDate: expirationDate.toISOString(),
-                    daysExpired: Math.abs(daysUntilExpiry)
-                });
-            } else if (daysUntilExpiry <= CONFIG.expirationWarningDays) {
-                expiringDocs.push({
-                    documentId: doc._id,
-                    documentType: doc.document_type,
-                    displayName: doc.display_name,
-                    expirationDate: expirationDate.toISOString(),
-                    daysUntilExpiry
-                });
-            }
-        }
-
-        return {
-            success: true,
-            driverId,
-            expiredDocuments: expiredDocs,
-            expiringDocuments: expiringDocs,
-            hasExpiredDocs: expiredDocs.length > 0,
-            hasExpiringDocs: expiringDocs.length > 0
-        };
-
+        return { success: true, driverId, expiredDocuments: expired, expiringDocuments: expiring, hasExpiredDocs: expired.length > 0, hasExpiringDocs: expiring.length > 0 };
     } catch (error) {
         console.error('[DocumentCollection] Error checking driver expirations:', error);
         return { success: false, error: error.message };
@@ -946,38 +350,23 @@ export async function checkDriverDocumentExpirations(driverId) {
 // HELPER: UPDATE WORKFLOW DOCUMENT STATUS
 // ============================================================================
 
-/**
- * Update workflow status based on document completion
- * @private
- */
 async function updateWorkflowDocumentStatus(workflowId) {
     try {
         const statusResult = await getDocumentStatus(workflowId);
         if (!statusResult.success) return;
 
-        // Use dual-source routing for get
-        const workflow = await getRecord(COLLECTION_KEYS.onboardingWorkflows, CONFIG.collections.onboardingWorkflows, workflowId);
+        const workflow = await dataAccess.getRecord(COLLECTION_KEYS.onboardingWorkflows, workflowId, { suppressAuth: true });
         if (!workflow) return;
 
-        let documentsStatus = 'pending';
-        if (statusResult.summary.hasRejections) {
-            documentsStatus = 'rejected';
-        } else if (statusResult.summary.isComplete) {
-            documentsStatus = 'complete';
-        } else if (statusResult.summary.uploaded > 0 || statusResult.summary.verified > 0) {
-            documentsStatus = 'partial';
-        }
+        let docsStatus = 'pending';
+        if (statusResult.summary.hasRejections) docsStatus = 'rejected';
+        else if (statusResult.summary.isComplete) docsStatus = 'complete';
+        else if (statusResult.summary.uploaded > 0 || statusResult.summary.verified > 0) docsStatus = 'partial';
 
-        // Update workflow if status changed using dual-source routing
-        if (workflow.documents_status !== documentsStatus) {
-            await updateData(COLLECTION_KEYS.onboardingWorkflows, CONFIG.collections.onboardingWorkflows, {
-                ...workflow,
-                documents_status: documentsStatus,
-                status: documentsStatus === 'complete' ? 'documents_complete' : workflow.status,
-                _updatedDate: new Date()
-            });
-
-            console.log(`[DocumentCollection] Workflow ${workflowId} documents_status updated to: ${documentsStatus}`);
+        if (workflow.documents_status !== docsStatus) {
+            await dataAccess.updateRecord(COLLECTION_KEYS.onboardingWorkflows, {
+                ...workflow, documents_status: docsStatus, status: docsStatus === 'complete' ? 'documents_complete' : workflow.status, _updatedDate: new Date()
+            }, { suppressAuth: true });
         }
     } catch (error) {
         console.error('[DocumentCollection] Error updating workflow status:', error);
@@ -988,63 +377,23 @@ async function updateWorkflowDocumentStatus(workflowId) {
 // REGENERATE UPLOAD TOKEN
 // ============================================================================
 
-/**
- * Regenerate upload token for expired links
- *
- * @param {string} workflowId - Workflow ID to regenerate tokens for
- * @returns {Object} Result with new token and portal URL
- */
 export async function regenerateUploadToken(workflowId) {
-    if (!workflowId) {
-        return { success: false, error: 'workflowId is required' };
-    }
-
+    if (!workflowId) return { success: false, error: 'workflowId is required' };
     try {
-        // Get all pending document requests for this workflow using dual-source routing
-        let pendingDocs = [];
-        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
-            const filter = `AND({Workflow Id} = '${workflowId}', OR({Status} = '${CONFIG.status.REQUESTED}', {Status} = '${CONFIG.status.REJECTED}'))`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 100 });
-            pendingDocs = result.records || [];
-        } else {
-            const result = await wixData.query(CONFIG.collections.documentRequests)
-                .eq('workflow_id', workflowId)
-                .hasSome('status', [CONFIG.status.REQUESTED, CONFIG.status.REJECTED])
-                .find({ suppressAuth: true });
-            pendingDocs = result.items;
-        }
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.documentRequests, {
+            filters: { workflow_id: workflowId, status: { hasSome: [CONFIG.status.REQUESTED, CONFIG.status.REJECTED] } },
+            limit: 100, suppressAuth: true
+        });
 
-        if (pendingDocs.length === 0) {
-            return { success: false, error: 'No pending documents found for this workflow' };
-        }
+        if (!result.items?.length) return { success: false, error: 'No pending documents' };
 
-        // Generate new token
         const { token, expiry } = generateUploadToken();
         const now = new Date();
-
-        // Update all pending documents with new token using dual-source routing
-        for (const doc of pendingDocs) {
-            await updateData(COLLECTION_KEYS.documentRequests, CONFIG.collections.documentRequests, {
-                ...doc,
-                upload_token: token,
-                upload_token_expiry: expiry,
-                _updatedDate: now
-            });
+        for (const doc of result.items) {
+            await dataAccess.updateRecord(COLLECTION_KEYS.documentRequests, { ...doc, upload_token: token, upload_token_expiry: expiry, _updatedDate: now }, { suppressAuth: true });
         }
 
-        const uploadPortalUrl = `https://lastmilecdl.com/document-upload?token=${token}`;
-
-        console.log(`[DocumentCollection] Regenerated token for ${pendingDocs.length} documents in workflow ${workflowId}`);
-
-        return {
-            success: true,
-            token,
-            tokenExpiry: expiry,
-            uploadPortalUrl,
-            documentsUpdated: pendingDocs.length
-        };
-
+        return { success: true, token, tokenExpiry: expiry, uploadPortalUrl: `https://lastmilecdl.com/document-upload?token=${token}`, documentsUpdated: result.items.length };
     } catch (error) {
         console.error('[DocumentCollection] Error regenerating token:', error);
         return { success: false, error: error.message };
@@ -1055,60 +404,26 @@ export async function regenerateUploadToken(workflowId) {
 // SCHEDULED JOB: SEND AUTO REMINDERS
 // ============================================================================
 
-/**
- * Send automatic reminders for pending documents
- * Called by scheduled job (jobs.config)
- *
- * @returns {Object} Result with reminder counts
- */
 export async function sendAutoReminders() {
     try {
         const now = new Date();
-        let remindersSent = 0;
-        let errors = 0;
+        let remindersSent = 0, errors = 0;
 
-        // Get all requested documents using dual-source routing
-        let requestedDocs = [];
-        if (usesAirtable(COLLECTION_KEYS.documentRequests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.documentRequests);
-            const maxReminders = CONFIG.reminderSequence.length;
-            const filter = `AND({Status} = '${CONFIG.status.REQUESTED}', {Reminder Sent Count} < ${maxReminders})`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 500 });
-            requestedDocs = result.records || [];
-        } else {
-            const result = await wixData.query(CONFIG.collections.documentRequests)
-                .eq('status', CONFIG.status.REQUESTED)
-                .lt('reminder_sent_count', CONFIG.reminderSequence.length)
-                .find({ suppressAuth: true });
-            requestedDocs = result.items;
-        }
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.documentRequests, {
+            filters: { status: CONFIG.status.REQUESTED, reminder_sent_count: { lt: CONFIG.reminderSequence.length } },
+            limit: 500, suppressAuth: true
+        });
 
-        for (const doc of requestedDocs) {
-            const createdDate = new Date(doc._createdDate);
-            const daysSinceCreation = Math.floor((now - createdDate) / (1000 * 60 * 60 * 24));
-            const currentReminderIndex = doc.reminder_sent_count || 0;
-            const nextReminderDay = CONFIG.reminderSequence[currentReminderIndex];
-
-            // Check if it's time for next reminder
-            if (nextReminderDay && daysSinceCreation >= nextReminderDay) {
-                const reminderResult = await sendDocumentReminder(doc._id);
-                if (reminderResult.success) {
-                    remindersSent++;
-                } else {
-                    errors++;
-                }
+        for (const doc of (result.items || [])) {
+            const daysSince = Math.floor((now - new Date(doc._createdDate)) / (1000 * 60 * 60 * 24));
+            const nextDay = CONFIG.reminderSequence[doc.reminder_sent_count || 0];
+            if (nextDay && daysSince >= nextDay) {
+                const res = await sendDocumentReminder(doc._id);
+                if (res.success) remindersSent++; else errors++;
             }
         }
 
-        console.log(`[DocumentCollection] Auto-reminders: ${remindersSent} sent, ${errors} errors`);
-
-        return {
-            success: true,
-            remindersSent,
-            errors,
-            timestamp: now.toISOString()
-        };
-
+        return { success: true, remindersSent, errors, timestamp: now.toISOString() };
     } catch (error) {
         console.error('[DocumentCollection] Error in sendAutoReminders:', error);
         return { success: false, error: error.message };

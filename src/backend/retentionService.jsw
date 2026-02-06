@@ -1,414 +1,177 @@
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
 import { log } from 'backend/observabilityService';
 import { getSubscription } from 'backend/subscriptionService';
 import { seedDriverPerformance } from 'backend/seeds/seedMockData';
-
-// ============================================================================
-// Data Source Configuration
-// ============================================================================
-import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // ===========================================
 // CONFIGURATION & CONSTANTS
 // ===========================================
 
-const RISK_THRESHOLDS = {
-    CRITICAL: 90,
-    HIGH: 70,
-    MEDIUM: 40
+const RISK_THRESHOLDS = { CRITICAL: 90, HIGH: 70, MEDIUM: 40 };
+const RISK_LEVELS = { CRITICAL: 'CRITICAL', HIGH: 'HIGH', MEDIUM: 'MEDIUM', LOW: 'LOW' };
+const ROI_CONSTANTS = { COST_PER_TURNOVER: 10000, BASELINE_RETENTION_RATE: 0.55 };
+
+// Collection keys for dataAccess
+const COLLECTION_KEYS = {
+    driverPerformance: 'driverPerformance',
+    riskLogs: 'retentionRiskLogs',
+    carriers: 'carriers'
 };
-
-const RISK_LEVELS = {
-    CRITICAL: 'CRITICAL',
-    HIGH: 'HIGH',
-    MEDIUM: 'MEDIUM',
-    LOW: 'LOW'
-};
-
-const ROI_CONSTANTS = {
-    COST_PER_TURNOVER: 10000, // Industry avg $8.4k - $12k
-    BASELINE_RETENTION_RATE: 0.55 // North American benchmark
-};
-
-// Collection keys (camelCase, matching config.jsw)
-const DRIVER_PERFORMANCE_KEY = 'driverPerformance';
-const RETENTION_RISK_LOGS_KEY = 'retentionRiskLogs';
-
-// ===========================================
-// Data Abstraction Layer Helpers
-// ===========================================
-
-/**
- * Query records from the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Object} airtableOptions - Options for Airtable query
- * @param {Function} [wixQueryBuilder] - Optional custom Wix query builder
- * @returns {Promise<Object>} Query result with items array
- */
-async function queryData(collectionKey, airtableOptions = {}, wixQueryBuilder = null) {
-  if (usesAirtable(collectionKey)) {
-    try {
-      const tableName = getAirtableTableName(collectionKey);
-      const result = await airtable.queryRecords(tableName, airtableOptions);
-      return { items: result.records || [], totalCount: (result.records || []).length };
-    } catch (error) {
-      console.error(`[RetentionService] Airtable query error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  if (wixQueryBuilder) {
-    return await wixQueryBuilder();
-  }
-  const result = await wixData.query(getWixCollectionName(collectionKey)).find({ suppressAuth: true });
-  return { items: result.items, totalCount: result.totalCount };
-}
-
-/**
- * Insert record into the appropriate data source
- */
-async function insertData(collectionKey, data) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.createRecord(tableName, data);
-  }
-  return await wixData.insert(getWixCollectionName(collectionKey), data, { suppressAuth: true });
-}
 
 // ===========================================
 // CORE LOGIC
 // ===========================================
 
-/**
- * Calculates retention risk score based on performance, finance, and BEHAVIOR
- * @param {Object} metrics - Performance metrics (miles, on-time, safety, pay, sessions, dNPS)
- * @returns {Object} { score, level, primaryFactor, actions }
- */
 export function calculateRiskScore(metrics) {
-    let score = 0;
-    let factors = [];
-    let suggestedActions = [];
+    let score = 0, factors = [], suggestedActions = [];
+    const { miles_driven, on_time_delivery_rate, safety_incidents, home_time_days, prev_miles_driven, pay_volatility_index, avg_weekly_pay, app_sessions_last_7d, app_sessions_prev_7d, dnps_score } = metrics;
 
-    const {
-        miles_driven,
-        on_time_delivery_rate, // 0-100
-        safety_incidents,
-        home_time_days,
-        prev_miles_driven,
-        pay_volatility_index, // 0-100
-        avg_weekly_pay,
-        app_sessions_last_7d,
-        app_sessions_prev_7d,
-        dnps_score
-    } = metrics;
-
-    // 1. dNPS (User Sentiment) - IMMEDIATE CRITICAL OVERRIDE
     if (dnps_score !== undefined && dnps_score <= 6) {
-        score = 95; // Immediate Critical
-        factors.unshift('Detractor (dNPS ' + dnps_score + ')'); // High priority
+        score = 95; factors.unshift('Detractor (dNPS ' + dnps_score + ')');
         suggestedActions.push("Immediate Manager Call");
     }
 
-    // 2. The "Silence Signal" (Engagement Drop)
     if (app_sessions_prev_7d > 0) {
         const activityDrop = (app_sessions_prev_7d - app_sessions_last_7d) / app_sessions_prev_7d;
-        if (activityDrop >= 0.50) {
-            score += 50;
-            factors.push('Silence Signal: 50%+ Activity Drop');
-            suggestedActions.push("Trigger Check-in (SMS)");
-        } else if (activityDrop >= 0.30) {
-            score += 20;
-            factors.push('Decreasing App Engagement');
-        }
+        if (activityDrop >= 0.50) { score += 50; factors.push('Silence Signal: 50%+ Activity Drop'); suggestedActions.push("Trigger Check-in (SMS)"); }
+        else if (activityDrop >= 0.30) { score += 20; factors.push('Decreasing App Engagement'); }
     }
 
-    // 3. Safety Impact
-    if (safety_incidents >= 2) {
-        score += 60;
-        factors.push('Multiple Safety Incidents');
-        suggestedActions.push("Schedule Safety Review");
-    } else if (safety_incidents === 1) {
-        score += 30;
-        factors.push('Safety Incident');
-    }
+    if (safety_incidents >= 2) { score += 60; factors.push('Multiple Safety Incidents'); suggestedActions.push("Schedule Safety Review"); }
+    else if (safety_incidents === 1) { score += 30; factors.push('Safety Incident'); }
 
-    // 4. Financial Stability
-    if (pay_volatility_index > 25) {
-        score += 45;
-        factors.push('Extreme Pay Volatility (>25%)');
-        suggestedActions.push("Verify Pay / Payroll Audit");
-    } else if (pay_volatility_index > 15) {
-        score += 25;
-        factors.push('Unstable Pay Checks');
-    }
+    if (pay_volatility_index > 25) { score += 45; factors.push('Extreme Pay Volatility (>25%)'); suggestedActions.push("Verify Pay / Payroll Audit"); }
+    else if (pay_volatility_index > 15) { score += 25; factors.push('Unstable Pay Checks'); }
 
-    // 5. Burnout (Home Time)
-    if (home_time_days < 2) {
-        score += 30;
-        factors.push('Severe Burnout Risk (Low Home Time)');
-        suggestedActions.push("Schedule Time Off");
-    }
+    if (home_time_days < 2) { score += 30; factors.push('Severe Burnout Risk (Low Home Time)'); suggestedActions.push("Schedule Time Off"); }
 
-    // Cap score at 100
     score = Math.min(100, score);
+    let level = score >= RISK_THRESHOLDS.CRITICAL ? RISK_LEVELS.CRITICAL : score >= RISK_THRESHOLDS.HIGH ? RISK_LEVELS.HIGH : score >= RISK_THRESHOLDS.MEDIUM ? RISK_LEVELS.MEDIUM : RISK_LEVELS.LOW;
 
-    // Determine Level
-    let level = RISK_LEVELS.LOW;
-    if (score >= RISK_THRESHOLDS.CRITICAL) level = RISK_LEVELS.CRITICAL;
-    else if (score >= RISK_THRESHOLDS.HIGH) level = RISK_LEVELS.HIGH;
-    else if (score >= RISK_THRESHOLDS.MEDIUM) level = RISK_LEVELS.MEDIUM;
-
-    return {
-        score,
-        level,
-        primaryFactor: factors.length > 0 ? factors[0] : 'Stable Operation',
-        allFactors: factors,
-        suggestedActions: suggestedActions.slice(0, 2) // Top 2 actions
-    };
+    return { score, level, primaryFactor: factors[0] || 'Stable Operation', allFactors: factors, suggestedActions: suggestedActions.slice(0, 2) };
 }
 
 // ===========================================
 // EXPORTED SERVICES
 // ===========================================
 
-/**
- * Verify if the current user owns the carrier account
- * @param {string} carrierDot - Carrier DOT to check
- * @returns {Promise<boolean>} TRUE if owner, throws Error if not
- */
 async function verifyCarrierOwnership(carrierDot) {
     const user = wixUsersBackend.currentUser;
     if (!user.loggedIn) throw new Error('Not authenticated');
     
-    try {
-        // Check Carriers collection
-        // Assumption: 'Carriers' collection has 'dot_number' and '_owner' field
-        const result = await wixData.query('Carriers')
-            .eq('dot_number', carrierDot)
-            .eq('_owner', user.id)
-            .find({ suppressAuth: true });
-            
-        if (result.items.length > 0) return true;
-        
-        throw new Error('Ownership verification failed');
-    } catch (error) {
-        console.error('Ownership check failed:', error);
-        throw new Error('Unauthorized access to carrier data');
-    }
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+        filters: { dot_number: carrierDot, _owner: user.id },
+        limit: 1, suppressAuth: true
+    });
+    if (!result.success || !result.items?.length) throw new Error('Unauthorized');
+    return true;
 }
 
-/**
- * SECURE wrapper for dashboard access
- * Checks: Login, Ownership, Subscription Tier
- */
 export async function getCarrierRetentionDashboardForCarrier(carrierDot) {
     try {
-        // 1. Auth & Ownership
         await verifyCarrierOwnership(carrierDot);
-
-        // 2. Subscription Check
         const sub = await getSubscription(carrierDot);
-        const allowFull = sub.plan_type === 'pro' || sub.plan_type === 'enterprise';
-
-        // 3. Feature Gating
-        if (!allowFull) {
-            // Free Tier: Return limited preview / upgrade prompt
-            return {
-                success: true,
-                isFreeTier: true,
-                message: 'Upgrade to Pro to identify flight-risk drivers.',
-                upgradeUrl: '/pricing',
-                overview: null // Hide actual data
-            };
+        if (!['pro', 'enterprise'].includes(sub.plan_type)) {
+            return { success: true, isFreeTier: true, message: 'Upgrade to Pro to identify flight-risk drivers.', upgradeUrl: '/pricing' };
         }
-
-        // 4. Fetch Full Data
         return await getCarrierRetentionDashboard(carrierDot);
-
     } catch (error) {
-        console.warn('Retention dashboard access denied:', error.message);
         return { success: false, error: error.message };
     }
 }
 
-/**
- * Get aggregated retention dashboard data for a carrier
- * @param {string} carrierDot - Carrier DOT number
- * @returns {Promise<Object>} Dashboard overview data with ROI & Prevention
- */
 export async function getCarrierRetentionDashboard(carrierDot) {
     try {
-        let drivers = [];
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverPerformance, {
+            filters: { carrier_dot: carrierDot }, limit: 1000, suppressAuth: true
+        });
+        let drivers = result.items || [];
 
-        // Check if using Airtable for driver performance data
-        if (usesAirtable(DRIVER_PERFORMANCE_KEY)) {
-            try {
-                const filter = `{Carrier DOT} = '${carrierDot}'`;
-                const result = await airtable.queryRecords(getAirtableTableName(DRIVER_PERFORMANCE_KEY), {
-                    filterByFormula: filter
-                });
-                drivers = result.records || [];
-            } catch (error) {
-                console.error('[RetentionService] Airtable query failed:', error.message);
-            }
-        } else {
-            // Wix query
-            try {
-                const result = await wixData.query('DriverPerformance')
-                    .eq('carrier_dot', carrierDot)
-                    .find({ suppressAuth: true });
-                drivers = result.items;
-            } catch (error) {
-                console.error('[RetentionService] Wix query failed:', error.message);
-            }
-        }
+        if (drivers.length === 0) drivers = await seedDriverPerformance(carrierDot);
 
-        // SEEDING LOGIC: If no data found, seed it
-        if (!drivers || drivers.length === 0) {
-            console.log(`[RetentionService] No data for carrier ${carrierDot}. Seeding...`);
-            drivers = await seedDriverPerformance(carrierDot);
-        }
-
-        // Process data for dashboard
-        let totalScore = 0;
-        let highRiskCount = 0;
-        let riskDistribution = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
-        let processedDrivers = [];
-
-        let payVolatilitySum = 0;
-        let totalWeeklyPay = 0;
+        let totalScore = 0, highRiskCount = 0, riskDistribution = { LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0 };
+        let payVolatilitySum = 0, totalWeeklyPay = 0, processedDrivers = [];
 
         for (const record of drivers) {
             const risk = calculateRiskScore(record);
-
-            // Update stats
             totalScore += risk.score;
             riskDistribution[risk.level]++;
-
             payVolatilitySum += (record.pay_volatility_index || 0);
             totalWeeklyPay += (record.avg_weekly_pay || 0);
-
-            if (risk.level === 'HIGH' || risk.level === 'CRITICAL') {
-                highRiskCount++;
-            }
+            if (['HIGH', 'CRITICAL'].includes(risk.level)) highRiskCount++;
 
             processedDrivers.push({
-                driverId: record.driver_id,
-                driverName: record.driver_name || 'Driver',
-                metrics: {
-                    miles: record.miles_driven,
-                    safety: record.safety_incidents,
-                    homeTime: record.home_time_days,
-                    weeklyPay: record.avg_weekly_pay,
-                    payVolatility: record.pay_volatility_index,
-                    sessionsLast7: record.app_sessions_last_7d,
-                    dNPS: record.dnps_score
-                },
+                driverId: record.driver_id, driverName: record.driver_name || 'Driver',
+                metrics: { miles: record.miles_driven, safety: record.safety_incidents, homeTime: record.home_time_days, weeklyPay: record.avg_weekly_pay, payVolatility: record.pay_volatility_index, sessionsLast7: record.app_sessions_last_7d, dNPS: record.dnps_score },
                 risk
             });
         }
 
-        const driverCount = drivers.length || 1;
-        const avgScore = Math.round(totalScore / driverCount);
-        const avgPayVolatility = Math.round(payVolatilitySum / driverCount);
-        const avgFleetPay = Math.round(totalWeeklyPay / driverCount);
+        const count = drivers.length || 1;
+        const avgScore = Math.round(totalScore / count);
+        const retentionRate = (100 - (avgScore * 0.5)) / 100;
+        const improvement = Math.max(0, retentionRate - ROI_CONSTANTS.BASELINE_RETENTION_RATE);
+        const driversSaved = Math.round(count * improvement);
 
-        // ROI CALCULATION
-        // Retention Rate = (100 - Avg Turnover Probability) / 100
-        const currentRetentionRate = (100 - (avgScore * 0.5)) / 100; // Simplified proxy
-        const improvement = Math.max(0, currentRetentionRate - ROI_CONSTANTS.BASELINE_RETENTION_RATE);
-        const driversSaved = Math.round(driverCount * improvement);
-        const costAvoided = driversSaved * ROI_CONSTANTS.COST_PER_TURNOVER;
-
-        // Sort by risk score descending
         processedDrivers.sort((a, b) => b.risk.score - a.risk.score);
 
         return {
             success: true,
             overview: {
-                avgRetentionScore: Math.round(currentRetentionRate * 100),
-                avgRiskScore: avgScore,
-                highRiskCount,
-                activeDrivers: driverCount,
-                riskDistribution,
-                roi: {
-                    costAvoided,
-                    driversSaved,
-                    baselineRate: ROI_CONSTANTS.BASELINE_RETENTION_RATE * 100
-                }
+                avgRetentionScore: Math.round(retentionRate * 100), avgRiskScore: avgScore, highRiskCount, activeDrivers: drivers.length, riskDistribution,
+                roi: { costAvoided: driversSaved * ROI_CONSTANTS.COST_PER_TURNOVER, driversSaved, baselineRate: ROI_CONSTANTS.BASELINE_RETENTION_RATE * 100 }
             },
-            financialHealth: {
-                avgWeeklyPay: avgFleetPay,
-                avgPayVolatility,
-                volatilityStatus: avgPayVolatility > 15 ? 'UNSTABLE' : 'STABLE'
-            },
+            financialHealth: { avgWeeklyPay: Math.round(totalWeeklyPay / count), avgPayVolatility: Math.round(payVolatilitySum / count), volatilityStatus: Math.round(payVolatilitySum / count) > 15 ? 'UNSTABLE' : 'STABLE' },
             atRiskWatchlist: processedDrivers.filter(d => d.risk.score >= RISK_THRESHOLDS.MEDIUM),
             allDrivers: processedDrivers
         };
-
     } catch (error) {
-        console.error('Error fetching retention dashboard:', error);
-        await log({ level: 'ERROR', source: 'retention-service', message: error.message });
-        throw new Error('Failed to load retention dashboard data.');
+        log({ level: 'ERROR', source: 'retention-service', message: error.message }).catch(() => {});
+        throw new Error('Failed to load retention dashboard');
     }
 }
 
-/**
- * Daily scheduled job function to refresh risk scores for all drivers
- * Iterates through DriverPerformance data and logs current risk to RetentionRiskLogs
- */
 export async function refreshAllRetentionRiskScores() {
-    console.log('[RetentionService] Starting daily risk score refresh...');
     const startTime = Date.now();
-    
     try {
-        // 1. Fetch all performance records (latest per driver)
-        // In this implementation, we query all records and process them.
-        // For production, you'd likely group by driver or filter by latest period.
-        const performanceData = await queryData(DRIVER_PERFORMANCE_KEY, { limit: 1000 });
-        const records = performanceData.items || [];
-        
-        console.log(`[RetentionService] Found ${records.length} performance records to process.`);
-        
-        let processedCount = 0;
+        const perfResult = await dataAccess.queryRecords(COLLECTION_KEYS.driverPerformance, { limit: 1000, suppressAuth: true });
+        const records = perfResult.items || [];
         const now = new Date();
         
         for (const metrics of records) {
-            // 2. Calculate current risk
             const risk = calculateRiskScore(metrics);
-            
-            // 3. Log to RetentionRiskLogs
-            await insertData(RETENTION_RISK_LOGS_KEY, {
-                driver_id: metrics.driver_id,
-                carrier_dot: metrics.carrier_dot,
-                risk_level: risk.level,
-                risk_score: risk.score,
-                primary_factor: risk.primaryFactor,
+            await dataAccess.insertRecord(COLLECTION_KEYS.riskLogs, {
+                driver_id: metrics.driver_id, carrier_dot: metrics.carrier_dot,
+                risk_level: risk.level, risk_score: risk.score, primary_factor: risk.primaryFactor,
                 assessment_date: now.toISOString()
-            });
-            
-            processedCount++;
+            }, { suppressAuth: true });
         }
-        
-        const duration = Date.now() - startTime;
-        console.log(`[RetentionService] Refresh complete. Processed ${processedCount} drivers in ${duration}ms.`);
-        
-        return {
-            success: true,
-            processed: processedCount,
-            durationMs: duration
-        };
-        
+        return { success: true, processed: records.length, durationMs: Date.now() - startTime };
     } catch (error) {
-        console.error('[RetentionService] Refresh failed:', error);
-        await log({ level: 'ERROR', source: 'retention-service', message: `Risk refresh failed: ${error.message}` });
-        return {
-            success: false,
-            error: error.message
-        };
+        log({ level: 'ERROR', source: 'retention-service', message: `Risk refresh failed: ${error.message}` }).catch(() => {});
+        return { success: false, error: error.message };
     }
+}
+
+export async function getInterventionSuggestions(driverId, riskData) {
+    try {
+        if (!riskData?.allFactors?.length) return { success: true, suggestions: [] };
+        const riskTypeMap = { 'Silence Signal': 'SILENCE_SIGNAL', 'Detractor': 'DETRACTOR_NPS', 'Safety Incident': 'SAFETY_INCIDENT', 'Pay Volatility': 'PAY_VOLATILITY', 'Burnout Risk': 'BURNOUT_RISK' };
+        const matchedTypes = new Set();
+        for (const f of riskData.allFactors) {
+            for (const [p, t] of Object.entries(riskTypeMap)) if (f.includes(p)) matchedTypes.add(t);
+        }
+        if (!matchedTypes.size) return { success: true, suggestions: [] };
+
+        const intSvc = await import('backend/interventionService');
+        const all = [];
+        for (const t of matchedTypes) {
+            const res = await intSvc.getTemplates('', t);
+            if (res.success && res.templates) all.push(...res.templates);
+        }
+        return { success: true, suggestions: all.sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0)).slice(0, 3) };
+    } catch (error) { return { success: false, error: error.message, suggestions: [] }; }
 }
 
 // ===========================================

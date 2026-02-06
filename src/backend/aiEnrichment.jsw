@@ -1,24 +1,15 @@
 import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
-import wixData from 'wix-data';
+import * as dataAccess from 'backend/dataAccess';
 import { getCarrierSafetyData } from 'backend/fmcsaService';
-import { log, logAIOperation, logExternalAPI, startTrace, endTrace } from 'backend/observabilityService';
-
-// ============================================================================
-// Data Source Configuration
-// ============================================================================
-import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import { log, logAIOperation, startTrace, endTrace } from 'backend/observabilityService';
 
 // ============================================================================
 // CONFIGURATION - PRODUCTION-HARDENED 2025 STACK
 // ============================================================================
 const CONFIG = {
-  // Collection keys (camelCase, matching config.jsw)
+  // Collection keys (camelCase, matching configData.js)
   enrichmentsKey: 'carrierEnrichments',
-
-  // Legacy collection name for wixData
-  enrichmentsCollection: 'CarrierEnrichments',
 
   // Claude Configuration
   claudeModel: 'claude-sonnet-4-20250514',
@@ -40,75 +31,6 @@ const CONFIG = {
   enablePerplexity: true,
   fallbackToClaudeOnly: true
 };
-
-// ============================================================================
-// Data Abstraction Layer Helpers
-// ============================================================================
-
-/**
- * Query records from the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Function} wixQueryBuilder - Function that builds and executes wixData query
- * @param {Object} airtableOptions - Options for Airtable query
- * @returns {Promise<Object>} Query result with items array
- */
-async function queryData(collectionKey, wixQueryBuilder, airtableOptions = {}) {
-  if (await usesAirtable(collectionKey)) {
-    try {
-      const tableName = await getAirtableTableName(collectionKey);
-      const result = await airtable.queryRecords(tableName, airtableOptions);
-      return { items: result.records || [], totalCount: (result.records || []).length };
-    } catch (error) {
-      console.error(`[AIEnrichment] Airtable query error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  return await wixQueryBuilder();
-}
-
-/**
- * Insert a record into the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Object} record - Record to insert
- * @returns {Promise<Object>} Inserted record
- */
-async function insertData(collectionKey, record) {
-  if (await usesAirtable(collectionKey)) {
-    try {
-      const tableName = await getAirtableTableName(collectionKey);
-      return await airtable.createRecord(tableName, record);
-    } catch (error) {
-      console.error(`[AIEnrichment] Airtable insert error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  const wixCollection = await getWixCollectionName(collectionKey);
-  return await wixData.insert(wixCollection, record, { suppressAuth: true });
-}
-
-/**
- * Update a record in the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Object} record - Record with _id to update
- * @returns {Promise<Object>} Updated record
- */
-async function updateData(collectionKey, record) {
-  if (await usesAirtable(collectionKey)) {
-    try {
-      const tableName = await getAirtableTableName(collectionKey);
-      const { _id, ...fields } = record;
-      return await airtable.updateRecord(tableName, _id, fields);
-    } catch (error) {
-      console.error(`[AIEnrichment] Airtable update error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  const wixCollection = await getWixCollectionName(collectionKey);
-  return await wixData.update(wixCollection, record, { suppressAuth: true });
-}
 
 // ============================================================================
 // MAIN ENRICHMENT PIPELINE - FAULT TOLERANT
@@ -145,7 +67,7 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
 
   try {
     // Check for fresh cache first - skip expensive API calls
-    const cached = await getCachedSentiment(dot);
+    const cached = await getCachedSentiment(dot, traceId);
     if (cached && !isSentimentStale(cached.enriched_date)) {
       console.log(`Using cached enrichment for DOT ${dot} (${cached.cache_age_days} days old)`);
       await log({ level: 'INFO', source: 'ai-enrichment', message: `Cache hit for DOT ${dot}`, traceId, details: { cacheAgeDays: cached.cache_age_days } });
@@ -175,7 +97,7 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
     const enrichedData = await callClaudeSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
 
     // STEP 4: Persist and Return
-    await cacheSentimentEnrichment(enrichedData);
+    await cacheSentimentEnrichment(enrichedData, traceId);
 
     const elapsed = Date.now() - startTime;
     console.log(`Enrichment complete for DOT ${dot} in ${elapsed}ms`);
@@ -587,26 +509,15 @@ function parseSentimentResponse(responseText, dotNumber) {
 // CACHE MANAGEMENT
 // ============================================================================
 
-async function getCachedSentiment(dotNumber) {
+async function getCachedSentiment(dotNumber, traceId = null) {
   try {
-    let items = [];
+    const result = await dataAccess.queryRecords(CONFIG.enrichmentsKey, {
+      filters: { dot_number: String(dotNumber) },
+      limit: 1,
+      traceId
+    });
 
-    if (await usesAirtable(CONFIG.enrichmentsKey)) {
-      // Airtable query
-      const filter = `{DOT Number} = '${String(dotNumber)}'`;
-      const result = await airtable.queryRecords(await getAirtableTableName(CONFIG.enrichmentsKey), {
-        filterByFormula: filter,
-        maxRecords: 1
-      });
-      items = result.records || [];
-    } else {
-      // Wix query
-      const result = await wixData.query(CONFIG.enrichmentsCollection)
-        .eq('dot_number', String(dotNumber))
-        .find();
-      items = result.items;
-    }
-
+    const items = result.items || [];
     if (items.length === 0) return null;
 
     const cached = items[0];
@@ -628,27 +539,27 @@ function isSentimentStale(enrichedDate) {
   return daysSince > CONFIG.cacheExpiryDays;
 }
 
-async function cacheSentimentEnrichment(sentimentData) {
+async function cacheSentimentEnrichment(sentimentData, traceId = null) {
   try {
     const dataToCache = { ...sentimentData };
     delete dataToCache.fmcsa; // FMCSA is cached separately
 
-    const existing = await getCachedSentiment(sentimentData.dot_number);
+    const existing = await getCachedSentiment(sentimentData.dot_number, traceId);
 
     if (existing && existing._id) {
-      await updateData(CONFIG.enrichmentsKey, {
+      await dataAccess.updateRecord(CONFIG.enrichmentsKey, {
         ...dataToCache,
         _id: existing._id,
         match_count: (existing.match_count || 0) + 1,
         last_matched_date: new Date()
-      });
+      }, { traceId });
       console.log(`Updated cached enrichment for DOT ${sentimentData.dot_number}`);
     } else {
-      await insertData(CONFIG.enrichmentsKey, {
+      await dataAccess.insertRecord(CONFIG.enrichmentsKey, {
         ...dataToCache,
         match_count: 1,
         last_matched_date: new Date()
-      });
+      }, { traceId });
       console.log(`Created new cached enrichment for DOT ${sentimentData.dot_number}`);
     }
   } catch (error) {

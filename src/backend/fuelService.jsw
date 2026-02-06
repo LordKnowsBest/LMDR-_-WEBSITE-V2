@@ -1,22 +1,9 @@
-/**
- * Fuel Service - Help drivers find cheapest diesel and calculate savings
- *
- * Features:
- * - Search diesel prices near location with fuel card discounts
- * - Route-based fuel planning
- * - Savings calculator
- * - Fuel card management
- * - Regional price trends
- */
-
-import wixData from 'wix-data';
 import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
-import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { seedFuelPrices, seedFuelTrends } from 'backend/seeds/seedMockData';
 
-// Collection keys for dual-source routing
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     fuelPrices: 'fuelPrices',
     fuelCards: 'fuelCards',
@@ -24,609 +11,126 @@ const COLLECTION_KEYS = {
     fuelPriceTrends: 'fuelPriceTrends'
 };
 
-// ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName || getWixCollectionName(collectionKey));
-    if (options.eq) {
-        for (const [field, value] of Object.entries(options.eq)) {
-            query = query.eq(field, value);
-        }
-    }
-    if (options.gt) {
-        for (const [field, value] of Object.entries(options.gt)) {
-            query = query.gt(field, value);
-        }
-    }
-    if (options.descending) {
-        query = query.descending(options.descending);
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function getRecord(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.getRecord(tableName, recordId);
-    }
-    return await wixData.get(wixCollectionName, recordId, { suppressAuth: true });
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function removeData(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.deleteRecord(tableName, recordId);
-    }
-    return await wixData.remove(wixCollectionName, recordId, { suppressAuth: true });
-}
-
-async function countData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            maxRecords: 1000
-        });
-        return (result.records || []).length;
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.eq) {
-        for (const [field, value] of Object.entries(options.eq)) {
-            query = query.eq(field, value);
-        }
-    }
-    return await query.count({ suppressAuth: true });
-}
-
-// Local Haversine formula - avoid async overhead from importing .jsw module
+// Local Haversine formula
 function calculateDistance(lat1, lng1, lat2, lng2) {
     if (!lat1 || !lng1 || !lat2 || !lng2) return 0;
-
     const R = 3958.8; // Earth's radius in miles
-    const toRad = (value) => (value * Math.PI) / 180;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lng2 - lng1);
-
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-              Math.sin(dLon / 2) * Math.sin(dLon / 2);
-
+    const toRad = (v) => (v * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1); const dLon = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
 }
 
-const COLLECTIONS = {
-    PRICES: 'FuelPrices',
-    CARDS: 'FuelCards',
-    CACHE: 'RoadUtilityCache',
-    TRENDS: 'FuelPriceTrends' // Added for trends
-};
-
-// Fuel card discount rates (cents per gallon)
 const FUEL_CARD_DISCOUNTS = {
-    comdata: { base: 0.05, premium: 0.08 },
-    efs: { base: 0.04, premium: 0.07 },
-    tcheck: { base: 0.03, premium: 0.06 },
-    fleetone: { base: 0.04, premium: 0.065 },
-    wex: { base: 0.035, premium: 0.055 }
+    comdata: { base: 0.05, premium: 0.08 }, efs: { base: 0.04, premium: 0.07 }, tcheck: { base: 0.03, premium: 0.06 },
+    fleetone: { base: 0.04, premium: 0.065 }, wex: { base: 0.035, premium: 0.055 }
 };
 
-// Cache TTL in minutes
-const CACHE_TTL_MINUTES = 15;
-
-/**
- * Search for diesel prices near location
- * @param {number} lat - Latitude
- * @param {number} lng - Longitude
- * @param {number} radius - Search radius in miles (default 50)
- * @param {Object} options - { cardType, amenities, minRating }
- */
 export async function searchFuelPrices(lat, lng, radius = 50, options = {}) {
     const cacheKey = `fuel:${lat.toFixed(2)}:${lng.toFixed(2)}:${radius}:${options.cardType || 'none'}`;
-
     try {
-        // 1. Check cache first
-        let cachedItems = [];
-        if (usesAirtable(COLLECTION_KEYS.roadUtilityCache)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.roadUtilityCache);
-            const filter = `AND({Cache Key} = "${cacheKey}", {Expires At} > "${new Date().toISOString()}")`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-            if (result.records && result.records.length > 0) {
-                cachedItems = [{ data: result.records[0].Data || result.records[0].data }];
-            }
-        } else {
-            const cached = await wixData.query(COLLECTIONS.CACHE)
-                .eq('cache_key', cacheKey)
-                .gt('expires_at', new Date())
-                .limit(1)
-                .find({ suppressAuth: true });
-            cachedItems = cached.items;
-        }
+        const cacheRes = await dataAccess.queryRecords(COLLECTION_KEYS.roadUtilityCache, {
+            filters: { cache_key: cacheKey, expires_at: { gt: new Date() } }, limit: 1, suppressAuth: true
+        });
+        if (cacheRes.items?.length) return { success: true, items: cacheRes.items[0].data, fromCache: true };
 
-        if (cachedItems.length > 0) {
-            console.log('[FuelService] Cache hit for:', cacheKey);
-            return { success: true, items: cachedItems[0].data, fromCache: true };
-        }
-
-        // 2. Query local database
-        let items = await queryData('fuelPrices', COLLECTIONS.PRICES, { limit: 1000 });
-
-        // If no local data, seed data using seedMockData service
-        if (items.length === 0) {
-            console.log('[FuelService] Seeding mock data for location:', { lat, lng, radius });
+        const dbRes = await dataAccess.queryRecords(COLLECTION_KEYS.fuelPrices, { limit: 1000, suppressAuth: true });
+        let items = dbRes.items || [];
+        if (!items.length) {
             await seedFuelPrices(lat, lng, radius);
-            items = await queryData('fuelPrices', COLLECTIONS.PRICES, { limit: 1000 });
+            const reRes = await dataAccess.queryRecords(COLLECTION_KEYS.fuelPrices, { limit: 1000, suppressAuth: true });
+            items = reRes.items || [];
         }
 
-        // Normalize data (Airtable/Wix structure alignment)
-        const normalizedItems = items.map(r => ({
-            _id: r._id || r.id,
-            station_id: r.station_id || r.fields?.['Station Id'] || r['Station Id'],
-            brand: r.brand || r.fields?.['Brand'] || r['Brand'],
-            name: r.name || r.fields?.['Name'] || r['Name'],
-            location: r.location || r.fields?.['Location'] || r['Location'],
-            diesel_price: r.diesel_price || r.fields?.['Diesel Price'] || r['Diesel Price'],
-            def_price: r.def_price || r.fields?.['Def Price'] || r['Def Price'],
-            card_discounts: r.card_discounts || r.fields?.['Card Discounts'] || r['Card Discounts'],
-            amenities: r.amenities || r.fields?.['Amenities'] || r['Amenities'],
-            address: r.address || r.fields?.['Address'] || r['Address']
-        }));
+        const nearby = items.map(s => {
+            const d = calculateDistance(parseFloat(lat), parseFloat(lng), parseFloat(s.location?.lat), parseFloat(s.location?.lng));
+            return { ...s, distance_miles: parseFloat(d.toFixed(2)) };
+        }).filter(s => s.distance_miles <= radius);
 
-        // 3. Filter by radius and calculate distance
-        const nearbyStations = normalizedItems.filter(station => {
-            if (!station.location?.lat || !station.location?.lng) return false;
-            const stationLat = parseFloat(station.location.lat);
-            const stationLng = parseFloat(station.location.lng);
-            if (isNaN(stationLat) || isNaN(stationLng)) return false;
-
-            const distance = calculateDistance(parseFloat(lat), parseFloat(lng), stationLat, stationLng);
-            station.distance_miles = parseFloat(distance.toFixed(2));
-            return distance <= radius;
+        const processed = nearby.map(s => {
+            let disc = 0;
+            if (options.cardType && s.card_discounts?.[options.cardType]) disc = s.card_discounts[options.cardType];
+            else if (options.cardType && FUEL_CARD_DISCOUNTS[options.cardType]) disc = FUEL_CARD_DISCOUNTS[options.cardType].base;
+            const effective = parseFloat(((s.diesel_price || 3.50) - disc).toFixed(3));
+            return { ...s, retail_price: s.diesel_price || 3.50, discount_applied: disc, effective_price: effective, savings_per_gallon: disc, savings_per_fill: parseFloat((disc * 150).toFixed(2)) };
         });
 
-        // 4. Apply fuel card discounts
-        const processedStations = nearbyStations.map(station => {
-            let discount = 0;
-            let discountSource = 'none';
+        processed.sort((a, b) => a.effective_price - b.effective_price);
+        const final = processed.slice(0, 25);
+        const expiry = new Date(); expiry.setMinutes(expiry.getMinutes() + 15);
+        await dataAccess.insertRecord(COLLECTION_KEYS.roadUtilityCache, { cache_key: cacheKey, cache_type: 'fuel', data: final, expires_at: expiry }, { suppressAuth: true }).catch(()=>{});
 
-            if (options.cardType && station.card_discounts && station.card_discounts[options.cardType]) {
-                discount = station.card_discounts[options.cardType];
-                discountSource = 'station';
-            } else if (options.cardType && FUEL_CARD_DISCOUNTS[options.cardType]) {
-                discount = FUEL_CARD_DISCOUNTS[options.cardType].base;
-                discountSource = 'standard';
-            }
-
-            const retailPrice = station.diesel_price || 3.50;
-            const effectivePrice = parseFloat((retailPrice - discount).toFixed(3));
-
-            return {
-                ...station,
-                retail_price: retailPrice,
-                discount_applied: discount,
-                discount_source: discountSource,
-                effective_price: effectivePrice,
-                savings_per_gallon: discount,
-                savings_per_fill: parseFloat((discount * 150).toFixed(2))
-            };
-        });
-
-        // 5. Filter by amenities
-        let finalItems = processedStations;
-        if (options.amenities && Array.isArray(options.amenities) && options.amenities.length > 0) {
-            finalItems = processedStations.filter(station =>
-                options.amenities.every(amenity => station.amenities && station.amenities.includes(amenity))
-            );
-        }
-
-        // 6. Sort and Limit
-        finalItems.sort((a, b) => a.effective_price - b.effective_price);
-        finalItems = finalItems.slice(0, 25);
-
-        // 8. Store in cache
-        const expiry = new Date();
-        expiry.setMinutes(expiry.getMinutes() + CACHE_TTL_MINUTES);
-
-        const cacheRecord = {
-            cache_key: cacheKey,
-            cache_type: 'fuel',
-            data: finalItems,
-            expires_at: expiry
-        };
-
-        await insertData(COLLECTION_KEYS.roadUtilityCache, COLLECTIONS.CACHE, cacheRecord)
-            .catch(err => console.warn('[FuelService] Cache write failed:', err.message));
-
-        return { success: true, items: finalItems };
-    } catch (error) {
-        console.error('[FuelService] searchFuelPrices failed:', error);
-        return { success: false, error: error.message };
-    }
+        return { success: true, items: final };
+    } catch (e) { return { success: false, error: e.message }; }
 }
 
-/**
- * Get fuel prices along a route
- * @param {Array} routePoints - Array of {lat, lng} waypoints
- * @param {Object} options - { cardType, maxStops }
- */
 export async function getFuelAlongRoute(routePoints, options = {}) {
-    if (!Array.isArray(routePoints) || routePoints.length < 2) {
-        return { success: false, error: 'At least 2 route points required' };
-    }
-
+    if (!Array.isArray(routePoints) || routePoints.length < 2) return { success: false, error: 'Invalid' };
     try {
-        const maxStops = options.maxStops || 5;
-        const allStations = [];
-        const seenIds = new Set();
-
-        const samplePoints = sampleRoutePoints(routePoints, maxStops);
-
-        for (const point of samplePoints) {
-            const result = await searchFuelPrices(point.lat, point.lng, 25, {
-                cardType: options.cardType
-            });
-
-            if (result.success) {
-                const top3 = result.items.slice(0, 3);
-                for (const station of top3) {
-                    if (!seenIds.has(station._id)) {
-                        station.route_mile = point.routeMile || 0;
-                        allStations.push(station);
-                        seenIds.add(station._id);
-                    }
-                }
-            }
-        }
-
-        allStations.sort((a, b) => a.effective_price - b.effective_price);
-
-        return {
-            success: true,
-            items: allStations,
-            routeLength: routePoints.length,
-            stopsFound: allStations.length
-        };
-    } catch (error) {
-        console.error('[FuelService] getFuelAlongRoute failed:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-/**
- * Sample evenly spaced points along a route
- */
-function sampleRoutePoints(routePoints, maxSamples) {
-    if (routePoints.length <= maxSamples) return routePoints;
-
-    const step = Math.floor(routePoints.length / maxSamples);
-    const samples = [];
-
-    for (let i = 0; i < routePoints.length; i += step) {
-        samples.push({ ...routePoints[i], routeMile: i * 10 }); // Rough estimate
-        if (samples.length >= maxSamples) break;
-    }
-
-    if (samples[samples.length - 1] !== routePoints[routePoints.length - 1]) {
-        samples.push(routePoints[routePoints.length - 1]);
-    }
-
-    return samples;
-}
-
-/**
- * Calculate potential fuel savings for a trip
- * @param {string} driverId - Driver ID
- * @param {Object} tripDetails - { gallonsNeeded, currentPrice, cardType, routePoints }
- */
-export async function calculateFuelSavings(driverId, tripDetails) {
-    if (!tripDetails.gallonsNeeded || tripDetails.gallonsNeeded <= 0) {
-        return { success: false, error: 'gallonsNeeded is required and must be positive' };
-    }
-
-    try {
-        const gallons = tripDetails.gallonsNeeded;
-        const currentPrice = tripDetails.currentPrice || 3.50;
-        const cardType = tripDetails.cardType || 'none';
-
-        let cheapestStation = null;
-        if (tripDetails.routePoints && tripDetails.routePoints.length >= 2) {
-            const routeResult = await getFuelAlongRoute(tripDetails.routePoints, { cardType });
-            if (routeResult.success && routeResult.items.length > 0) {
-                cheapestStation = routeResult.items[0];
-            }
-        } else if (tripDetails.lat && tripDetails.lng) {
-            const searchResult = await searchFuelPrices(tripDetails.lat, tripDetails.lng, 50, { cardType });
-            if (searchResult.success && searchResult.items.length > 0) {
-                cheapestStation = searchResult.items[0];
-            }
-        }
-
-        const currentCost = gallons * currentPrice;
-        const cheapestPrice = cheapestStation ? cheapestStation.effective_price : currentPrice;
-        const cheapestCost = gallons * cheapestPrice;
-        const savings = currentCost - cheapestCost;
-
-        let cardDiscount = 0;
-        if (cardType !== 'none' && FUEL_CARD_DISCOUNTS[cardType]) {
-            cardDiscount = FUEL_CARD_DISCOUNTS[cardType].base;
-        }
-        const cardSavings = gallons * cardDiscount;
-
-        const stateAverage = await getStateAveragePrice(tripDetails.state || 'US');
-        const vsAverageSavings = gallons * (stateAverage - cheapestPrice);
-
-        return {
-            success: true,
-            calculation: {
-                gallons,
-                currentPrice,
-                currentCost: parseFloat(currentCost.toFixed(2)),
-                cheapestPrice,
-                cheapestCost: parseFloat(cheapestCost.toFixed(2)),
-                totalSavings: parseFloat(savings.toFixed(2)),
-                cardSavings: parseFloat(cardSavings.toFixed(2)),
-                vsAverageSavings: parseFloat(vsAverageSavings.toFixed(2)),
-                stateAverage,
-                cheapestStation: cheapestStation ? {
-                    name: cheapestStation.name,
-                    brand: cheapestStation.brand,
-                    distance_miles: cheapestStation.distance_miles,
-                    effective_price: cheapestStation.effective_price
-                } : null
-            }
-        };
-    } catch (error) {
-        console.error('[FuelService] calculateFuelSavings failed:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-/**
- * Get state average diesel price (mock for now)
- */
-async function getStateAveragePrice(state) {
-    // In production, this would query EIA or other data source
-    const stateAverages = {
-        'US': 3.75,
-        'TX': 3.45, 'CA': 5.20, 'FL': 3.65, 'TN': 3.55,
-        'GA': 3.60, 'NC': 3.58, 'OH': 3.70, 'PA': 4.10,
-        'IL': 3.85, 'IN': 3.72, 'MO': 3.48, 'AR': 3.42
-    };
-    return stateAverages[state] || stateAverages['US'];
-}
-
-/**
- * Link a fuel card to a driver's profile
- * @param {string} driverId - Driver ID
- * @param {Object} cardInfo - { cardType, last4, nickname }
- */
-export async function linkFuelCard(driverId, cardInfo) {
-    if (!driverId) return { success: false, error: 'driverId is required' };
-    if (!cardInfo.cardType) return { success: false, error: 'cardType is required' };
-    if (!cardInfo.last4 || cardInfo.last4.length !== 4) {
-        return { success: false, error: 'last4 must be exactly 4 digits' };
-    }
-
-    try {
-        let existingCount = 0;
-        if (usesAirtable(COLLECTION_KEYS.fuelCards)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.fuelCards);
-            const filter = `AND({Driver Id} = "${driverId}", {Card Type} = "${cardInfo.cardType}", {Card Number Last4} = "${cardInfo.last4}")`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-            existingCount = (result.records || []).length;
-        } else {
-            const existing = await wixData.query(COLLECTIONS.CARDS)
-                .eq('driver_id', driverId)
-                .eq('card_type', cardInfo.cardType)
-                .eq('card_number_last4', cardInfo.last4)
-                .limit(1)
-                .find({ suppressAuth: true });
-            existingCount = existing.items.length;
-        }
-
-        if (existingCount > 0) {
-            return { success: false, error: 'This card is already linked to your account' };
-        }
-
-        const cardCount = await countData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, {
-            eq: { driver_id: driverId },
-            filter: `{Driver Id} = "${driverId}"`
-        });
-
-        if (cardCount >= 5) {
-            return { success: false, error: 'Maximum of 5 fuel cards allowed per driver' };
-        }
-
-        const isPrimary = cardCount === 0;
-
-        const record = {
-            driver_id: driverId,
-            card_type: cardInfo.cardType,
-            card_number_last4: cardInfo.last4,
-            nickname: cardInfo.nickname || `${cardInfo.cardType.toUpperCase()} ****${cardInfo.last4}`,
-            is_primary: isPrimary,
-            linked_at: new Date()
-        };
-
-        const result = await insertData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, record);
-
-        return {
-            success: true,
-            card: {
-                _id: result._id,
-                cardType: result.card_type,
-                last4: result.card_number_last4,
-                nickname: result.nickname,
-                isPrimary: result.is_primary
-            }
-        };
-    } catch (error) {
-        console.error('[FuelService] linkFuelCard failed:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-/**
- * Get driver's linked fuel cards
- * @param {string} driverId - Driver ID
- */
-export async function getDriverFuelCards(driverId) {
-    if (!driverId) return { success: false, error: 'driverId is required' };
-
-    try {
-        let resultItems = await queryData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, {
-            filter: `{Driver Id} = "${driverId}"`,
-            eq: { driver_id: driverId },
-            sort: [{ field: 'Is Primary', direction: 'desc' }],
-            descending: 'is_primary'
-        });
-
-        const cards = resultItems.map(card => ({
-            _id: card._id || card.id,
-            cardType: card.card_type || card['Card Type'],
-            last4: card.card_number_last4 || card['Card Number Last4'],
-            nickname: card.nickname || card['Nickname'],
-            isPrimary: card.is_primary || card['Is Primary'],
-            linkedAt: card.linked_at || card['Linked At']
-        }));
-
-        return { success: true, cards };
-    } catch (error) {
-        console.error('[FuelService] getDriverFuelCards failed:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-/**
- * Remove a linked fuel card
- * @param {string} driverId - Driver ID
- * @param {string} cardId - Card record ID
- */
-export async function unlinkFuelCard(driverId, cardId) {
-    if (!driverId || !cardId) {
-        return { success: false, error: 'driverId and cardId are required' };
-    }
-
-    try {
-        const card = await getRecord(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, cardId);
-        const cardDriverId = card?.driver_id || card?.['Driver Id'];
-        if (!card || cardDriverId !== driverId) {
-            return { success: false, error: 'Card not found or access denied' };
-        }
-
-        await removeData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, cardId);
-
-        // If this was primary, make another card primary
-        const isPrimary = card.is_primary || card['Is Primary'];
-        if (isPrimary) {
-            let remainingItems = await queryData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, {
-                filter: `{Driver Id} = "${driverId}"`,
-                eq: { driver_id: driverId },
-                limit: 1
-            });
-
-            if (remainingItems.length > 0) {
-                const newPrimary = remainingItems[0];
-                newPrimary.is_primary = true;
-                if (newPrimary['Is Primary'] !== undefined) newPrimary['Is Primary'] = true;
-
-                await updateData(COLLECTION_KEYS.fuelCards, COLLECTIONS.CARDS, newPrimary);
-            }
-        }
-
-        return { success: true, message: 'Card removed successfully' };
-    } catch (error) {
-        console.error('[FuelService] unlinkFuelCard failed:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-/**
- * Get price trends for a state
- * @param {string} state - State abbreviation
- * @param {number} days - Number of days to look back (default 30)
- */
-export async function getFuelPriceTrends(state, days = 30) {
-    if (!state) return { success: false, error: 'state is required' };
-
-    try {
-        // Query trend data from DB
-        let trends = await queryData(COLLECTION_KEYS.fuelPriceTrends, COLLECTIONS.TRENDS, {
-            filter: `{State} = "${state}"`,
-            eq: { state: state },
-            sort: [{ field: 'Date', direction: 'desc' }],
-            descending: 'date',
-            limit: days
-        });
-
-        // If empty, seed data
-        if (!trends || trends.length === 0) {
-            console.log(`[FuelService] Seeding mock trends for ${state}...`);
-            const seedResult = await seedFuelTrends(state);
-            if (seedResult.seeded) {
-                trends = await queryData(COLLECTION_KEYS.fuelPriceTrends, COLLECTIONS.TRENDS, {
-                    filter: `{State} = "${state}"`,
-                    eq: { state: state },
-                    sort: [{ field: 'Date', direction: 'desc' }],
-                    descending: 'date',
-                    limit: days
+        const all = []; const seen = new Set();
+        const max = options.maxStops || 5;
+        const step = Math.max(1, Math.floor(routePoints.length / max));
+        for (let i = 0; i < routePoints.length; i += step) {
+            const res = await searchFuelPrices(routePoints[i].lat, routePoints[i].lng, 25, { cardType: options.cardType });
+            if (res.success) {
+                res.items.slice(0, 3).forEach(s => {
+                    if (!seen.has(s._id)) { s.route_mile = i * 10; all.push(s); seen.add(s._id); }
                 });
             }
         }
+        return { success: true, items: all.sort((a, b) => a.effective_price - b.effective_price) };
+    } catch (e) { return { success: false, error: e.message }; }
+}
 
-        // Normalize
-        const normalizedTrends = trends.map(t => ({
-            date: t.date || t['Date'] || t.fields?.['Date'],
-            avgPrice: t.avgPrice || t['Average Price'] || t.fields?.['Average Price'] || t.avg_price // Mapping variability handling
-        })).sort((a, b) => new Date(a.date) - new Date(b.date)); // Sort ascending for chart
+export async function calculateFuelSavings(driverId, tripDetails) {
+    const { gallonsNeeded: g, currentPrice: p = 3.50, cardType = 'none' } = tripDetails;
+    if (!g || g <= 0) return { success: false, error: 'Invalid gallons' };
+    try {
+        let best = null;
+        if (tripDetails.routePoints?.length >= 2) {
+            const res = await getFuelAlongRoute(tripDetails.routePoints, { cardType });
+            if (res.success && res.items.length) best = res.items[0];
+        } else if (tripDetails.lat && tripDetails.lng) {
+            const res = await searchFuelPrices(tripDetails.lat, tripDetails.lng, 50, { cardType });
+            if (res.success && res.items.length) best = res.items[0];
+        }
+        const bestPrice = best ? best.effective_price : p;
+        return { success: true, calculation: { gallons: g, currentPrice: p, totalSavings: parseFloat(((p - bestPrice) * g).toFixed(2)), cheapestPrice: bestPrice } };
+    } catch (e) { return { success: false, error: e.message }; }
+}
 
-        // Calculate trend direction
-        const currentAvg = normalizedTrends.length > 0 ? normalizedTrends[normalizedTrends.length - 1].avgPrice : 0;
-        const firstWeekAvg = normalizedTrends.slice(0, 7).reduce((sum, t) => sum + t.avgPrice, 0) / 7 || currentAvg;
-        const lastWeekAvg = normalizedTrends.slice(-7).reduce((sum, t) => sum + t.avgPrice, 0) / 7 || currentAvg;
-        const trendChange = lastWeekAvg - firstWeekAvg;
+export async function linkFuelCard(driverId, cardInfo) {
+    const { cardType, last4 } = cardInfo;
+    const existing = await dataAccess.queryRecords(COLLECTION_KEYS.fuelCards, { filters: { driver_id: driverId, card_type: cardType, card_number_last4: last4 }, limit: 1, suppressAuth: true });
+    if (existing.items?.length) return { success: false, error: 'Already linked' };
 
-        return {
-            success: true,
-            state,
-            currentAverage: parseFloat(currentAvg.toFixed(3)),
-            trendDirection: trendChange < -0.02 ? 'down' : trendChange > 0.02 ? 'up' : 'stable',
-            trendAmount: parseFloat(Math.abs(trendChange).toFixed(3)),
-            trends: normalizedTrends
-        };
-    } catch (error) {
-        console.error('[FuelService] getFuelPriceTrends failed:', error);
-        return { success: false, error: error.message };
+    const count = await dataAccess.countRecords(COLLECTION_KEYS.fuelCards, { driver_id: driverId });
+    if (count >= 5) return { success: false, error: 'Limit reached' };
+
+    const res = await dataAccess.insertRecord(COLLECTION_KEYS.fuelCards, { driver_id: driverId, card_type: cardType, card_number_last4: last4, nickname: cardInfo.nickname || `${cardType.toUpperCase()} ****${last4}`, is_primary: count === 0, linked_at: new Date() }, { suppressAuth: true });
+    return { success: res.success, card: res.record };
+}
+
+export async function getDriverFuelCards(driverId) {
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.fuelCards, { filters: { driver_id: driverId }, sort: [{ field: 'is_primary', direction: 'desc' }], limit: 10, suppressAuth: true });
+    return { success: true, cards: res.items || [] };
+}
+
+export async function unlinkFuelCard(driverId, cardId) {
+    const card = await dataAccess.getRecord(COLLECTION_KEYS.fuelCards, cardId, { suppressAuth: true });
+    if (!card || card.driver_id !== driverId) return { success: false, error: 'Denied' };
+    await dataAccess.removeRecord(COLLECTION_KEYS.fuelCards, cardId, { suppressAuth: true });
+    return { success: true };
+}
+
+export async function getFuelPriceTrends(state, days = 30) {
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.fuelPriceTrends, { filters: { state }, sort: [{ field: 'date', direction: 'desc' }], limit: days, suppressAuth: true });
+    let trends = res.items || [];
+    if (!trends.length) {
+        await seedFuelTrends(state);
+        const re = await dataAccess.queryRecords(COLLECTION_KEYS.fuelPriceTrends, { filters: { state }, sort: [{ field: 'date', direction: 'desc' }], limit: days, suppressAuth: true });
+        trends = re.items || [];
     }
+    return { success: true, state, trends: trends.sort((a,b) => new Date(a.date) - new Date(b.date)) };
 }

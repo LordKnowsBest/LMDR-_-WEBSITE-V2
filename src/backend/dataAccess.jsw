@@ -13,8 +13,9 @@
  */
 
 import wixData from 'wix-data';
-import { usesAirtable, getWixCollectionName } from 'backend/configData';
+import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
+import { logDatabase, log } from 'backend/observabilityService';
 
 // ============================================================================
 // QUERY OPERATIONS
@@ -30,17 +31,50 @@ import * as airtable from 'backend/airtableClient';
  * @param {number} [options.skip] - Number of records to skip (pagination)
  * @param {Array<{field: string, direction: 'asc'|'desc'}>} [options.sort] - Sort configuration
  * @param {boolean} [options.suppressAuth] - Wix-specific: bypass permissions
- * @returns {Promise<{success: boolean, items: Array, totalCount?: number, error?: string}>}
+ * @param {string} [options.traceId] - For distributed tracing
+ * @returns {Promise<{success: boolean, items: Array, totalCount?: number, error?: string, errorCode?: string}>}
  */
 export async function queryRecords(collectionKey, options = {}) {
+  const startTime = Date.now();
+  const { traceId } = options;
+
   try {
+    let result;
     if (usesAirtable(collectionKey)) {
-      return await queryAirtable(collectionKey, options);
+      result = await queryAirtable(collectionKey, options);
+    } else {
+      result = await queryWix(collectionKey, options);
     }
-    return await queryWix(collectionKey, options);
+
+    // Log database operation for observability
+    await logDatabase({
+      operation: 'query',
+      collection: collectionKey,
+      success: result.success,
+      affectedRows: result.items?.length || 0,
+      latencyMs: Date.now() - startTime,
+      traceId
+    });
+
+    return result;
   } catch (error) {
+    const latency = Date.now() - startTime;
     console.error(`[dataAccess] queryRecords error (${collectionKey}):`, error.message);
-    return { success: false, items: [], error: error.message };
+    
+    await log({
+      level: 'ERROR',
+      source: 'data-access',
+      message: `Database query failed for ${collectionKey}`,
+      traceId,
+      details: { error: error.message, latency }
+    });
+
+    return { 
+      success: false, 
+      items: [], 
+      error: error.message,
+      errorCode: 'DB_QUERY_ERROR'
+    };
   }
 }
 
@@ -204,26 +238,50 @@ export async function getRecord(collectionKey, recordId, options = {}) {
  * @param {Object} data - The record data
  * @param {Object} [options] - Options
  * @param {boolean} [options.suppressAuth] - Wix-specific: bypass permissions
- * @returns {Promise<{success: boolean, record?: Object, error?: string}>}
+ * @param {string} [options.traceId] - For distributed tracing
+ * @returns {Promise<{success: boolean, record?: Object, error?: string, errorCode?: string}>}
  */
 export async function insertRecord(collectionKey, data, options = {}) {
+  const startTime = Date.now();
+  const { traceId } = options;
+
   try {
+    let inserted;
     if (usesAirtable(collectionKey)) {
-      // Pass collection key directly - airtableClient handles table name transformation
       const result = await airtable.createRecord(collectionKey, data);
       if (result.error) {
-        return { success: false, error: result.error };
+        throw new Error(result.error);
       }
-      return { success: true, record: result };
+      inserted = result;
+    } else {
+      const collectionName = getWixCollectionName(collectionKey);
+      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+      inserted = await wixData.insert(collectionName, data, wixOptions);
     }
 
-    const collectionName = getWixCollectionName(collectionKey);
-    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
-    const inserted = await wixData.insert(collectionName, data, wixOptions);
+    await logDatabase({
+      operation: 'insert',
+      collection: collectionKey,
+      success: true,
+      affectedRows: 1,
+      latencyMs: Date.now() - startTime,
+      traceId
+    });
+
     return { success: true, record: inserted };
   } catch (error) {
+    const latency = Date.now() - startTime;
     console.error(`[dataAccess] insertRecord error (${collectionKey}):`, error.message);
-    return { success: false, error: error.message };
+    
+    await log({
+      level: 'ERROR',
+      source: 'data-access',
+      message: `Database insert failed for ${collectionKey}`,
+      traceId,
+      details: { error: error.message, latency }
+    });
+
+    return { success: false, error: error.message, errorCode: 'DB_INSERT_ERROR' };
   }
 }
 
@@ -238,31 +296,55 @@ export async function insertRecord(collectionKey, data, options = {}) {
  * @param {Object} data - The record data (must include _id)
  * @param {Object} [options] - Options
  * @param {boolean} [options.suppressAuth] - Wix-specific: bypass permissions
- * @returns {Promise<{success: boolean, record?: Object, error?: string}>}
+ * @param {string} [options.traceId] - For distributed tracing
+ * @returns {Promise<{success: boolean, record?: Object, error?: string, errorCode?: string}>}
  */
 export async function updateRecord(collectionKey, data, options = {}) {
+  const startTime = Date.now();
+  const { traceId } = options;
+
   try {
     if (!data._id) {
-      return { success: false, error: 'Record _id is required for update' };
+      return { success: false, error: 'Record _id is required for update', errorCode: 'MISSING_ID' };
     }
 
+    let updated;
     if (usesAirtable(collectionKey)) {
-      // Pass collection key directly - airtableClient handles table name transformation
       const { _id, ...fields } = data;
       const result = await airtable.updateRecord(collectionKey, _id, fields);
       if (result.error) {
-        return { success: false, error: result.error };
+        throw new Error(result.error);
       }
-      return { success: true, record: result };
+      updated = result;
+    } else {
+      const collectionName = getWixCollectionName(collectionKey);
+      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+      updated = await wixData.update(collectionName, data, wixOptions);
     }
 
-    const collectionName = getWixCollectionName(collectionKey);
-    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
-    const updated = await wixData.update(collectionName, data, wixOptions);
+    await logDatabase({
+      operation: 'update',
+      collection: collectionKey,
+      success: true,
+      affectedRows: 1,
+      latencyMs: Date.now() - startTime,
+      traceId
+    });
+
     return { success: true, record: updated };
   } catch (error) {
+    const latency = Date.now() - startTime;
     console.error(`[dataAccess] updateRecord error (${collectionKey}):`, error.message);
-    return { success: false, error: error.message };
+    
+    await log({
+      level: 'ERROR',
+      source: 'data-access',
+      message: `Database update failed for ${collectionKey}`,
+      traceId,
+      details: { error: error.message, latency }
+    });
+
+    return { success: false, error: error.message, errorCode: 'DB_UPDATE_ERROR' };
   }
 }
 

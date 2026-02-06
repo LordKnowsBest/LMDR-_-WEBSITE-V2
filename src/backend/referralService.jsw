@@ -1,24 +1,8 @@
-/**
- * Referral & Cross-Platform Bonus Service
- *
- * Handles:
- * - Driver referral link generation and tracking
- * - Referral conversion tracking (signup, application, hire)
- * - Match Quality Bonuses (both sides get bonus on high-match hires)
- * - Referral network bonus distribution
- *
- * This service uses Airtable-only collections (no Wix fallback).
- */
-
-import { getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { createNotification } from 'backend/memberService';
 import wixUsersBackend from 'wix-users-backend';
 
-// =============================================================================
-// COLLECTION KEYS (Airtable-only)
-// =============================================================================
-
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     driverReferrals: 'driverReferrals',
     matchQualityBonuses: 'matchQualityBonuses',
@@ -50,35 +34,6 @@ const REFERRAL_CONFIG = {
     }
 };
 
-// =============================================================================
-// AIRTABLE-ONLY HELPER FUNCTIONS
-// =============================================================================
-
-async function queryData(collectionKey, options = {}) {
-    const tableName = getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-        filterByFormula: options.filter || '',
-        sort: options.sort,
-        maxRecords: options.limit || 100
-    });
-    return result.records || [];
-}
-
-async function insertData(collectionKey, data) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.createRecord(tableName, data);
-}
-
-async function updateData(collectionKey, recordId, data) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.updateRecord(tableName, recordId, data);
-}
-
-async function getRecord(collectionKey, recordId) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.getRecord(tableName, recordId);
-}
-
 // Lazy-load gamification service to avoid circular dependencies
 async function getGamificationService() {
     return await import('backend/gamificationService');
@@ -90,579 +45,149 @@ async function getGamificationService() {
 
 /**
  * Generate a unique referral code for a driver
- * @param {string} driverId - Driver ID
- * @returns {object} { success, referralCode, referralLink }
  */
 export async function generateReferralCode(driverId) {
-    try {
-        if (!driverId) {
-            return { success: false, error: 'Driver ID required' };
-        }
+  try {
+    if (!driverId) return { success: false, error: 'Driver ID required' };
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: driverId, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
+    if (res.items?.length) return { success: true, referralCode: res.items[0].referral_code, referralLink: buildReferralLink(res.items[0].referral_code), existingCode: true };
 
-        // Check if driver already has a referral code
-        const existing = await queryData(COLLECTION_KEYS.driverReferrals, {
-            filter: `AND({Referrer ID} = "${driverId}", {Is Referrer Record} = "Yes")`,
-            limit: 1
-        });
-
-        if (existing.length > 0) {
-            const record = existing[0];
-            return {
-                success: true,
-                referralCode: record['Referral Code'],
-                referralLink: buildReferralLink(record['Referral Code']),
-                existingCode: true
-            };
-        }
-
-        // Generate unique code
-        const referralCode = generateUniqueCode(driverId);
-        const now = new Date().toISOString();
-
-        // Create referrer record
-        await insertData(COLLECTION_KEYS.driverReferrals, {
-            'Referrer ID': driverId,
-            'Referral Code': referralCode,
-            'Is Referrer Record': 'Yes',
-            'Total Referrals': 0,
-            'Successful Hires': 0,
-            'Total XP Earned': 0,
-            'Created At': now,
-            'Updated At': now
-        });
-
-        return {
-            success: true,
-            referralCode,
-            referralLink: buildReferralLink(referralCode),
-            existingCode: false
-        };
-    } catch (error) {
-        console.error('generateReferralCode error:', error);
-        return { success: false, error: error.message };
-    }
+    const code = generateUniqueCode(driverId), now = new Date().toISOString();
+    await dataAccess.insertRecord(COLLECTION_KEYS.driverReferrals, { referrer_id: driverId, referral_code: code, is_referrer_record: 'Yes', total_referrals: 0, successful_hires: 0, total_xp_earned: 0, created_at: now, updated_at: now }, { suppressAuth: true });
+    return { success: true, referralCode: code, referralLink: buildReferralLink(code), existingCode: false };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
 /**
  * Get driver's referral stats
- * @param {string} driverId
- * @returns {object} Referral statistics
  */
 export async function getReferralStats(driverId) {
-    try {
-        // Get referrer record
-        const referrerRecords = await queryData(COLLECTION_KEYS.driverReferrals, {
-            filter: `AND({Referrer ID} = "${driverId}", {Is Referrer Record} = "Yes")`,
-            limit: 1
-        });
+  try {
+    const masterRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: driverId, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
+    if (!masterRes.items?.length) return { success: true, hasReferralCode: false, stats: { totalReferrals: 0, successfulHires: 0, totalXPEarned: 0 } };
+    const master = masterRes.items[0];
 
-        if (referrerRecords.length === 0) {
-            return {
-                success: true,
-                hasReferralCode: false,
-                referralCode: null,
-                stats: {
-                    totalReferrals: 0,
-                    pendingSignups: 0,
-                    successfulHires: 0,
-                    totalXPEarned: 0
-                }
-            };
-        }
+    const refsRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: driverId, is_referrer_record: 'No' }, sort: [{ field: 'created_at', direction: 'desc' }], limit: 50, suppressAuth: true });
+    const referrals = refsRes.items || [];
 
-        const referrer = referrerRecords[0];
-
-        // Get individual referral records
-        const referrals = await queryData(COLLECTION_KEYS.driverReferrals, {
-            filter: `AND({Referrer ID} = "${driverId}", {Is Referrer Record} = "No")`,
-            sort: [{ field: 'Created At', direction: 'desc' }],
-            limit: 50
-        });
-
-        const stats = {
-            totalReferrals: referrals.length,
-            pendingSignups: referrals.filter(r => r['Status'] === 'signed_up').length,
-            appliedCount: referrals.filter(r => r['Status'] === 'applied').length,
-            successfulHires: referrals.filter(r => r['Status'] === 'hired').length,
-            totalXPEarned: referrer['Total XP Earned'] || 0
-        };
-
-        return {
-            success: true,
-            hasReferralCode: true,
-            referralCode: referrer['Referral Code'],
-            referralLink: buildReferralLink(referrer['Referral Code']),
-            stats,
-            recentReferrals: referrals.slice(0, 5).map(r => ({
-                refereeId: r['Referee ID'],
-                status: r['Status'],
-                signupDate: r['Signup Date'],
-                xpEarned: r['XP Earned From Referral'] || 0
-            }))
-        };
-    } catch (error) {
-        console.error('getReferralStats error:', error);
-        return { success: false, error: error.message };
-    }
+    return { success: true, hasReferralCode: true, referralCode: master.referral_code, referralLink: buildReferralLink(master.referral_code), stats: { totalReferrals: referrals.length, pendingSignups: referrals.filter(r => r.status === 'signed_up').length, successfulHires: referrals.filter(r => r.status === 'hired').length, totalXPEarned: master.total_xp_earned || 0 }, recentReferrals: referrals.slice(0, 5).map(r => ({ refereeId: r.referee_id, status: r.status, signupDate: r.signup_date, xpEarned: r.xp_earned_from_referral || 0 })) };
+  } catch (error) { return { success: false, error: error.message }; }
 }
-
-// =============================================================================
-// REFERRAL TRACKING
-// =============================================================================
 
 /**
  * Track a referral signup
- * Called when a new user signs up with a referral code
- * @param {string} referralCode - The referral code used
- * @param {string} newUserId - The new user's ID
- * @param {string} newUserEmail - The new user's email (for tracking)
- * @returns {object} { success, referrerId, bonusAwarded }
  */
 export async function trackReferralSignup(referralCode, newUserId, newUserEmail = '') {
-    try {
-        if (!referralCode || !newUserId) {
-            return { success: false, error: 'Referral code and new user ID required' };
-        }
+  try {
+    if (!referralCode || !newUserId) return { success: false, error: 'Required fields missing' };
+    const refRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referral_code: referralCode, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
+    if (!refRes.items?.length) return { success: false, error: 'Invalid code' };
+    const referrer = refRes.items[0], now = new Date().toISOString();
 
-        // Find the referrer by code
-        const referrerRecords = await queryData(COLLECTION_KEYS.driverReferrals, {
-            filter: `AND({Referral Code} = "${referralCode}", {Is Referrer Record} = "Yes")`,
-            limit: 1
-        });
+    const existing = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referee_id: newUserId }, limit: 1, suppressAuth: true });
+    if (existing.items?.length) return { success: false, error: 'Already referred' };
 
-        if (referrerRecords.length === 0) {
-            return { success: false, error: 'Invalid referral code' };
-        }
+    await dataAccess.insertRecord(COLLECTION_KEYS.driverReferrals, { referrer_id: referrer.referrer_id, referee_id: newUserId, referee_email: newUserEmail, referral_code: referralCode, is_referrer_record: 'No', status: 'signed_up', signup_date: now, created_at: now, updated_at: now }, { suppressAuth: true });
+    await dataAccess.updateRecord(COLLECTION_KEYS.driverReferrals, { ...referrer, total_referrals: (referrer.total_referrals || 0) + 1, updated_at: now }, { suppressAuth: true });
 
-        const referrer = referrerRecords[0];
-        const referrerId = referrer['Referrer ID'];
-        const now = new Date().toISOString();
+    awardReferralXP(referrer.referrer_id, 'referrer_on_signup', { refereeId: newUserId });
+    awardReferralXP(newUserId, 'referee_signup_bonus', { referrerId: referrer.referrer_id });
+    createNotification(referrer.referrer_id, 'referral_signup', 'New Referral!', 'Someone signed up! +200 XP', '/driver/referrals').catch(() => {});
 
-        // Check if this user was already referred
-        const existingReferral = await queryData(COLLECTION_KEYS.driverReferrals, {
-            filter: `{Referee ID} = "${newUserId}"`,
-            limit: 1
-        });
-
-        if (existingReferral.length > 0) {
-            return { success: false, error: 'User already has a referral record' };
-        }
-
-        // Create referral tracking record
-        await insertData(COLLECTION_KEYS.driverReferrals, {
-            'Referrer ID': referrerId,
-            'Referee ID': newUserId,
-            'Referee Email': newUserEmail,
-            'Referral Code': referralCode,
-            'Is Referrer Record': 'No',
-            'Status': 'signed_up',
-            'Signup Date': now,
-            'XP Earned From Referral': 0,
-            'Created At': now,
-            'Updated At': now
-        });
-
-        // Update referrer's total count
-        await updateData(COLLECTION_KEYS.driverReferrals, referrer.id, {
-            'Total Referrals': (referrer['Total Referrals'] || 0) + 1,
-            'Updated At': now
-        });
-
-        // Award XP to referrer (non-blocking)
-        awardReferralXP(referrerId, 'referrer_on_signup', { refereeId: newUserId });
-
-        // Award signup bonus to referee (non-blocking)
-        awardReferralXP(newUserId, 'referee_signup_bonus', { referrerId });
-
-        // Notify referrer
-        createNotification(
-            referrerId,
-            'referral_signup',
-            'New Referral Signup!',
-            'Someone you referred just signed up! You earned 200 XP.',
-            '/driver/referrals'
-        ).catch(err => console.warn('Referral notification failed:', err.message));
-
-        return {
-            success: true,
-            referrerId,
-            bonusAwarded: {
-                referrer: REFERRAL_CONFIG.rewards.referrer_on_signup,
-                referee: REFERRAL_CONFIG.rewards.referee_signup_bonus
-            }
-        };
-    } catch (error) {
-        console.error('trackReferralSignup error:', error);
-        return { success: false, error: error.message };
-    }
+    return { success: true, referrerId: referrer.referrer_id };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
 /**
- * Track referral conversion - when referred user takes an action
- * @param {string} userId - The referred user's ID
- * @param {'applied' | 'hired'} conversionType - Type of conversion
- * @param {object} metadata - Additional data (carrierDot, etc.)
+ * Track referral conversion
  */
 export async function trackReferralConversion(userId, conversionType, metadata = {}) {
-    try {
-        // Find the referral record for this user
-        const referralRecords = await queryData(COLLECTION_KEYS.driverReferrals, {
-            filter: `AND({Referee ID} = "${userId}", {Is Referrer Record} = "No")`,
-            limit: 1
-        });
+  try {
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referee_id: userId, is_referrer_record: 'No' }, limit: 1, suppressAuth: true });
+    if (!res.items?.length) return { success: true, wasReferred: false };
+    const referral = res.items[0], now = new Date().toISOString();
 
-        if (referralRecords.length === 0) {
-            // User wasn't referred, nothing to track
-            return { success: true, wasReferred: false };
-        }
+    let xpReward = conversionType === 'applied' ? 100 : conversionType === 'hired' ? 500 : 0;
+    if (xpReward > 0) {
+      const update = { ...referral, status: conversionType, updated_at: now, xp_earned_from_referral: (referral.xp_earned_from_referral || 0) + xpReward };
+      await dataAccess.updateRecord(COLLECTION_KEYS.driverReferrals, update, { suppressAuth: true });
 
-        const referral = referralRecords[0];
-        const referrerId = referral['Referrer ID'];
-        const now = new Date().toISOString();
-
-        // Determine XP reward based on conversion type
-        let xpReward = 0;
-        let notificationTitle = '';
-        let notificationMessage = '';
-
-        if (conversionType === 'applied' && referral['Status'] === 'signed_up') {
-            xpReward = REFERRAL_CONFIG.rewards.referrer_on_application;
-            notificationTitle = 'Referral Applied!';
-            notificationMessage = 'Your referral just submitted their first application! You earned 100 XP.';
-        } else if (conversionType === 'hired') {
-            xpReward = REFERRAL_CONFIG.rewards.referrer_on_hire;
-            notificationTitle = 'Referral Got Hired!';
-            notificationMessage = 'Amazing! Your referral just got hired! You earned 500 XP.';
-        }
-
-        if (xpReward > 0) {
-            // Update referral record
-            const updateFields = {
-                'Status': conversionType,
-                'Updated At': now
-            };
-
-            if (conversionType === 'applied') {
-                updateFields['First Application Date'] = now;
-            } else if (conversionType === 'hired') {
-                updateFields['Hire Date'] = now;
-                updateFields['Hired Carrier DOT'] = metadata.carrierDot || '';
-            }
-
-            updateFields['XP Earned From Referral'] = (referral['XP Earned From Referral'] || 0) + xpReward;
-
-            await updateData(COLLECTION_KEYS.driverReferrals, referral.id, updateFields);
-
-            // Update referrer's master record
-            const referrerRecords = await queryData(COLLECTION_KEYS.driverReferrals, {
-                filter: `AND({Referrer ID} = "${referrerId}", {Is Referrer Record} = "Yes")`,
-                limit: 1
-            });
-
-            if (referrerRecords.length > 0) {
-                const referrerMaster = referrerRecords[0];
-                const masterUpdate = {
-                    'Total XP Earned': (referrerMaster['Total XP Earned'] || 0) + xpReward,
-                    'Updated At': now
-                };
-
-                if (conversionType === 'hired') {
-                    masterUpdate['Successful Hires'] = (referrerMaster['Successful Hires'] || 0) + 1;
-                }
-
-                await updateData(COLLECTION_KEYS.driverReferrals, referrerMaster.id, masterUpdate);
-            }
-
-            // Award XP to referrer
-            awardReferralXP(referrerId, `referrer_on_${conversionType}`, { refereeId: userId, ...metadata });
-
-            // Send notification
-            createNotification(referrerId, 'referral_conversion', notificationTitle, notificationMessage, '/driver/referrals')
-                .catch(err => console.warn('Referral conversion notification failed:', err.message));
-        }
-
-        return {
-            success: true,
-            wasReferred: true,
-            referrerId,
-            xpAwarded: xpReward
-        };
-    } catch (error) {
-        console.error('trackReferralConversion error:', error);
-        return { success: false, error: error.message };
+      const masterRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: referral.referrer_id, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
+      if (masterRes.items?.length) {
+        const master = masterRes.items[0];
+        const masterUpd = { ...master, total_xp_earned: (master.total_xp_earned || 0) + xpReward, updated_at: now };
+        if (conversionType === 'hired') masterUpd.successful_hires = (master.successful_hires || 0) + 1;
+        await dataAccess.updateRecord(COLLECTION_KEYS.driverReferrals, masterUpd, { suppressAuth: true });
+      }
+      awardReferralXP(referral.referrer_id, `referrer_on_${conversionType}`, { refereeId: userId, ...metadata });
+      createNotification(referral.referrer_id, 'referral_conversion', 'Referral Goal!', `Your referral goal reached: ${conversionType}`, '/driver/referrals').catch(() => {});
     }
+    return { success: true, wasReferred: true };
+  } catch (error) { return { success: false, error: error.message }; }
 }
-
-/**
- * Validate a referral code
- * @param {string} referralCode
- * @returns {object} { valid, referrerId }
- */
-export async function validateReferralCode(referralCode) {
-    try {
-        if (!referralCode) {
-            return { valid: false };
-        }
-
-        const referrerRecords = await queryData(COLLECTION_KEYS.driverReferrals, {
-            filter: `AND({Referral Code} = "${referralCode}", {Is Referrer Record} = "Yes")`,
-            limit: 1
-        });
-
-        if (referrerRecords.length === 0) {
-            return { valid: false };
-        }
-
-        return {
-            valid: true,
-            referrerId: referrerRecords[0]['Referrer ID']
-        };
-    } catch (error) {
-        console.error('validateReferralCode error:', error);
-        return { valid: false, error: error.message };
-    }
-}
-
-// =============================================================================
-// MATCH QUALITY BONUS
-// =============================================================================
 
 /**
  * Award match quality bonus when a hire is made
- * Both driver and recruiter get bonus XP/points based on match score
- * @param {string} driverId - Hired driver ID
- * @param {string} recruiterId - Recruiter who made the hire
- * @param {number} matchScore - The match score (0-100)
- * @param {object} metadata - Additional info (carrierDot, etc.)
  */
 export async function awardMatchQualityBonus(driverId, recruiterId, matchScore, metadata = {}) {
     try {
-        if (!driverId || !recruiterId || matchScore === undefined) {
-            return { success: false, error: 'Missing required parameters' };
-        }
-
-        // Determine bonus tier based on match score
-        let bonusTier = null;
-        let driverBonus = 0;
-        let recruiterBonus = 0;
-
-        if (matchScore >= REFERRAL_CONFIG.matchQuality.excellent.threshold) {
-            bonusTier = 'excellent';
-            driverBonus = REFERRAL_CONFIG.matchQuality.excellent.driverBonus;
-            recruiterBonus = REFERRAL_CONFIG.matchQuality.excellent.recruiterBonus;
-        } else if (matchScore >= REFERRAL_CONFIG.matchQuality.great.threshold) {
-            bonusTier = 'great';
-            driverBonus = REFERRAL_CONFIG.matchQuality.great.driverBonus;
-            recruiterBonus = REFERRAL_CONFIG.matchQuality.great.recruiterBonus;
-        } else if (matchScore >= REFERRAL_CONFIG.matchQuality.good.threshold) {
-            bonusTier = 'good';
-            driverBonus = REFERRAL_CONFIG.matchQuality.good.driverBonus;
-            recruiterBonus = REFERRAL_CONFIG.matchQuality.good.recruiterBonus;
-        }
-
-        if (!bonusTier) {
-            // Match score too low for bonus
-            return { success: true, bonusAwarded: false, reason: 'Match score below threshold' };
-        }
+        if (!driverId || !recruiterId || matchScore === undefined) return { success: false, error: 'Missing params' };
+        let tier = null, dBonus = 0, rBonus = 0;
+        if (matchScore >= 90) { tier = 'excellent'; dBonus = 150; rBonus = 200; }
+        else if (matchScore >= 80) { tier = 'great'; dBonus = 100; rBonus = 150; }
+        else if (matchScore >= 70) { tier = 'good'; dBonus = 50; rBonus = 75; }
+        if (!tier) return { success: true, bonusAwarded: false };
 
         const now = new Date().toISOString();
+        await dataAccess.insertRecord(COLLECTION_KEYS.matchQualityBonuses, { driver_id: driverId, recruiter_id: recruiterId, match_score: matchScore, bonus_tier: tier, driver_bonus_xp: dBonus, recruiter_bonus_points: rBonus, carrier_dot: String(metadata.carrierDot || ''), hire_date: now, created_at: now }, { suppressAuth: true });
 
-        // Record the bonus
-        await insertData(COLLECTION_KEYS.matchQualityBonuses, {
-            'Driver ID': driverId,
-            'Recruiter ID': recruiterId,
-            'Match Score': matchScore,
-            'Bonus Tier': bonusTier,
-            'Driver Bonus XP': driverBonus,
-            'Recruiter Bonus Points': recruiterBonus,
-            'Carrier DOT': metadata.carrierDot || '',
-            'Hire Date': now,
-            'Created At': now
-        });
-
-        // Award bonuses (non-blocking)
         const gamification = await getGamificationService();
+        gamification.awardDriverXP(driverId, 'match_quality_bonus', { matchScore, bonusTier: tier, bonusXP: dBonus }).catch(() => {});
+        gamification.awardRecruiterPoints(recruiterId, 'match_quality_bonus', { matchScore, bonusTier: tier, bonusPoints: rBonus }).catch(() => {});
 
-        // Award driver XP
-        gamification.awardDriverXP(driverId, 'match_quality_bonus', {
-            matchScore,
-            bonusTier,
-            bonusXP: driverBonus,
-            carrierDot: metadata.carrierDot
-        }).catch(err => console.warn('Driver match bonus failed:', err.message));
+        createNotification(driverId, 'match_quality_bonus', 'Match Bonus!', `Score ${matchScore}% earned you ${dBonus} XP`, '/driver/achievements').catch(() => {});
+        createNotification(recruiterId, 'match_quality_bonus', 'Match Bonus!', `Hire score ${matchScore}% earned you ${rBonus} pts`, '/recruiter/leaderboard').catch(() => {});
 
-        // Award recruiter points
-        gamification.awardRecruiterPoints(recruiterId, 'match_quality_bonus', {
-            matchScore,
-            bonusTier,
-            bonusPoints: recruiterBonus,
-            driverId
-        }).catch(err => console.warn('Recruiter match bonus failed:', err.message));
-
-        // Notify both parties
-        const tierEmoji = bonusTier === 'excellent' ? '🌟' : bonusTier === 'great' ? '⭐' : '✨';
-
-        createNotification(
-            driverId,
-            'match_quality_bonus',
-            `${tierEmoji} Match Quality Bonus!`,
-            `Your ${matchScore}% match score earned you ${driverBonus} bonus XP!`,
-            '/driver/achievements'
-        ).catch(err => console.warn('Driver notification failed:', err.message));
-
-        createNotification(
-            recruiterId,
-            'match_quality_bonus',
-            `${tierEmoji} Match Quality Bonus!`,
-            `Your ${matchScore}% match hire earned you ${recruiterBonus} bonus points!`,
-            '/recruiter/leaderboard'
-        ).catch(err => console.warn('Recruiter notification failed:', err.message));
-
-        console.log(`✅ Match quality bonus awarded: ${bonusTier} tier, driver +${driverBonus} XP, recruiter +${recruiterBonus} points`);
-
-        return {
-            success: true,
-            bonusAwarded: true,
-            bonusTier,
-            driverBonus,
-            recruiterBonus,
-            matchScore
-        };
-    } catch (error) {
-        console.error('awardMatchQualityBonus error:', error);
-        return { success: false, error: error.message };
-    }
+        return { success: true, bonusAwarded: true, bonusTier: tier, dBonus, rBonus };
+    } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get match quality bonus history
- * @param {string} userId - Driver or recruiter ID
- * @param {'driver' | 'recruiter'} userType
- * @returns {object} Bonus history
- */
 export async function getMatchQualityBonusHistory(userId, userType) {
     try {
-        const filterField = userType === 'driver' ? 'Driver ID' : 'Recruiter ID';
-
-        const records = await queryData(COLLECTION_KEYS.matchQualityBonuses, {
-            filter: `{${filterField}} = "${userId}"`,
-            sort: [{ field: 'Created At', direction: 'desc' }],
-            limit: 20
-        });
-
-        const bonusField = userType === 'driver' ? 'Driver Bonus XP' : 'Recruiter Bonus Points';
-        const totalBonus = records.reduce((sum, r) => sum + (r[bonusField] || 0), 0);
-
-        return {
-            success: true,
-            totalBonuses: records.length,
-            totalEarned: totalBonus,
-            bonusByTier: {
-                excellent: records.filter(r => r['Bonus Tier'] === 'excellent').length,
-                great: records.filter(r => r['Bonus Tier'] === 'great').length,
-                good: records.filter(r => r['Bonus Tier'] === 'good').length
-            },
-            recentBonuses: records.slice(0, 10).map(r => ({
-                matchScore: r['Match Score'],
-                bonusTier: r['Bonus Tier'],
-                bonus: r[bonusField],
-                hireDate: r['Hire Date']
-            }))
-        };
-    } catch (error) {
-        console.error('getMatchQualityBonusHistory error:', error);
-        return { success: false, error: error.message };
-    }
+        const filterField = userType === 'driver' ? 'driver_id' : 'recruiter_id';
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.matchQualityBonuses, { filters: { [filterField]: userId }, sort: [{ field: 'created_at', direction: 'desc' }], limit: 20, suppressAuth: true });
+        const bonusField = userType === 'driver' ? 'driver_bonus_xp' : 'recruiter_bonus_points';
+        return { success: true, totalEarned: (result.items || []).reduce((s, r) => s + (r[bonusField] || 0), 0), recentBonuses: (result.items || []).slice(0, 10) };
+    } catch (error) { return { success: false, error: error.message }; }
 }
 
 // =============================================================================
-// INTEGRATION HOOKS (for recruiter_service.jsw)
+// INTERNAL HELPERS
 // =============================================================================
 
-/**
- * Process cross-platform bonuses when a hire is made
- * Should be called from recruiter_service.jsw when status changes to HIRED
- * @param {string} driverId - Driver who was hired
- * @param {string} recruiterId - Recruiter who made the hire
- * @param {number} matchScore - Match score (optional)
- * @param {object} metadata - Additional data
- */
-export async function processHireBonus(driverId, recruiterId, matchScore = 0, metadata = {}) {
-    try {
-        const results = {
-            matchQualityBonus: null,
-            referralConversion: null
-        };
-
-        // 1. Award match quality bonus if score is high enough
-        if (matchScore >= REFERRAL_CONFIG.matchQuality.good.threshold) {
-            results.matchQualityBonus = await awardMatchQualityBonus(
-                driverId,
-                recruiterId,
-                matchScore,
-                metadata
-            );
-        }
-
-        // 2. Track referral conversion if driver was referred
-        results.referralConversion = await trackReferralConversion(driverId, 'hired', metadata);
-
-        console.log(`✅ Hire bonuses processed for driver ${driverId}`);
-        return { success: true, results };
-    } catch (error) {
-        console.error('processHireBonus error:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-// =============================================================================
-// HELPER FUNCTIONS
-// =============================================================================
-
-/**
- * Generate a unique referral code
- */
 function generateUniqueCode(driverId) {
-    // Use last 4 chars of driver ID + random string
-    const suffix = driverId.slice(-4).toUpperCase();
-    const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-    return `${REFERRAL_CONFIG.linkPrefix}${suffix}${random}`;
+    return REFERRAL_CONFIG.linkPrefix + Math.random().toString(36).substr(2, 6).toUpperCase();
 }
 
-/**
- * Build the full referral link
- */
-function buildReferralLink(referralCode) {
-    // Base URL for the signup page with referral parameter
-    return `https://www.lastmiledr.app/driver-signup?ref=${referralCode}`;
+function buildReferralLink(code) {
+    return `https://www.lastmiledr.app/signup?ref=${code}`;
 }
 
-/**
- * Award referral-related XP (non-blocking helper)
- */
+export async function validateReferralCode(code) {
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referral_code: code, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
+    return { valid: !!res.items?.length, referrerId: res.items?.[0]?.referrer_id || null };
+}
+
 async function awardReferralXP(userId, rewardType, metadata = {}) {
     try {
         const gamification = await getGamificationService();
         const xpAmount = REFERRAL_CONFIG.rewards[rewardType] || 0;
-
         if (xpAmount > 0) {
-            await gamification.awardDriverXP(userId, 'referral_bonus', {
-                rewardType,
-                xpAmount,
-                ...metadata
-            });
+            await gamification.awardDriverXP(userId, 'referral_bonus', { rewardType, xpAmount, ...metadata });
         }
-    } catch (error) {
-        console.warn(`Referral XP award failed for ${rewardType}:`, error.message);
-    }
+    } catch (error) { }
 }
 
-/**
- * Get referral configuration (for frontend display)
- */
 export function getReferralConfig() {
-    return {
-        rewards: REFERRAL_CONFIG.rewards,
-        matchQuality: REFERRAL_CONFIG.matchQuality
-    };
+    return { rewards: REFERRAL_CONFIG.rewards, matchQuality: REFERRAL_CONFIG.matchQuality };
 }

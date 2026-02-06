@@ -10,17 +10,13 @@
  * This service uses Airtable-only collections (no Wix fallback).
  */
 
-import { getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { createNotification } from 'backend/memberService';
 import { logGamificationEvent } from 'backend/gamificationService';
 import { sendBatchLeaderboardAnnouncements } from 'backend/emailService';
 import * as gamificationCache from 'backend/gamificationCache';
 
-// =============================================================================
-// COLLECTION KEYS (Airtable-only)
-// =============================================================================
-
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
   leaderboardSnapshots: 'leaderboardSnapshots',
   recruiterProgression: 'recruiterProgression',
@@ -103,30 +99,6 @@ const PERIODS = {
 };
 
 // =============================================================================
-// AIRTABLE-ONLY HELPER FUNCTIONS
-// =============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  const tableName = getAirtableTableName(collectionKey);
-  const result = await airtable.queryRecords(tableName, {
-    filterByFormula: options.filter || '',
-    sort: options.sort,
-    maxRecords: options.limit || 100
-  });
-  return result.records || [];
-}
-
-async function insertData(collectionKey, data) {
-  const tableName = getAirtableTableName(collectionKey);
-  return await airtable.createRecord(tableName, data);
-}
-
-async function updateData(collectionKey, recordId, data) {
-  const tableName = getAirtableTableName(collectionKey);
-  return await airtable.updateRecord(tableName, recordId, data);
-}
-
-// =============================================================================
 // GET LEADERBOARD
 // =============================================================================
 
@@ -151,9 +123,11 @@ export async function getLeaderboard(type = 'overall', period = 'monthly', optio
 
     // Use cache for leaderboard data (expensive query)
     const fetchLeaderboardData = async () => {
-      return await queryData(COLLECTION_KEYS.recruiterProgression, {
-        limit: 1000
+      const res = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterProgression, {
+        limit: 1000,
+        suppressAuth: true
       });
+      return res.items || [];
     };
 
     // Get all recruiter progressions (cached for 5 minutes)
@@ -161,7 +135,7 @@ export async function getLeaderboard(type = 'overall', period = 'monthly', optio
       ? await fetchLeaderboardData()
       : await gamificationCache.getLeaderboard(type, period, fetchLeaderboardData);
 
-    if (recruiters.length === 0) {
+    if (!recruiters || recruiters.length === 0) {
       return {
         rankings: [],
         total: 0,
@@ -506,28 +480,32 @@ export async function generateLeaderboardSnapshot(period = 'weekly') {
       const snapshotId = `${period}_${type}_${periodStart.toISOString().split('T')[0]}`;
 
       // Check if snapshot already exists
-      const existing = await queryData(COLLECTION_KEYS.leaderboardSnapshots, {
-        filter: `{Snapshot ID} = "${snapshotId}"`,
-        limit: 1
+      const existing = await dataAccess.queryRecords(COLLECTION_KEYS.leaderboardSnapshots, {
+        filters: { snapshot_id: snapshotId },
+        limit: 1,
+        suppressAuth: true
       });
 
       const snapshotData = {
-        'Snapshot ID': snapshotId,
-        'Period Type': period,
-        'Period Start': periodStart.toISOString(),
-        'Period End': periodEnd.toISOString(),
-        'Leaderboard Type': type,
-        'Rankings JSON': JSON.stringify(leaderboard.rankings.slice(0, 100)),
-        'Total Participants': leaderboard.total,
-        'Created At': now.toISOString()
+        snapshot_id: snapshotId,
+        period_type: period,
+        period_start: periodStart.toISOString(),
+        period_end: periodEnd.toISOString(),
+        leaderboard_type: type,
+        rankings_json: JSON.stringify(leaderboard.rankings.slice(0, 100)),
+        total_participants: leaderboard.total,
+        created_at: now.toISOString()
       };
 
-      if (existing.length > 0) {
+      if (existing.items && existing.items.length > 0) {
         // Update existing snapshot
-        await updateData(COLLECTION_KEYS.leaderboardSnapshots, existing[0].id, snapshotData);
+        await dataAccess.updateRecord(COLLECTION_KEYS.leaderboardSnapshots, {
+          ...existing.items[0],
+          ...snapshotData
+        }, { suppressAuth: true });
       } else {
         // Create new snapshot
-        await insertData(COLLECTION_KEYS.leaderboardSnapshots, snapshotData);
+        await dataAccess.insertRecord(COLLECTION_KEYS.leaderboardSnapshots, snapshotData, { suppressAuth: true });
       }
 
       snapshots.push({
@@ -627,26 +605,31 @@ async function sendLeaderboardNotifications(period, periodStart, periodEnd) {
 export async function getLeaderboardHistory(recruiterId, periods = 12, periodType = 'weekly') {
   try {
     // Get snapshots for the specified period type
-    const snapshots = await queryData(COLLECTION_KEYS.leaderboardSnapshots, {
-      filter: `AND({Period Type} = "${periodType}", {Leaderboard Type} = "overall")`,
-      sort: [{ field: 'Period Start', direction: 'desc' }],
-      limit: periods
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.leaderboardSnapshots, {
+      filters: {
+        period_type: periodType,
+        leaderboard_type: "overall"
+      },
+      sort: [{ field: 'period_start', direction: 'desc' }],
+      limit: periods,
+      suppressAuth: true
     });
 
+    const snapshots = result.items || [];
     const history = [];
 
     for (const snapshot of snapshots) {
       try {
-        const rankings = JSON.parse(snapshot['Rankings JSON'] || '[]');
+        const rankings = JSON.parse(snapshot.rankings_json || '[]');
         const userRanking = rankings.find(r => r.recruiterId === recruiterId);
 
         history.push({
-          periodStart: snapshot['Period Start'],
-          periodEnd: snapshot['Period End'],
-          periodType: snapshot['Period Type'],
+          periodStart: snapshot.period_start,
+          periodEnd: snapshot.period_end,
+          periodType: snapshot.period_type,
           position: userRanking?.rank || null,
           score: userRanking?.score || null,
-          totalParticipants: snapshot['Total Participants'] || rankings.length,
+          totalParticipants: snapshot.total_participants || rankings.length,
           onLeaderboard: !!userRanking
         });
       } catch (parseError) {

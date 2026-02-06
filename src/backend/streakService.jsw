@@ -10,17 +10,13 @@
  * This service uses Airtable-only collections (no Wix fallback).
  */
 
-import { getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { getStreakMultiplier, DRIVER_XP_ACTIONS } from 'backend/gamificationConfig';
 import { awardDriverXP, logGamificationEvent } from 'backend/gamificationService';
 import { checkStreakAchievements } from 'backend/achievementService';
 import { chunkArray } from 'backend/utils/arrayUtils';
 
-// =============================================================================
-// CONSTANTS
-// =============================================================================
-
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
   driverProgression: 'driverProgression',
   gamificationEvents: 'gamificationEvents'
@@ -28,25 +24,6 @@ const COLLECTION_KEYS = {
 
 // Streak milestone days for bonus XP
 const STREAK_MILESTONES = [7, 30, 60, 90];
-
-// =============================================================================
-// AIRTABLE HELPERS
-// =============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  const tableName = await getAirtableTableName(collectionKey);
-  const result = await airtable.queryRecords(tableName, {
-    filterByFormula: options.filter || '',
-    sort: options.sort,
-    maxRecords: options.limit || 100
-  });
-  return result.records || [];
-}
-
-async function updateData(collectionKey, recordId, data) {
-  const tableName = await getAirtableTableName(collectionKey);
-  return await airtable.updateRecord(tableName, recordId, data);
-}
 
 // =============================================================================
 // DATE HELPERS
@@ -132,22 +109,23 @@ function getDaysSinceUTC(date) {
 export async function recordDailyLogin(driverId) {
   try {
     // Get current progression
-    const records = await queryData(COLLECTION_KEYS.driverProgression, {
-      filter: `{Driver ID} = "${driverId}"`,
-      limit: 1
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProgression, {
+      filters: { driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
     });
 
-    if (records.length === 0) {
+    if (!result.items || result.items.length === 0) {
       // No progression record - this shouldn't happen, but handle gracefully
       return { success: false, reason: 'no_progression_record' };
     }
 
-    const progression = records[0];
-    const recordId = progression.id;
-    const lastLoginDate = progression['Last Login Date'];
-    const currentStreak = progression['Streak Days'] || 0;
-    const longestStreak = progression['Longest Streak'] || 0;
-    const freezesAvailable = progression['Streak Freeze Available'] || 0;
+    const progression = result.items[0];
+    const recordId = progression._id;
+    const lastLoginDate = progression.last_login_date;
+    const currentStreak = progression.streak_days || 0;
+    const longestStreak = progression.longest_streak || 0;
+    const freezesAvailable = progression.streak_freeze_available || 0;
 
     const now = new Date();
     const today = getTodayUTC();
@@ -209,22 +187,18 @@ export async function recordDailyLogin(driverId) {
 
     // Update progression record
     const updateData = {
-      'Last Login Date': now.toISOString(),
-      'Streak Days': newStreak,
-      'Longest Streak': newLongestStreak,
-      'Updated At': now.toISOString()
+      ...progression,
+      last_login_date: now.toISOString(),
+      streak_days: newStreak,
+      longest_streak: newLongestStreak,
+      updated_at: now.toISOString()
     };
 
     if (streakFrozen) {
-      updateData['Streak Freeze Available'] = freezesAvailable - 1;
+      updateData.streak_freeze_available = freezesAvailable - 1;
     }
 
-    const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
-    await airtable.updateRecord(
-      progressionTable,
-      recordId,
-      updateData
-    );
+    await dataAccess.updateRecord(COLLECTION_KEYS.driverProgression, updateData, { suppressAuth: true });
 
     // Award daily login XP
     const loginResult = await awardDriverXP(driverId, 'daily_login', {
@@ -285,12 +259,13 @@ export async function recordDailyLogin(driverId) {
  */
 export async function getStreakStatus(driverId) {
   try {
-    const records = await queryData(COLLECTION_KEYS.driverProgression, {
-      filter: `{Driver ID} = "${driverId}"`,
-      limit: 1
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProgression, {
+      filters: { driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
     });
 
-    if (records.length === 0) {
+    if (!result.items || result.items.length === 0) {
       return {
         streak_days: 0,
         longest_streak: 0,
@@ -303,11 +278,11 @@ export async function getStreakStatus(driverId) {
       };
     }
 
-    const progression = records[0];
-    const lastLoginDate = progression['Last Login Date'];
-    const currentStreak = progression['Streak Days'] || 0;
-    const longestStreak = progression['Longest Streak'] || 0;
-    const freezesAvailable = progression['Streak Freeze Available'] || 0;
+    const progression = result.items[0];
+    const lastLoginDate = progression.last_login_date;
+    const currentStreak = progression.streak_days || 0;
+    const longestStreak = progression.longest_streak || 0;
+    const freezesAvailable = progression.streak_freeze_available || 0;
 
     const today = getTodayUTC();
     let loggedInToday = false;
@@ -364,33 +339,30 @@ export async function getStreakStatus(driverId) {
  */
 export async function useStreakFreeze(driverId) {
   try {
-    const records = await queryData(COLLECTION_KEYS.driverProgression, {
-      filter: `{Driver ID} = "${driverId}"`,
-      limit: 1
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProgression, {
+      filters: { driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
     });
 
-    if (records.length === 0) {
+    if (!result.items || result.items.length === 0) {
       return { success: false, reason: 'no_progression_record' };
     }
 
-    const progression = records[0];
-    const freezesAvailable = progression['Streak Freeze Available'] || 0;
-    const currentStreak = progression['Streak Days'] || 0;
+    const progression = result.items[0];
+    const freezesAvailable = progression.streak_freeze_available || 0;
+    const currentStreak = progression.streak_days || 0;
 
     if (freezesAvailable <= 0) {
       return { success: false, reason: 'no_freezes_available', freezes_remaining: 0 };
     }
 
     // Deduct freeze
-    const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
-    await airtable.updateRecord(
-      progressionTable,
-      progression.id,
-      {
-        'Streak Freeze Available': freezesAvailable - 1,
-        'Updated At': new Date().toISOString()
-      }
-    );
+    await dataAccess.updateRecord(COLLECTION_KEYS.driverProgression, {
+      ...progression,
+      streak_freeze_available: freezesAvailable - 1,
+      updated_at: new Date().toISOString()
+    }, { suppressAuth: true });
 
     // Log the event
     await logGamificationEvent(driverId, 'driver', {
@@ -421,29 +393,26 @@ export async function useStreakFreeze(driverId) {
  */
 export async function grantStreakFreeze(driverId, amount = 1) {
   try {
-    const records = await queryData(COLLECTION_KEYS.driverProgression, {
-      filter: `{Driver ID} = "${driverId}"`,
-      limit: 1
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProgression, {
+      filters: { driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
     });
 
-    if (records.length === 0) {
+    if (!result.items || result.items.length === 0) {
       return { success: false, reason: 'no_progression_record' };
     }
 
-    const progression = records[0];
-    const currentFreezes = progression['Streak Freeze Available'] || 0;
+    const progression = result.items[0];
+    const currentFreezes = progression.streak_freeze_available || 0;
     const maxFreezes = 3; // Cap at 3 freezes
     const newTotal = Math.min(currentFreezes + amount, maxFreezes);
 
-    const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
-    await airtable.updateRecord(
-      progressionTable,
-      progression.id,
-      {
-        'Streak Freeze Available': newTotal,
-        'Updated At': new Date().toISOString()
-      }
-    );
+    await dataAccess.updateRecord(COLLECTION_KEYS.driverProgression, {
+      ...progression,
+      streak_freeze_available: newTotal,
+      updated_at: new Date().toISOString()
+    }, { suppressAuth: true });
 
     // Log the event
     await logGamificationEvent(driverId, 'driver', {
@@ -478,16 +447,20 @@ export async function getStreaksAtRisk() {
     const todayStr = today.toISOString().split('T')[0];
 
     // Get all drivers with active streaks who haven't logged in today
-    const records = await queryData(COLLECTION_KEYS.driverProgression, {
-      filter: `AND({Streak Days} > 0, NOT(DATESTR({Last Login Date}) = "${todayStr}"))`,
-      limit: 1000
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProgression, {
+      filters: {
+        streak_days: { gt: 0 },
+        last_login_date: { lt: todayStr }
+      },
+      limit: 1000,
+      suppressAuth: true
     });
 
-    return records.map(r => ({
-      driverId: r['Driver ID'],
-      streakDays: r['Streak Days'],
-      lastLoginDate: r['Last Login Date'],
-      freezesAvailable: r['Streak Freeze Available'] || 0
+    return (result.items || []).map(r => ({
+      driverId: r.driver_id,
+      streakDays: r.streak_days,
+      lastLoginDate: r.last_login_date,
+      freezesAvailable: r.streak_freeze_available || 0
     }));
   } catch (error) {
     console.error('getStreaksAtRisk error:', error);
@@ -509,20 +482,22 @@ export async function processExpiredStreaks() {
     const twoDaysAgoStr = twoDaysAgo.toISOString().split('T')[0];
 
     // Get drivers with streaks who last logged in 2+ days ago
-    const records = await queryData(COLLECTION_KEYS.driverProgression, {
-      filter: `AND({Streak Days} > 0, DATESTR({Last Login Date}) <= "${twoDaysAgoStr}")`,
-      limit: 1000
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProgression, {
+      filters: {
+        streak_days: { gt: 0 },
+        last_login_date: { le: twoDaysAgoStr }
+      },
+      limit: 1000,
+      suppressAuth: true
     });
 
+    const records = result.items || [];
     console.log(`[processExpiredStreaks] Starting: ${records.length} records`);
 
     let streaksBroken = 0;
     let freezesUsed = 0;
     let processed = 0;
     const errors = [];
-
-    // Cache table name ONCE before loop
-    const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
 
     // Chunk and process in parallel (20 per chunk - update + log per item)
     const chunks = chunkArray(records, 20);
@@ -531,25 +506,22 @@ export async function processExpiredStreaks() {
       const results = await Promise.all(
         chunk.map(async (record) => {
           try {
-            const freezesAvailable = record['Streak Freeze Available'] || 0;
-            const daysSinceLogin = getDaysSinceUTC(record['Last Login Date']);
+            const freezesAvailable = record.streak_freeze_available || 0;
+            const daysSinceLogin = getDaysSinceUTC(record.last_login_date);
 
             if (daysSinceLogin === 2 && freezesAvailable > 0) {
               // Auto-use freeze
-              await airtable.updateRecord(
-                progressionTable,
-                record.id,
-                {
-                  'Streak Freeze Available': freezesAvailable - 1,
-                  'Updated At': new Date().toISOString()
-                }
-              );
+              await dataAccess.updateRecord(COLLECTION_KEYS.driverProgression, {
+                ...record,
+                streak_freeze_available: freezesAvailable - 1,
+                updated_at: new Date().toISOString()
+              }, { suppressAuth: true });
 
-              await logGamificationEvent(record['Driver ID'], 'driver', {
+              await logGamificationEvent(record.driver_id, 'driver', {
                 eventType: 'streak_freeze_auto_used',
                 action: 'auto_streak_freeze',
                 metadata: {
-                  streakPreserved: record['Streak Days'],
+                  streakPreserved: record.streak_days,
                   freezesRemaining: freezesAvailable - 1
                 }
               });
@@ -557,20 +529,17 @@ export async function processExpiredStreaks() {
               return { success: true, freezeUsed: true };
             } else if (daysSinceLogin > 2 || (daysSinceLogin === 2 && freezesAvailable === 0)) {
               // Break the streak
-              await airtable.updateRecord(
-                progressionTable,
-                record.id,
-                {
-                  'Streak Days': 0,
-                  'Updated At': new Date().toISOString()
-                }
-              );
+              await dataAccess.updateRecord(COLLECTION_KEYS.driverProgression, {
+                ...record,
+                streak_days: 0,
+                updated_at: new Date().toISOString()
+              }, { suppressAuth: true });
 
-              await logGamificationEvent(record['Driver ID'], 'driver', {
+              await logGamificationEvent(record.driver_id, 'driver', {
                 eventType: 'streak_broken',
                 action: 'streak_expired',
                 metadata: {
-                  previousStreak: record['Streak Days'],
+                  previousStreak: record.streak_days,
                   daysSinceLogin
                 }
               });
@@ -580,7 +549,7 @@ export async function processExpiredStreaks() {
 
             return { success: true, noAction: true };
           } catch (error) {
-            return { success: false, id: record.id, error: error.message };
+            return { success: false, id: record._id, error: error.message };
           }
         })
       );
@@ -621,10 +590,12 @@ export async function processExpiredStreaks() {
 export async function grantMonthlyFreezes() {
   try {
     // Get all drivers
-    const records = await queryData(COLLECTION_KEYS.driverProgression, {
-      limit: 5000
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProgression, {
+      limit: 5000,
+      suppressAuth: true
     });
 
+    const records = result.items || [];
     console.log(`[grantMonthlyFreezes] Starting: ${records.length} records`);
 
     const maxFreezes = 3;
@@ -632,12 +603,9 @@ export async function grantMonthlyFreezes() {
     let freezesGranted = 0;
     let processed = 0;
 
-    // Cache table name ONCE before loop
-    const progressionTable = await getAirtableTableName(COLLECTION_KEYS.driverProgression);
-
     // Filter records that need updates
     const needsUpdate = records.filter(record => {
-      const currentFreezes = record['Streak Freeze Available'] || 0;
+      const currentFreezes = record.streak_freeze_available || 0;
       return currentFreezes < maxFreezes;
     });
 
@@ -648,21 +616,18 @@ export async function grantMonthlyFreezes() {
       const results = await Promise.all(
         chunk.map(async (record) => {
           try {
-            const currentFreezes = record['Streak Freeze Available'] || 0;
+            const currentFreezes = record.streak_freeze_available || 0;
             const newTotal = Math.min(currentFreezes + 1, maxFreezes);
 
-            await airtable.updateRecord(
-              progressionTable,
-              record.id,
-              {
-                'Streak Freeze Available': newTotal,
-                'Updated At': new Date().toISOString()
-              }
-            );
+            await dataAccess.updateRecord(COLLECTION_KEYS.driverProgression, {
+              ...record,
+              streak_freeze_available: newTotal,
+              updated_at: new Date().toISOString()
+            }, { suppressAuth: true });
 
             return { success: true, granted: newTotal > currentFreezes };
           } catch (error) {
-            return { success: false, id: record.id, error: error.message };
+            return { success: false, id: record._id, error: error.message };
           }
         })
       );

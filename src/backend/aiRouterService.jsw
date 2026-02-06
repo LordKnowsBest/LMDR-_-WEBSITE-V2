@@ -14,89 +14,26 @@
  * - Mistral - European alternative, good for certain tasks
  */
 
-import wixData from 'wix-data';
 import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
 import { currentMember } from 'wix-members-backend';
 import { log, logAIOperation, startTrace, endTrace } from 'backend/observabilityService';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================
 // CONFIGURATION & CONSTANTS
 // ============================================
 
 const CONFIG = {
-    collections: {
-        routerConfig: 'AIRouterConfig',
-        usageLog: 'AIUsageLog',
-        auditLog: 'AdminAuditLog'
-    },
     cacheExpiry: 5 * 60 * 1000 // 5 minutes cache for config
 };
 
-// Collection keys for dual-source routing
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     routerConfig: 'aiRouterConfig',
     usageLog: 'aiUsageLog',
-    auditLog: 'adminAuditLog'
+    auditLog: 'auditLog'
 };
-
-// ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.eq) {
-        for (const [field, value] of Object.entries(options.eq)) {
-            query = query.eq(field, value);
-        }
-    }
-    if (options.ge) {
-        for (const [field, value] of Object.entries(options.ge)) {
-            query = query.ge(field, value);
-        }
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.updateRecord(tableName, data._id || data.id, data);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function removeData(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.deleteRecord(tableName, recordId);
-    }
-    return await wixData.remove(wixCollectionName, recordId, { suppressAuth: true });
-}
 
 // In-memory cache for router config
 let configCache = null;
@@ -440,13 +377,14 @@ export async function getRouterConfig() {
     }
 
     try {
-        const result = await wixData.query(CONFIG.collections.routerConfig)
-            .limit(100)
-            .find({ suppressAuth: true });
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.routerConfig, {
+            limit: 100,
+            suppressAuth: true
+        });
 
         // Build config map
         const configMap = {};
-        for (const item of result.items) {
+        for (const item of (result.items || [])) {
             configMap[item.functionId] = {
                 provider: item.provider,
                 model: item.model,
@@ -509,9 +447,11 @@ export async function updateFunctionConfig(functionId, config) {
 
     try {
         // Check if config exists
-        const existing = await wixData.query(CONFIG.collections.routerConfig)
-            .eq('functionId', functionId)
-            .find({ suppressAuth: true });
+        const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.routerConfig, {
+            filters: { functionId: functionId },
+            limit: 1,
+            suppressAuth: true
+        });
 
         const member = await currentMember.getMember();
         const configData = {
@@ -526,11 +466,11 @@ export async function updateFunctionConfig(functionId, config) {
             modifiedAt: new Date()
         };
 
-        if (existing.items.length > 0) {
-            configData._id = existing.items[0]._id;
-            await wixData.update(CONFIG.collections.routerConfig, configData, { suppressAuth: true });
+        if (existingResult.success && existingResult.items.length > 0) {
+            configData._id = existingResult.items[0]._id;
+            await dataAccess.updateRecord(COLLECTION_KEYS.routerConfig, configData, { suppressAuth: true });
         } else {
-            await wixData.insert(CONFIG.collections.routerConfig, configData, { suppressAuth: true });
+            await dataAccess.insertRecord(COLLECTION_KEYS.routerConfig, configData, { suppressAuth: true });
         }
 
         // Clear cache
@@ -561,12 +501,14 @@ export async function resetFunctionConfig(functionId) {
     }
 
     try {
-        const existing = await wixData.query(CONFIG.collections.routerConfig)
-            .eq('functionId', functionId)
-            .find({ suppressAuth: true });
+        const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.routerConfig, {
+            filters: { functionId: functionId },
+            limit: 1,
+            suppressAuth: true
+        });
 
-        if (existing.items.length > 0) {
-            await wixData.remove(CONFIG.collections.routerConfig, existing.items[0]._id, { suppressAuth: true });
+        if (existingResult.success && existingResult.items.length > 0) {
+            await dataAccess.removeRecord(COLLECTION_KEYS.routerConfig, existingResult.items[0]._id, { suppressAuth: true });
         }
 
         // Clear cache
@@ -659,10 +601,11 @@ export async function getUsageStats(period = 'week') {
             ? new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
             : new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-        const result = await wixData.query(CONFIG.collections.usageLog)
-            .ge('timestamp', startDate)
-            .limit(1000)
-            .find({ suppressAuth: true });
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.usageLog, {
+            filters: { timestamp: { gte: startDate } },
+            limit: 1000,
+            suppressAuth: true
+        });
 
         // Aggregate by function and provider
         const byFunction = {};
@@ -672,27 +615,27 @@ export async function getUsageStats(period = 'week') {
         let totalLatency = 0;
         let errorCount = 0;
 
-        for (const log of result.items) {
+        for (const logItem of (result.items || [])) {
             totalCalls++;
-            totalTokens += log.tokensUsed || 0;
-            totalLatency += log.latencyMs || 0;
-            if (log.error) errorCount++;
+            totalTokens += logItem.tokensUsed || 0;
+            totalLatency += logItem.latencyMs || 0;
+            if (logItem.error) errorCount++;
 
             // By function
-            if (!byFunction[log.functionId]) {
-                byFunction[log.functionId] = { calls: 0, tokens: 0, errors: 0 };
+            if (!byFunction[logItem.functionId]) {
+                byFunction[logItem.functionId] = { calls: 0, tokens: 0, errors: 0 };
             }
-            byFunction[log.functionId].calls++;
-            byFunction[log.functionId].tokens += log.tokensUsed || 0;
-            if (log.error) byFunction[log.functionId].errors++;
+            byFunction[logItem.functionId].calls++;
+            byFunction[logItem.functionId].tokens += logItem.tokensUsed || 0;
+            if (logItem.error) byFunction[logItem.functionId].errors++;
 
             // By provider
-            if (!byProvider[log.provider]) {
-                byProvider[log.provider] = { calls: 0, tokens: 0, avgLatency: 0, errors: 0 };
+            if (!byProvider[logItem.provider]) {
+                byProvider[logItem.provider] = { calls: 0, tokens: 0, avgLatency: 0, errors: 0 };
             }
-            byProvider[log.provider].calls++;
-            byProvider[log.provider].tokens += log.tokensUsed || 0;
-            if (log.error) byProvider[log.provider].errors++;
+            byProvider[logItem.provider].calls++;
+            byProvider[logItem.provider].tokens += logItem.tokensUsed || 0;
+            if (logItem.error) byProvider[logItem.provider].errors++;
         }
 
         // Calculate averages
@@ -723,10 +666,6 @@ export async function getUsageStats(period = 'week') {
 /**
  * Route an AI request to the configured provider
  * This is the main function other services will call
- *
- * @param {string} functionId - The function to route (e.g., 'carrier_synthesis')
- * @param {Object} request - The request payload
- * @returns {Promise<Object>} - The AI response
  */
 export async function routeAIRequest(functionId, request, traceId = null) {
     const startTime = Date.now();
@@ -827,12 +766,13 @@ async function getRouterConfigInternal() {
     }
 
     try {
-        const result = await wixData.query(CONFIG.collections.routerConfig)
-            .limit(100)
-            .find({ suppressAuth: true });
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.routerConfig, {
+            limit: 100,
+            suppressAuth: true
+        });
 
         const configMap = {};
-        for (const item of result.items) {
+        for (const item of (result.items || [])) {
             configMap[item.functionId] = {
                 provider: item.provider,
                 model: item.model,
@@ -1034,15 +974,9 @@ async function callCohere(apiKey, model, request) {
 
 async function logUsage(functionId, provider, model, latencyMs, tokensUsed, error, usedFallback) {
     try {
-        await wixData.insert(CONFIG.collections.usageLog, {
-            functionId,
-            provider,
-            model,
-            latencyMs,
-            tokensUsed: tokensUsed || 0,
-            error: error || null,
-            usedFallback,
-            timestamp: new Date()
+        await dataAccess.insertRecord(COLLECTION_KEYS.usageLog, {
+            functionId, provider, model, latencyMs, tokensUsed: tokensUsed || 0,
+            error: error || null, usedFallback, timestamp: new Date()
         }, { suppressAuth: true });
     } catch (e) {
         console.error('Failed to log AI usage:', e);
@@ -1052,15 +986,12 @@ async function logUsage(functionId, provider, model, latencyMs, tokensUsed, erro
 async function logAuditEntry(action, targetId, details) {
     try {
         const member = await currentMember.getMember();
-        await wixData.insert(CONFIG.collections.auditLog, {
-            action,
-            targetType: 'ai_router',
-            targetId,
-            details,
-            adminId: member?._id || 'system',
-            adminEmail: member?.loginEmail || 'system',
+        const auditRecord = {
+            action, targetType: 'ai_router', targetId, details,
+            adminId: member?._id || 'system', adminEmail: member?.loginEmail || 'system',
             timestamp: new Date()
-        }, { suppressAuth: true });
+        };
+        await dataAccess.insertRecord(COLLECTION_KEYS.auditLog, auditRecord, { suppressAuth: true });
     } catch (e) {
         console.error('Failed to log audit entry:', e);
     }
@@ -1127,3 +1058,67 @@ export async function testAllProviders() {
     }
     return results;
 }
+
+// ============================================
+// HEALTH CHECK
+// ============================================
+
+/**
+ * Test connectivity to a specific provider
+ */
+export async function testProvider(providerId) {
+    await requireAdmin();
+
+    const provider = PROVIDER_REGISTRY[providerId];
+    if (!provider) {
+        throw new Error(`Unknown provider: ${providerId}`);
+    }
+
+    try {
+        const apiKey = await getSecret(provider.secretKey);
+        if (!apiKey) {
+            return {
+                provider: providerId,
+                status: 'not_configured',
+                message: `API key not set. Add secret: ${provider.secretKey}`
+            };
+        }
+
+        // Simple test request
+        const startTime = Date.now();
+        const response = await callProvider(providerId, provider.models[0].id, {
+            prompt: 'Say "OK" and nothing else.',
+            maxTokens: 10
+        });
+
+        return {
+            provider: providerId,
+            status: 'healthy',
+            latencyMs: Date.now() - startTime,
+            model: provider.models[0].id,
+            response: response.content.substring(0, 50)
+        };
+
+    } catch (error) {
+        return {
+            provider: providerId,
+            status: 'error',
+            message: error.message
+        };
+    }
+}
+
+/**
+ * Test all configured providers
+ */
+export async function testAllProviders() {
+    await requireAdmin();
+
+    const results = {};
+    for (const providerId of Object.keys(PROVIDER_REGISTRY)) {
+        results[providerId] = await testProvider(providerId);
+    }
+    return results;
+}
+
+

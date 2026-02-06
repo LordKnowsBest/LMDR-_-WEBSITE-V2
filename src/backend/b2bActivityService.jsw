@@ -1,18 +1,5 @@
-// ============================================================================
-// B2B ACTIVITY SERVICE - Unified activity timeline for business development
-//
-// Tracks all B2B touchpoints: emails, SMS, calls, meetings, tasks, notes.
-// Provides a single timeline view per account/contact for full context.
-//
-// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
-//
-// Used on: Account Detail, B2B Dashboard, Pipeline views
-// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
-// ============================================================================
-
 import wixData from 'wix-data';
-import { usesAirtable, getAirtableTableName } from 'backend/config';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================================================
 // COLLECTION KEYS
@@ -23,451 +10,131 @@ const COLLECTIONS = {
   accounts: 'b2bAccounts'
 };
 
-// ============================================================================
-// ACTIVITY TYPES & CHANNELS
-// ============================================================================
-
 const ACTIVITY_TYPES = {
-  EMAIL: 'email',
-  SMS: 'sms',
-  CALL: 'call',
-  MEETING: 'meeting',
-  TASK: 'task',
-  NOTE: 'note',
-  STAGE_CHANGE: 'stage_change',
-  SIGNAL: 'signal'
+  EMAIL: 'email', SMS: 'sms', CALL: 'call', MEETING: 'meeting',
+  TASK: 'task', NOTE: 'note', STAGE_CHANGE: 'stage_change', SIGNAL: 'signal'
 };
-
-const OUTCOMES = {
-  COMPLETED: 'completed',
-  NO_ANSWER: 'no_answer',
-  LEFT_VM: 'left_vm',
-  CONNECTED: 'connected',
-  SCHEDULED: 'scheduled',
-  CANCELLED: 'cancelled',
-  SENT: 'sent',
-  OPENED: 'opened',
-  REPLIED: 'replied',
-  BOUNCED: 'bounced'
-};
-
-// ============================================================================
-// DUAL-SOURCE HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-      filterByFormula: options.filter || '',
-      sort: options.sort,
-      maxRecords: options.limit || 100
-    });
-    return { items: result.records || [], totalCount: result.records?.length || 0 };
-  }
-  let query = wixData.query(collectionKey);
-  if (options.limit) query = query.limit(options.limit);
-  return await query.find();
-}
-
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.createRecord(tableName, record);
-    return result.record || record;
-  }
-  return await wixData.insert(collectionKey, record);
-}
-
-async function updateData(collectionKey, recordId, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.updateRecord(tableName, recordId, record);
-    return result.record || record;
-  }
-  return await wixData.update(collectionKey, { _id: recordId, ...record });
-}
-
-async function findByField(collectionKey, fieldName, value) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    return await airtable.findByField(tableName, fieldName, value);
-  }
-  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
-  return result.items || [];
-}
 
 // ============================================================================
 // LOG ACTIVITIES
 // ============================================================================
 
-/**
- * Log a new activity entry (core method used by all other services)
- *
- * @param {Object} activityData
- * @param {string} activityData.account_id - B2B Account ID
- * @param {string} [activityData.contact_id] - Contact ID (if applicable)
- * @param {string} activityData.type - Activity type (email, sms, call, meeting, task, note, stage_change, signal)
- * @param {string} [activityData.channel] - Channel (email, phone, sms, in_person, platform)
- * @param {string} [activityData.subject] - Subject/title
- * @param {string} [activityData.notes] - Detailed notes
- * @param {string} [activityData.outcome] - Outcome code
- * @param {string} [activityData.owner_id] - Who performed the activity
- * @param {Object} [activityData.metadata] - Additional context (JSON-serialized)
- * @returns {Promise<{success: boolean, activity?: Object, error?: string}>}
- */
 export async function logActivity(activityData) {
   try {
-    if (!activityData.account_id) {
-      return { success: false, error: 'Account ID is required' };
-    }
-    if (!activityData.type) {
-      return { success: false, error: 'Activity type is required' };
-    }
+    if (!activityData.account_id || !activityData.type) return { success: false, error: 'Missing fields' };
 
     const record = {
-      account_id: activityData.account_id,
-      contact_id: activityData.contact_id || '',
-      type: activityData.type,
-      channel: activityData.channel || activityData.type,
-      subject: activityData.subject || '',
-      notes: activityData.notes || '',
-      outcome: activityData.outcome || '',
-      owner_id: activityData.owner_id || '',
+      account_id: activityData.account_id, contact_id: activityData.contact_id || '',
+      type: activityData.type, channel: activityData.channel || activityData.type,
+      subject: activityData.subject || '', notes: activityData.notes || '',
+      outcome: activityData.outcome || '', owner_id: activityData.owner_id || '',
       metadata: activityData.metadata ? JSON.stringify(activityData.metadata) : '',
       created_at: new Date().toISOString()
     };
 
-    const saved = await insertData(COLLECTIONS.activities, record);
+    const result = await dataAccess.insertRecord(COLLECTIONS.activities, record, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error);
 
-    // Update account last_activity_at (fire-and-forget)
     updateAccountActivity(activityData.account_id).catch(() => {});
-
-    return { success: true, activity: saved };
+    return { success: true, activity: result.record };
   } catch (error) {
-    console.error('Error logging B2B activity:', error);
-    return { success: false, error: error.message || 'Failed to log activity' };
+    console.error('logActivity error:', error);
+    return { success: false, error: error.message };
   }
 }
 
-/**
- * Log an email activity
- *
- * @param {string} accountId
- * @param {string} contactId
- * @param {string} subject - Email subject
- * @param {string} outcome - sent, opened, replied, bounced
- * @param {string} [ownerId]
- * @returns {Promise<{success: boolean, activity?: Object, error?: string}>}
- */
 export async function logEmail(accountId, contactId, subject, outcome = 'sent', ownerId = '') {
-  return logActivity({
-    account_id: accountId,
-    contact_id: contactId,
-    type: ACTIVITY_TYPES.EMAIL,
-    channel: 'email',
-    subject,
-    outcome,
-    owner_id: ownerId
-  });
+  return logActivity({ account_id: accountId, contact_id: contactId, type: ACTIVITY_TYPES.EMAIL, channel: 'email', subject, outcome, owner_id: ownerId });
 }
 
-/**
- * Log an SMS activity
- *
- * @param {string} accountId
- * @param {string} contactId
- * @param {string} subject - Message preview
- * @param {string} outcome - sent, delivered, replied
- * @param {string} [ownerId]
- * @returns {Promise<{success: boolean, activity?: Object, error?: string}>}
- */
 export async function logSms(accountId, contactId, subject, outcome = 'sent', ownerId = '') {
-  return logActivity({
-    account_id: accountId,
-    contact_id: contactId,
-    type: ACTIVITY_TYPES.SMS,
-    channel: 'sms',
-    subject,
-    outcome,
-    owner_id: ownerId
-  });
+  return logActivity({ account_id: accountId, contact_id: contactId, type: ACTIVITY_TYPES.SMS, channel: 'sms', subject, outcome, owner_id: ownerId });
 }
 
-/**
- * Log a call activity
- *
- * @param {string} accountId
- * @param {string} contactId
- * @param {Object} callDetails
- * @param {string} callDetails.outcome - connected, no_answer, left_vm
- * @param {number} [callDetails.duration] - Duration in seconds
- * @param {string} [callDetails.notes] - Call notes
- * @param {string} [callDetails.disposition] - Disposition code
- * @param {string} [ownerId]
- * @returns {Promise<{success: boolean, activity?: Object, error?: string}>}
- */
 export async function logCall(accountId, contactId, callDetails = {}, ownerId = '') {
   return logActivity({
-    account_id: accountId,
-    contact_id: contactId,
-    type: ACTIVITY_TYPES.CALL,
-    channel: 'phone',
-    subject: `Call - ${callDetails.outcome || 'completed'}`,
-    notes: callDetails.notes || '',
-    outcome: callDetails.outcome || 'completed',
-    owner_id: ownerId,
-    metadata: {
-      duration: callDetails.duration,
-      disposition: callDetails.disposition
-    }
+    account_id: accountId, contact_id: contactId, type: ACTIVITY_TYPES.CALL, channel: 'phone',
+    subject: `Call - ${callDetails.outcome || 'completed'}`, notes: callDetails.notes || '',
+    outcome: callDetails.outcome || 'completed', owner_id: ownerId,
+    metadata: { duration: callDetails.duration, disposition: callDetails.disposition }
   });
 }
 
-/**
- * Log a meeting activity
- *
- * @param {string} accountId
- * @param {string} contactId
- * @param {string} subject - Meeting title
- * @param {string} notes - Meeting notes
- * @param {string} [ownerId]
- * @returns {Promise<{success: boolean, activity?: Object, error?: string}>}
- */
 export async function logMeeting(accountId, contactId, subject, notes = '', ownerId = '') {
-  return logActivity({
-    account_id: accountId,
-    contact_id: contactId,
-    type: ACTIVITY_TYPES.MEETING,
-    channel: 'in_person',
-    subject,
-    notes,
-    outcome: 'completed',
-    owner_id: ownerId
-  });
+  return logActivity({ account_id: accountId, contact_id: contactId, type: ACTIVITY_TYPES.MEETING, channel: 'in_person', subject, notes, outcome: 'completed', owner_id: ownerId });
 }
 
-/**
- * Log a task activity
- *
- * @param {string} accountId
- * @param {string} subject - Task description
- * @param {string} outcome - completed, scheduled, cancelled
- * @param {string} [ownerId]
- * @returns {Promise<{success: boolean, activity?: Object, error?: string}>}
- */
 export async function logTask(accountId, subject, outcome = 'completed', ownerId = '') {
-  return logActivity({
-    account_id: accountId,
-    type: ACTIVITY_TYPES.TASK,
-    channel: 'platform',
-    subject,
-    outcome,
-    owner_id: ownerId
-  });
+  return logActivity({ account_id: accountId, type: ACTIVITY_TYPES.TASK, channel: 'platform', subject, outcome, owner_id: ownerId });
 }
 
-/**
- * Log a note (free-form observation)
- *
- * @param {string} accountId
- * @param {string} notes - Note content
- * @param {string} [ownerId]
- * @returns {Promise<{success: boolean, activity?: Object, error?: string}>}
- */
 export async function logNote(accountId, notes, ownerId = '') {
-  return logActivity({
-    account_id: accountId,
-    type: ACTIVITY_TYPES.NOTE,
-    channel: 'platform',
-    subject: 'Note',
-    notes,
-    owner_id: ownerId
-  });
+  return logActivity({ account_id: accountId, type: ACTIVITY_TYPES.NOTE, channel: 'platform', subject: 'Note', notes, owner_id: ownerId });
 }
 
-/**
- * Log a pipeline stage change
- *
- * @param {string} accountId
- * @param {string} fromStage
- * @param {string} toStage
- * @param {string} [ownerId]
- * @returns {Promise<{success: boolean, activity?: Object, error?: string}>}
- */
 export async function logStageChange(accountId, fromStage, toStage, ownerId = '') {
-  return logActivity({
-    account_id: accountId,
-    type: ACTIVITY_TYPES.STAGE_CHANGE,
-    channel: 'platform',
-    subject: `Stage: ${fromStage} → ${toStage}`,
-    outcome: 'completed',
-    owner_id: ownerId,
-    metadata: { from_stage: fromStage, to_stage: toStage }
-  });
+  return logActivity({ account_id: accountId, type: ACTIVITY_TYPES.STAGE_CHANGE, channel: 'platform', subject: `Stage: ${fromStage} → ${toStage}`, outcome: 'completed', owner_id: ownerId, metadata: { from_stage: fromStage, to_stage: toStage } });
 }
 
 // ============================================================================
 // ACTIVITY RETRIEVAL
 // ============================================================================
 
-/**
- * Get activity timeline for an account
- *
- * @param {string} accountId
- * @param {Object} [options]
- * @param {string} [options.type] - Filter by activity type
- * @param {string} [options.contactId] - Filter by contact
- * @param {number} [options.limit=50] - Max activities
- * @param {string} [options.since] - ISO date to filter from
- * @returns {Promise<{success: boolean, activities?: Object[], totalCount?: number, error?: string}>}
- */
 export async function getAccountTimeline(accountId, options = {}) {
   try {
-    if (!accountId) return { success: false, error: 'Account ID is required' };
+    if (!accountId) return { success: false, error: 'Account ID required' };
+    const filters = { account_id: accountId };
+    if (options.type) filters.type = options.type;
+    if (options.contactId) filters.contact_id = options.contactId;
+    if (options.since) filters.created_at = { gt: options.since };
 
-    const limit = options.limit || 50;
-    const parts = [`{account_id} = "${accountId}"`];
-
-    if (options.type) parts.push(`{type} = "${options.type}"`);
-    if (options.contactId) parts.push(`{contact_id} = "${options.contactId}"`);
-    if (options.since) parts.push(`IS_AFTER({created_at}, "${options.since}")`);
-
-    const filter = parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`;
-
-    const result = await queryData(COLLECTIONS.activities, {
-      filter,
-      sort: [{ field: 'created_at', direction: 'desc' }],
-      limit
+    const result = await dataAccess.queryRecords(COLLECTIONS.activities, {
+      filters, sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: options.limit || 50, suppressAuth: true
     });
-
-    return {
-      success: true,
-      activities: result.items || [],
-      totalCount: result.totalCount || 0
-    };
+    return { success: true, activities: result.items || [], totalCount: result.totalCount || result.items?.length };
   } catch (error) {
-    console.error('Error fetching account timeline:', error);
-    return { success: false, error: error.message || 'Failed to fetch timeline' };
+    return { success: false, error: error.message };
   }
 }
 
-/**
- * Get recent activities across all accounts (for dashboard feed)
- *
- * @param {Object} [options]
- * @param {string} [options.ownerId] - Filter by rep
- * @param {string} [options.type] - Filter by type
- * @param {number} [options.limit=20] - Max activities
- * @returns {Promise<{success: boolean, activities?: Object[], error?: string}>}
- */
 export async function getRecentActivities(options = {}) {
   try {
-    const limit = options.limit || 20;
-    const parts = [];
+    const filters = {};
+    if (options.ownerId) filters.owner_id = options.ownerId;
+    if (options.type) filters.type = options.type;
 
-    if (options.ownerId) parts.push(`{owner_id} = "${options.ownerId}"`);
-    if (options.type) parts.push(`{type} = "${options.type}"`);
-
-    const filter = parts.length > 0
-      ? (parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`)
-      : '';
-
-    const result = await queryData(COLLECTIONS.activities, {
-      filter,
-      sort: [{ field: 'created_at', direction: 'desc' }],
-      limit
+    const result = await dataAccess.queryRecords(COLLECTIONS.activities, {
+      filters, sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: options.limit || 20, suppressAuth: true
     });
-
     return { success: true, activities: result.items || [] };
   } catch (error) {
-    console.error('Error fetching recent activities:', error);
-    return { success: false, error: error.message || 'Failed to fetch activities' };
+    return { success: false, error: error.message };
   }
 }
 
-/**
- * Get activity counts by type for an account (for summary widgets)
- *
- * @param {string} accountId
- * @returns {Promise<{success: boolean, counts?: Object, error?: string}>}
- */
 export async function getActivityCounts(accountId) {
   try {
-    if (!accountId) return { success: false, error: 'Account ID is required' };
-
-    const filter = `{account_id} = "${accountId}"`;
-    const result = await queryData(COLLECTIONS.activities, {
-      filter,
-      limit: 500
-    });
-
-    const counts = {
-      total: 0,
-      email: 0,
-      sms: 0,
-      call: 0,
-      meeting: 0,
-      task: 0,
-      note: 0
-    };
-
-    (result.items || []).forEach(activity => {
-      counts.total++;
-      const type = activity.type || '';
-      if (counts[type] !== undefined) {
-        counts[type]++;
-      }
-    });
-
+    const result = await dataAccess.queryRecords(COLLECTIONS.activities, { filters: { account_id: accountId }, limit: 500, suppressAuth: true });
+    const counts = { total: 0, email: 0, sms: 0, call: 0, meeting: 0, task: 0, note: 0 };
+    (result.items || []).forEach(a => { counts.total++; if (counts.hasOwnProperty(a.type)) counts[a.type]++; });
     return { success: true, counts };
   } catch (error) {
-    console.error('Error fetching activity counts:', error);
-    return { success: false, error: error.message || 'Failed to fetch counts' };
+    return { success: false, error: error.message };
   }
 }
 
-/**
- * Get activity velocity metrics for a rep (touches per period)
- *
- * @param {string} ownerId
- * @param {number} [days=7] - Period in days
- * @returns {Promise<{success: boolean, velocity?: Object, error?: string}>}
- */
 export async function getActivityVelocity(ownerId, days = 7) {
   try {
-    if (!ownerId) return { success: false, error: 'Owner ID is required' };
-
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString();
-
-    const filter = `AND({owner_id} = "${ownerId}", IS_AFTER({created_at}, "${sinceStr}"))`;
-    const result = await queryData(COLLECTIONS.activities, {
-      filter,
-      limit: 500
-    });
-
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const result = await dataAccess.queryRecords(COLLECTIONS.activities, { filters: { owner_id: ownerId, created_at: { gt: since } }, limit: 500, suppressAuth: true });
     const activities = result.items || [];
     const byType = {};
-    activities.forEach(a => {
-      const t = a.type || 'other';
-      byType[t] = (byType[t] || 0) + 1;
-    });
-
-    return {
-      success: true,
-      velocity: {
-        owner_id: ownerId,
-        period_days: days,
-        total_touches: activities.length,
-        touches_per_day: Math.round((activities.length / days) * 10) / 10,
-        by_type: byType
-      }
-    };
+    activities.forEach(a => { const t = a.type || 'other'; byType[t] = (byType[t] || 0) + 1; });
+    return { success: true, velocity: { owner_id: ownerId, period_days: days, total_touches: activities.length, touches_per_day: Math.round((activities.length / days) * 10) / 10, by_type: byType } };
   } catch (error) {
-    console.error('Error computing activity velocity:', error);
-    return { success: false, error: error.message || 'Failed to compute velocity' };
+    return { success: false, error: error.message };
   }
 }
 
@@ -475,24 +142,11 @@ export async function getActivityVelocity(ownerId, days = 7) {
 // INTERNAL HELPERS
 // ============================================================================
 
-/**
- * Update account's last_activity_at timestamp
- */
 async function updateAccountActivity(accountId) {
   try {
-    if (usesAirtable(COLLECTIONS.accounts)) {
-      const tableName = await getAirtableTableName(COLLECTIONS.accounts);
-      await airtable.updateRecord(tableName, accountId, {
-        last_activity_at: new Date().toISOString()
-      });
-    } else {
-      const existing = await wixData.get(COLLECTIONS.accounts, accountId);
-      if (existing) {
-        existing.last_activity_at = new Date().toISOString();
-        await wixData.update(COLLECTIONS.accounts, existing);
-      }
+    const existing = await dataAccess.getRecord(COLLECTIONS.accounts, accountId, { suppressAuth: true });
+    if (existing) {
+      await dataAccess.updateRecord(COLLECTIONS.accounts, { ...existing, last_activity_at: new Date().toISOString() }, { suppressAuth: true });
     }
-  } catch (err) {
-    console.warn('Failed to update account activity timestamp:', err.message);
-  }
+  } catch (err) { }
 }

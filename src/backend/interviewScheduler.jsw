@@ -1,18 +1,8 @@
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
-import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import * as lifecycleService from 'backend/lifecycleService';
 
-/**
- * Interview Scheduling Service (Phase 4I)
- * Handles appointment states: REQUESTED -> PROPOSED -> CONFIRMED/CANCELLED
- * Supports both Wix and Airtable data sources based on config
- */
-
-// ============================================================================
-// Gamification Hooks (Lazy-loaded to avoid circular deps)
-// ============================================================================
+// Gamification Hooks (Lazy-loaded)
 let gamificationLoaded = false;
 let awardDriverXP = null;
 let awardRecruiterPoints = null;
@@ -24,369 +14,106 @@ async function loadGamificationServices() {
         const gamificationService = await import('backend/gamificationService');
         awardDriverXP = gamificationService.awardDriverXP;
         awardRecruiterPoints = gamificationService.awardRecruiterPoints;
-
         const challengeService = await import('backend/challengeService');
         updateChallengeProgress = challengeService.updateChallengeProgress;
-
         gamificationLoaded = true;
-    } catch (err) {
-        console.warn('Gamification services not available:', err.message);
-    }
+    } catch (err) { }
 }
 
-/**
- * Award gamification XP/points for interview actions (non-blocking)
- */
 async function awardInterviewGamification(userId, userType, action, applicationId) {
     try {
         await loadGamificationServices();
-
         if (userType === 'driver' && awardDriverXP) {
-            await awardDriverXP(userId, action, {
-                sourceType: 'interview',
-                sourceId: applicationId
-            });
-            if (updateChallengeProgress) {
-                await updateChallengeProgress(userId, 'driver', action, { applicationId });
-            }
+            await awardDriverXP(userId, action, { sourceType: 'interview', sourceId: applicationId });
+            if (updateChallengeProgress) await updateChallengeProgress(userId, 'driver', action, { applicationId });
         } else if (userType === 'recruiter' && awardRecruiterPoints) {
-            await awardRecruiterPoints(userId, action, {
-                sourceType: 'interview',
-                sourceId: applicationId
-            });
-            if (updateChallengeProgress) {
-                await updateChallengeProgress(userId, 'recruiter', action, { applicationId });
-            }
+            await awardRecruiterPoints(userId, action, { sourceType: 'interview', sourceId: applicationId });
+            if (updateChallengeProgress) await updateChallengeProgress(userId, 'recruiter', action, { applicationId });
         }
-    } catch (err) {
-        console.warn('Failed to award interview gamification:', err.message);
-    }
+    } catch (err) { }
 }
 
-const CONFIG = {
-    interviewsCollection: 'Interviews',
-    interestsCollection: 'DriverCarrierInterests',
-    messagesCollection: 'Messages',
-    STATUS: {
-        REQUESTED: 'REQUESTED',   // Recruiter asked for availability
-        PROPOSED: 'PROPOSED',     // One party suggested specific slots
-        CONFIRMED: 'CONFIRMED',   // Slot agreed upon
-        CANCELLED: 'CANCELLED'    // Appointment cancelled
-    }
-};
-
-// Collection keys for config lookup (camelCase)
 const COLLECTION_KEYS = {
-    interviews: 'interviews',  // Note: not defined in config.jsw yet, will default to wix
+    interviews: 'interviews',
     interests: 'driverCarrierInterests',
     messages: 'messages'
 };
 
-/**
- * Recruiter requests driver to provide availability
- * Supports both Wix and Airtable data sources based on config
- */
+const STATUS = { REQUESTED: 'REQUESTED', PROPOSED: 'PROPOSED', CONFIRMED: 'CONFIRMED', CANCELLED: 'CANCELLED' };
+
 export async function requestAvailability(applicationId) {
     try {
         const userId = wixUsersBackend.currentUser.id;
-        if (!userId) throw new Error('Not authenticated');
+        const application = await dataAccess.getRecord(COLLECTION_KEYS.interests, applicationId, { suppressAuth: true });
+        if (!application) throw new Error('Not found');
 
-        // Get application record
-        let application = null;
-        if (usesAirtable(COLLECTION_KEYS.interests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
-            application = await airtable.getRecord(tableName, applicationId);
-            if (application && application.error) application = null;
-        } else {
-            application = await wixData.get(CONFIG.interestsCollection, applicationId);
-        }
-        if (!application) throw new Error('Application not found');
+        const interviewData = { application_id: applicationId, driver_id: application.driver_id, carrier_dot: application.carrier_dot, status: STATUS.REQUESTED, requested_by: userId, requested_at: new Date() };
+        const existing = await dataAccess.queryRecords(COLLECTION_KEYS.interviews, { filters: { application_id: applicationId }, limit: 1, suppressAuth: true });
 
-        // Create or update interview record
-        const interviewData = {
-            application_id: applicationId,
-            driver_id: application.driver_id,
-            carrier_dot: application.carrier_dot,
-            status: CONFIG.STATUS.REQUESTED,
-            requested_by: userId,
-            requested_at: new Date()
-        };
+        if (existing.items?.length) await dataAccess.updateRecord(COLLECTION_KEYS.interviews, { ...existing.items[0], ...interviewData }, { suppressAuth: true });
+        else await dataAccess.insertRecord(COLLECTION_KEYS.interviews, interviewData, { suppressAuth: true });
 
-        // Check for existing interview and upsert
-        if (usesAirtable(COLLECTION_KEYS.interviews)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.interviews);
-            const formula = `{Application ID} = '${applicationId}'`;
-            const existing = await airtable.queryRecords(tableName, {
-                filterByFormula: formula,
-                maxRecords: 1
-            });
-
-            if (existing.records && existing.records.length > 0) {
-                await airtable.updateRecord(tableName, existing.records[0]._id, interviewData);
-            } else {
-                await airtable.createRecord(tableName, interviewData);
-            }
-        } else {
-            // Wix path
-            const existing = await wixData.query(CONFIG.interviewsCollection)
-                .eq('application_id', applicationId)
-                .find();
-
-            if (existing.items.length > 0) {
-                interviewData._id = existing.items[0]._id;
-                await wixData.update(CONFIG.interviewsCollection, interviewData);
-            } else {
-                await wixData.insert(CONFIG.interviewsCollection, interviewData);
-            }
-        }
-
-        // Send system message to chat
-        await sendSystemMessage(applicationId, 'ACTION_REQUIRED', {
-            action: 'PROVIDE_AVAILABILITY',
-            text: 'Recruiter requested your interview availability.'
-        }, application.driver_id);
-
+        await sendSystemMessage(applicationId, 'ACTION_REQUIRED', { action: 'PROVIDE_AVAILABILITY', text: 'Recruiter requested interview availability.' }, application.driver_id);
         return { success: true };
-    } catch (error) {
-        console.error('❌ Error requesting availability:', error);
-        return { success: false, error: error.message };
-    }
+    } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Propose specific time slots (from either driver or recruiter)
- * Supports both Wix and Airtable data sources based on config
- * @param {string} applicationId
- * @param {Array} slots [{id: 1, start: Date, end: Date}]
- */
 export async function proposeTimeSlots(applicationId, slots) {
     try {
         const userId = wixUsersBackend.currentUser.id;
+        const application = await dataAccess.getRecord(COLLECTION_KEYS.interests, applicationId, { suppressAuth: true });
+        const updateData = { status: STATUS.PROPOSED, proposed_slots: JSON.stringify(slots), last_proposer_id: userId, last_proposal_at: new Date() };
 
-        // Get application record
-        let application = null;
-        if (usesAirtable(COLLECTION_KEYS.interests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
-            application = await airtable.getRecord(tableName, applicationId);
-            if (application && application.error) application = null;
-        } else {
-            application = await wixData.get(CONFIG.interestsCollection, applicationId);
-        }
+        const existing = await dataAccess.queryRecords(COLLECTION_KEYS.interviews, { filters: { application_id: applicationId }, limit: 1, suppressAuth: true });
+        if (!existing.items?.length) throw new Error('Not found');
 
-        const updateData = {
-            status: CONFIG.STATUS.PROPOSED,
-            proposed_slots: JSON.stringify(slots),
-            last_proposer_id: userId,
-            last_proposal_at: new Date()
-        };
-
-        // Get existing interview record and update
-        if (usesAirtable(COLLECTION_KEYS.interviews)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.interviews);
-            const formula = `{Application ID} = '${applicationId}'`;
-            const existing = await airtable.queryRecords(tableName, {
-                filterByFormula: formula,
-                maxRecords: 1
-            });
-
-            if (!existing.records || existing.records.length === 0) {
-                throw new Error('Interview record not found');
-            }
-
-            await airtable.updateRecord(tableName, existing.records[0]._id, updateData);
-        } else {
-            // Wix path
-            const existing = await wixData.query(CONFIG.interviewsCollection)
-                .eq('application_id', applicationId)
-                .find();
-
-            if (existing.items.length === 0) throw new Error('Interview record not found');
-
-            const interview = existing.items[0];
-            const finalData = { ...interview, ...updateData };
-            await wixData.update(CONFIG.interviewsCollection, finalData);
-        }
-
-        // Notify other party
+        await dataAccess.updateRecord(COLLECTION_KEYS.interviews, { ...existing.items[0], ...updateData }, { suppressAuth: true });
         const receiverId = userId === application.driver_id ? application._owner : application.driver_id;
-        await sendSystemMessage(applicationId, 'ACTION_REQUIRED', {
-            action: 'REVIEW_SLOTS',
-            slots: slots,
-            text: userId === application.driver_id ? 'Driver proposed interview times.' : 'Recruiter proposed interview times.'
-        }, receiverId);
-
+        await sendSystemMessage(applicationId, 'ACTION_REQUIRED', { action: 'REVIEW_SLOTS', slots, text: userId === application.driver_id ? 'Driver proposed times.' : 'Recruiter proposed times.' }, receiverId);
         return { success: true };
-    } catch (error) {
-        console.error('❌ Error proposing slots:', error);
-        return { success: false, error: error.message };
-    }
+    } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Confirm a specific time slot
- * Supports both Wix and Airtable data sources based on config
- */
 export async function confirmTimeSlot(applicationId, slotIndex) {
     try {
         const userId = wixUsersBackend.currentUser.id;
-        let interview = null;
-        let interviewId = null;
-
-        // Get existing interview record
-        if (usesAirtable(COLLECTION_KEYS.interviews)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.interviews);
-            const formula = `{Application ID} = '${applicationId}'`;
-            const existing = await airtable.queryRecords(tableName, {
-                filterByFormula: formula,
-                maxRecords: 1
-            });
-
-            if (!existing.records || existing.records.length === 0) {
-                throw new Error('Interview record not found');
-            }
-            interview = existing.records[0];
-            interviewId = interview._id;
-        } else {
-            // Wix path
-            const existing = await wixData.query(CONFIG.interviewsCollection)
-                .eq('application_id', applicationId)
-                .find();
-
-            if (existing.items.length === 0) throw new Error('Interview record not found');
-            interview = existing.items[0];
-            interviewId = interview._id;
-        }
+        const existing = await dataAccess.queryRecords(COLLECTION_KEYS.interviews, { filters: { application_id: applicationId }, limit: 1, suppressAuth: true });
+        if (!existing.items?.length) throw new Error('Not found');
+        const interview = existing.items[0];
 
         const slots = JSON.parse(interview.proposed_slots);
-        const selectedSlot = slots[slotIndex];
+        const selected = slots[slotIndex];
+        const updateFields = { status: STATUS.CONFIRMED, confirmed_slot: JSON.stringify(selected), confirmed_at: new Date(), confirmed_by: userId };
 
-        const updateFields = {
-            status: CONFIG.STATUS.CONFIRMED,
-            confirmed_slot: JSON.stringify(selectedSlot),
-            confirmed_at: new Date(),
-            confirmed_by: userId
-        };
-
-        // Update the interview record
-        if (usesAirtable(COLLECTION_KEYS.interviews)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.interviews);
-            await airtable.updateRecord(tableName, interviewId, updateFields);
-        } else {
-            // Wix path
-            const updateData = { ...interview, ...updateFields };
-            await wixData.update(CONFIG.interviewsCollection, updateData);
-        }
-
-        // Get application for receiver ID
-        let application = null;
-        if (usesAirtable(COLLECTION_KEYS.interests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
-            application = await airtable.getRecord(tableName, applicationId);
-            if (application && application.error) application = null;
-        } else {
-            application = await wixData.get(CONFIG.interestsCollection, applicationId);
-        }
-
+        await dataAccess.updateRecord(COLLECTION_KEYS.interviews, { ...interview, ...updateFields }, { suppressAuth: true });
+        const application = await dataAccess.getRecord(COLLECTION_KEYS.interests, applicationId, { suppressAuth: true });
         const receiverId = userId === application.driver_id ? application._owner : application.driver_id;
 
-        await sendSystemMessage(applicationId, 'INFO', {
-            text: `Interview Confirmed: ${new Date(selectedSlot.start).toLocaleString()}`,
-            details: selectedSlot
-        }, receiverId);
+        await sendSystemMessage(applicationId, 'INFO', { text: `Interview Confirmed: ${new Date(selected.start).toLocaleString()}`, details: selected }, receiverId);
+        lifecycleService.logEvent(application.driver_id, application.carrier_dot, lifecycleService.EVENT_TYPES.INTERVIEW_SCHEDULED, { applicationId, interviewId: interview._id, scheduledTime: selected.start }).catch(() => {});
 
-        // Lifecycle: Log the INTERVIEW_SCHEDULED event (non-blocking)
-        lifecycleService.logEvent(application.driver_id, application.carrier_dot, lifecycleService.EVENT_TYPES.INTERVIEW_SCHEDULED, {
-            applicationId: applicationId,
-            interviewId: interviewId,
-            scheduledTime: selectedSlot.start
-        }).catch(err => console.warn('Failed to log lifecycle interview event:', err.message));
-
-        // Award gamification XP/points for scheduling an interview (non-blocking)
-        // Determine user type based on who confirmed
         const isDriver = userId === application.driver_id;
-        awardInterviewGamification(userId, isDriver ? 'driver' : 'recruiter', 'schedule_interview', applicationId)
-            .catch(err => console.warn('Gamification award failed:', err.message));
+        awardInterviewGamification(userId, isDriver ? 'driver' : 'recruiter', 'schedule_interview', applicationId).catch(() => {});
+        const otherId = isDriver ? application._owner : application.driver_id;
+        if (otherId) awardInterviewGamification(otherId, isDriver ? 'recruiter' : 'driver', 'schedule_interview', applicationId).catch(() => {});
 
-        // Also award to the other party who participated
-        const otherPartyType = isDriver ? 'recruiter' : 'driver';
-        const otherPartyId = isDriver ? application._owner : application.driver_id;
-        if (otherPartyId) {
-            awardInterviewGamification(otherPartyId, otherPartyType, 'schedule_interview', applicationId)
-                .catch(err => console.warn('Gamification award failed:', err.message));
-        }
-
-        return { success: true, slot: selectedSlot };
-    } catch (error) {
-        console.error('❌ Error confirming slot:', error);
-        return { success: false, error: error.message };
-    }
+        return { success: true, slot: selected };
+    } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get current interview state for an application
- * Supports both Wix and Airtable data sources based on config
- */
 export async function getInterviewState(applicationId) {
     try {
-        let interview = null;
-
-        if (usesAirtable(COLLECTION_KEYS.interviews)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.interviews);
-            const formula = `{Application ID} = '${applicationId}'`;
-            const result = await airtable.queryRecords(tableName, {
-                filterByFormula: formula,
-                maxRecords: 1
-            });
-
-            if (result.records && result.records.length > 0) {
-                interview = result.records[0];
-            }
-        } else {
-            // Wix path
-            const result = await wixData.query(CONFIG.interviewsCollection)
-                .eq('application_id', applicationId)
-                .find();
-
-            if (result.items.length > 0) {
-                interview = result.items[0];
-            }
-        }
-
-        if (!interview) return { success: true, state: null };
-
+        const res = await dataAccess.queryRecords(COLLECTION_KEYS.interviews, { filters: { application_id: applicationId }, limit: 1, suppressAuth: true });
+        if (!res.items?.length) return { success: true, state: null };
+        const interview = res.items[0];
         if (interview.proposed_slots) interview.proposed_slots = JSON.parse(interview.proposed_slots);
         if (interview.confirmed_slot) interview.confirmed_slot = JSON.parse(interview.confirmed_slot);
-
         return { success: true, state: interview };
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
+    } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Helper to send system-type messages to chat
- * Supports both Wix and Airtable data sources based on config
- */
 async function sendSystemMessage(applicationId, subType, payload, receiverId) {
     const userId = wixUsersBackend.currentUser.id;
-    const systemMessage = {
-        application_id: applicationId,
-        content: payload.text,
-        sender_id: userId,
-        receiver_id: receiverId,
-        sender_type: 'system', // Special type for UI cards
-        timestamp: new Date(),
-        is_read: false,
-        metadata: JSON.stringify({
-            subType: subType, // INFO, ACTION_REQUIRED
-            payload: payload
-        })
-    };
-
-    if (usesAirtable(COLLECTION_KEYS.messages)) {
-        const tableName = getAirtableTableName(COLLECTION_KEYS.messages);
-        return airtable.createRecord(tableName, systemMessage);
-    } else {
-        return wixData.insert(CONFIG.messagesCollection, systemMessage);
-    }
+    const systemMessage = { application_id: applicationId, content: payload.text, sender_id: userId, receiver_id: receiverId, sender_type: 'system', timestamp: new Date(), is_read: false, metadata: JSON.stringify({ subType, payload }) };
+    return await dataAccess.insertRecord(COLLECTION_KEYS.messages, systemMessage, { suppressAuth: true });
 }

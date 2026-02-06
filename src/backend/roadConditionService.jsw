@@ -3,51 +3,16 @@
  * Phase 6 of Driver Road Utilities
  */
 
-import wixData from 'wix-data';
-import { fetch } from 'wix-fetch';
-import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { fetchMultiStateConditions } from 'backend/adapters/state511';
 import { seedRoadConditions, seedTruckRestrictions } from 'backend/seeds/seedMockData';
 
-// ============================================
-// COLLECTIONS
-// ============================================
-const COLLECTIONS = {
-    CONDITIONS: 'RoadConditions',
-    RESTRICTIONS: 'TruckRestrictions',
-    REPORTS: 'DriverConditionReports'
+// Collection keys for dataAccess routing
+const COLLECTION_KEYS = {
+    roadConditions: 'roadConditions',
+    truckRestrictions: 'truckRestrictions',
+    driverConditionReports: 'driverConditionReports'
 };
-
-// ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName || getWixCollectionName(collectionKey));
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const { _id, ...airtableData } = data;
-        return await airtable.createRecord(tableName, airtableData);
-    }
-    return await wixData.insert(wixCollectionName || getWixCollectionName(collectionKey), data, { suppressAuth: true });
-}
 
 // ============================================
 // SERVICE FUNCTIONS
@@ -62,15 +27,16 @@ export async function getRouteConditions(routePoints, options = {}) {
     if (!routePoints || routePoints.length === 0) return { success: false, error: 'No route provided' };
 
     try {
-        // 1. Query DB for seeded conditions
-        let relevantConditions = await queryData('roadConditions', COLLECTIONS.CONDITIONS, { limit: 1000 });
+        // 1. Query DB for seeded conditions using dataAccess
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.roadConditions, { limit: 1000, suppressAuth: true });
+        let relevantConditions = result.items || [];
 
-        // 2. If empty, seed and re-query (or use seeded data directly implies logic in seed function)
-        // But seedRoadConditions returns { seeded, count } not data. So we re-query.
+        // 2. If empty, seed and re-query
         if (relevantConditions.length === 0) {
             const seedResult = await seedRoadConditions();
             if (seedResult.seeded) {
-                relevantConditions = await queryData('roadConditions', COLLECTIONS.CONDITIONS, { limit: 1000 });
+                const reRes = await dataAccess.queryRecords(COLLECTION_KEYS.roadConditions, { limit: 1000, suppressAuth: true });
+                relevantConditions = reRes.items || [];
             }
         }
 
@@ -192,12 +158,14 @@ export async function getTruckRestrictions(routePoints, truckSpecs = {}) {
             }
         }
 
-        // 2. DB Data (seeded if empty)
-        let dbRestrictions = await queryData('truckRestrictions', COLLECTIONS.RESTRICTIONS, { limit: 1000 });
+        // 2. DB Data (seeded if empty) using dataAccess
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.truckRestrictions, { limit: 1000, suppressAuth: true });
+        let dbRestrictions = result.items || [];
         if (dbRestrictions.length === 0) {
             const seedResult = await seedTruckRestrictions();
             if (seedResult.seeded) {
-                dbRestrictions = await queryData('truckRestrictions', COLLECTIONS.RESTRICTIONS, { limit: 1000 });
+                const reRes = await dataAccess.queryRecords(COLLECTION_KEYS.truckRestrictions, { limit: 1000, suppressAuth: true });
+                dbRestrictions = reRes.items || [];
             }
         }
 
@@ -239,9 +207,6 @@ export async function getChainRequirements(routePoints) {
         if (!isWinter) return { success: true, requirements: [] };
 
         // Mock Chain Control Areas check
-        // In real app: Check intersection with chain control polygons from DOT
-        // Note: Keeping this logic hardcoded as it is "business logic" / "GIS logic"
-        // rather than data to be fetched, until we have a ChainAreas collection.
         const chainAreas = [
             { highway: 'I-80', state: 'CA', name: 'Donner Pass', latMin: 39.2, latMax: 39.4, lngMin: -120.6, lngMax: -120.0, level: 'R2' },
             { highway: 'I-5', state: 'CA', name: 'Siskiyou Pass', latMin: 41.9, latMax: 42.1, lngMin: -122.7, lngMax: -122.5, level: 'R1' },
@@ -312,9 +277,7 @@ export async function reportCondition(report) {
             status: 'active'
         };
 
-        // GPS Validation (Phase 6 Enhancement)
-        // If report location is too far from user's current location (mocked here), reject
-        // In real app, we verify `report.userLocation` vs `report.location` distance < 5 miles
+        // GPS Validation
         if (report.userLocation) {
              const dist = calculateDistance(report.userLocation.lat, report.userLocation.lng, report.location.lat, report.location.lng);
              if (dist > 10) { // 10 mile validation radius
@@ -322,13 +285,11 @@ export async function reportCondition(report) {
              }
         }
 
-        const result = await insertData('driverConditionReports', COLLECTIONS.REPORTS, record);
-        console.log('[RoadConditionService] Report submitted:', result);
+        // Use dataAccess for insert
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.driverConditionReports, record, { suppressAuth: true });
+        if (!result.success) throw new Error(result.error);
 
-        // Check for duplicates/confirmations
-        // If similar report exists within 1 mile and 30 mins, increment its verified_count instead of new record
-        
-        return { success: true, reportId: result._id || result.id };
+        return { success: true, reportId: result.record._id };
 
     } catch (error) {
         return { success: false, error: error.message };
@@ -341,8 +302,7 @@ export async function reportCondition(report) {
  * @param {string} userId 
  */
 export async function verifyConditionReport(reportId, userId) {
-    // Logic to increment verified_count
-    // wixData.get(COLLECTIONS.REPORTS, reportId)... update
+    // Logic to increment verified_count could be implemented with dataAccess update
     return { success: true, message: 'Report verified' };
 }
 

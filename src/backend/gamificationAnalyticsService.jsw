@@ -11,13 +11,9 @@
  * This service uses Airtable-only collections (no Wix fallback).
  */
 
-import { getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
-// =============================================================================
-// COLLECTION KEYS
-// =============================================================================
-
+// Collection keys for dataAccess
 const COLLECTION_KEYS = {
     driverProgression: 'driverProgression',
     recruiterProgression: 'recruiterProgression',
@@ -33,59 +29,16 @@ const COLLECTION_KEYS = {
 };
 
 // =============================================================================
-// AIRTABLE HELPER
-// =============================================================================
-
-async function queryData(collectionKey, options = {}) {
-    try {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 1000
-        });
-        return result.records || [];
-    } catch (error) {
-        console.error(`Query error for ${collectionKey}:`, error.message);
-        return [];
-    }
-}
-
-// =============================================================================
 // DASHBOARD METRICS
 // =============================================================================
 
-/**
- * Get comprehensive gamification metrics for admin dashboard
- * @returns {object} Dashboard metrics
- */
 export async function getGamificationDashboardMetrics() {
     try {
-        const [
-            economyHealth,
-            achievementStats,
-            challengeStats,
-            engagementMetrics,
-            eventMetrics
-        ] = await Promise.all([
-            getEconomyHealthMetrics(),
-            getAchievementUnlockRates(),
-            getChallengeCompletionRates(),
-            getEngagementMetrics(),
-            getEventMetrics()
+        const [economy, achievements, challenges, engagement, events] = await Promise.all([
+            getEconomyHealthMetrics(), getAchievementUnlockRates(), getChallengeCompletionRates(),
+            getEngagementMetrics(), getEventMetrics()
         ]);
-
-        return {
-            success: true,
-            timestamp: new Date().toISOString(),
-            metrics: {
-                economy: economyHealth,
-                achievements: achievementStats,
-                challenges: challengeStats,
-                engagement: engagementMetrics,
-                events: eventMetrics
-            }
-        };
+        return { success: true, timestamp: new Date().toISOString(), metrics: { economy, achievements, challenges, engagement, events } };
     } catch (error) {
         console.error('getGamificationDashboardMetrics error:', error);
         return { success: false, error: error.message };
@@ -96,544 +49,145 @@ export async function getGamificationDashboardMetrics() {
 // ECONOMY HEALTH METRICS
 // =============================================================================
 
-/**
- * Get XP/Points economy health metrics
- * Tracks inflation, distribution, and earning rates
- */
 export async function getEconomyHealthMetrics() {
     try {
-        // Get all driver progressions
-        const driverProgressions = await queryData(COLLECTION_KEYS.driverProgression, {
-            limit: 10000
-        });
+        const [driverProgs, recruiterProgs] = await Promise.all([
+            dataAccess.queryRecords(COLLECTION_KEYS.driverProgression, { limit: 5000, suppressAuth: true }).then(r => r.items || []),
+            dataAccess.queryRecords(COLLECTION_KEYS.recruiterProgression, { limit: 5000, suppressAuth: true }).then(r => r.items || [])
+        ]);
 
-        // Get all recruiter progressions
-        const recruiterProgressions = await queryData(COLLECTION_KEYS.recruiterProgression, {
-            limit: 10000
-        });
-
-        // Calculate driver XP statistics
-        const driverXPs = driverProgressions.map(d => d['Total XP'] || d['total_xp'] || 0);
+        const driverXPs = driverProgs.map(d => d.current_xp || 0);
         const driverStats = calculateStats(driverXPs);
+        const levelDist = countDistribution(driverProgs.map(d => d.level || 1));
 
-        // Calculate recruiter points statistics
-        const recruiterPoints = recruiterProgressions.map(r => r['Total Points'] || r['total_points'] || 0);
-        const recruiterStats = calculateStats(recruiterPoints);
+        const recruiterPts = recruiterProgs.map(r => r.current_points || 0);
+        const recruiterStats = calculateStats(recruiterPts);
+        const rankDist = countDistribution(recruiterProgs.map(r => r.rank || 1));
 
-        // Level distribution
-        const driverLevels = driverProgressions.map(d => d['Level'] || d['level'] || 1);
-        const levelDistribution = countDistribution(driverLevels);
+        const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const recentRes = await dataAccess.queryRecords(COLLECTION_KEYS.gamificationEvents, { filters: { created_at: { gte: weekAgo } }, limit: 5000, suppressAuth: true });
+        const recent = recentRes.items || [];
 
-        // Rank distribution
-        const recruiterRanks = recruiterProgressions.map(r => r['Rank'] || r['rank'] || 1);
-        const rankDistribution = countDistribution(recruiterRanks);
-
-        // Recent XP events (last 7 days)
-        const weekAgo = new Date();
-        weekAgo.setDate(weekAgo.getDate() - 7);
-        const recentEvents = await queryData(COLLECTION_KEYS.gamificationEvents, {
-            filter: `{Created At} >= '${weekAgo.toISOString()}'`,
-            limit: 10000
-        });
-
-        const xpEvents = recentEvents.filter(e => e['Event Type'] === 'xp_earned' || e['event_type'] === 'xp_earned');
-        const pointsEvents = recentEvents.filter(e => e['Event Type'] === 'points_earned' || e['event_type'] === 'points_earned');
-
-        const dailyXPRate = xpEvents.length > 0 ? Math.round(xpEvents.reduce((sum, e) => sum + (e['XP Amount'] || e['xp_amount'] || 0), 0) / 7) : 0;
-        const dailyPointsRate = pointsEvents.length > 0 ? Math.round(pointsEvents.reduce((sum, e) => sum + (e['Points Amount'] || e['points_amount'] || 0), 0) / 7) : 0;
+        const dailyXP = Math.round(recent.filter(e => e.event_type === 'xp_earned').reduce((s, e) => s + (e.xp_earned || 0), 0) / 7);
+        const dailyPts = Math.round(recent.filter(e => e.event_type === 'points_earned').reduce((s, e) => s + (e.points_earned || 0), 0) / 7);
 
         return {
-            drivers: {
-                totalUsers: driverProgressions.length,
-                totalXPInCirculation: driverStats.sum,
-                averageXP: driverStats.avg,
-                medianXP: driverStats.median,
-                maxXP: driverStats.max,
-                dailyXPEarnRate: dailyXPRate,
-                levelDistribution
-            },
-            recruiters: {
-                totalUsers: recruiterProgressions.length,
-                totalPointsInCirculation: recruiterStats.sum,
-                averagePoints: recruiterStats.avg,
-                medianPoints: recruiterStats.median,
-                maxPoints: recruiterStats.max,
-                dailyPointsEarnRate: dailyPointsRate,
-                rankDistribution
-            },
-            healthIndicators: {
-                xpInflationRate: calculateInflationRate(dailyXPRate, driverStats.sum),
-                pointsInflationRate: calculateInflationRate(dailyPointsRate, recruiterStats.sum),
-                levelProgressionHealth: assessProgressionHealth(levelDistribution),
-                rankProgressionHealth: assessProgressionHealth(rankDistribution)
-            }
+            drivers: { totalUsers: driverProgs.length, totalXP: driverStats.sum, averageXP: driverStats.avg, dailyXPEarnRate: dailyXP, levelDistribution: levelDist },
+            recruiters: { totalUsers: recruiterProgs.length, totalPoints: recruiterStats.sum, averagePoints: recruiterStats.avg, dailyPointsEarnRate: dailyPts, rankDistribution: rankDist },
+            health: { xpInflation: calculateInflationRate(dailyXP, driverStats.sum), pointsInflation: calculateInflationRate(dailyPts, recruiterStats.sum) }
         };
-    } catch (error) {
-        console.error('getEconomyHealthMetrics error:', error);
-        return { error: error.message };
-    }
+    } catch (error) { return { error: error.message }; }
 }
 
 // =============================================================================
 // ACHIEVEMENT METRICS
 // =============================================================================
 
-/**
- * Get achievement unlock rates
- */
 export async function getAchievementUnlockRates() {
     try {
-        // Get all driver achievements
-        const driverAchievements = await queryData(COLLECTION_KEYS.driverAchievements, {
-            limit: 10000
-        });
+        const [dAch, rBadges, dProgs, rProgs] = await Promise.all([
+            dataAccess.queryRecords(COLLECTION_KEYS.driverAchievements, { limit: 5000, suppressAuth: true }).then(r => r.items || []),
+            dataAccess.queryRecords(COLLECTION_KEYS.recruiterBadges, { limit: 5000, suppressAuth: true }).then(r => r.items || []),
+            dataAccess.countRecords(COLLECTION_KEYS.driverProgression, {}),
+            dataAccess.countRecords(COLLECTION_KEYS.recruiterProgression, {})
+        ]);
 
-        // Get all recruiter badges
-        const recruiterBadges = await queryData(COLLECTION_KEYS.recruiterBadges, {
-            limit: 10000
-        });
+        const dTotal = dProgs || 1, rTotal = rProgs || 1;
+        const dByAch = groupBy(dAch, 'achievement_id');
+        const rByBadge = groupBy(rBadges, 'badge_id');
 
-        // Get total users for rate calculation
-        const driverProgressions = await queryData(COLLECTION_KEYS.driverProgression, { limit: 10000 });
-        const recruiterProgressions = await queryData(COLLECTION_KEYS.recruiterProgression, { limit: 10000 });
-
-        const totalDrivers = driverProgressions.length || 1;
-        const totalRecruiters = recruiterProgressions.length || 1;
-
-        // Group by achievement type
-        const driverByAchievement = groupBy(driverAchievements, 'Achievement ID', 'achievement_id');
-        const recruiterByBadge = groupBy(recruiterBadges, 'Badge ID', 'badge_id');
-
-        // Calculate unlock rates
-        const driverUnlockRates = Object.entries(driverByAchievement).map(([id, records]) => ({
-            achievementId: id,
-            unlockCount: records.length,
-            unlockRate: Math.round((records.length / totalDrivers) * 100 * 10) / 10
-        })).sort((a, b) => b.unlockCount - a.unlockCount);
-
-        const recruiterUnlockRates = Object.entries(recruiterByBadge).map(([id, records]) => ({
-            badgeId: id,
-            unlockCount: records.length,
-            unlockRate: Math.round((records.length / totalRecruiters) * 100 * 10) / 10
-        })).sort((a, b) => b.unlockCount - a.unlockCount);
-
-        // Recent unlocks (last 7 days)
-        const weekAgo = new Date();
-        weekAgo.setDate(weekAgo.getDate() - 7);
-        const recentDriverUnlocks = driverAchievements.filter(a => {
-            const earnedDate = a['Earned At'] || a['earned_at'] || a['Created At'];
-            return earnedDate && new Date(earnedDate) >= weekAgo;
-        });
-        const recentRecruiterUnlocks = recruiterBadges.filter(b => {
-            const earnedDate = b['Earned At'] || b['earned_at'] || b['Created At'];
-            return earnedDate && new Date(earnedDate) >= weekAgo;
-        });
+        const dRates = Object.entries(dByAch).map(([id, recs]) => ({ achievementId: id, count: recs.length, rate: Math.round((recs.length / dTotal) * 1000) / 10 }));
+        const rRates = Object.entries(rByBadge).map(([id, recs]) => ({ badgeId: id, count: recs.length, rate: Math.round((recs.length / rTotal) * 1000) / 10 }));
 
         return {
-            drivers: {
-                totalUnlocks: driverAchievements.length,
-                uniqueAchievements: Object.keys(driverByAchievement).length,
-                averagePerUser: Math.round((driverAchievements.length / totalDrivers) * 10) / 10,
-                unlockRates: driverUnlockRates.slice(0, 10),
-                recentUnlocks: recentDriverUnlocks.length,
-                rarestAchievements: driverUnlockRates.slice(-5).reverse()
-            },
-            recruiters: {
-                totalUnlocks: recruiterBadges.length,
-                uniqueBadges: Object.keys(recruiterByBadge).length,
-                averagePerUser: Math.round((recruiterBadges.length / totalRecruiters) * 10) / 10,
-                unlockRates: recruiterUnlockRates.slice(0, 10),
-                recentUnlocks: recentRecruiterUnlocks.length,
-                rarestBadges: recruiterUnlockRates.slice(-5).reverse()
-            }
+            drivers: { totalUnlocks: dAch.length, averagePerUser: Math.round((dAch.length / dTotal) * 10) / 10, rates: dRates.sort((a,b)=>b.count-a.count).slice(0, 10) },
+            recruiters: { totalUnlocks: rBadges.length, averagePerUser: Math.round((rBadges.length / rTotal) * 10) / 10, rates: rRates.sort((a,b)=>b.count-a.count).slice(0, 10) }
         };
-    } catch (error) {
-        console.error('getAchievementUnlockRates error:', error);
-        return { error: error.message };
-    }
+    } catch (error) { return { error: error.message }; }
 }
 
 // =============================================================================
 // CHALLENGE METRICS
 // =============================================================================
 
-/**
- * Get challenge completion rates
- */
 export async function getChallengeCompletionRates() {
     try {
-        // Get driver challenges
-        const driverChallenges = await queryData(COLLECTION_KEYS.driverChallenges, {
-            limit: 10000
-        });
+        const [dCh, rCh] = await Promise.all([
+            dataAccess.queryRecords(COLLECTION_KEYS.driverChallenges, { limit: 5000, suppressAuth: true }).then(r => r.items || []),
+            dataAccess.queryRecords(COLLECTION_KEYS.recruiterChallenges, { limit: 5000, suppressAuth: true }).then(r => r.items || [])
+        ]);
 
-        // Get recruiter challenges
-        const recruiterChallenges = await queryData(COLLECTION_KEYS.recruiterChallenges, {
-            limit: 10000
-        });
-
-        // Calculate completion rates
-        const driverCompleted = driverChallenges.filter(c => c['Status'] === 'completed' || c['status'] === 'completed');
-        const driverActive = driverChallenges.filter(c => c['Status'] === 'active' || c['status'] === 'active');
-        const driverExpired = driverChallenges.filter(c => c['Status'] === 'expired' || c['status'] === 'expired');
-
-        const recruiterCompleted = recruiterChallenges.filter(c => c['Status'] === 'completed' || c['status'] === 'completed');
-        const recruiterActive = recruiterChallenges.filter(c => c['Status'] === 'active' || c['status'] === 'active');
-        const recruiterExpired = recruiterChallenges.filter(c => c['Status'] === 'expired' || c['status'] === 'expired');
-
-        // Group by challenge type
-        const driverByType = groupBy(driverChallenges, 'Challenge Type', 'challenge_type');
-        const recruiterByType = groupBy(recruiterChallenges, 'Challenge Type', 'challenge_type');
-
-        // Calculate type-specific completion rates
-        const driverTypeRates = calculateTypeCompletionRates(driverByType);
-        const recruiterTypeRates = calculateTypeCompletionRates(recruiterByType);
+        const dComp = dCh.filter(c => c.status === 'completed' || c.status === 'claimed').length;
+        const rComp = rCh.filter(c => c.status === 'completed' || c.status === 'claimed').length;
 
         return {
-            drivers: {
-                total: driverChallenges.length,
-                completed: driverCompleted.length,
-                active: driverActive.length,
-                expired: driverExpired.length,
-                completionRate: driverChallenges.length > 0
-                    ? Math.round((driverCompleted.length / driverChallenges.length) * 100)
-                    : 0,
-                byType: driverTypeRates
-            },
-            recruiters: {
-                total: recruiterChallenges.length,
-                completed: recruiterCompleted.length,
-                active: recruiterActive.length,
-                expired: recruiterExpired.length,
-                completionRate: recruiterChallenges.length > 0
-                    ? Math.round((recruiterCompleted.length / recruiterChallenges.length) * 100)
-                    : 0,
-                byType: recruiterTypeRates
-            }
+            drivers: { total: dCh.length, completed: dComp, rate: dCh.length > 0 ? Math.round((dComp / dCh.length) * 100) : 0 },
+            recruiters: { total: rCh.length, completed: rComp, rate: rCh.length > 0 ? Math.round((rComp / rCh.length) * 100) : 0 }
         };
-    } catch (error) {
-        console.error('getChallengeCompletionRates error:', error);
-        return { error: error.message };
-    }
+    } catch (error) { return { error: error.message }; }
 }
 
 // =============================================================================
 // ENGAGEMENT METRICS
 // =============================================================================
 
-/**
- * Get engagement metrics
- */
 export async function getEngagementMetrics() {
     try {
-        const now = new Date();
-        const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const [recent, referrals, bonuses] = await Promise.all([
+            dataAccess.queryRecords(COLLECTION_KEYS.gamificationEvents, { filters: { created_at: { gte: monthAgo } }, limit: 10000, suppressAuth: true }).then(r => r.items || []),
+            dataAccess.countRecords(COLLECTION_KEYS.driverReferrals, { is_referrer_record: 'No' }),
+            dataAccess.countRecords(COLLECTION_KEYS.matchQualityBonuses, {})
+        ]);
 
-        // Get gamification events
-        const recentEvents = await queryData(COLLECTION_KEYS.gamificationEvents, {
-            filter: `{Created At} >= '${monthAgo.toISOString()}'`,
-            limit: 10000
-        });
-
-        // Daily active users (unique users with events in last 24h)
-        const dailyEvents = recentEvents.filter(e => {
-            const eventDate = e['Created At'] || e['created_at'];
-            return eventDate && new Date(eventDate) >= dayAgo;
-        });
-        const dailyActiveUsers = new Set(dailyEvents.map(e => e['User ID'] || e['user_id'])).size;
-
-        // Weekly active users
-        const weeklyEvents = recentEvents.filter(e => {
-            const eventDate = e['Created At'] || e['created_at'];
-            return eventDate && new Date(eventDate) >= weekAgo;
-        });
-        const weeklyActiveUsers = new Set(weeklyEvents.map(e => e['User ID'] || e['user_id'])).size;
-
-        // Monthly active users
-        const monthlyActiveUsers = new Set(recentEvents.map(e => e['User ID'] || e['user_id'])).size;
-
-        // Event type breakdown
-        const eventTypes = groupBy(recentEvents, 'Event Type', 'event_type');
-        const eventTypeBreakdown = Object.entries(eventTypes).map(([type, events]) => ({
-            type,
-            count: events.length,
-            percentage: Math.round((events.length / recentEvents.length) * 100)
-        })).sort((a, b) => b.count - a.count);
-
-        // Referral metrics
-        const referrals = await queryData(COLLECTION_KEYS.driverReferrals, {
-            filter: `{Is Referrer Record} = "No"`,
-            limit: 10000
-        });
-        const successfulReferrals = referrals.filter(r => r['Status'] === 'hired');
-
-        // Match quality bonuses
-        const bonuses = await queryData(COLLECTION_KEYS.matchQualityBonuses, {
-            limit: 1000
-        });
+        const mau = new Set(recent.map(e => e.user_id)).size;
+        const types = groupBy(recent, 'event_type');
 
         return {
-            activeUsers: {
-                daily: dailyActiveUsers,
-                weekly: weeklyActiveUsers,
-                monthly: monthlyActiveUsers,
-                stickinessRatio: weeklyActiveUsers > 0
-                    ? Math.round((dailyActiveUsers / weeklyActiveUsers) * 100)
-                    : 0
-            },
-            events: {
-                last24h: dailyEvents.length,
-                last7d: weeklyEvents.length,
-                last30d: recentEvents.length,
-                typeBreakdown: eventTypeBreakdown.slice(0, 10)
-            },
-            referrals: {
-                total: referrals.length,
-                successful: successfulReferrals.length,
-                conversionRate: referrals.length > 0
-                    ? Math.round((successfulReferrals.length / referrals.length) * 100)
-                    : 0
-            },
-            matchQuality: {
-                totalBonuses: bonuses.length,
-                byTier: {
-                    excellent: bonuses.filter(b => b['Bonus Tier'] === 'excellent').length,
-                    great: bonuses.filter(b => b['Bonus Tier'] === 'great').length,
-                    good: bonuses.filter(b => b['Bonus Tier'] === 'good').length
-                }
-            }
+            activeUsers: { monthly: mau },
+            events: { last30d: recent.length, types: Object.entries(types).map(([t, e]) => ({ type: t, count: e.length })).sort((a,b)=>b.count-a.count).slice(0, 5) },
+            referrals: { total: referrals },
+            matchQuality: { totalBonuses: bonuses }
         };
-    } catch (error) {
-        console.error('getEngagementMetrics error:', error);
-        return { error: error.message };
-    }
+    } catch (error) { return { error: error.message }; }
 }
 
 // =============================================================================
 // EVENT METRICS
 // =============================================================================
 
-/**
- * Get seasonal event metrics
- */
 export async function getEventMetrics() {
     try {
-        // Get all events
-        const events = await queryData(COLLECTION_KEYS.seasonalEvents, {
-            limit: 100
-        });
-
-        // Get all participants
-        const participants = await queryData(COLLECTION_KEYS.eventParticipants, {
-            limit: 10000
-        });
-
-        const activeEvents = events.filter(e => e['Status'] === 'active');
-        const completedEvents = events.filter(e => e['Status'] === 'ended');
-
-        // Calculate participation stats per event
-        const eventStats = events.map(event => {
-            const eventParticipants = participants.filter(p =>
-                p['Event ID'] === event['Event ID'] || p['Event ID'] === event.id
-            );
-            const totalXP = eventParticipants.reduce((sum, p) => sum + (p['XP Earned'] || 0), 0);
-            const totalPoints = eventParticipants.reduce((sum, p) => sum + (p['Points Earned'] || 0), 0);
-
-            return {
-                eventId: event['Event ID'] || event.id,
-                name: event['Name'],
-                status: event['Status'],
-                participants: eventParticipants.length,
-                totalXPEarned: totalXP,
-                totalPointsEarned: totalPoints,
-                avgXPPerUser: eventParticipants.length > 0
-                    ? Math.round(totalXP / eventParticipants.length)
-                    : 0
-            };
-        });
+        const [events, participants] = await Promise.all([
+            dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, { limit: 100, suppressAuth: true }).then(r => r.items || []),
+            dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, { limit: 5000, suppressAuth: true }).then(r => r.items || [])
+        ]);
 
         return {
-            summary: {
-                totalEvents: events.length,
-                activeEvents: activeEvents.length,
-                completedEvents: completedEvents.length,
-                totalParticipants: participants.length
-            },
-            events: eventStats
+            summary: { totalEvents: events.length, activeEvents: events.filter(e => e.status === 'active').length, totalParticipants: participants.length },
+            events: events.map(e => ({ id: e._id, name: e.name, status: e.status, participants: participants.filter(p => p.event_id === e._id).length }))
         };
-    } catch (error) {
-        console.error('getEventMetrics error:', error);
-        return { error: error.message };
-    }
+    } catch (error) { return { error: error.message }; }
 }
 
 // =============================================================================
 // ABUSE DETECTION
 // =============================================================================
 
-/**
- * Monitor for gaming/abuse patterns
- * @returns {object} Suspicious activity report
- */
 export async function detectAbusePatterns() {
     try {
-        const now = new Date();
-        const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const recentRes = await dataAccess.queryRecords(COLLECTION_KEYS.gamificationEvents, { filters: { created_at: { gte: dayAgo } }, limit: 10000, suppressAuth: true });
+        const byUser = groupBy(recentRes.items || [], 'user_id');
 
-        // Get recent events
-        const recentEvents = await queryData(COLLECTION_KEYS.gamificationEvents, {
-            filter: `{Created At} >= '${dayAgo.toISOString()}'`,
-            limit: 10000
-        });
-
-        // Group by user
-        const eventsByUser = groupBy(recentEvents, 'User ID', 'user_id');
-
-        const suspiciousUsers = [];
-
-        for (const [userId, events] of Object.entries(eventsByUser)) {
-            const flags = [];
-
-            // Check for excessive XP earning (>1000 XP in 24h is suspicious)
-            const totalXP = events
-                .filter(e => e['Event Type'] === 'xp_earned' || e['event_type'] === 'xp_earned')
-                .reduce((sum, e) => sum + (e['XP Amount'] || e['xp_amount'] || 0), 0);
-            if (totalXP > 1000) {
-                flags.push({ type: 'excessive_xp', value: totalXP, threshold: 1000 });
-            }
-
-            // Check for excessive points (>2000 points in 24h)
-            const totalPoints = events
-                .filter(e => e['Event Type'] === 'points_earned' || e['event_type'] === 'points_earned')
-                .reduce((sum, e) => sum + (e['Points Amount'] || e['points_amount'] || 0), 0);
-            if (totalPoints > 2000) {
-                flags.push({ type: 'excessive_points', value: totalPoints, threshold: 2000 });
-            }
-
-            // Check for rapid-fire events (>100 events in 24h)
-            if (events.length > 100) {
-                flags.push({ type: 'rapid_fire_events', value: events.length, threshold: 100 });
-            }
-
-            // Check for repetitive actions (same action >50 times)
-            const actionCounts = {};
-            events.forEach(e => {
-                const action = e['Action'] || e['action'] || 'unknown';
-                actionCounts[action] = (actionCounts[action] || 0) + 1;
-            });
-            for (const [action, count] of Object.entries(actionCounts)) {
-                if (count > 50) {
-                    flags.push({ type: 'repetitive_action', action, value: count, threshold: 50 });
-                }
-            }
-
-            if (flags.length > 0) {
-                suspiciousUsers.push({
-                    userId,
-                    eventCount: events.length,
-                    totalXP,
-                    totalPoints,
-                    flags,
-                    riskLevel: flags.length >= 3 ? 'high' : flags.length >= 2 ? 'medium' : 'low'
-                });
-            }
+        const suspicious = [];
+        for (const [uid, evts] of Object.entries(byUser)) {
+            const xp = evts.filter(e => e.event_type === 'xp_earned').reduce((s, e) => s + (e.xp_earned || 0), 0);
+            if (xp > 1000 || evts.length > 100) suspicious.push({ userId: uid, eventCount: evts.length, totalXP: xp, risk: xp > 2000 ? 'high' : 'medium' });
         }
 
-        // Sort by risk level
-        const riskOrder = { high: 0, medium: 1, low: 2 };
-        suspiciousUsers.sort((a, b) => riskOrder[a.riskLevel] - riskOrder[b.riskLevel]);
-
-        return {
-            success: true,
-            timestamp: now.toISOString(),
-            period: '24h',
-            totalUsersAnalyzed: Object.keys(eventsByUser).length,
-            suspiciousUsers: suspiciousUsers.slice(0, 20),
-            summary: {
-                highRisk: suspiciousUsers.filter(u => u.riskLevel === 'high').length,
-                mediumRisk: suspiciousUsers.filter(u => u.riskLevel === 'medium').length,
-                lowRisk: suspiciousUsers.filter(u => u.riskLevel === 'low').length
-            }
-        };
-    } catch (error) {
-        console.error('detectAbusePatterns error:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-// =============================================================================
-// ENGAGEMENT LIFT REPORT
-// =============================================================================
-
-/**
- * Generate engagement lift report comparing before/after gamification
- * @param {string} launchDate - ISO date string of gamification launch
- */
-export async function getEngagementLiftReport(launchDate) {
-    try {
-        const launch = new Date(launchDate);
-        const now = new Date();
-        const daysSinceLaunch = Math.floor((now.getTime() - launch.getTime()) / (24 * 60 * 60 * 1000));
-
-        if (daysSinceLaunch < 7) {
-            return {
-                success: false,
-                error: 'Need at least 7 days of data for engagement lift report'
-            };
-        }
-
-        // Get post-launch events
-        const postLaunchEvents = await queryData(COLLECTION_KEYS.gamificationEvents, {
-            filter: `{Created At} >= '${launch.toISOString()}'`,
-            limit: 10000
-        });
-
-        // Calculate metrics
-        const uniqueUsers = new Set(postLaunchEvents.map(e => e['User ID'] || e['user_id'])).size;
-        const totalXPAwarded = postLaunchEvents
-            .filter(e => e['Event Type'] === 'xp_earned')
-            .reduce((sum, e) => sum + (e['XP Amount'] || 0), 0);
-        const totalPointsAwarded = postLaunchEvents
-            .filter(e => e['Event Type'] === 'points_earned')
-            .reduce((sum, e) => sum + (e['Points Amount'] || 0), 0);
-
-        // Get achievements earned post-launch
-        const achievements = await queryData(COLLECTION_KEYS.driverAchievements, {
-            filter: `{Earned At} >= '${launch.toISOString()}'`,
-            limit: 10000
-        });
-
-        // Get challenges completed
-        const challenges = await queryData(COLLECTION_KEYS.driverChallenges, {
-            filter: `AND({Status} = "completed", {Completed At} >= '${launch.toISOString()}')`,
-            limit: 10000
-        });
-
-        return {
-            success: true,
-            reportDate: now.toISOString(),
-            launchDate: launch.toISOString(),
-            daysSinceLaunch,
-            metrics: {
-                engagedUsers: uniqueUsers,
-                totalEvents: postLaunchEvents.length,
-                eventsPerDay: Math.round(postLaunchEvents.length / daysSinceLaunch),
-                totalXPAwarded,
-                totalPointsAwarded,
-                achievementsEarned: achievements.length,
-                challengesCompleted: challenges.length,
-                avgXPPerUser: uniqueUsers > 0 ? Math.round(totalXPAwarded / uniqueUsers) : 0,
-                avgAchievementsPerUser: uniqueUsers > 0
-                    ? Math.round((achievements.length / uniqueUsers) * 10) / 10
-                    : 0
-            }
-        };
-    } catch (error) {
-        console.error('getEngagementLiftReport error:', error);
-        return { success: false, error: error.message };
-    }
+        return { success: true, timestamp: new Date().toISOString(), totalUsers: Object.keys(byUser).length, suspiciousUsers: suspicious.sort((a,b)=>b.totalXP-a.totalXP).slice(0, 20) };
+    } catch (error) { return { success: false, error: error.message }; }
 }
 
 // =============================================================================
@@ -641,67 +195,26 @@ export async function getEngagementLiftReport(launchDate) {
 // =============================================================================
 
 function calculateStats(values) {
-    if (values.length === 0) return { sum: 0, avg: 0, median: 0, max: 0, min: 0 };
-
-    const sorted = [...values].sort((a, b) => a - b);
+    if (!values.length) return { sum: 0, avg: 0 };
     const sum = values.reduce((a, b) => a + b, 0);
-    const avg = Math.round(sum / values.length);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    const max = sorted[sorted.length - 1];
-    const min = sorted[0];
-
-    return { sum, avg, median, max, min };
+    return { sum, avg: Math.round(sum / values.length) };
 }
 
 function countDistribution(values) {
-    const distribution = {};
-    values.forEach(v => {
-        distribution[v] = (distribution[v] || 0) + 1;
-    });
-    return distribution;
+    const dist = {};
+    values.forEach(v => { dist[v] = (dist[v] || 0) + 1; });
+    return dist;
 }
 
-function groupBy(array, primaryKey, fallbackKey) {
-    return array.reduce((acc, item) => {
-        const key = item[primaryKey] || item[fallbackKey] || 'unknown';
-        if (!acc[key]) acc[key] = [];
-        acc[key].push(item);
+function groupBy(arr, key) {
+    return arr.reduce((acc, item) => {
+        const k = item[key] || 'unknown';
+        if (!acc[k]) acc[k] = [];
+        acc[k].push(item);
         return acc;
     }, {});
 }
 
-function calculateInflationRate(dailyRate, totalCirculation) {
-    if (totalCirculation === 0) return 0;
-    // Daily inflation as percentage of total circulation
-    return Math.round((dailyRate / totalCirculation) * 100 * 100) / 100;
-}
-
-function assessProgressionHealth(distribution) {
-    const levels = Object.keys(distribution).map(Number).sort((a, b) => a - b);
-    if (levels.length <= 1) return 'insufficient_data';
-
-    // Healthy progression should have most users in lower levels with gradual decline
-    const totalUsers = Object.values(distribution).reduce((a, b) => a + b, 0);
-    const lowLevelUsers = (distribution[1] || 0) + (distribution[2] || 0) + (distribution[3] || 0);
-    const lowLevelPercent = (lowLevelUsers / totalUsers) * 100;
-
-    if (lowLevelPercent > 90) return 'too_slow';
-    if (lowLevelPercent < 40) return 'too_fast';
-    return 'healthy';
-}
-
-function calculateTypeCompletionRates(groupedChallenges) {
-    return Object.entries(groupedChallenges).map(([type, challenges]) => {
-        const completed = challenges.filter(c =>
-            c['Status'] === 'completed' || c['status'] === 'completed'
-        ).length;
-        return {
-            type,
-            total: challenges.length,
-            completed,
-            completionRate: challenges.length > 0
-                ? Math.round((completed / challenges.length) * 100)
-                : 0
-        };
-    });
+function calculateInflationRate(daily, total) {
+    return total === 0 ? 0 : Math.round((daily / total) * 10000) / 100;
 }

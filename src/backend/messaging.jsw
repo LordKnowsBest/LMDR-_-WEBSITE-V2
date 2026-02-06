@@ -1,16 +1,8 @@
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
 import { sendMessageNotification } from 'backend/emailService';
+import * as dataAccess from 'backend/dataAccess';
 
-// ============================================================================
-// Data Source Configuration
-// ============================================================================
-import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
-
-// ============================================================================
 // Gamification Hooks (Lazy-loaded to avoid circular deps)
-// ============================================================================
 let gamificationLoaded = false;
 let awardDriverXP = null;
 let awardRecruiterPoints = null;
@@ -49,7 +41,6 @@ async function awardMessageGamification(senderId, senderType, applicationId, isF
                 sourceId: applicationId
             });
 
-            // Update challenge progress
             if (updateChallengeProgress) {
                 await updateChallengeProgress(senderId, 'driver', 'send_message', { applicationId });
             }
@@ -59,7 +50,6 @@ async function awardMessageGamification(senderId, senderType, applicationId, isF
                 sourceId: applicationId
             });
 
-            // Update challenge progress
             if (updateChallengeProgress) {
                 await updateChallengeProgress(senderId, 'recruiter', 'send_message', { applicationId });
             }
@@ -76,7 +66,6 @@ async function trackResponseTime(userId, userType, responseTimeMinutes, applicat
     try {
         await loadGamificationServices();
 
-        // Award bonus XP/points for fast responses (under 60 minutes)
         if (responseTimeMinutes < 60) {
             if (userType === 'driver' && awardDriverXP) {
                 await awardDriverXP(userId, 'fast_response', {
@@ -93,7 +82,6 @@ async function trackResponseTime(userId, userType, responseTimeMinutes, applicat
             }
         }
 
-        // Check for response-related achievements
         if (checkResponseAchievements) {
             await checkResponseAchievements(userId, userType, responseTimeMinutes);
         }
@@ -107,198 +95,60 @@ async function trackResponseTime(userId, userType, responseTimeMinutes, applicat
  */
 async function checkAndAwardResponseBonus(senderId, senderType, applicationId, receiverId) {
     try {
-        // Get the last message in this conversation from the other party
-        let lastMessageFromOther = null;
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.messages, {
+            filters: {
+                application_id: applicationId,
+                sender_id: receiverId
+            },
+            sort: [{ field: 'timestamp', direction: 'desc' }],
+            limit: 1,
+            suppressAuth: true
+        });
 
-        if (usesAirtable(MESSAGES_KEY)) {
-            const filter = `AND({Application ID} = '${applicationId}', {Sender ID} = '${receiverId}')`;
-            const messagesTable = await getAirtableTableName(MESSAGES_KEY);
-            const result = await airtable.queryRecords(messagesTable, {
-                filterByFormula: filter,
-                sort: [{ field: 'Sent Date', direction: 'desc' }],
-                maxRecords: 1
-            });
-            lastMessageFromOther = (result.records || [])[0];
-        } else {
-            const result = await wixData.query(MESSAGES_COLLECTION)
-                .eq('application_id', applicationId)
-                .eq('sender_id', receiverId)
-                .descending('timestamp')
-                .limit(1)
-                .find({ suppressAuth: true });
-            lastMessageFromOther = result.items[0];
-        }
-
-        // If no previous message from other party, this isn't a response
+        const lastMessageFromOther = result.items?.[0];
         if (!lastMessageFromOther) return;
 
-        // Calculate response time in minutes
-        const lastMessageTime = new Date(lastMessageFromOther.timestamp || lastMessageFromOther['Sent Date']);
+        const lastMessageTime = new Date(lastMessageFromOther.timestamp);
         const now = new Date();
         const responseTimeMinutes = Math.round((now - lastMessageTime) / (1000 * 60));
 
-        // Award fast response bonus if under threshold
         await trackResponseTime(senderId, senderType, responseTimeMinutes, applicationId);
     } catch (err) {
         console.warn('Failed to check response bonus:', err.message);
     }
 }
 
-// Collection keys (camelCase, matching config.jsw)
-const MESSAGES_KEY = 'messages';
-const DRIVER_CARRIER_INTERESTS_KEY = 'driverCarrierInterests';
-const RECRUITER_CARRIERS_KEY = 'recruiterCarriers';
-const DRIVER_PROFILES_KEY = 'driverProfiles';
-
-// Legacy collection names for wixData
-const MESSAGES_COLLECTION = 'Messages';
-const DRIVER_CARRIER_INTERESTS_COLLECTION = 'DriverCarrierInterests';
-const RECRUITER_CARRIERS_COLLECTION = 'recruiterCarriers';
-const DRIVER_PROFILES_COLLECTION = 'DriverProfiles';
-
-// ============================================================================
-// Data Abstraction Layer Helpers
-// ============================================================================
-
-/**
- * Query records from the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Function} wixQueryBuilder - Function that builds and executes wixData query
- * @param {Object} airtableOptions - Options for Airtable query
- * @returns {Promise<Object>} Query result with items array
- */
-async function queryData(collectionKey, wixQueryBuilder, airtableOptions = {}) {
-  if (usesAirtable(collectionKey)) {
-    try {
-      const tableName = await getAirtableTableName(collectionKey);
-      const result = await airtable.queryRecords(tableName, airtableOptions);
-      return { items: result.records || [], totalCount: (result.records || []).length };
-    } catch (error) {
-      console.error(`[Messaging] Airtable query error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  return await wixQueryBuilder();
-}
-
-/**
- * Get a single record by ID
- * @param {string} collectionKey - camelCase collection key
- * @param {string} recordId - Record ID
- * @returns {Promise<Object|null>} Record or null
- */
-async function getRecord(collectionKey, recordId) {
-  if (usesAirtable(collectionKey)) {
-    try {
-      const tableName = await getAirtableTableName(collectionKey);
-      return await airtable.getRecord(tableName, recordId);
-    } catch (error) {
-      console.error(`[Messaging] Airtable get error for ${collectionKey}:`, error.message);
-      return null;
-    }
-  }
-  // Use Wix
-  const wixCollection = getWixCollectionName(collectionKey);
-  return await wixData.get(wixCollection, recordId, { suppressAuth: true });
-}
-
-/**
- * Insert a record into the appropriate data source
- * @param {string} collectionKey - camelCase collection key
- * @param {Object} record - Record to insert
- * @returns {Promise<Object>} Inserted record
- */
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    try {
-      const tableName = await getAirtableTableName(collectionKey);
-      return await airtable.createRecord(tableName, record);
-    } catch (error) {
-      console.error(`[Messaging] Airtable insert error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  const wixCollection = getWixCollectionName(collectionKey);
-  return await wixData.insert(wixCollection, record);
-}
-
-/**
- * Bulk update records
- * @param {string} collectionKey - camelCase collection key
- * @param {Array} records - Records to update
- * @returns {Promise<Object>} Update result
- */
-async function bulkUpdateData(collectionKey, records) {
-  if (usesAirtable(collectionKey)) {
-    try {
-      const tableName = await getAirtableTableName(collectionKey);
-      return await airtable.bulkUpdate(tableName, records);
-    } catch (error) {
-      console.error(`[Messaging] Airtable bulk update error for ${collectionKey}:`, error.message);
-      throw error;
-    }
-  }
-  // Use Wix
-  const wixCollection = getWixCollectionName(collectionKey);
-  return await wixData.bulkUpdate(wixCollection, records);
-}
+// Collection keys
+const COLLECTION_KEYS = {
+    messages: 'messages',
+    interests: 'driverCarrierInterests',
+    recruiterCarriers: 'recruiterCarriers',
+    driverProfiles: 'driverProfiles'
+};
 
 // ============================================================================
 // SECURITY HELPERS
 // ============================================================================
 
-/**
- * Validates that the sender has permission to message in this application context.
- * - Drivers can only message on applications they created
- * - Recruiters can only message on applications for their assigned carriers
- */
 async function validateSenderPermission(applicationId, senderId, senderType) {
     try {
-        const application = await getRecord(DRIVER_CARRIER_INTERESTS_KEY, applicationId);
-        if (!application) {
-            console.warn('Warning: Application not found:', applicationId);
-            return false;
-        }
+        const application = await dataAccess.getRecord(COLLECTION_KEYS.interests, applicationId, { suppressAuth: true });
+        if (!application) return false;
 
         if (senderType === 'driver') {
-            // Driver must own this application
-            const isOwner = application.driver_id === senderId;
-            if (!isOwner) {
-                console.warn('Warning: Driver permission denied - not application owner');
-            }
-            return isOwner;
+            return application.driver_id === senderId;
         } else if (senderType === 'recruiter') {
-            // Recruiter must have access to this carrier
-            let recruiterAccessItems = [];
-
-            if (usesAirtable(RECRUITER_CARRIERS_KEY)) {
-                // Airtable query
-                const filter = `AND({Recruiter ID} = '${senderId}', {Carrier DOT} = '${application.carrier_dot}', {Is Active} = TRUE())`;
-                const recruiterCarriersTable = await getAirtableTableName(RECRUITER_CARRIERS_KEY);
-                const result = await airtable.queryRecords(recruiterCarriersTable, {
-                    filterByFormula: filter,
-                    maxRecords: 1
-                });
-                recruiterAccessItems = result.records || [];
-            } else {
-                // Wix query
-                const recruiterAccess = await wixData.query(RECRUITER_CARRIERS_COLLECTION)
-                    .eq('recruiter_id', senderId)
-                    .eq('carrier_dot', application.carrier_dot)
-                    .eq('is_active', true)
-                    .find({ suppressAuth: true });
-                recruiterAccessItems = recruiterAccess.items;
-            }
-
-            const hasAccess = recruiterAccessItems.length > 0;
-            if (!hasAccess) {
-                console.warn('Warning: Recruiter permission denied - no carrier access');
-            }
-            return hasAccess;
+            const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+                filters: {
+                    recruiter_id: senderId,
+                    carrier_dot: application.carrier_dot,
+                    is_active: true
+                },
+                limit: 1,
+                suppressAuth: true
+            });
+            return result.items && result.items.length > 0;
         }
-
         return false;
     } catch (error) {
         console.error('Error validating sender permission:', error);
@@ -306,108 +156,43 @@ async function validateSenderPermission(applicationId, senderId, senderType) {
     }
 }
 
-/**
- * Sanitizes message content to prevent XSS and enforce limits.
- */
 function sanitizeContent(content) {
     if (!content || typeof content !== 'string') return '';
-
-    return content
-        .replace(/<[^>]*>/g, '')     // Strip HTML tags
-        .replace(/&[^;]+;/g, '')     // Strip HTML entities
-        .substring(0, 2000)          // Limit to 2000 chars
-        .trim();
+    return content.replace(/<[^>]*>/g, '').replace(/&[^;]+;/g, '').substring(0, 2000).trim();
 }
 
-/**
- * Triggers an email notification for a new message.
- * Fetches context from application and sends non-blocking notification.
- */
 async function triggerMessageNotification(receiverId, senderId, senderType, applicationId, messageContent) {
     try {
-        // Get application details for context
-        const application = await getRecord(DRIVER_CARRIER_INTERESTS_KEY, applicationId);
-        if (!application) {
-            console.warn('Warning: Cannot notify - application not found');
-            return;
-        }
+        const application = await dataAccess.getRecord(COLLECTION_KEYS.interests, applicationId, { suppressAuth: true });
+        if (!application) return;
 
-        // Determine sender/receiver names based on sender type
         let senderName = 'Someone';
         let recipientName = 'User';
         let carrierName = application.carrier_name || '';
         let isDriver = false;
 
         if (senderType === 'driver') {
-            // Driver sent message -> notify recruiter
-            let driverProfileItems = [];
-
-            if (usesAirtable(DRIVER_PROFILES_KEY)) {
-                // Airtable query
-                const filter = `{Wix Member ID} = '${senderId}'`;
-                const driverProfilesTable = await getAirtableTableName(DRIVER_PROFILES_KEY);
-                const result = await airtable.queryRecords(driverProfilesTable, {
-                    filterByFormula: filter,
-                    maxRecords: 1
-                });
-                driverProfileItems = result.records || [];
-            } else {
-                // Wix query
-                const driverProfile = await wixData.query(DRIVER_PROFILES_COLLECTION)
-                    .eq('user_id', senderId)
-                    .limit(1)
-                    .find({ suppressAuth: true });
-                driverProfileItems = driverProfile.items;
-            }
-
-            if (driverProfileItems.length > 0) {
-                senderName = driverProfileItems[0].first_name || 'A driver';
-            }
-            isDriver = false; // Receiver is recruiter
+            const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
+                filters: { user_id: senderId },
+                limit: 1,
+                suppressAuth: true
+            });
+            if (result.items?.[0]) senderName = result.items[0].first_name || 'A driver';
+            isDriver = false;
         } else {
-            // Recruiter sent message -> notify driver
             senderName = carrierName || 'A recruiter';
-            isDriver = true; // Receiver is driver
-
-            // Get driver name for personalization
-            let driverProfileItems = [];
-
-            if (usesAirtable(DRIVER_PROFILES_KEY)) {
-                // Airtable query
-                const filter = `{Wix Member ID} = '${receiverId}'`;
-                const driverProfilesTable2 = await getAirtableTableName(DRIVER_PROFILES_KEY);
-                const result = await airtable.queryRecords(driverProfilesTable2, {
-                    filterByFormula: filter,
-                    maxRecords: 1
-                });
-                driverProfileItems = result.records || [];
-            } else {
-                // Wix query
-                const driverProfile = await wixData.query(DRIVER_PROFILES_COLLECTION)
-                    .eq('user_id', receiverId)
-                    .limit(1)
-                    .find({ suppressAuth: true });
-                driverProfileItems = driverProfile.items;
-            }
-
-            if (driverProfileItems.length > 0) {
-                recipientName = driverProfileItems[0].first_name || 'Driver';
-            }
+            isDriver = true;
+            const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
+                filters: { user_id: receiverId },
+                limit: 1,
+                suppressAuth: true
+            });
+            if (result.items?.[0]) recipientName = result.items[0].first_name || 'Driver';
         }
 
-        // Send notification
-        await sendMessageNotification(receiverId, {
-            recipientName,
-            senderName,
-            messagePreview: messageContent,
-            carrierName,
-            isDriver
-        });
-
-        console.log(`Email notification sent to ${receiverId}`);
+        await sendMessageNotification(receiverId, { recipientName, senderName, messagePreview: messageContent, carrierName, isDriver });
     } catch (error) {
         console.error('triggerMessageNotification error:', error);
-        throw error; // Re-throw so caller's .catch() handles it
     }
 }
 
@@ -415,13 +200,6 @@ async function triggerMessageNotification(receiverId, senderId, senderType, appl
 // EXPORTED FUNCTIONS
 // ============================================================================
 
-/**
- * Sends a message from the current user (driver or recruiter).
- * @param {string} applicationId - The ID of the application/match event.
- * @param {string} content - The message text.
- * @param {string} receiverId - ID of the receiving user.
- * @param {string} senderType - 'driver' or 'recruiter'.
- */
 export async function sendMessage(applicationId, content, receiverId, senderType) {
     if (!applicationId || !content || !receiverId || !senderType) {
         return { success: false, error: 'Missing required fields' };
@@ -429,21 +207,13 @@ export async function sendMessage(applicationId, content, receiverId, senderType
 
     try {
         const userId = await getCurrentUserId();
-        if (!userId) {
-            return { success: false, error: 'Not authenticated' };
-        }
+        if (!userId) return { success: false, error: 'Not authenticated' };
 
-        // Validate sender has permission
         const hasPermission = await validateSenderPermission(applicationId, userId, senderType);
-        if (!hasPermission) {
-            return { success: false, error: 'Permission denied' };
-        }
+        if (!hasPermission) return { success: false, error: 'Permission denied' };
 
-        // Sanitize content
         const sanitizedContent = sanitizeContent(content);
-        if (!sanitizedContent) {
-            return { success: false, error: 'Message content is empty' };
-        }
+        if (!sanitizedContent) return { success: false, error: 'Message content is empty' };
 
         const newMessage = {
             application_id: applicationId,
@@ -455,114 +225,55 @@ export async function sendMessage(applicationId, content, receiverId, senderType
             is_read: false
         };
 
-        const result = await insertData(MESSAGES_KEY, newMessage);
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.messages, newMessage);
+        if (!result.success) throw new Error(result.error);
 
-        // Send email notification (non-blocking)
-        triggerMessageNotification(receiverId, userId, senderType, applicationId, sanitizedContent)
-            .catch(err => console.warn('Warning: Notification failed (non-critical):', err.message));
+        triggerMessageNotification(receiverId, userId, senderType, applicationId, sanitizedContent).catch(() => {});
+        awardMessageGamification(userId, senderType, applicationId).catch(() => {});
+        checkAndAwardResponseBonus(userId, senderType, applicationId, receiverId).catch(() => {});
 
-        // Award gamification XP/points (non-blocking)
-        awardMessageGamification(userId, senderType, applicationId)
-            .catch(err => console.warn('Warning: Gamification award failed (non-critical):', err.message));
-
-        // Check for response time bonus if this is a reply
-        checkAndAwardResponseBonus(userId, senderType, applicationId, receiverId)
-            .catch(err => console.warn('Warning: Response bonus check failed (non-critical):', err.message));
-
-        // Pipeline Automation: Emit driver_message event (non-blocking)
         if (senderType === 'driver') {
             (async () => {
                 try {
                     const automation = await import('backend/pipelineAutomationService');
-                    // applicationId maps to an interest record; look up carrier_dot
-                    const { usesAirtable: usesAT, getAirtableTableName: getATTable } = await import('backend/config');
-                    const airtableClient = await import('backend/airtableClient');
-                    let carrierDot = null;
-                    if (usesAT('driverCarrierInterests')) {
-                        const interest = await airtableClient.getRecord(getATTable('driverCarrierInterests'), applicationId);
-                        if (interest && !interest.error) carrierDot = interest.carrier_dot;
+                    const interest = await dataAccess.getRecord(COLLECTION_KEYS.interests, applicationId, { suppressAuth: true });
+                    if (interest?.carrier_dot) {
+                        await automation.processEvent(interest.carrier_dot, 'driver_message', { driverId: userId, interestId: applicationId });
                     }
-                    if (carrierDot) {
-                        await automation.processEvent(carrierDot, 'driver_message', {
-                            driverId: userId,
-                            interestId: applicationId
-                        });
-                    }
-                } catch (err) {
-                    console.warn('Pipeline driver_message event failed:', err.message);
-                }
+                } catch (err) { /* ignore */ }
             })();
         }
 
-        return { success: true, message: result };
+        return { success: true, message: result.record };
     } catch (error) {
         console.error('Error sending message:', error);
         return { success: false, error: error.message };
     }
 }
 
-/**
- * Retrieves the conversation for a specific application.
- * @param {string} applicationId
- */
 export async function getConversation(applicationId) {
     if (!applicationId) return { success: false, error: 'Missing applicationId' };
-
     try {
-        let items = [];
-
-        if (usesAirtable(MESSAGES_KEY)) {
-            // Airtable query
-            const filter = `{Application ID} = '${applicationId}'`;
-            const messagesTable = await getAirtableTableName(MESSAGES_KEY);
-            const result = await airtable.queryRecords(messagesTable, {
-                filterByFormula: filter,
-                sort: [{ field: 'Sent Date', direction: 'asc' }]
-            });
-            items = result.records || [];
-        } else {
-            // Wix query
-            const results = await wixData.query(MESSAGES_COLLECTION)
-                .eq('application_id', applicationId)
-                .ascending('timestamp')
-                .find();
-            items = results.items;
-        }
-
-        return { success: true, messages: items };
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.messages, {
+            filters: { application_id: applicationId },
+            sort: [{ field: 'timestamp', direction: 'asc' }],
+            suppressAuth: true
+        });
+        return { success: true, messages: result.items || [] };
     } catch (error) {
         console.error('Error fetching conversation:', error);
         return { success: false, error: error.message };
     }
 }
 
-/**
- * Gets unread message count for the current user.
- */
 export async function getUnreadCount() {
     try {
         const userId = await getCurrentUserId();
         if (!userId) return { success: false, error: 'Not authenticated' };
-
-        let count = 0;
-
-        if (usesAirtable(MESSAGES_KEY)) {
-            // Airtable query - count matching records
-            const filter = `AND({Recipient ID} = '${userId}', {Read} = FALSE())`;
-            const messagesTable = await getAirtableTableName(MESSAGES_KEY);
-            const result = await airtable.queryRecords(messagesTable, {
-                filterByFormula: filter
-            });
-            count = (result.records || []).length;
-        } else {
-            // Wix query
-            const results = await wixData.query(MESSAGES_COLLECTION)
-                .eq('receiver_id', userId)
-                .eq('is_read', false)
-                .count();
-            count = results;
-        }
-
+        const count = await dataAccess.countRecords(COLLECTION_KEYS.messages, {
+            receiver_id: userId,
+            is_read: false
+        });
         return { success: true, count };
     } catch (error) {
         console.error('Error counting unread messages:', error);
@@ -570,40 +281,25 @@ export async function getUnreadCount() {
     }
 }
 
-/**
- * Marks all messages in a conversation as read for the receiver.
- * @param {string} applicationId
- */
 export async function markAsRead(applicationId) {
     try {
         const userId = await getCurrentUserId();
         if (!userId) return { success: false, error: 'Not authenticated' };
 
-        let unreadItems = [];
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.messages, {
+            filters: {
+                application_id: applicationId,
+                receiver_id: userId,
+                is_read: false
+            },
+            suppressAuth: true
+        });
 
-        if (usesAirtable(MESSAGES_KEY)) {
-            // Airtable query
-            const filter = `AND({Application ID} = '${applicationId}', {Recipient ID} = '${userId}', {Read} = FALSE())`;
-            const messagesTable = await getAirtableTableName(MESSAGES_KEY);
-            const result = await airtable.queryRecords(messagesTable, {
-                filterByFormula: filter
-            });
-            unreadItems = result.records || [];
-        } else {
-            // Wix query
-            const unreadResults = await wixData.query(MESSAGES_COLLECTION)
-                .eq('application_id', applicationId)
-                .eq('receiver_id', userId)
-                .eq('is_read', false)
-                .find();
-            unreadItems = unreadResults.items;
-        }
-
+        const unreadItems = result.items || [];
         if (unreadItems.length > 0) {
             const updates = unreadItems.map(msg => ({ ...msg, is_read: true }));
-            await bulkUpdateData(MESSAGES_KEY, updates);
+            await dataAccess.bulkUpdateRecords(COLLECTION_KEYS.messages, updates, { suppressAuth: true });
         }
-
         return { success: true };
     } catch (error) {
         console.error('Error marking messages as read:', error);
@@ -611,11 +307,7 @@ export async function markAsRead(applicationId) {
     }
 }
 
-// Helper to get current user ID
 async function getCurrentUserId() {
     const currentUser = wixUsersBackend.currentUser;
-    if (!currentUser.loggedIn) {
-        return null;
-    }
-    return currentUser.id;
+    return currentUser.loggedIn ? currentUser.id : null;
 }

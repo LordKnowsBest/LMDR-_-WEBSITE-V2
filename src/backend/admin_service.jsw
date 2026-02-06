@@ -1,401 +1,19 @@
-/**
- * Admin Service - Backend functions for Admin Portal
- * Handles driver management, analytics, and administrative operations
- *
- * DUAL-SOURCE SUPPORT: This service supports both Wix and Airtable data sources.
- * The data source is determined by the config.jsw configuration.
- *
- * Collections used:
- * - DriverProfiles (drivers)
- * - Carriers (carriers)
- * - DriverCarrierInterests (applications)
- * - MatchEvents (matches)
- * - CarrierEnrichments (enrichments)
- * - AdminAuditLog (auditLog)
- */
-
-import wixData from 'wix-data';
 import { currentMember } from 'wix-members-backend';
 import { triggeredEmails } from 'wix-crm-backend';
-import { getDataSource, getWixCollectionName, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================
 // COLLECTION CONFIGURATION
 // ============================================
 
-const COLLECTIONS = {
-    drivers: {
-        wixName: 'DriverProfiles',
-        configKey: 'driverProfiles'
-    },
-    carriers: {
-        wixName: 'Carriers',
-        configKey: 'carriers'
-    },
-    applications: {
-        wixName: 'DriverCarrierInterests',
-        configKey: 'driverCarrierInterests'
-    },
-    matches: {
-        wixName: 'MatchEvents',
-        configKey: 'matchEvents'
-    },
-    enrichments: {
-        wixName: 'CarrierEnrichments',
-        configKey: 'carrierEnrichments'
-    },
-    auditLog: {
-        wixName: 'AdminAuditLog',
-        configKey: 'auditLog'
-    }
+const COLLECTION_KEYS = {
+    drivers: 'driverProfiles',
+    carriers: 'carriers',
+    applications: 'driverCarrierInterests',
+    matches: 'matchEvents',
+    enrichments: 'carrierEnrichments',
+    auditLog: 'auditLog'
 };
-
-// ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-/**
- * Get the data source for a collection
- * @param {string} collectionKey - Key from COLLECTIONS
- * @returns {'wix' | 'airtable'}
- */
-function getSource(collectionKey) {
-    return getDataSource(COLLECTIONS[collectionKey].configKey);
-}
-
-/**
- * Get the collection name for the current data source
- * @param {string} collectionKey - Key from COLLECTIONS
- * @returns {string}
- */
-function getCollectionName(collectionKey) {
-    return COLLECTIONS[collectionKey].wixName;
-}
-
-/**
- * Query records from appropriate data source with full query support
- * @param {string} collectionKey - Key from COLLECTIONS
- * @param {Object} options - Query options
- * @returns {Promise<Object>} Query result with items
- */
-async function queryFromSource(collectionKey, options = {}) {
-    const collectionName = getCollectionName(collectionKey);
-
-    if (getSource(collectionKey) === 'airtable') {
-        const airtableOptions = {};
-        const conditions = [];
-
-        // Handle equality conditions
-        if (options.eq) {
-            for (const [field, value] of Object.entries(options.eq)) {
-                const airtableField = mapFieldToAirtable(field);
-                conditions.push(formatAirtableCondition(airtableField, '=', value));
-            }
-        }
-
-        // Handle contains conditions
-        if (options.contains) {
-            for (const [field, value] of Object.entries(options.contains)) {
-                const airtableField = mapFieldToAirtable(field);
-                conditions.push(`FIND(LOWER('${value}'), LOWER({${airtableField}})) > 0`);
-            }
-        }
-
-        // Handle greater than or equal conditions
-        if (options.ge) {
-            for (const [field, value] of Object.entries(options.ge)) {
-                const airtableField = mapFieldToAirtable(field);
-                if (value instanceof Date) {
-                    conditions.push(`IS_AFTER({${airtableField}}, '${value.toISOString()}')`);
-                } else {
-                    conditions.push(`{${airtableField}} >= ${value}`);
-                }
-            }
-        }
-
-        // Handle less than conditions
-        if (options.lt) {
-            for (const [field, value] of Object.entries(options.lt)) {
-                const airtableField = mapFieldToAirtable(field);
-                if (value instanceof Date) {
-                    conditions.push(`IS_BEFORE({${airtableField}}, '${value.toISOString()}')`);
-                } else {
-                    conditions.push(`{${airtableField}} < ${value}`);
-                }
-            }
-        }
-
-        // Handle not equal conditions
-        if (options.ne) {
-            for (const [field, value] of Object.entries(options.ne)) {
-                const airtableField = mapFieldToAirtable(field);
-                conditions.push(formatAirtableCondition(airtableField, '!=', value));
-            }
-        }
-
-        // Handle hasSome conditions
-        if (options.hasSome) {
-            for (const [field, values] of Object.entries(options.hasSome)) {
-                const airtableField = mapFieldToAirtable(field);
-                const orConditions = values.map(v => formatAirtableCondition(airtableField, '=', v));
-                if (orConditions.length === 1) {
-                    conditions.push(orConditions[0]);
-                } else if (orConditions.length > 1) {
-                    conditions.push(`OR(${orConditions.join(', ')})`);
-                }
-            }
-        }
-
-        if (conditions.length > 0) {
-            airtableOptions.filterByFormula = conditions.length === 1 ? conditions[0] : `AND(${conditions.join(', ')})`;
-        }
-
-        if (options.limit) {
-            airtableOptions.maxRecords = options.limit;
-        }
-
-        if (options.skip) {
-            // Airtable doesn't support skip directly, we need to fetch more and slice
-            airtableOptions.maxRecords = (options.limit || 100) + (options.skip || 0);
-        }
-
-        if (options.sortField) {
-            const airtableSortField = mapFieldToAirtable(options.sortField);
-            airtableOptions.sort = [{
-                field: airtableSortField,
-                direction: options.sortDirection || 'desc'
-            }];
-        }
-
-        const result = await airtable.queryRecords(collectionName, airtableOptions);
-        let records = result.records || [];
-
-        // Handle skip (since Airtable doesn't support offset natively)
-        if (options.skip && options.skip > 0) {
-            records = records.slice(options.skip);
-        }
-
-        if (options.limit) {
-            records = records.slice(0, options.limit);
-        }
-
-        return {
-            items: records,
-            totalCount: result.records?.length || 0
-        };
-    } else {
-        // Wix Data source
-        let query = wixData.query(collectionName);
-
-        if (options.eq) {
-            for (const [field, value] of Object.entries(options.eq)) {
-                query = query.eq(field, value);
-            }
-        }
-
-        if (options.contains) {
-            for (const [field, value] of Object.entries(options.contains)) {
-                query = query.contains(field, value);
-            }
-        }
-
-        if (options.ge) {
-            for (const [field, value] of Object.entries(options.ge)) {
-                query = query.ge(field, value);
-            }
-        }
-
-        if (options.lt) {
-            for (const [field, value] of Object.entries(options.lt)) {
-                query = query.lt(field, value);
-            }
-        }
-
-        if (options.ne) {
-            for (const [field, value] of Object.entries(options.ne)) {
-                query = query.ne(field, value);
-            }
-        }
-
-        if (options.hasSome) {
-            for (const [field, values] of Object.entries(options.hasSome)) {
-                query = query.hasSome(field, values);
-            }
-        }
-
-        if (options.sortField) {
-            if (options.sortDirection === 'asc') {
-                query = query.ascending(options.sortField);
-            } else {
-                query = query.descending(options.sortField);
-            }
-        }
-
-        if (options.skip) {
-            query = query.skip(options.skip);
-        }
-
-        if (options.limit) {
-            query = query.limit(options.limit);
-        }
-
-        const findOptions = options.suppressAuth ? { suppressAuth: true } : {};
-        return await query.find(findOptions);
-    }
-}
-
-/**
- * Count records from appropriate data source
- * @param {string} collectionKey - Key from COLLECTIONS
- * @param {Object} options - Query options
- * @returns {Promise<number>}
- */
-async function countFromSource(collectionKey, options = {}) {
-    const collectionName = getCollectionName(collectionKey);
-
-    if (getSource(collectionKey) === 'airtable') {
-        // For Airtable, we need to query and count
-        const result = await queryFromSource(collectionKey, { ...options, limit: 10000 });
-        return result.items?.length || 0;
-    } else {
-        let query = wixData.query(collectionName);
-
-        if (options.eq) {
-            for (const [field, value] of Object.entries(options.eq)) {
-                query = query.eq(field, value);
-            }
-        }
-
-        if (options.ge) {
-            for (const [field, value] of Object.entries(options.ge)) {
-                query = query.ge(field, value);
-            }
-        }
-
-        if (options.ne) {
-            for (const [field, value] of Object.entries(options.ne)) {
-                query = query.ne(field, value);
-            }
-        }
-
-        return await query.count();
-    }
-}
-
-/**
- * Get a single record by ID
- * @param {string} collectionKey - Key from COLLECTIONS
- * @param {string} recordId - Record ID
- * @returns {Promise<Object|null>}
- */
-async function getFromSource(collectionKey, recordId) {
-    const collectionName = getCollectionName(collectionKey);
-
-    if (getSource(collectionKey) === 'airtable') {
-        const result = await airtable.getRecord(collectionName, recordId);
-        return result.error ? null : result;
-    } else {
-        return await wixData.get(collectionName, recordId);
-    }
-}
-
-/**
- * Update a record
- * @param {string} collectionKey - Key from COLLECTIONS
- * @param {Object} record - Record to update
- * @param {Object} options - Update options
- * @returns {Promise<Object>}
- */
-async function updateInSource(collectionKey, record, options = {}) {
-    const collectionName = getCollectionName(collectionKey);
-
-    if (getSource(collectionKey) === 'airtable') {
-        const { _id, ...fields } = record;
-        return await airtable.updateRecord(collectionName, _id, fields);
-    } else {
-        const updateOptions = options.suppressAuth ? { suppressAuth: true } : {};
-        return await wixData.update(collectionName, record, updateOptions);
-    }
-}
-
-/**
- * Insert a record
- * @param {string} collectionKey - Key from COLLECTIONS
- * @param {Object} record - Record to insert
- * @param {Object} options - Insert options
- * @returns {Promise<Object>}
- */
-async function insertInSource(collectionKey, record, options = {}) {
-    const collectionName = getCollectionName(collectionKey);
-
-    if (getSource(collectionKey) === 'airtable') {
-        return await airtable.createRecord(collectionName, record);
-    } else {
-        const insertOptions = options.suppressAuth ? { suppressAuth: true } : {};
-        return await wixData.insert(collectionName, record, insertOptions);
-    }
-}
-
-/**
- * Map Wix field name to Airtable field name
- * @param {string} field - Wix field name
- * @returns {string} Airtable field name
- */
-function mapFieldToAirtable(field) {
-    const fieldMap = {
-        '_id': 'Record ID',
-        '_createdDate': 'Created',
-        '_updatedDate': 'Last Modified',
-        '_owner': 'Owner',
-        'firstName': 'First Name',
-        'lastName': 'Last Name',
-        'email': 'Email',
-        'phone': 'Phone',
-        'status': 'Status',
-        'verificationStatus': 'Verification Status',
-        'membershipTier': 'Membership Tier',
-        'profileCompletion': 'Profile Completion',
-        'dot_number': 'DOT Number',
-        'legal_name': 'Legal Name',
-        'dba_name': 'DBA Name',
-        'phy_city': 'Physical City',
-        'phy_state': 'Physical State',
-        'nbr_power_unit': 'Total Power Units',
-        'safety_rating': 'Safety Rating',
-        'admin_status': 'Admin Status',
-        'is_flagged': 'Is Flagged',
-        'isFlagged': 'Is Flagged',
-        'mc_number': 'MC Number',
-        'driverId': 'Driver',
-        'carrierId': 'Carrier',
-        'action': 'Action',
-        'targetType': 'Target Type',
-        'targetId': 'Target ID',
-        'timestamp': 'Timestamp'
-    };
-
-    return fieldMap[field] || field.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-}
-
-/**
- * Format a value for Airtable filter formula
- * @param {string} field - Airtable field name
- * @param {string} operator - Comparison operator
- * @param {*} value - Value to compare
- * @returns {string} Airtable formula clause
- */
-function formatAirtableCondition(field, operator, value) {
-    if (typeof value === 'string') {
-        return `{${field}} ${operator} '${value.replace(/'/g, "\\'")}'`;
-    } else if (typeof value === 'boolean') {
-        return `{${field}} ${operator} ${value ? 'TRUE()' : 'FALSE()'}`;
-    } else if (value === null) {
-        return operator === '=' ? `{${field}} = BLANK()` : `{${field}} != BLANK()`;
-    } else {
-        return `{${field}} ${operator} ${value}`;
-    }
-}
 
 // ============================================
 // AUTHORIZATION
@@ -411,7 +29,6 @@ async function isAdmin() {
         if (!member) return false;
 
         // Check for admin role in member data
-        // Customize this based on your role implementation
         const adminRoles = ['admin', 'super_admin', 'ops_admin'];
         const memberRole = member.contactDetails?.customFields?.role || '';
 
@@ -442,7 +59,6 @@ async function requireAdmin() {
  * @returns {Promise<Object>} - Drivers list with pagination info
  */
 export async function getDriversList(options = {}) {
-    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     const {
@@ -454,22 +70,22 @@ export async function getDriversList(options = {}) {
     } = options;
 
     try {
-        // Build query options
-        const queryOptions = {};
+        const queryFilters = {};
 
-        // Apply status filter
+        // Apply filters
         if (filters.status && filters.status !== 'all') {
-            queryOptions.eq = { ...queryOptions.eq, status: filters.status };
+            queryFilters.status = filters.status;
         }
-
-        // Apply verification filter
         if (filters.verification && filters.verification !== 'all') {
-            queryOptions.eq = { ...queryOptions.eq, verificationStatus: filters.verification };
+            queryFilters.verificationStatus = filters.verification;
+        }
+        if (filters.tier && filters.tier !== 'all') {
+            queryFilters.membershipTier = filters.tier;
         }
 
-        // Apply tier filter
-        if (filters.tier && filters.tier !== 'all') {
-            queryOptions.eq = { ...queryOptions.eq, membershipTier: filters.tier };
+        // Handle search
+        if (filters.search) {
+            queryFilters.firstName = { contains: filters.search.toLowerCase() };
         }
 
         // Apply sorting
@@ -479,64 +95,16 @@ export async function getDriversList(options = {}) {
             lastActive: '_updatedDate'
         };
         const dbSortField = sortFieldMap[sortField] || '_updatedDate';
-        queryOptions.sortField = dbSortField;
-        queryOptions.sortDirection = sortDirection;
 
-        // Apply pagination
-        const skip = (page - 1) * pageSize;
-        queryOptions.skip = skip;
-        queryOptions.limit = pageSize;
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.drivers, {
+            filters: queryFilters,
+            sort: [{ field: dbSortField, direction: sortDirection }],
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            suppressAuth: true
+        });
 
-        // For search, we need special handling
-        let result;
-        if (filters.search && getSource('drivers') === 'wix') {
-            // Wix-specific: use OR queries for search
-            const searchTerm = filters.search.toLowerCase();
-            let query = wixData.query('DriverProfiles');
-
-            query = query.contains('firstName', searchTerm)
-                .or(wixData.query('DriverProfiles').contains('lastName', searchTerm))
-                .or(wixData.query('DriverProfiles').contains('email', searchTerm));
-
-            if (filters.status && filters.status !== 'all') {
-                query = query.eq('status', filters.status);
-            }
-            if (filters.verification && filters.verification !== 'all') {
-                query = query.eq('verificationStatus', filters.verification);
-            }
-            if (filters.tier && filters.tier !== 'all') {
-                query = query.eq('membershipTier', filters.tier);
-            }
-
-            if (sortDirection === 'asc') {
-                query = query.ascending(dbSortField);
-            } else {
-                query = query.descending(dbSortField);
-            }
-
-            query = query.skip(skip).limit(pageSize);
-            result = await query.find();
-        } else if (filters.search && getSource('drivers') === 'airtable') {
-            // Airtable: use FIND for text search
-            const searchTerm = filters.search.toLowerCase();
-            queryOptions.contains = {
-                firstName: searchTerm
-            };
-            // Note: Airtable OR search would require a custom formula
-            result = await queryFromSource('drivers', queryOptions);
-        } else {
-            result = await queryFromSource('drivers', queryOptions);
-        }
-
-        // Get total count
-        const countOptions = {};
-        if (filters.status && filters.status !== 'all') {
-            countOptions.eq = { ...countOptions.eq, status: filters.status };
-        }
-        if (filters.verification && filters.verification !== 'all') {
-            countOptions.eq = { ...countOptions.eq, verificationStatus: filters.verification };
-        }
-        const countResult = await countFromSource('drivers', countOptions);
+        if (!result.success) throw new Error(result.error);
 
         // Transform drivers for frontend
         const drivers = result.items.map(driver => ({
@@ -555,12 +123,14 @@ export async function getDriversList(options = {}) {
             membershipTier: driver.membershipTier || 'free'
         }));
 
+        const totalCount = result.totalCount || result.items.length;
+
         return {
             drivers,
-            totalCount: countResult,
+            totalCount,
             currentPage: page,
             pageSize,
-            totalPages: Math.ceil(countResult / pageSize)
+            totalPages: Math.ceil(totalCount / pageSize)
         };
 
     } catch (error) {
@@ -575,40 +145,37 @@ export async function getDriversList(options = {}) {
  * @returns {Promise<Object>} - Driver details
  */
 export async function getDriverDetail(driverId) {
-    // Collections: DriverProfiles (drivers), DriverCarrierInterests (applications), MatchEvents (matches)
     await requireAdmin();
 
     try {
-        const driver = await getFromSource('drivers', driverId);
-        if (!driver) {
-            throw new Error('Driver not found');
-        }
+        const driver = await dataAccess.getRecord(COLLECTION_KEYS.drivers, driverId, { suppressAuth: true });
+        if (!driver) throw new Error('Driver not found');
 
         // Get application history
-        const applications = await queryFromSource('applications', {
-            eq: { driverId: driverId },
-            sortField: '_createdDate',
-            sortDirection: 'desc',
-            limit: 20
+        const applications = await dataAccess.queryRecords(COLLECTION_KEYS.applications, {
+            filters: { driverId },
+            sort: [{ field: '_createdDate', direction: 'desc' }],
+            limit: 20,
+            suppressAuth: true
         });
 
         // Get match history
-        const matches = await queryFromSource('matches', {
-            eq: { driverId: driverId },
-            sortField: '_createdDate',
-            sortDirection: 'desc',
-            limit: 20
+        const matches = await dataAccess.queryRecords(COLLECTION_KEYS.matches, {
+            filters: { driverId },
+            sort: [{ field: '_createdDate', direction: 'desc' }],
+            limit: 20,
+            suppressAuth: true
         });
 
         return {
             ...driver,
             profileCompletion: calculateProfileCompletion(driver),
             location: formatLocation(driver),
-            applications: applications.items,
-            matchHistory: matches.items,
+            applications: applications.items || [],
+            matchHistory: matches.items || [],
             stats: {
-                totalApplications: applications.totalCount,
-                totalMatches: matches.totalCount
+                totalApplications: applications.totalCount || 0,
+                totalMatches: matches.totalCount || 0
             }
         };
 
@@ -620,25 +187,16 @@ export async function getDriverDetail(driverId) {
 
 /**
  * Update driver status
- * @param {string} driverId - Driver ID
- * @param {string} status - New status
- * @param {string} reason - Reason for status change
- * @returns {Promise<Object>} - Updated driver
  */
 export async function updateDriverStatus(driverId, status, reason = '') {
-    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     const validStatuses = ['active', 'pending', 'suspended', 'incomplete'];
-    if (!validStatuses.includes(status)) {
-        throw new Error('Invalid status');
-    }
+    if (!validStatuses.includes(status)) throw new Error('Invalid status');
 
     try {
-        const driver = await getFromSource('drivers', driverId);
-        if (!driver) {
-            throw new Error('Driver not found');
-        }
+        const driver = await dataAccess.getRecord(COLLECTION_KEYS.drivers, driverId, { suppressAuth: true });
+        if (!driver) throw new Error('Driver not found');
 
         const previousStatus = driver.status;
         driver.status = status;
@@ -648,16 +206,15 @@ export async function updateDriverStatus(driverId, status, reason = '') {
             to: status,
             reason,
             changedAt: new Date(),
-            changedBy: 'admin' // Could enhance to include admin ID
+            changedBy: 'admin'
         });
 
-        const updated = await updateInSource('drivers', driver);
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.drivers, driver, { suppressAuth: true });
+        if (!result.success) throw new Error(result.error);
 
-        // Log admin action
         await logAdminAction('updateDriverStatus', driverId, { previousStatus, newStatus: status, reason });
 
-        return updated;
-
+        return result.record;
     } catch (error) {
         console.error('Error updating driver status:', error);
         throw new Error('Failed to update driver status');
@@ -666,30 +223,24 @@ export async function updateDriverStatus(driverId, status, reason = '') {
 
 /**
  * Verify driver documents
- * @param {string} driverId - Driver ID
- * @returns {Promise<Object>} - Updated driver
  */
 export async function verifyDriver(driverId) {
-    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
-        const driver = await getFromSource('drivers', driverId);
-        if (!driver) {
-            throw new Error('Driver not found');
-        }
+        const driver = await dataAccess.getRecord(COLLECTION_KEYS.drivers, driverId, { suppressAuth: true });
+        if (!driver) throw new Error('Driver not found');
 
         driver.verificationStatus = 'verified';
         driver.verifiedAt = new Date();
         driver.status = 'active';
 
-        const updated = await updateInSource('drivers', driver);
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.drivers, driver, { suppressAuth: true });
+        if (!result.success) throw new Error(result.error);
 
-        // Log admin action
         await logAdminAction('verifyDriver', driverId, {});
 
-        return updated;
-
+        return result.record;
     } catch (error) {
         console.error('Error verifying driver:', error);
         throw new Error('Failed to verify driver');
@@ -698,26 +249,14 @@ export async function verifyDriver(driverId) {
 
 /**
  * Suspend driver account
- * @param {string} driverId - Driver ID
- * @param {string} reason - Suspension reason
- * @returns {Promise<Object>} - Updated driver
  */
 export async function suspendDriver(driverId, reason = '') {
     await requireAdmin();
-
-    try {
-        return await updateDriverStatus(driverId, 'suspended', reason);
-    } catch (error) {
-        console.error('Error suspending driver:', error);
-        throw new Error('Failed to suspend driver');
-    }
+    return await updateDriverStatus(driverId, 'suspended', reason);
 }
 
 /**
  * Bulk update driver statuses
- * @param {string[]} driverIds - Array of driver IDs
- * @param {string} action - Action to perform
- * @returns {Promise<Object>} - Result summary
  */
 export async function bulkUpdateDrivers(driverIds, action) {
     await requireAdmin();
@@ -727,17 +266,10 @@ export async function bulkUpdateDrivers(driverIds, action) {
     for (const driverId of driverIds) {
         try {
             switch (action) {
-                case 'verify':
-                    await verifyDriver(driverId);
-                    break;
-                case 'suspend':
-                    await suspendDriver(driverId, 'Bulk suspension');
-                    break;
-                case 'activate':
-                    await updateDriverStatus(driverId, 'active', 'Bulk activation');
-                    break;
-                default:
-                    throw new Error('Invalid action');
+                case 'verify': await verifyDriver(driverId); break;
+                case 'suspend': await suspendDriver(driverId, 'Bulk suspension'); break;
+                case 'activate': await updateDriverStatus(driverId, 'active', 'Bulk activation'); break;
+                default: throw new Error('Invalid action');
             }
             results.success++;
         } catch (error) {
@@ -755,47 +287,30 @@ export async function bulkUpdateDrivers(driverIds, action) {
 
 /**
  * Get driver statistics for dashboard
- * @returns {Promise<Object>} - Stats object
  */
 export async function getDriverStats() {
-    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
-        // Total drivers
-        const totalResult = await countFromSource('drivers', {});
-
-        // Active drivers
-        const activeResult = await countFromSource('drivers', {
-            eq: { status: 'active' }
-        });
-
-        // Pending verification
-        const pendingResult = await countFromSource('drivers', {
-            eq: { verificationStatus: 'in_review' }
-        });
-
-        // Expired documents (simplified - would need actual doc expiry tracking)
-        const expiredResult = await countFromSource('drivers', {
-            eq: { verificationStatus: 'expired' }
-        });
-
-        // New this week
         const weekAgo = new Date();
         weekAgo.setDate(weekAgo.getDate() - 7);
-        const newThisWeek = await countFromSource('drivers', {
-            ge: { _createdDate: weekAgo }
-        });
+
+        const [total, active, pending, expired, newThisWeek] = await Promise.all([
+            dataAccess.countRecords(COLLECTION_KEYS.drivers, {}),
+            dataAccess.countRecords(COLLECTION_KEYS.drivers, { status: 'active' }),
+            dataAccess.countRecords(COLLECTION_KEYS.drivers, { verificationStatus: 'in_review' }),
+            dataAccess.countRecords(COLLECTION_KEYS.drivers, { verificationStatus: 'expired' }),
+            dataAccess.countRecords(COLLECTION_KEYS.drivers, { _createdDate: { gte: weekAgo } })
+        ]);
 
         return {
-            total: totalResult,
-            active: activeResult,
-            activePercent: totalResult > 0 ? Math.round((activeResult / totalResult) * 100) : 0,
-            pending: pendingResult,
-            expiredDocs: expiredResult,
+            total,
+            active,
+            activePercent: total > 0 ? Math.round((active / total) * 100) : 0,
+            pending,
+            expiredDocs: expired,
             newThisWeek
         };
-
     } catch (error) {
         console.error('Error fetching driver stats:', error);
         throw new Error('Failed to fetch stats');
@@ -804,46 +319,35 @@ export async function getDriverStats() {
 
 /**
  * Get driver analytics over time
- * @param {string} period - Time period (week, month, quarter)
- * @returns {Promise<Object>} - Analytics data
  */
 export async function getDriverAnalytics(period = 'month') {
-    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
         const now = new Date();
-        let startDate;
+        let startDate = new Date();
 
-        switch (period) {
-            case 'week':
-                startDate = new Date(now.setDate(now.getDate() - 7));
-                break;
-            case 'quarter':
-                startDate = new Date(now.setMonth(now.getMonth() - 3));
-                break;
-            default: // month
-                startDate = new Date(now.setMonth(now.getMonth() - 1));
-        }
+        if (period === 'week') startDate.setDate(now.getDate() - 7);
+        else if (period === 'quarter') startDate.setMonth(now.getMonth() - 3);
+        else startDate.setMonth(now.getMonth() - 1);
 
-        // Get registrations in period
-        const registrations = await queryFromSource('drivers', {
-            ge: { _createdDate: startDate }
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.drivers, {
+            filters: { _createdDate: { gte: startDate } },
+            limit: 1000,
+            suppressAuth: true
         });
 
-        // Group by day
         const dailyRegistrations = {};
-        registrations.items.forEach(driver => {
+        (result.items || []).forEach(driver => {
             const date = new Date(driver._createdDate).toISOString().split('T')[0];
             dailyRegistrations[date] = (dailyRegistrations[date] || 0) + 1;
         });
 
         return {
             period,
-            totalRegistrations: registrations.totalCount,
+            totalRegistrations: result.totalCount || result.items.length,
             dailyBreakdown: dailyRegistrations
         };
-
     } catch (error) {
         console.error('Error fetching analytics:', error);
         throw new Error('Failed to fetch analytics');
@@ -851,87 +355,58 @@ export async function getDriverAnalytics(period = 'month') {
 }
 
 // ============================================
-// EXPORT
+// EXPORT & MESSAGING
 // ============================================
 
 /**
  * Export drivers to CSV format
- * @param {Object} filters - Filter options
- * @returns {Promise<string>} - CSV string
  */
 export async function exportDriversCSV(filters = {}) {
-    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
-        const queryOptions = { limit: 1000 };
+        const queryFilters = {};
+        if (filters.status && filters.status !== 'all') queryFilters.status = filters.status;
+        if (filters.verification && filters.verification !== 'all') queryFilters.verificationStatus = filters.verification;
 
-        if (filters.status && filters.status !== 'all') {
-            queryOptions.eq = { ...queryOptions.eq, status: filters.status };
-        }
-        if (filters.verification && filters.verification !== 'all') {
-            queryOptions.eq = { ...queryOptions.eq, verificationStatus: filters.verification };
-        }
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.drivers, {
+            filters: queryFilters,
+            limit: 1000,
+            suppressAuth: true
+        });
 
-        const result = await queryFromSource('drivers', queryOptions);
-
-        // Generate CSV
         const headers = ['ID', 'First Name', 'Last Name', 'Email', 'Status', 'Verification', 'Location', 'Joined Date'];
         const rows = result.items.map(d => [
-            d._id,
-            d.firstName || '',
-            d.lastName || '',
-            d.email || '',
-            d.status || '',
-            d.verificationStatus || '',
-            formatLocation(d),
+            d._id, d.firstName || '', d.lastName || '', d.email || '', 
+            d.status || '', d.verificationStatus || '', formatLocation(d),
             d._createdDate ? new Date(d._createdDate).toISOString() : ''
         ]);
 
-        const csv = [
+        return [
             headers.join(','),
             ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
         ].join('\n');
-
-        return csv;
-
     } catch (error) {
         console.error('Error exporting drivers:', error);
         throw new Error('Failed to export drivers');
     }
 }
 
-// ============================================
-// MESSAGING
-// ============================================
-
 /**
  * Send email to driver
- * @param {string} driverId - Driver ID
- * @param {string} templateId - Email template ID
- * @param {Object} variables - Template variables
- * @returns {Promise<void>}
  */
 export async function sendDriverEmail(driverId, templateId, variables = {}) {
-    // Collection: DriverProfiles (drivers)
     await requireAdmin();
 
     try {
-        const driver = await getFromSource('drivers', driverId);
-        if (!driver || !driver.email) {
-            throw new Error('Driver not found or no email');
-        }
+        const driver = await dataAccess.getRecord(COLLECTION_KEYS.drivers, driverId, { suppressAuth: true });
+        if (!driver || !driver.email) throw new Error('Driver not found or no email');
 
         await triggeredEmails.emailContact(templateId, driver._owner, {
-            variables: {
-                firstName: driver.firstName,
-                ...variables
-            }
+            variables: { firstName: driver.firstName, ...variables }
         });
 
-        // Log action
         await logAdminAction('sendEmail', driverId, { templateId });
-
     } catch (error) {
         console.error('Error sending email:', error);
         throw new Error('Failed to send email');
@@ -942,18 +417,10 @@ export async function sendDriverEmail(driverId, templateId, variables = {}) {
 // AUDIT LOGGING
 // ============================================
 
-/**
- * Log admin action for audit trail
- * @param {string} action - Action type
- * @param {string} targetId - Target entity ID
- * @param {Object} details - Action details
- */
 async function logAdminAction(action, targetId, details = {}) {
-    // Collection: AdminAuditLog (auditLog)
     try {
         const member = await currentMember.getMember();
-
-        await insertInSource('auditLog', {
+        await dataAccess.insertRecord(COLLECTION_KEYS.auditLog, {
             action,
             targetType: 'driver',
             targetId,
@@ -961,48 +428,10 @@ async function logAdminAction(action, targetId, details = {}) {
             adminId: member?._id || 'system',
             adminEmail: member?.loginEmail || 'system',
             timestamp: new Date()
-        });
+        }, { suppressAuth: true });
     } catch (error) {
         console.error('Failed to log admin action:', error);
-        // Don't throw - audit logging failure shouldn't block the action
     }
-}
-
-// ============================================
-// HELPER FUNCTIONS
-// ============================================
-
-/**
- * Calculate profile completion percentage
- */
-function calculateProfileCompletion(driver) {
-    const fields = [
-        'firstName', 'lastName', 'email', 'phone',
-        'cdlClass', 'yearsExperience', 'preferredRegion',
-        'equipmentExperience', 'homeZip'
-    ];
-
-    let completed = 0;
-    fields.forEach(field => {
-        if (driver[field] && String(driver[field]).trim() !== '') {
-            completed++;
-        }
-    });
-
-    return Math.round((completed / fields.length) * 100);
-}
-
-/**
- * Format location from driver data
- */
-function formatLocation(driver) {
-    const parts = [];
-    if (driver.city) parts.push(driver.city);
-    if (driver.state) parts.push(driver.state);
-    if (parts.length === 0 && driver.homeZip) {
-        return `ZIP: ${driver.homeZip}`;
-    }
-    return parts.join(', ') || 'Not specified';
 }
 
 // ============================================
@@ -1011,11 +440,8 @@ function formatLocation(driver) {
 
 /**
  * Get paginated list of carriers with filters
- * @param {Object} options - Query options
- * @returns {Promise<Object>} - Carriers list with pagination info
  */
 export async function getCarriersList(options = {}) {
-    // Collections: Carriers (carriers), CarrierEnrichments (enrichments)
     await requireAdmin();
 
     const {
@@ -1027,20 +453,17 @@ export async function getCarriersList(options = {}) {
     } = options;
 
     try {
-        // Build query options
-        const queryOptions = {};
+        const queryFilters = {};
+        if (filters.status && filters.status !== 'all') queryFilters.admin_status = filters.status;
+        if (filters.safetyRating && filters.safetyRating !== 'all') queryFilters.safety_rating = filters.safetyRating;
 
-        // Apply status filter
-        if (filters.status && filters.status !== 'all') {
-            queryOptions.eq = { ...queryOptions.eq, admin_status: filters.status };
+        // Fleet size filter
+        if (filters.fleetSize && filters.fleetSize !== 'all') {
+            if (filters.fleetSize === 'small') queryFilters.nbr_power_unit = { lt: 50 };
+            else if (filters.fleetSize === 'medium') queryFilters.nbr_power_unit = { gte: 50, lt: 200 };
+            else if (filters.fleetSize === 'large') queryFilters.nbr_power_unit = { ge: 200 };
         }
 
-        // Apply safety rating filter
-        if (filters.safetyRating && filters.safetyRating !== 'all') {
-            queryOptions.eq = { ...queryOptions.eq, safety_rating: filters.safetyRating };
-        }
-
-        // Apply sorting
         const sortFieldMap = {
             name: 'legal_name',
             fleetSize: 'nbr_power_unit',
@@ -1048,84 +471,21 @@ export async function getCarriersList(options = {}) {
             safetyRating: 'safety_rating'
         };
         const dbSortField = sortFieldMap[sortField] || '_updatedDate';
-        queryOptions.sortField = dbSortField;
-        queryOptions.sortDirection = sortDirection;
 
-        // Apply pagination
-        const skip = (page - 1) * pageSize;
-        queryOptions.skip = skip;
-        queryOptions.limit = pageSize;
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+            filters: queryFilters,
+            sort: [{ field: dbSortField, direction: sortDirection }],
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            suppressAuth: true
+        });
 
-        // Handle fleet size filter (requires range queries)
-        if (filters.fleetSize && filters.fleetSize !== 'all') {
-            switch (filters.fleetSize) {
-                case 'small':
-                    queryOptions.lt = { ...queryOptions.lt, nbr_power_unit: 50 };
-                    break;
-                case 'medium':
-                    queryOptions.ge = { ...queryOptions.ge, nbr_power_unit: 50 };
-                    queryOptions.lt = { ...queryOptions.lt, nbr_power_unit: 200 };
-                    break;
-                case 'large':
-                    queryOptions.ge = { ...queryOptions.ge, nbr_power_unit: 200 };
-                    break;
-            }
-        }
+        if (!result.success) throw new Error(result.error);
 
-        // Handle search - needs special handling for OR queries
-        let result;
-        if (filters.search && getSource('carriers') === 'wix') {
-            // Wix-specific: use OR queries for search
-            const searchTerm = filters.search;
-            const asNumber = parseInt(searchTerm, 10);
-
-            let searchQuery = wixData.query('Carriers').contains('legal_name', searchTerm)
-                .or(wixData.query('Carriers').contains('phy_city', searchTerm))
-                .or(wixData.query('Carriers').contains('dba_name', searchTerm));
-
-            if (!isNaN(asNumber)) {
-                searchQuery = searchQuery.or(wixData.query('Carriers').eq('dot_number', asNumber));
-                searchQuery = searchQuery.or(wixData.query('Carriers').eq('mc_number', asNumber));
-            }
-
-            if (filters.status && filters.status !== 'all') {
-                searchQuery = searchQuery.eq('admin_status', filters.status);
-            }
-            if (filters.safetyRating && filters.safetyRating !== 'all') {
-                searchQuery = searchQuery.eq('safety_rating', filters.safetyRating);
-            }
-
-            if (sortDirection === 'asc') {
-                searchQuery = searchQuery.ascending(dbSortField);
-            } else {
-                searchQuery = searchQuery.descending(dbSortField);
-            }
-
-            searchQuery = searchQuery.skip(skip).limit(pageSize);
-            result = await searchQuery.find();
-        } else if (filters.search && getSource('carriers') === 'airtable') {
-            // Airtable: use FIND for text search on legal_name
-            queryOptions.contains = { legal_name: filters.search };
-            result = await queryFromSource('carriers', queryOptions);
-        } else {
-            result = await queryFromSource('carriers', queryOptions);
-        }
-
-        // Get total count
-        const countOptions = {};
-        if (filters.status && filters.status !== 'all') {
-            countOptions.eq = { ...countOptions.eq, admin_status: filters.status };
-        }
-        if (filters.safetyRating && filters.safetyRating !== 'all') {
-            countOptions.eq = { ...countOptions.eq, safety_rating: filters.safetyRating };
-        }
-        const countResult = await countFromSource('carriers', countOptions);
-
-        // Fetch Enrichment Status for these carriers
+        // Fetch Enrichment Status
         const dotNumbers = result.items.map(c => String(c.dot_number));
         const enrichments = await getCarrierEnrichments(dotNumbers);
 
-        // Transform carriers for frontend
         const carriers = result.items.map(carrier => ({
             _id: carrier._id,
             legalName: carrier.legal_name || 'Unknown',
@@ -1145,36 +505,28 @@ export async function getCarriersList(options = {}) {
 
         return {
             carriers,
-            totalCount: countResult,
+            totalCount: result.totalCount || result.items.length,
             currentPage: page,
             pageSize,
-            totalPages: Math.ceil(countResult / pageSize)
+            totalPages: Math.ceil((result.totalCount || result.items.length) / pageSize)
         };
-
     } catch (error) {
         console.error('Error fetching carriers list:', error);
         throw new Error('Failed to fetch carriers');
     }
 }
 
-/**
- * Helper to get enrichment status
- */
 async function getCarrierEnrichments(dotNumbers) {
-    // Collection: CarrierEnrichments (enrichments)
     if (!dotNumbers.length) return {};
     try {
-        const result = await queryFromSource('enrichments', {
-            hasSome: { dot_number: dotNumbers }
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.enrichments, {
+            filters: { dot_number: { hasSome: dotNumbers } },
+            suppressAuth: true
         });
-
         const map = {};
-        result.items.forEach(item => {
-            map[item.dot_number] = item;
-        });
+        (result.items || []).forEach(item => { map[item.dot_number] = item; });
         return map;
     } catch (e) {
-        console.warn('Failed to fetch enrichments', e);
         return {};
     }
 }
@@ -1183,13 +535,14 @@ async function getCarrierEnrichments(dotNumbers) {
  * Get carrier dashboard stats
  */
 export async function getCarrierStats() {
-    // Collections: Carriers (carriers), CarrierEnrichments (enrichments)
     await requireAdmin();
     try {
-        const total = await countFromSource('carriers', {});
-        const flagged = await countFromSource('carriers', { eq: { is_flagged: true } });
-        const enriched = await countFromSource('enrichments', {});
-        const active = await countFromSource('carriers', { ne: { admin_status: 'inactive' } });
+        const [total, flagged, enriched, active] = await Promise.all([
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, {}),
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, { is_flagged: true }),
+            dataAccess.countRecords(COLLECTION_KEYS.enrichments, {}),
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, { admin_status: { ne: 'inactive' } })
+        ]);
 
         return {
             total,
@@ -1198,7 +551,7 @@ export async function getCarrierStats() {
             flagged,
             enriched,
             enrichedPercent: total > 0 ? Math.round((enriched / total) * 100) : 0,
-            newThisWeek: 0 // Placeholder or impl if needed
+            newThisWeek: 0
         };
     } catch (error) {
         console.error('Error fetching carrier stats:', error);
@@ -1210,19 +563,18 @@ export async function getCarrierStats() {
  * Get detailed carrier info
  */
 export async function getCarrierDetail(carrierId) {
-    // Collections: Carriers (carriers), CarrierEnrichments (enrichments)
     await requireAdmin();
     try {
-        const carrier = await getFromSource('carriers', carrierId);
+        const carrier = await dataAccess.getRecord(COLLECTION_KEYS.carriers, carrierId, { suppressAuth: true });
         if (!carrier) throw new Error('Carrier not found');
 
-        // Get enrichment
         let enrichment = null;
         if (carrier.dot_number) {
-            const enrichResult = await queryFromSource('enrichments', {
-                eq: { dot_number: String(carrier.dot_number) }
+            const enrichResult = await dataAccess.queryRecords(COLLECTION_KEYS.enrichments, {
+                filters: { dot_number: String(carrier.dot_number) },
+                limit: 1
             });
-            if (enrichResult.items.length > 0) enrichment = enrichResult.items[0];
+            enrichment = enrichResult.items?.[0] || null;
         }
 
         return {
@@ -1241,10 +593,9 @@ export async function getCarrierDetail(carrierId) {
  * Update carrier status/flag
  */
 export async function updateCarrierStatus(carrierId, updates) {
-    // Collection: Carriers (carriers)
     await requireAdmin();
     try {
-        const carrier = await getFromSource('carriers', carrierId);
+        const carrier = await dataAccess.getRecord(COLLECTION_KEYS.carriers, carrierId, { suppressAuth: true });
         if (!carrier) throw new Error('Carrier not found');
 
         let changed = false;
@@ -1258,7 +609,7 @@ export async function updateCarrierStatus(carrierId, updates) {
         }
 
         if (changed) {
-            await updateInSource('carriers', carrier);
+            await dataAccess.updateRecord(COLLECTION_KEYS.carriers, carrier, { suppressAuth: true });
             await logAdminAction('updateCarrier', carrierId, updates);
         }
 
@@ -1269,8 +620,25 @@ export async function updateCarrierStatus(carrierId, updates) {
     }
 }
 
+// ============================================
+// HELPERS
+// ============================================
+
+function calculateProfileCompletion(driver) {
+    const fields = ['firstName', 'lastName', 'email', 'phone', 'cdlClass', 'yearsExperience', 'homeZip'];
+    let completed = 0;
+    fields.forEach(field => { if (driver[field]) completed++; });
+    return Math.round((completed / fields.length) * 100);
+}
+
+function formatLocation(driver) {
+    const parts = [];
+    if (driver.city) parts.push(driver.city);
+    if (driver.state) parts.push(driver.state);
+    return parts.join(', ') || driver.homeZip || 'Not specified';
+}
+
 function normalizeCarrier(carrier) {
-    // Reuse the mapping logic matching frontend expectation
     return {
         _id: carrier._id,
         legalName: carrier.legal_name,
@@ -1281,7 +649,6 @@ function normalizeCarrier(carrier) {
         state: carrier.phy_state,
         fleetSize: carrier.nbr_power_unit,
         safetyRating: carrier.safety_rating,
-        // ... pass through other raw fields too
         ...carrier
     };
 }

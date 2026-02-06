@@ -1,39 +1,10 @@
-// ============================================================================
-// MESSAGING REALTIME SERVICE - Optimized polling for message updates
-// ============================================================================
-
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
-// Collection keys for dual-source routing
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     messages: 'messages'
 };
-
-// Dual-source query helper
-async function queryMessages(options = {}) {
-    if (usesAirtable(COLLECTION_KEYS.messages)) {
-        const tableName = getAirtableTableName(COLLECTION_KEYS.messages);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    // Wix Data path
-    let query = wixData.query('Messages');
-    if (options.sort) {
-        query = options.sortDir === 'asc' ? query.ascending(options.sort) : query.descending(options.sort);
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
 
 // ============================================================================
 // GET NEW MESSAGES (For Polling)
@@ -41,46 +12,31 @@ async function queryMessages(options = {}) {
 
 /**
  * Fetches messages newer than a given timestamp for efficient polling.
- *
- * @param {string} applicationId - The application/conversation ID
- * @param {string|number} sinceTimestamp - ISO string or Unix timestamp of last known message
- * @returns {Object} { success, messages[], hasNew }
  */
 export async function getNewMessages(applicationId, sinceTimestamp) {
-    if (!applicationId) {
-        return { success: false, error: 'Missing applicationId' };
-    }
+    if (!applicationId) return { success: false, error: 'Missing applicationId' };
 
     try {
         const userId = await getCurrentUserId();
-        if (!userId) {
-            return { success: false, error: 'Not authenticated' };
-        }
+        if (!userId) return { success: false, error: 'Not authenticated' };
 
-        // Convert timestamp to Date object
-        let sinceDate;
-        if (sinceTimestamp) {
-            sinceDate = typeof sinceTimestamp === 'number'
-                ? new Date(sinceTimestamp)
-                : new Date(sinceTimestamp);
-        } else {
-            // If no timestamp, get all messages (initial load)
-            sinceDate = new Date(0);
-        }
+        const sinceDate = sinceTimestamp ? new Date(sinceTimestamp) : new Date(0);
 
-        const results = await wixData.query('Messages')
-            .eq('application_id', applicationId)
-            .gt('timestamp', sinceDate)
-            .ascending('timestamp')
-            .find({ suppressAuth: true });
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.messages, {
+            filters: {
+                application_id: applicationId,
+                timestamp: { gt: sinceDate }
+            },
+            sort: [{ field: 'timestamp', direction: 'asc' }],
+            suppressAuth: true
+        });
 
+        const items = result.items || [];
         return {
             success: true,
-            messages: results.items,
-            hasNew: results.items.length > 0,
-            latestTimestamp: results.items.length > 0
-                ? results.items[results.items.length - 1].timestamp
-                : sinceTimestamp
+            messages: items,
+            hasNew: items.length > 0,
+            latestTimestamp: items.length > 0 ? items[items.length - 1].timestamp : sinceTimestamp
         };
     } catch (error) {
         console.error('Error fetching new messages:', error);
@@ -94,32 +50,30 @@ export async function getNewMessages(applicationId, sinceTimestamp) {
 
 /**
  * Gets the total unread message count across all applications for current user.
- * Optimized for badge display.
- *
- * @returns {Object} { success, count, byApplication: { appId: count } }
  */
 export async function getUnreadCountForUser() {
     try {
         const userId = await getCurrentUserId();
-        if (!userId) {
-            return { success: false, error: 'Not authenticated' };
-        }
+        if (!userId) return { success: false, error: 'Not authenticated' };
 
-        const results = await wixData.query('Messages')
-            .eq('receiver_id', userId)
-            .eq('is_read', false)
-            .find({ suppressAuth: true });
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.messages, {
+            filters: {
+                receiver_id: userId,
+                is_read: false
+            },
+            suppressAuth: true
+        });
 
-        // Group by application for detailed badge info
+        const items = result.items || [];
         const byApplication = {};
-        results.items.forEach(msg => {
+        items.forEach(msg => {
             const appId = msg.application_id;
             byApplication[appId] = (byApplication[appId] || 0) + 1;
         });
 
         return {
             success: true,
-            count: results.items.length,
+            count: items.length,
             byApplication
         };
     } catch (error) {
@@ -134,35 +88,31 @@ export async function getUnreadCountForUser() {
 
 /**
  * Lightweight check if there are any new messages since a timestamp.
- * Use this for efficient polling before fetching full messages.
- *
- * @param {string} applicationId - The application/conversation ID
- * @param {string|number} sinceTimestamp - Last known timestamp
- * @returns {Object} { hasNew, newCount }
  */
 export async function checkForNewMessages(applicationId, sinceTimestamp) {
-    if (!applicationId || !sinceTimestamp) {
-        return { hasNew: false, newCount: 0 };
-    }
+    if (!applicationId || !sinceTimestamp) return { hasNew: false, newCount: 0 };
 
     try {
-        const sinceDate = typeof sinceTimestamp === 'number'
-            ? new Date(sinceTimestamp)
-            : new Date(sinceTimestamp);
+        const sinceDate = new Date(sinceTimestamp);
+        const count = await dataAccess.countRecords(COLLECTION_KEYS.messages, {
+            application_id: applicationId,
+            timestamp: { gt: sinceDate }
+        });
 
-        const count = await wixData.query('Messages')
-            .eq('application_id', applicationId)
-            .gt('timestamp', sinceDate)
-            .count({ suppressAuth: true });
-
-        return {
-            hasNew: count > 0,
-            newCount: count
-        };
+        return { hasNew: count > 0, newCount: count };
     } catch (error) {
         console.error('Error checking for new messages:', error);
         return { hasNew: false, newCount: 0 };
     }
+}
+
+// ============================================================================
+// HELPER
+// ============================================================================
+
+async function getCurrentUserId() {
+    const currentUser = wixUsersBackend.currentUser;
+    return currentUser.loggedIn ? currentUser.id : null;
 }
 
 // ============================================================================

@@ -1,27 +1,10 @@
-/**
- * Carrier Admin Service - Backend functions for Admin Portal
- * Handles carrier management, FMCSA data, enrichment status, and administrative operations
- *
- * DUAL-SOURCE SUPPORT: Supports both Wix Data and Airtable based on config.jsw settings
- */
-
-import wixData from 'wix-data';
 import { currentMember } from 'wix-members-backend';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================
 // CONFIGURATION
 // ============================================
 
-const CONFIG = {
-    carriersCollection: 'Carriers',
-    safetyDataCollection: 'CarrierSafetyData',
-    enrichmentsCollection: 'CarrierEnrichments',
-    auditLogCollection: 'AdminAuditLog'
-};
-
-// Collection key mapping for config.jsw
 const COLLECTION_KEYS = {
     carriers: 'carriers',
     safetyData: 'carrierSafetyData',
@@ -30,129 +13,6 @@ const COLLECTION_KEYS = {
     matchEvents: 'matchEvents',
     driverInterests: 'driverCarrierInterests'
 };
-
-// ============================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================
-
-/**
- * Query records from either Wix or Airtable
- */
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-
-    // Wix Data path
-    let query = wixData.query(wixCollectionName);
-    if (options.wixQuery) {
-        query = options.wixQuery;
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find(options.suppressAuth ? { suppressAuth: true } : undefined);
-    return result.items;
-}
-
-/**
- * Count records from either Wix or Airtable
- */
-async function countData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.countRecords(tableName, options.filter || '');
-        return result.count || 0;
-    }
-
-    // Wix Data path
-    let query = wixData.query(wixCollectionName);
-    if (options.wixQuery) {
-        query = options.wixQuery;
-    }
-    return await query.count();
-}
-
-/**
- * Get single record by ID
- */
-async function getRecord(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.getRecord(tableName, recordId);
-        return result.record || null;
-    }
-    return await wixData.get(wixCollectionName, recordId);
-}
-
-/**
- * Update a record
- */
-async function updateRecord(collectionKey, wixCollectionName, record, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.updateRecord(tableName, record._id || record.id, record);
-        return result.record || record;
-    }
-    return await wixData.update(wixCollectionName, record, options.suppressAuth ? { suppressAuth: true } : undefined);
-}
-
-/**
- * Insert a record
- */
-async function insertRecord(collectionKey, wixCollectionName, record, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.createRecord(tableName, record);
-        return result.record || record;
-    }
-    return await wixData.insert(wixCollectionName, record, options.suppressAuth ? { suppressAuth: true } : undefined);
-}
-
-/**
- * Remove a record
- */
-async function removeRecord(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        await airtable.deleteRecord(tableName, recordId);
-        return { _id: recordId };
-    }
-    return await wixData.remove(wixCollectionName, recordId);
-}
-
-/**
- * Find records by field value
- */
-async function findByField(collectionKey, wixCollectionName, fieldName, value, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const airtableField = airtable.mapFieldName ? airtable.mapFieldName(fieldName, collectionKey) : fieldName;
-        const filter = `{${airtableField}} = '${value}'`;
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: filter,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-
-    // Wix Data path
-    let query = wixData.query(wixCollectionName).eq(fieldName, value);
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    if (options.descending) {
-        query = query.descending(options.descending);
-    }
-    const result = await query.find(options.suppressAuth ? { suppressAuth: true } : undefined);
-    return result.items;
-}
 
 // ============================================
 // AUTHORIZATION
@@ -208,140 +68,62 @@ export async function getCarriersList(options = {}) {
     } = options;
 
     try {
-        let resultItems = [];
-        let countResult = 0;
+        const queryFilters = {};
 
-        // Dual-source routing
-        if (usesAirtable(COLLECTION_KEYS.carriers)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
-
-            // Build Airtable filter
-            const filterParts = [];
-
-            if (filters.search) {
-                const searchTerm = filters.search;
-                filterParts.push(`OR(SEARCH("${searchTerm}", LOWER({Legal Name})), SEARCH("${searchTerm}", LOWER({Dot Number})), SEARCH("${searchTerm}", LOWER({Phy City})))`);
-            }
-
-            if (filters.status && filters.status !== 'all') {
-                filterParts.push(`{Status} = '${filters.status}'`);
-            }
-
-            if (filters.fleetSize && filters.fleetSize !== 'all') {
-                switch (filters.fleetSize) {
-                    case 'small':
-                        filterParts.push(`{Nbr Power Unit} < 50`);
-                        break;
-                    case 'medium':
-                        filterParts.push(`AND({Nbr Power Unit} >= 50, {Nbr Power Unit} < 200)`);
-                        break;
-                    case 'large':
-                        filterParts.push(`{Nbr Power Unit} >= 200`);
-                        break;
-                }
-            }
-
-            if (filters.safetyRating && filters.safetyRating !== 'all') {
-                filterParts.push(`{Safety Rating} = '${filters.safetyRating}'`);
-            }
-
-            if (filters.state && filters.state !== 'all') {
-                filterParts.push(`{Phy State} = '${filters.state}'`);
-            }
-
-            const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : (filterParts[0] || '');
-
-            const sortFieldMapAirtable = {
-                name: 'Legal Name',
-                fleetSize: 'Nbr Power Unit',
-                lastUpdated: 'Updated Date',
-                safetyRating: 'Safety Rating'
-            };
-            const airtableSortField = sortFieldMapAirtable[sortField] || 'Updated Date';
-
-            const queryResult = await airtable.queryRecords(tableName, {
-                filterByFormula: filter,
-                sort: [{ field: airtableSortField, direction: sortDirection }],
-                maxRecords: pageSize
-            });
-            resultItems = queryResult.records || [];
-            countResult = resultItems.length; // Airtable doesn't have efficient total count
-        } else {
-            // Wix Data path
-            let query = wixData.query(CONFIG.carriersCollection);
-
-            // Apply search filter
-            if (filters.search) {
-                const searchTerm = filters.search.toLowerCase();
-                query = query.contains('legal_name', searchTerm)
-                    .or(wixData.query(CONFIG.carriersCollection).contains('dot_number', searchTerm))
-                    .or(wixData.query(CONFIG.carriersCollection).contains('phy_city', searchTerm));
-            }
-
-            // Apply status filter
-            if (filters.status && filters.status !== 'all') {
-                query = query.eq('status', filters.status);
-            }
-
-            // Apply fleet size filter
-            if (filters.fleetSize && filters.fleetSize !== 'all') {
-                switch (filters.fleetSize) {
-                    case 'small':
-                        query = query.lt('nbr_power_unit', 50);
-                        break;
-                    case 'medium':
-                        query = query.ge('nbr_power_unit', 50).lt('nbr_power_unit', 200);
-                        break;
-                    case 'large':
-                        query = query.ge('nbr_power_unit', 200);
-                        break;
-                }
-            }
-
-            // Apply safety rating filter
-            if (filters.safetyRating && filters.safetyRating !== 'all') {
-                query = query.eq('safety_rating', filters.safetyRating);
-            }
-
-            // Apply state filter
-            if (filters.state && filters.state !== 'all') {
-                query = query.eq('phy_state', filters.state);
-            }
-
-            // Apply sorting
-            const sortFieldMap = {
-                name: 'legal_name',
-                fleetSize: 'nbr_power_unit',
-                lastUpdated: '_updatedDate',
-                safetyRating: 'safety_rating'
-            };
-            const dbSortField = sortFieldMap[sortField] || '_updatedDate';
-
-            if (sortDirection === 'asc') {
-                query = query.ascending(dbSortField);
-            } else {
-                query = query.descending(dbSortField);
-            }
-
-            // Apply pagination
-            const skip = (page - 1) * pageSize;
-            query = query.skip(skip).limit(pageSize);
-
-            // Execute query
-            const result = await query.find();
-            resultItems = result.items;
-
-            // Get total count
-            let countQuery = wixData.query(CONFIG.carriersCollection);
-            if (filters.status && filters.status !== 'all') {
-                countQuery = countQuery.eq('status', filters.status);
-            }
-            countResult = await countQuery.count();
+        if (filters.search) {
+            queryFilters.legal_name = { contains: filters.search };
         }
+
+        if (filters.status && filters.status !== 'all') {
+            queryFilters.status = filters.status;
+        }
+
+        if (filters.fleetSize && filters.fleetSize !== 'all') {
+            switch (filters.fleetSize) {
+                case 'small':
+                    queryFilters.nbr_power_unit = { lt: 50 };
+                    break;
+                case 'medium':
+                    queryFilters.nbr_power_unit = { gte: 50, lt: 200 };
+                    break;
+                case 'large':
+                    queryFilters.nbr_power_unit = { gte: 200 };
+                    break;
+            }
+        }
+
+        if (filters.safetyRating && filters.safetyRating !== 'all') {
+            queryFilters.safety_rating = filters.safetyRating;
+        }
+
+        if (filters.state && filters.state !== 'all') {
+            queryFilters.phy_state = filters.state;
+        }
+
+        const sortFieldMap = {
+            name: 'legal_name',
+            fleetSize: 'nbr_power_unit',
+            lastUpdated: '_updatedDate',
+            safetyRating: 'safety_rating'
+        };
+        const dbSortField = sortFieldMap[sortField] || '_updatedDate';
+
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+            filters: queryFilters,
+            sort: [{ field: dbSortField, direction: sortDirection }],
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            suppressAuth: true
+        });
+
+        if (!result.success) throw new Error(result.error);
+
+        const resultItems = result.items || [];
+        const countResult = result.totalCount || resultItems.length;
 
         // Get enrichment status for these carriers
         const dotNumbers = resultItems.map(c => String(c.dot_number));
-        const enrichmentStatus = await getEnrichmentStatus(dotNumbers);
+        const enrichmentStatusMap = await getEnrichmentStatus(dotNumbers);
 
         // Transform carriers for frontend
         const carriers = resultItems.map(carrier => ({
@@ -357,7 +139,7 @@ export async function getCarriersList(options = {}) {
             status: carrier.status || 'active',
             safetyRating: carrier.safety_rating || 'NOT RATED',
             isAuthorized: carrier.is_authorized !== false,
-            enrichmentStatus: enrichmentStatus[carrier.dot_number] || 'none',
+            enrichmentStatus: enrichmentStatusMap[carrier.dot_number] || 'none',
             lastUpdated: carrier._updatedDate,
             _createdDate: carrier._createdDate,
             mcNumber: carrier.mc_number || null,
@@ -388,79 +170,48 @@ export async function getCarrierDetail(carrierId) {
     await requireAdmin();
 
     try {
-        // Use dual-source routing for carrier
-        const carrier = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrierId);
+        const carrier = await dataAccess.getRecord(COLLECTION_KEYS.carriers, carrierId, { suppressAuth: true });
         if (!carrier) {
             throw new Error('Carrier not found');
         }
 
-        // Get safety data - use dual-source routing
+        // Get safety data
         let safetyData = null;
         try {
-            const safetyItems = await findByField(COLLECTION_KEYS.safetyData, CONFIG.safetyDataCollection, 'dot_number', String(carrier.dot_number), { limit: 1 });
-            if (safetyItems.length > 0) {
-                safetyData = safetyItems[0];
-            }
+            safetyData = await dataAccess.findByField(COLLECTION_KEYS.safetyData, 'dot_number', String(carrier.dot_number), { suppressAuth: true });
         } catch (e) {
             console.warn('Could not fetch safety data:', e.message);
         }
 
-        // Get enrichment data - use dual-source routing
+        // Get enrichment data
         let enrichment = null;
         try {
-            const enrichmentItems = await findByField(COLLECTION_KEYS.enrichments, CONFIG.enrichmentsCollection, 'dot_number', String(carrier.dot_number), { limit: 1 });
-            if (enrichmentItems.length > 0) {
-                enrichment = enrichmentItems[0];
-            }
+            enrichment = await dataAccess.findByField(COLLECTION_KEYS.enrichments, 'dot_number', String(carrier.dot_number), { suppressAuth: true });
         } catch (e) {
             console.warn('Could not fetch enrichment:', e.message);
         }
 
-        // Get match activity - use dual-source routing
-        let matchActivityItems = [];
-        let matchTotalCount = 0;
-        if (usesAirtable(COLLECTION_KEYS.matchEvents)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.matchEvents);
-            const filter = `{Carrier Dot} = '${String(carrier.dot_number)}'`;
-            const result = await airtable.queryRecords(tableName, {
-                filterByFormula: filter,
-                sort: [{ field: 'Timestamp', direction: 'desc' }],
-                maxRecords: 20
-            });
-            matchActivityItems = result.records || [];
-            matchTotalCount = matchActivityItems.length;
-        } else {
-            const matchActivity = await wixData.query('MatchEvents')
-                .eq('carrier_dot', String(carrier.dot_number))
-                .descending('timestamp')
-                .limit(20)
-                .find();
-            matchActivityItems = matchActivity.items;
-            matchTotalCount = matchActivity.totalCount;
-        }
+        // Get match activity
+        const matchResult = await dataAccess.queryRecords(COLLECTION_KEYS.matchEvents, {
+            filters: { carrier_dot: String(carrier.dot_number) },
+            sort: [{ field: 'timestamp', direction: 'desc' }],
+            limit: 20,
+            suppressAuth: true
+        });
 
-        // Get driver interests - use dual-source routing
-        let driverInterestItems = [];
-        let interestsTotalCount = 0;
-        if (usesAirtable(COLLECTION_KEYS.driverInterests)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.driverInterests);
-            const filter = `{Carrier Dot} = '${String(carrier.dot_number)}'`;
-            const result = await airtable.queryRecords(tableName, {
-                filterByFormula: filter,
-                sort: [{ field: 'Created Date', direction: 'desc' }],
-                maxRecords: 20
-            });
-            driverInterestItems = result.records || [];
-            interestsTotalCount = driverInterestItems.length;
-        } else {
-            const driverInterests = await wixData.query('DriverCarrierInterests')
-                .eq('carrier_dot', String(carrier.dot_number))
-                .descending('_createdDate')
-                .limit(20)
-                .find();
-            driverInterestItems = driverInterests.items;
-            interestsTotalCount = driverInterests.totalCount;
-        }
+        const matchActivityItems = matchResult.items || [];
+        const matchTotalCount = matchResult.totalCount || matchActivityItems.length;
+
+        // Get driver interests
+        const interestResult = await dataAccess.queryRecords(COLLECTION_KEYS.driverInterests, {
+            filters: { carrier_dot: String(carrier.dot_number) },
+            sort: [{ field: '_createdDate', direction: 'desc' }],
+            limit: 20,
+            suppressAuth: true
+        });
+
+        const driverInterestItems = interestResult.items || [];
+        const interestsTotalCount = interestResult.totalCount || driverInterestItems.length;
 
         return {
             ...carrier,
@@ -513,7 +264,7 @@ export async function updateCarrierStatus(carrierId, status, reason = '') {
     }
 
     try {
-        const carrier = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrierId);
+        const carrier = await dataAccess.getRecord(COLLECTION_KEYS.carriers, carrierId, { suppressAuth: true });
         if (!carrier) {
             throw new Error('Carrier not found');
         }
@@ -529,7 +280,8 @@ export async function updateCarrierStatus(carrierId, status, reason = '') {
             changedBy: 'admin'
         });
 
-        const updated = await updateRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrier);
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.carriers, carrier, { suppressAuth: true });
+        if (!result.success) throw new Error(result.error);
 
         // Log admin action
         await logAdminAction('updateCarrierStatus', carrierId, {
@@ -539,7 +291,7 @@ export async function updateCarrierStatus(carrierId, status, reason = '') {
             reason
         });
 
-        return updated;
+        return result.record;
 
     } catch (error) {
         console.error('Error updating carrier status:', error);
@@ -557,7 +309,7 @@ export async function flagCarrier(carrierId, reason = '') {
     await requireAdmin();
 
     try {
-        const carrier = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrierId);
+        const carrier = await dataAccess.getRecord(COLLECTION_KEYS.carriers, carrierId, { suppressAuth: true });
         if (!carrier) {
             throw new Error('Carrier not found');
         }
@@ -567,14 +319,15 @@ export async function flagCarrier(carrierId, reason = '') {
         carrier.flaggedAt = new Date();
         carrier.status = 'pending_review';
 
-        const updated = await updateRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrier);
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.carriers, carrier, { suppressAuth: true });
+        if (!result.success) throw new Error(result.error);
 
         await logAdminAction('flagCarrier', carrierId, {
             dotNumber: carrier.dot_number,
             reason
         });
 
-        return updated;
+        return result.record;
 
     } catch (error) {
         console.error('Error flagging carrier:', error);
@@ -591,7 +344,7 @@ export async function unflagCarrier(carrierId) {
     await requireAdmin();
 
     try {
-        const carrier = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrierId);
+        const carrier = await dataAccess.getRecord(COLLECTION_KEYS.carriers, carrierId, { suppressAuth: true });
         if (!carrier) {
             throw new Error('Carrier not found');
         }
@@ -601,13 +354,14 @@ export async function unflagCarrier(carrierId) {
         carrier.flaggedAt = null;
         carrier.status = 'active';
 
-        const updated = await updateRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrier);
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.carriers, carrier, { suppressAuth: true });
+        if (!result.success) throw new Error(result.error);
 
         await logAdminAction('unflagCarrier', carrierId, {
             dotNumber: carrier.dot_number
         });
 
-        return updated;
+        return result.record;
 
     } catch (error) {
         console.error('Error unflagging carrier:', error);
@@ -624,27 +378,16 @@ export async function refreshCarrierEnrichment(carrierId) {
     await requireAdmin();
 
     try {
-        const carrier = await getRecord(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, carrierId);
+        const carrier = await dataAccess.getRecord(COLLECTION_KEYS.carriers, carrierId, { suppressAuth: true });
         if (!carrier) {
             throw new Error('Carrier not found');
         }
 
-        // Clear existing enrichment cache (dual-source)
-        let enrichmentItems = [];
-        if (usesAirtable(COLLECTION_KEYS.enrichments)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.enrichments);
-            const filter = `{DOT Number} = '${String(carrier.dot_number)}'`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-            enrichmentItems = result.records || [];
-        } else {
-            const enrichmentResult = await wixData.query(CONFIG.enrichmentsCollection)
-                .eq('dot_number', String(carrier.dot_number))
-                .find();
-            enrichmentItems = enrichmentResult.items;
-        }
+        // Clear existing enrichment cache
+        const enrichment = await dataAccess.findByField(COLLECTION_KEYS.enrichments, 'dot_number', String(carrier.dot_number), { suppressAuth: true });
 
-        if (enrichmentItems.length > 0) {
-            await removeRecord(COLLECTION_KEYS.enrichments, CONFIG.enrichmentsCollection, enrichmentItems[0]._id);
+        if (enrichment) {
+            await dataAccess.removeRecord(COLLECTION_KEYS.enrichments, enrichment._id, { suppressAuth: true });
         }
 
         await logAdminAction('refreshEnrichment', carrierId, {
@@ -716,66 +459,27 @@ export async function getCarrierStats() {
     await requireAdmin();
 
     try {
-        let totalResult, activeResult, flaggedResult, enrichedResult;
-        let smallFleet, mediumFleet, largeFleet, newThisWeek;
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
 
-        if (usesAirtable(COLLECTION_KEYS.carriers)) {
-            // Airtable path
-            const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
-            const enrichTableName = getAirtableTableName(COLLECTION_KEYS.enrichments);
-
-            totalResult = (await airtable.countRecords(tableName)).count || 0;
-            activeResult = (await airtable.countRecords(tableName, "{Status} = 'active'")).count || 0;
-            flaggedResult = (await airtable.countRecords(tableName, "{Is Flagged} = TRUE()")).count || 0;
-            enrichedResult = (await airtable.countRecords(enrichTableName)).count || 0;
-
-            smallFleet = (await airtable.countRecords(tableName, "{Nbr Power Unit} < 50")).count || 0;
-            mediumFleet = (await airtable.countRecords(tableName, "AND({Nbr Power Unit} >= 50, {Nbr Power Unit} < 200)")).count || 0;
-            largeFleet = (await airtable.countRecords(tableName, "{Nbr Power Unit} >= 200")).count || 0;
-
-            const weekAgo = new Date();
-            weekAgo.setDate(weekAgo.getDate() - 7);
-            const weekAgoStr = weekAgo.toISOString().split('T')[0];
-            newThisWeek = (await airtable.countRecords(tableName, `IS_AFTER({Created Date}, '${weekAgoStr}')`)).count || 0;
-        } else {
-            // Wix Data path (original)
-            totalResult = await wixData.query(CONFIG.carriersCollection).count();
-
-            activeResult = await wixData.query(CONFIG.carriersCollection)
-                .eq('status', 'active')
-                .count();
-
-            flaggedResult = await wixData.query(CONFIG.carriersCollection)
-                .eq('isFlagged', true)
-                .count();
-
-            enrichedResult = await wixData.query(CONFIG.enrichmentsCollection).count();
-
-            smallFleet = await wixData.query(CONFIG.carriersCollection)
-                .lt('nbr_power_unit', 50)
-                .count();
-            mediumFleet = await wixData.query(CONFIG.carriersCollection)
-                .ge('nbr_power_unit', 50)
-                .lt('nbr_power_unit', 200)
-                .count();
-            largeFleet = await wixData.query(CONFIG.carriersCollection)
-                .ge('nbr_power_unit', 200)
-                .count();
-
-            const weekAgo = new Date();
-            weekAgo.setDate(weekAgo.getDate() - 7);
-            newThisWeek = await wixData.query(CONFIG.carriersCollection)
-                .ge('_createdDate', weekAgo)
-                .count();
-        }
+        const [total, active, flagged, enriched, smallFleet, mediumFleet, largeFleet, newThisWeek] = await Promise.all([
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, {}),
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, { status: 'active' }),
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, { isFlagged: true }),
+            dataAccess.countRecords(COLLECTION_KEYS.enrichments, {}),
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, { nbr_power_unit: { lt: 50 } }),
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, { nbr_power_unit: { gte: 50, lt: 200 } }),
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, { nbr_power_unit: { gte: 200 } }),
+            dataAccess.countRecords(COLLECTION_KEYS.carriers, { _createdDate: { gte: weekAgo } })
+        ]);
 
         return {
-            total: totalResult,
-            active: activeResult,
-            activePercent: totalResult > 0 ? Math.round((activeResult / totalResult) * 100) : 0,
-            flagged: flaggedResult,
-            enriched: enrichedResult,
-            enrichedPercent: totalResult > 0 ? Math.round((enrichedResult / totalResult) * 100) : 0,
+            total,
+            active,
+            activePercent: total > 0 ? Math.round((active / total) * 100) : 0,
+            flagged,
+            enriched,
+            enrichedPercent: total > 0 ? Math.round((enriched / total) * 100) : 0,
             fleetBreakdown: {
                 small: smallFleet,
                 medium: mediumFleet,
@@ -798,14 +502,13 @@ export async function getStateDistribution() {
     await requireAdmin();
 
     try {
-        // Use dual-source routing
-        const carriers = await queryData(COLLECTION_KEYS.carriers, CONFIG.carriersCollection, {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
             limit: 1000,
             suppressAuth: true
         });
 
         const stateCounts = {};
-        for (const carrier of carriers) {
+        for (const carrier of (result.items || [])) {
             const state = carrier.phy_state || 'Unknown';
             stateCounts[state] = (stateCounts[state] || 0) + 1;
         }
@@ -833,36 +536,17 @@ export async function exportCarriersCSV(filters = {}) {
     await requireAdmin();
 
     try {
-        let carriers = [];
+        const queryFilters = {};
+        if (filters.status && filters.status !== 'all') queryFilters.status = filters.status;
+        if (filters.state && filters.state !== 'all') queryFilters.phy_state = filters.state;
 
-        // Use dual-source routing
-        if (usesAirtable(COLLECTION_KEYS.carriers)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
-            const filterParts = [];
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+            filters: queryFilters,
+            limit: 1000,
+            suppressAuth: true
+        });
 
-            if (filters.status && filters.status !== 'all') {
-                filterParts.push(`{Status} = '${filters.status}'`);
-            }
-            if (filters.state && filters.state !== 'all') {
-                filterParts.push(`{Phy State} = '${filters.state}'`);
-            }
-
-            const filter = filterParts.length > 0 ? `AND(${filterParts.join(', ')})` : '';
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1000 });
-            carriers = result.records || [];
-        } else {
-            let query = wixData.query(CONFIG.carriersCollection);
-
-            if (filters.status && filters.status !== 'all') {
-                query = query.eq('status', filters.status);
-            }
-            if (filters.state && filters.state !== 'all') {
-                query = query.eq('phy_state', filters.state);
-            }
-
-            const result = await query.limit(1000).find();
-            carriers = result.items;
-        }
+        const carriers = result.items || [];
 
         // Generate CSV
         const headers = ['DOT Number', 'Legal Name', 'DBA', 'City', 'State', 'Fleet Size', 'Drivers', 'Safety Rating', 'Status', 'MC Number', 'Phone'];
@@ -898,28 +582,19 @@ export async function exportCarriersCSV(filters = {}) {
 // ============================================
 
 /**
- * Get enrichment status for multiple carriers - uses dual-source routing
+ * Get enrichment status for multiple carriers
  */
 async function getEnrichmentStatus(dotNumbers) {
     if (!dotNumbers || dotNumbers.length === 0) return {};
 
     try {
-        let enrichments = [];
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.enrichments, {
+            filters: { dot_number: { hasSome: dotNumbers } },
+            limit: dotNumbers.length,
+            suppressAuth: true
+        });
 
-        if (usesAirtable(COLLECTION_KEYS.enrichments)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.enrichments);
-            // Build OR filter for multiple DOT numbers
-            const dotFilters = dotNumbers.map(dot => `{Dot Number} = '${dot}'`).join(', ');
-            const filter = dotNumbers.length > 1 ? `OR(${dotFilters})` : dotFilters;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: dotNumbers.length });
-            enrichments = result.records || [];
-        } else {
-            const result = await wixData.query(CONFIG.enrichmentsCollection)
-                .hasSome('dot_number', dotNumbers)
-                .find();
-            enrichments = result.items;
-        }
-
+        const enrichments = result.items || [];
         const statusMap = {};
         const now = Date.now();
 
@@ -961,7 +636,7 @@ async function logAdminAction(action, targetId, details = {}) {
             timestamp: new Date()
         };
 
-        await insertRecord(COLLECTION_KEYS.auditLog, CONFIG.auditLogCollection, auditRecord, { suppressAuth: true });
+        await dataAccess.insertRecord(COLLECTION_KEYS.auditLog, auditRecord, { suppressAuth: true });
     } catch (error) {
         console.error('Failed to log admin action:', error);
     }

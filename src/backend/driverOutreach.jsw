@@ -1,14 +1,7 @@
-// ============================================================================
-// DRIVER OUTREACH SERVICE - Backend for Recruiter Driver Search
-// Handles saving drivers to pipeline and outreach messaging
-// ============================================================================
-
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
 import { sendMessage as sendMessagingMessage } from 'backend/messaging.jsw';
 import { checkViewQuota } from 'backend/subscriptionService.jsw';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // Match notifications - lazy-loaded to avoid circular dependencies
 async function getMatchNotifications() {
@@ -25,7 +18,7 @@ function notifyDriverContactedNonBlocking(driverId, contactInfo) {
 // CONFIGURATION
 // ============================================================================
 
-// Collection keys for dual-source routing
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     interests: 'driverCarrierInterests',
     driverProfiles: 'driverProfiles',
@@ -35,54 +28,9 @@ const COLLECTION_KEYS = {
     outreachHistory: 'recruiterOutreachHistory'
 };
 
-// ============================================================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const result = await airtable.queryRecords(tableName, {
-            filterByFormula: options.filter || '',
-            sort: options.sort,
-            maxRecords: options.limit || 100
-        });
-        return result.records || [];
-    }
-    let query = wixData.query(wixCollectionName);
-    if (options.sort) {
-        query = options.sortDir === 'asc' ? query.ascending(options.sort) : query.descending(options.sort);
-    }
-    if (options.limit) {
-        query = query.limit(options.limit);
-    }
-    const result = await query.find({ suppressAuth: true });
-    return result.items;
-}
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
 const CONFIG = {
-  interestsCollection: 'DriverCarrierInterests',
-  driverProfilesCollection: 'DriverProfiles',
-  recruiterCarriersCollection: 'recruiterCarriers',
-  carriersCollection: 'Carriers',
-  profileViewsCollection: 'CarrierDriverViews',
-  outreachHistoryCollection: 'RecruiterOutreachHistory',
-
   // Origin types for tracking where interest came from
-  ORIGIN: {
-    DRIVER_APPLIED: 'driver_applied',
-    RECRUITER_SEARCH: 'recruiter_search',
-    MUTUAL_MATCH: 'mutual_match'
-  },
-
+  ORIGIN: { DRIVER_APPLIED: 'driver_applied', RECRUITER_SEARCH: 'recruiter_search', MUTUAL_MATCH: 'mutual_match' },
   // Initial status when recruiter saves a driver
   RECRUITER_INITIAL_STATUS: 'contacted'
 };
@@ -93,10 +41,7 @@ const CONFIG = {
 
 async function getCurrentUserId() {
   const currentUser = wixUsersBackend.currentUser;
-  if (!currentUser.loggedIn) {
-    return null;
-  }
-  return currentUser.id;
+  return currentUser.loggedIn ? currentUser.id : null;
 }
 
 // ============================================================================
@@ -106,23 +51,14 @@ async function getCurrentUserId() {
 async function verifyRecruiterAccess(carrierDOT) {
   try {
     const userId = await getCurrentUserId();
-    if (!userId) {
-      return { success: false, error: 'Not authenticated' };
-    }
+    if (!userId) return { success: false, error: 'Not authenticated' };
 
-    const dotString = String(carrierDOT).trim();
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+      filters: { recruiter_id: userId, carrier_dot: String(carrierDOT).trim(), is_active: true },
+      limit: 1, suppressAuth: true
+    });
 
-    const result = await wixData.query(CONFIG.recruiterCarriersCollection)
-      .eq('recruiter_id', userId)
-      .eq('carrier_dot', dotString)
-      .eq('is_active', true)
-      .limit(1)
-      .find({ suppressAuth: true });
-
-    if (result.items.length === 0) {
-      return { success: false, error: 'No access to this carrier' };
-    }
-
+    if (!result.success || result.items.length === 0) return { success: false, error: 'No access to this carrier' };
     return { success: true, carrierAccess: result.items[0], userId };
   } catch (error) {
     console.error('verifyRecruiterAccess error:', error);
@@ -132,195 +68,86 @@ async function verifyRecruiterAccess(carrierDOT) {
 
 // ============================================================================
 // SAVE DRIVER TO PIPELINE
-// Adds a driver found via search to the recruiter's pipeline
 // ============================================================================
 
-/**
- * Save a driver from search results to the recruiter's pipeline
- * @param {string} carrierDot - The carrier's DOT number
- * @param {string} driverId - The driver's profile ID
- * @param {string} notes - Optional notes from recruiter
- * @returns {Object} { success, interestId, errorCode }
- */
 export async function saveDriverToPipeline(carrierDot, driverId, notes = '') {
   try {
-    // Verify recruiter access
     const accessCheck = await verifyRecruiterAccess(carrierDot);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
+    if (!accessCheck.success) return accessCheck;
 
     const dotString = String(carrierDot).trim();
+    const driver = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
+    if (!driver) return { success: false, errorCode: 'DRIVER_NOT_FOUND', error: 'Driver profile not found' };
 
-    // Check if driver profile exists
-    const driverResult = await wixData.query(CONFIG.driverProfilesCollection)
-      .eq('_id', driverId)
-      .limit(1)
-      .find({ suppressAuth: true });
+    const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { carrier_dot: dotString, driver_id: driverId }, limit: 1, suppressAuth: true
+    });
 
-    if (driverResult.items.length === 0) {
-      return { success: false, errorCode: 'DRIVER_NOT_FOUND', error: 'Driver profile not found' };
+    if (existingResult.success && existingResult.items.length > 0) {
+      return { success: false, errorCode: 'DUPLICATE_SAVE', error: 'Driver already in pipeline', interestId: existingResult.items[0]._id, status: existingResult.items[0].status };
     }
 
-    const driver = driverResult.items[0];
+    const viewResult = await dataAccess.queryRecords(COLLECTION_KEYS.profileViews, {
+      filters: { carrier_dot: dotString, driver_id: driverId },
+      sort: [{ field: 'view_timestamp', direction: 'desc' }], limit: 1, suppressAuth: true
+    });
 
-    // Check if already in pipeline
-    const existingResult = await wixData.query(CONFIG.interestsCollection)
-      .eq('carrier_dot', dotString)
-      .eq('driver_id', driverId)
-      .limit(1)
-      .find({ suppressAuth: true });
+    if (!viewResult.items?.length) return { success: false, errorCode: 'PROFILE_VIEW_REQUIRED', error: 'View profile required before saving' };
 
-    if (existingResult.items.length > 0) {
-      return {
-        success: false,
-        errorCode: 'DUPLICATE_SAVE',
-        error: 'Driver already in pipeline',
-        interestId: existingResult.items[0]._id,
-        status: existingResult.items[0].status
-      };
-    }
-
-    // Verify profile was viewed (check quota consumption)
-    const viewResult = await wixData.query(CONFIG.profileViewsCollection)
-      .eq('carrier_dot', dotString)
-      .eq('driver_id', driverId)
-      .descending('view_timestamp')
-      .limit(1)
-      .find({ suppressAuth: true });
-
-    if (viewResult.items.length === 0) {
-      return {
-        success: false,
-        errorCode: 'PROFILE_VIEW_REQUIRED',
-        error: 'You must view the driver profile before saving to pipeline'
-      };
-    }
-
-    // Create the interest record
     const now = new Date();
     const interestRecord = {
-      driver_id: driverId,
-      carrier_dot: dotString,
-      status: CONFIG.RECRUITER_INITIAL_STATUS,
-      match_score: 0,
-      origin: CONFIG.ORIGIN.RECRUITER_SEARCH,
-      recruiter_notes: notes || '',
-      action_timestamp: now,
-      application_date: now,
-      status_history: JSON.stringify([{
-        status: CONFIG.RECRUITER_INITIAL_STATUS,
-        timestamp: now.toISOString(),
-        by: 'recruiter'
-      }]),
-      contact_email: driver.email,
-      contact_phone: driver.phone,
-      preferred_contact: driver.preferred_contact || 'email'
+      driver_id: driverId, carrier_dot: dotString, status: CONFIG.RECRUITER_INITIAL_STATUS, match_score: 0,
+      origin: CONFIG.ORIGIN.RECRUITER_SEARCH, recruiter_notes: notes || '', action_timestamp: now, application_date: now,
+      status_history: JSON.stringify([{ status: CONFIG.RECRUITER_INITIAL_STATUS, timestamp: now.toISOString(), by: 'recruiter' }]),
+      contact_email: driver.email, contact_phone: driver.phone, preferred_contact: driver.preferred_contact || 'email'
     };
 
-    const insertResult = await wixData.insert(CONFIG.interestsCollection, interestRecord, { suppressAuth: true });
-
-    // Record outreach action
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.interests, interestRecord, { suppressAuth: true });
     await recordOutreachAction(dotString, driverId, 'save_to_pipeline', accessCheck.userId);
 
-    console.log(`[DriverOutreach] Saved driver ${driverId} to pipeline for carrier ${dotString}`);
-
-    return {
-      success: true,
-      interestId: insertResult._id,
-      status: CONFIG.RECRUITER_INITIAL_STATUS
-    };
+    return { success: true, interestId: result.record._id, status: CONFIG.RECRUITER_INITIAL_STATUS };
   } catch (error) {
     console.error('saveDriverToPipeline error:', error);
     return { success: false, error: error.message };
   }
 }
 
-// Alias for backward compatibility with page code
 export const saveToRecruiterPipeline = saveDriverToPipeline;
 
 // ============================================================================
 // SEND MESSAGE TO DRIVER
-// Wrapper for messaging service with recruiter context
 // ============================================================================
 
-/**
- * Send a message from recruiter to driver
- * @param {string} carrierDot - The carrier's DOT number
- * @param {string} driverId - The driver's profile ID
- * @param {string} messageContent - The message text
- * @returns {Object} { success, messageId, errorCode }
- */
 export async function sendMessageToDriver(carrierDot, driverId, messageContent) {
   try {
-    // Verify recruiter access
     const accessCheck = await verifyRecruiterAccess(carrierDot);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
-
-    if (!messageContent || messageContent.trim().length === 0) {
-      return { success: false, errorCode: 'EMPTY_MESSAGE', error: 'Message content required' };
-    }
+    if (!accessCheck.success) return accessCheck;
+    if (!messageContent?.trim()) return { success: false, errorCode: 'EMPTY_MESSAGE', error: 'Message required' };
 
     const dotString = String(carrierDot).trim();
+    const viewResult = await dataAccess.queryRecords(COLLECTION_KEYS.profileViews, {
+      filters: { carrier_dot: dotString, driver_id: driverId }, limit: 1, suppressAuth: true
+    });
 
-    // Check if profile was viewed (required before contact)
-    const viewResult = await wixData.query(CONFIG.profileViewsCollection)
-      .eq('carrier_dot', dotString)
-      .eq('driver_id', driverId)
-      .descending('view_timestamp')
-      .limit(1)
-      .find({ suppressAuth: true });
+    if (!viewResult.items?.length) return { success: false, errorCode: 'PROFILE_VIEW_REQUIRED', error: 'View profile required before messaging' };
 
-    if (viewResult.items.length === 0) {
-      return {
-        success: false,
-        errorCode: 'PROFILE_VIEW_REQUIRED',
-        error: 'You must view the driver profile before sending a message'
-      };
-    }
-
-    // Check if there's an existing interest record
-    let interestResult = await wixData.query(CONFIG.interestsCollection)
-      .eq('carrier_dot', dotString)
-      .eq('driver_id', driverId)
-      .limit(1)
-      .find({ suppressAuth: true });
+    const interestResult = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { carrier_dot: dotString, driver_id: driverId }, limit: 1, suppressAuth: true
+    });
 
     let applicationId;
-
-    if (interestResult.items.length > 0) {
-      applicationId = interestResult.items[0]._id;
-    } else {
-      // No interest record exists - create one first
+    if (interestResult.items?.length) applicationId = interestResult.items[0]._id;
+    else {
       const saveResult = await saveDriverToPipeline(carrierDot, driverId, '');
-      if (!saveResult.success) {
-        return saveResult;
-      }
+      if (!saveResult.success) return saveResult;
       applicationId = saveResult.interestId;
     }
 
-    // Send message
-    const result = await sendMessagingMessage(
-      applicationId,
-      messageContent.trim(),
-      driverId,
-      'recruiter'
-    );
-
+    const result = await sendMessagingMessage(applicationId, messageContent.trim(), driverId, 'recruiter');
     if (result.success) {
-      // Record outreach action
       await recordOutreachAction(dotString, driverId, 'message_sent', accessCheck.userId);
-      console.log(`[DriverOutreach] Message sent to driver ${driverId}`);
-
-      // Notify driver they were contacted (non-blocking)
-      notifyDriverContactedNonBlocking(driverId, {
-        carrierDot: dotString,
-        messagePreview: messageContent.trim().substring(0, 100)
-      });
+      notifyDriverContactedNonBlocking(driverId, { carrierDot: dotString, messagePreview: messageContent.trim().substring(0, 100) });
     }
-
     return result;
   } catch (error) {
     console.error('sendMessageToDriver error:', error);
@@ -330,66 +157,33 @@ export async function sendMessageToDriver(carrierDot, driverId, messageContent) 
 
 // ============================================================================
 // RECORD OUTREACH ACTION
-// Logs recruiter actions for history tracking
 // ============================================================================
 
 async function recordOutreachAction(carrierDot, driverId, actionType, recruiterId) {
   try {
-    const record = {
-      carrier_dot: carrierDot,
-      driver_id: driverId,
-      action_type: actionType,
-      recruiter_id: recruiterId,
-      timestamp: new Date()
-    };
-
-    await wixData.insert(CONFIG.outreachHistoryCollection, record, { suppressAuth: true });
-  } catch (error) {
-    // Non-critical, just log
-    console.warn('Could not record outreach action:', error.message);
-  }
+    await dataAccess.insertRecord(COLLECTION_KEYS.outreachHistory, {
+      carrier_dot: carrierDot, driver_id: driverId, action_type: actionType, recruiter_id: recruiterId, timestamp: new Date()
+    }, { suppressAuth: true });
+  } catch (err) { }
 }
 
 // ============================================================================
 // GET OUTREACH HISTORY
-// Returns history of recruiter actions for a carrier/driver
 // ============================================================================
 
-/**
- * Get outreach history for a carrier
- * @param {string} carrierDot - The carrier's DOT number
- * @param {string} driverId - Optional driver ID to filter by
- * @returns {Object} { success, history[] }
- */
 export async function getOutreachHistory(carrierDot, driverId = null) {
   try {
-    // Verify recruiter access
     const accessCheck = await verifyRecruiterAccess(carrierDot);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
+    if (!accessCheck.success) return accessCheck;
 
-    const dotString = String(carrierDot).trim();
+    const filters = { carrier_dot: String(carrierDot).trim() };
+    if (driverId) filters.driver_id = driverId;
 
-    let query = wixData.query(CONFIG.outreachHistoryCollection)
-      .eq('carrier_dot', dotString)
-      .descending('timestamp');
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.outreachHistory, {
+      filters, sort: [{ field: 'timestamp', direction: 'desc' }], limit: 100, suppressAuth: true
+    });
 
-    if (driverId) {
-      query = query.eq('driver_id', driverId);
-    }
-
-    const result = await query.limit(100).find({ suppressAuth: true });
-
-    return {
-      success: true,
-      history: result.items.map(item => ({
-        actionType: item.action_type,
-        driverId: item.driver_id,
-        timestamp: item.timestamp,
-        recruiterId: item.recruiter_id
-      }))
-    };
+    return { success: true, history: (result.items || []).map(item => ({ actionType: item.action_type, driverId: item.driver_id, timestamp: item.timestamp, recruiterId: item.recruiter_id })) };
   } catch (error) {
     console.error('getOutreachHistory error:', error);
     return { success: false, error: error.message, history: [] };
@@ -398,42 +192,17 @@ export async function getOutreachHistory(carrierDot, driverId = null) {
 
 // ============================================================================
 // GET QUOTA STATUS
-// Returns current quota information for the carrier
 // ============================================================================
 
-/**
- * Get quota status for a carrier
- * @param {string} carrierDot - The carrier's DOT number
- * @returns {Object} { tier, used, limit, remaining, resetDate }
- */
 export async function getQuotaStatus(carrierDot) {
   try {
-    // Verify recruiter access
     const accessCheck = await verifyRecruiterAccess(carrierDot);
-    if (!accessCheck.success) {
-      return accessCheck;
-    }
+    if (!accessCheck.success) return accessCheck;
 
     const quotaCheck = await checkViewQuota(carrierDot);
-
-    return {
-      success: true,
-      tier: quotaCheck.tier || 'free',
-      used: quotaCheck.used || 0,
-      limit: quotaCheck.limit || 5,
-      remaining: quotaCheck.remaining || 0,
-      resetDate: quotaCheck.resetDate,
-      hasQuota: quotaCheck.hasQuota
-    };
+    return { success: true, tier: quotaCheck.tier || 'free', used: quotaCheck.used || 0, limit: quotaCheck.limit || 5, remaining: quotaCheck.remaining || 0, resetDate: quotaCheck.resetDate, hasQuota: quotaCheck.hasQuota };
   } catch (error) {
     console.error('getQuotaStatus error:', error);
-    return {
-      success: false,
-      error: error.message,
-      tier: 'free',
-      used: 0,
-      limit: 5,
-      remaining: 0
-    };
+    return { success: false, error: error.message, tier: 'free', used: 0, limit: 5, remaining: 0 };
   }
 }

@@ -10,14 +10,10 @@
  * This service uses Airtable-only collections (no Wix fallback).
  */
 
-import { getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { createNotification } from 'backend/memberService';
 
-// =============================================================================
-// COLLECTION KEYS (Airtable-only)
-// =============================================================================
-
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     seasonalEvents: 'seasonalEvents',
     eventParticipants: 'eventParticipants',
@@ -38,558 +34,188 @@ const EVENT_STATUS = {
 };
 
 // =============================================================================
-// AIRTABLE-ONLY HELPER FUNCTIONS
-// =============================================================================
-
-async function queryData(collectionKey, options = {}) {
-    const tableName = getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-        filterByFormula: options.filter || '',
-        sort: options.sort,
-        maxRecords: options.limit || 100
-    });
-    return result.records || [];
-}
-
-async function insertData(collectionKey, data) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.createRecord(tableName, data);
-}
-
-async function updateData(collectionKey, recordId, data) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.updateRecord(tableName, recordId, data);
-}
-
-async function getRecord(collectionKey, recordId) {
-    const tableName = getAirtableTableName(collectionKey);
-    return await airtable.getRecord(tableName, recordId);
-}
-
-// =============================================================================
 // GET ACTIVE EVENTS
 // =============================================================================
 
 /**
  * Get all currently active events
- * @returns {array} Active events with multipliers and details
  */
 export async function getActiveEvents() {
     try {
         const now = new Date().toISOString();
-
-        const records = await queryData(COLLECTION_KEYS.seasonalEvents, {
-            filter: `AND({Status} = "${EVENT_STATUS.ACTIVE}", {Start Date} <= "${now}", {End Date} >= "${now}")`,
-            sort: [{ field: 'Priority', direction: 'desc' }],
-            limit: 10
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, {
+            filters: { status: EVENT_STATUS.ACTIVE, start_date: { le: now }, end_date: { ge: now } },
+            sort: [{ field: 'priority', direction: 'desc' }], limit: 10, suppressAuth: true
         });
-
-        return records.map(normalizeEvent);
-    } catch (error) {
-        console.error('getActiveEvents error:', error);
-        return [];
-    }
+        return (result.items || []).map(normalizeEvent);
+    } catch (error) { return []; }
 }
 
 /**
- * Get upcoming events (for preview/announcement)
- * @param {number} daysAhead - How many days ahead to look
- * @returns {array} Upcoming events
+ * Get upcoming events
  */
 export async function getUpcomingEvents(daysAhead = 7) {
     try {
         const now = new Date();
         const futureDate = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
-
-        const records = await queryData(COLLECTION_KEYS.seasonalEvents, {
-            filter: `AND({Status} = "${EVENT_STATUS.SCHEDULED}", {Start Date} >= "${now.toISOString()}", {Start Date} <= "${futureDate.toISOString()}")`,
-            sort: [{ field: 'Start Date', direction: 'asc' }],
-            limit: 5
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, {
+            filters: { status: EVENT_STATUS.SCHEDULED, start_date: { gte: now.toISOString(), le: futureDate.toISOString() } },
+            sort: [{ field: 'start_date', direction: 'asc' }], limit: 5, suppressAuth: true
         });
-
-        return records.map(normalizeEvent);
-    } catch (error) {
-        console.error('getUpcomingEvents error:', error);
-        return [];
-    }
+        return (result.items || []).map(normalizeEvent);
+    } catch (error) { return []; }
 }
 
-/**
- * Get a specific event by ID
- * @param {string} eventId
- * @returns {object} Event details
- */
 export async function getEventById(eventId) {
     try {
-        const record = await getRecord(COLLECTION_KEYS.seasonalEvents, eventId);
-        if (!record) return null;
-        return normalizeEvent(record);
-    } catch (error) {
-        console.error('getEventById error:', error);
-        return null;
-    }
+        const record = await dataAccess.getRecord(COLLECTION_KEYS.seasonalEvents, eventId, { suppressAuth: true });
+        return record ? normalizeEvent(record) : null;
+    } catch (error) { return null; }
 }
 
 // =============================================================================
 // EVENT PARTICIPATION
 // =============================================================================
 
-/**
- * Join an active event
- * @param {string} userId - User ID
- * @param {string} userType - 'driver' or 'recruiter'
- * @param {string} eventId - Event ID
- * @returns {object} Participation record
- */
 export async function joinEvent(userId, userType, eventId) {
     try {
-        // Verify event is active
         const event = await getEventById(eventId);
-        if (!event) {
-            return { success: false, error: 'event_not_found' };
-        }
+        if (!event || event.status !== EVENT_STATUS.ACTIVE) return { success: false, error: 'event_not_active' };
 
-        if (event.status !== EVENT_STATUS.ACTIVE) {
-            return { success: false, error: 'event_not_active' };
-        }
-
-        // Check if already participating
-        const existing = await queryData(COLLECTION_KEYS.eventParticipants, {
-            filter: `AND({User ID} = "${userId}", {Event ID} = "${eventId}")`,
-            limit: 1
+        const existing = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
+            filters: { user_id: userId, event_id: eventId }, limit: 1, suppressAuth: true
         });
+        if (existing.items?.length) return { success: true, already_joined: true, participant: normalizeParticipant(existing.items[0]) };
 
-        if (existing.length > 0) {
-            return { success: true, already_joined: true, participant: normalizeParticipant(existing[0]) };
-        }
-
-        // Create participation record
         const now = new Date().toISOString();
-        const participantData = {
-            'User ID': userId,
-            'User Type': userType,
-            'Event ID': eventId,
-            'Event Name': event.name,
-            'Points Earned': 0,
-            'XP Earned': 0,
-            'Challenges Completed': 0,
-            'Joined At': now,
-            'Created At': now,
-            'Updated At': now
-        };
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.eventParticipants, {
+            user_id: userId, user_type: userType, event_id: eventId, event_name: event.name,
+            points_earned: 0, xp_earned: 0, challenges_completed: 0, joined_at: now, created_at: now, updated_at: now
+        }, { suppressAuth: true });
 
-        const result = await insertData(COLLECTION_KEYS.eventParticipants, participantData);
-
-        return {
-            success: true,
-            participant: normalizeParticipant(result)
-        };
-    } catch (error) {
-        console.error('joinEvent error:', error);
-        return { success: false, error: error.message };
-    }
+        return { success: result.success, participant: normalizeParticipant(result.record) };
+    } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get user's participation in an event
- * @param {string} userId
- * @param {string} eventId
- * @returns {object} Participation status and stats
- */
 export async function getEventParticipation(userId, eventId) {
     try {
-        const records = await queryData(COLLECTION_KEYS.eventParticipants, {
-            filter: `AND({User ID} = "${userId}", {Event ID} = "${eventId}")`,
-            limit: 1
-        });
-
-        if (records.length === 0) {
-            return { participating: false };
-        }
-
-        return {
-            participating: true,
-            participant: normalizeParticipant(records[0])
-        };
-    } catch (error) {
-        console.error('getEventParticipation error:', error);
-        return { participating: false, error: error.message };
-    }
+        const res = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, { filters: { user_id: userId, event_id: eventId }, limit: 1, suppressAuth: true });
+        return res.items?.length ? { participating: true, participant: normalizeParticipant(res.items[0]) } : { participating: false };
+    } catch (error) { return { participating: false, error: error.message }; }
 }
 
-/**
- * Update event participation stats (called when user earns XP/points during event)
- * @param {string} userId
- * @param {string} eventId
- * @param {object} stats - { xpEarned, pointsEarned, challengeCompleted }
- */
 export async function updateEventStats(userId, eventId, stats) {
     try {
-        const records = await queryData(COLLECTION_KEYS.eventParticipants, {
-            filter: `AND({User ID} = "${userId}", {Event ID} = "${eventId}")`,
-            limit: 1
-        });
-
-        if (records.length === 0) return;
-
-        const participant = records[0];
-        const updateFields = {
-            'Updated At': new Date().toISOString()
-        };
-
-        if (stats.xpEarned) {
-            updateFields['XP Earned'] = (participant['XP Earned'] || 0) + stats.xpEarned;
-        }
-        if (stats.pointsEarned) {
-            updateFields['Points Earned'] = (participant['Points Earned'] || 0) + stats.pointsEarned;
-        }
-        if (stats.challengeCompleted) {
-            updateFields['Challenges Completed'] = (participant['Challenges Completed'] || 0) + 1;
-        }
-
-        await updateData(COLLECTION_KEYS.eventParticipants, participant.id, updateFields);
-    } catch (error) {
-        console.error('updateEventStats error:', error);
-    }
+        const res = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, { filters: { user_id: userId, event_id: eventId }, limit: 1, suppressAuth: true });
+        if (!res.items?.length) return;
+        const p = res.items[0];
+        const update = { ...p, updated_at: new Date().toISOString() };
+        if (stats.xpEarned) update.xp_earned = (p.xp_earned || 0) + stats.xpEarned;
+        if (stats.pointsEarned) update.points_earned = (p.points_earned || 0) + stats.pointsEarned;
+        if (stats.challengeCompleted) update.challenges_completed = (p.challenges_completed || 0) + 1;
+        await dataAccess.updateRecord(COLLECTION_KEYS.eventParticipants, update, { suppressAuth: true });
+    } catch (error) { }
 }
 
 // =============================================================================
 // EVENT LEADERBOARD
 // =============================================================================
 
-/**
- * Get event leaderboard
- * @param {string} eventId
- * @param {string} userType - 'driver' or 'recruiter' or 'all'
- * @param {object} options - { limit, offset }
- * @returns {object} { leaderboard, total }
- */
 export async function getEventLeaderboard(eventId, userType = 'all', options = {}) {
     try {
         const limit = options.limit || 20;
+        const filters = { event_id: eventId };
+        if (userType !== 'all') filters.user_type = userType;
+        const sortField = userType === 'recruiter' ? 'points_earned' : 'xp_earned';
 
-        let filter = `{Event ID} = "${eventId}"`;
-        if (userType !== 'all') {
-            filter = `AND(${filter}, {User Type} = "${userType}")`;
-        }
-
-        // Sort by XP for drivers, points for recruiters, or combined for all
-        const sortField = userType === 'recruiter' ? 'Points Earned' : 'XP Earned';
-
-        const records = await queryData(COLLECTION_KEYS.eventParticipants, {
-            filter,
-            sort: [{ field: sortField, direction: 'desc' }],
-            limit: limit + 1
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
+            filters, sort: [{ field: sortField, direction: 'desc' }], limit: limit + 1, suppressAuth: true
         });
-
-        const hasMore = records.length > limit;
-        const leaderboard = records.slice(0, limit).map((record, index) => ({
-            rank: index + 1,
-            ...normalizeParticipant(record)
-        }));
-
-        return {
-            leaderboard,
-            total: records.length,
-            hasMore
-        };
-    } catch (error) {
-        console.error('getEventLeaderboard error:', error);
-        return { leaderboard: [], total: 0, error: error.message };
-    }
+        const items = result.items || [];
+        return { leaderboard: items.slice(0, limit).map((r, i) => ({ rank: i + 1, ...normalizeParticipant(r) })), total: result.totalCount || items.length, hasMore: items.length > limit };
+    } catch (error) { return { leaderboard: [], total: 0, error: error.message }; }
 }
 
-/**
- * Get user's rank in an event
- * @param {string} userId
- * @param {string} eventId
- * @returns {object} { rank, totalParticipants, score }
- */
 export async function getUserEventRank(userId, eventId) {
     try {
-        // Get all participants sorted by score
-        const allRecords = await queryData(COLLECTION_KEYS.eventParticipants, {
-            filter: `{Event ID} = "${eventId}"`,
-            sort: [{ field: 'XP Earned', direction: 'desc' }],
-            limit: 10000
-        });
-
-        const userIndex = allRecords.findIndex(r => r['User ID'] === userId);
-
-        if (userIndex === -1) {
-            return { participating: false };
-        }
-
-        const userRecord = allRecords[userIndex];
-
-        return {
-            participating: true,
-            rank: userIndex + 1,
-            totalParticipants: allRecords.length,
-            xpEarned: userRecord['XP Earned'] || 0,
-            pointsEarned: userRecord['Points Earned'] || 0,
-            challengesCompleted: userRecord['Challenges Completed'] || 0
-        };
-    } catch (error) {
-        console.error('getUserEventRank error:', error);
-        return { participating: false, error: error.message };
-    }
+        const res = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, { filters: { event_id: eventId }, sort: [{ field: 'xp_earned', direction: 'desc' }], limit: 10000, suppressAuth: true });
+        const items = res.items || [];
+        const idx = items.findIndex(r => r.user_id === userId);
+        if (idx === -1) return { participating: false };
+        const r = items[idx];
+        return { participating: true, rank: idx + 1, totalParticipants: items.length, xpEarned: r.xp_earned || 0, pointsEarned: r.points_earned || 0, challengesCompleted: r.challenges_completed || 0 };
+    } catch (error) { return { participating: false, error: error.message }; }
 }
 
 // =============================================================================
-// EVENT LIFECYCLE (Admin/Scheduled Jobs)
+// EVENT LIFECYCLE
 // =============================================================================
 
-/**
- * Start scheduled events that are due (called by scheduled job)
- * @returns {object} { started, count }
- */
 export async function startScheduledEvents() {
     try {
         const now = new Date().toISOString();
-
-        // Find events that should start now
-        const records = await queryData(COLLECTION_KEYS.seasonalEvents, {
-            filter: `AND({Status} = "${EVENT_STATUS.SCHEDULED}", {Start Date} <= "${now}")`,
-            limit: 50
-        });
-
-        let startedCount = 0;
-
-        for (const record of records) {
-            await updateData(COLLECTION_KEYS.seasonalEvents, record.id, {
-                'Status': EVENT_STATUS.ACTIVE,
-                'Activated At': now,
-                'Updated At': now
-            });
-
-            // Notify subscribers about event start
-            await notifyEventStart(normalizeEvent(record));
-            startedCount++;
+        const res = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, { filters: { status: EVENT_STATUS.SCHEDULED, start_date: { le: now } }, limit: 50, suppressAuth: true });
+        for (const r of (res.items || [])) {
+            await dataAccess.updateRecord(COLLECTION_KEYS.seasonalEvents, { ...r, status: EVENT_STATUS.ACTIVE, activated_at: now, updated_at: now }, { suppressAuth: true });
         }
-
-        console.log(`✅ Started ${startedCount} scheduled events`);
-        return { started: true, count: startedCount };
-    } catch (error) {
-        console.error('startScheduledEvents error:', error);
-        return { started: false, error: error.message };
-    }
+        return { started: true, count: res.items?.length || 0 };
+    } catch (error) { return { started: false, error: error.message }; }
 }
 
-/**
- * End events that have passed their end date (called by scheduled job)
- * @returns {object} { ended, count }
- */
 export async function endExpiredEvents() {
     try {
         const now = new Date().toISOString();
-
-        // Find events that should end now
-        const records = await queryData(COLLECTION_KEYS.seasonalEvents, {
-            filter: `AND({Status} = "${EVENT_STATUS.ACTIVE}", {End Date} <= "${now}")`,
-            limit: 50
-        });
-
-        let endedCount = 0;
-
-        for (const record of records) {
-            await updateData(COLLECTION_KEYS.seasonalEvents, record.id, {
-                'Status': EVENT_STATUS.ENDED,
-                'Ended At': now,
-                'Updated At': now
-            });
-
-            // Process final leaderboard and awards
-            await processEventEnd(record.id, normalizeEvent(record));
-            endedCount++;
+        const res = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, { filters: { status: EVENT_STATUS.ACTIVE, end_date: { le: now } }, limit: 50, suppressAuth: true });
+        for (const r of (res.items || [])) {
+            await dataAccess.updateRecord(COLLECTION_KEYS.seasonalEvents, { ...r, status: EVENT_STATUS.ENDED, ended_at: now, updated_at: now }, { suppressAuth: true });
         }
-
-        console.log(`✅ Ended ${endedCount} expired events`);
-        return { ended: true, count: endedCount };
-    } catch (error) {
-        console.error('endExpiredEvents error:', error);
-        return { ended: false, error: error.message };
-    }
+        return { ended: true, count: res.items?.length || 0 };
+    } catch (error) { return { ended: false, error: error.message }; }
 }
 
-/**
- * Process event end - calculate winners and distribute rewards
- */
-async function processEventEnd(eventId, event) {
-    try {
-        // Get top participants for each user type
-        const driverLeaderboard = await getEventLeaderboard(eventId, 'driver', { limit: 10 });
-        const recruiterLeaderboard = await getEventLeaderboard(eventId, 'recruiter', { limit: 10 });
-
-        // Notify top participants
-        for (const entry of driverLeaderboard.leaderboard.slice(0, 3)) {
-            await createNotification(
-                entry.userId,
-                'event_ended',
-                `${event.name} Has Ended!`,
-                `Congratulations! You finished #${entry.rank} in the ${event.name} event! Check your rewards.`,
-                '/driver/achievements'
-            );
-        }
-
-        for (const entry of recruiterLeaderboard.leaderboard.slice(0, 3)) {
-            await createNotification(
-                entry.userId,
-                'event_ended',
-                `${event.name} Has Ended!`,
-                `Congratulations! You finished #${entry.rank} in the ${event.name} event! Check your rewards.`,
-                '/recruiter/leaderboard'
-            );
-        }
-
-        console.log(`✅ Processed end for event: ${event.name}`);
-    } catch (error) {
-        console.error('processEventEnd error:', error);
-    }
-}
-
-/**
- * Notify users about event starting
- */
-async function notifyEventStart(event) {
-    try {
-        // For now, we'll create notifications for recently active users
-        // In production, this could use a proper notification service
-        console.log(`📣 Event started: ${event.name}`);
-    } catch (error) {
-        console.error('notifyEventStart error:', error);
-    }
-}
-
-// =============================================================================
-// EVENT MULTIPLIERS
-// =============================================================================
-
-/**
- * Get current XP multiplier from active events
- * @returns {number} Combined multiplier (minimum 1.0)
- */
 export async function getCurrentXPMultiplier() {
     try {
-        const activeEvents = await getActiveEvents();
-
-        let maxMultiplier = 1.0;
-        for (const event of activeEvents) {
-            if (event.xpMultiplier > maxMultiplier) {
-                maxMultiplier = event.xpMultiplier;
-            }
-        }
-
-        return maxMultiplier;
-    } catch (error) {
-        return 1.0;
-    }
+        const events = await getActiveEvents();
+        return Math.max(1.0, ...events.map(e => e.xpMultiplier || 1.0));
+    } catch (error) { return 1.0; }
 }
 
-/**
- * Get current points multiplier from active events
- * @returns {number} Combined multiplier (minimum 1.0)
- */
 export async function getCurrentPointsMultiplier() {
     try {
-        const activeEvents = await getActiveEvents();
-
-        let maxMultiplier = 1.0;
-        for (const event of activeEvents) {
-            if (event.pointsMultiplier > maxMultiplier) {
-                maxMultiplier = event.pointsMultiplier;
-            }
-        }
-
-        return maxMultiplier;
-    } catch (error) {
-        return 1.0;
-    }
+        const events = await getActiveEvents();
+        return Math.max(1.0, ...events.map(e => e.pointsMultiplier || 1.0));
+    } catch (error) { return 1.0; }
 }
 
-// =============================================================================
-// EVENT CHALLENGES
-// =============================================================================
-
-/**
- * Get challenges specific to an event
- * @param {string} eventId
- * @param {string} userType - 'driver' or 'recruiter'
- * @returns {array} Event-specific challenges
- */
 export async function getEventChallenges(eventId, userType) {
     try {
-        const records = await queryData(COLLECTION_KEYS.challengeDefinitions, {
-            filter: `AND({Challenge Type} = "event", {Event ID} = "${eventId}", {User Type} = "${userType}", {Is Active} = "Yes")`,
-            sort: [{ field: 'Display Order', direction: 'asc' }],
-            limit: 20
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.challengeDefinitions, {
+            filters: { challenge_type: 'event', event_id: eventId, user_type: userType, is_active: 'Yes' },
+            sort: [{ field: 'display_order', direction: 'asc' }], limit: 20, suppressAuth: true
         });
-
-        return records.map(r => ({
-            _id: r.id,
-            challengeId: r['Challenge ID'],
-            name: r['Name'],
-            description: r['Description'],
-            actionType: r['Action Type'],
-            targetValue: r['Target Value'] || 1,
-            xpReward: r['XP Reward'] || 0,
-            pointsReward: r['Points Reward'] || 0,
-            icon: r['Icon'],
-            color: r['Color']
-        }));
-    } catch (error) {
-        console.error('getEventChallenges error:', error);
-        return [];
-    }
+        return (result.items || []).map(r => ({ _id: r._id, challengeId: r.challenge_id, name: r.name, description: r.description, actionType: r.action_type, targetValue: r.target_value || 1, xpReward: r.xp_reward || 0, pointsReward: r.points_reward || 0, icon: r.icon, color: r.color }));
+    } catch (error) { return []; }
 }
 
-// =============================================================================
-// EVENT SUMMARY
-// =============================================================================
-
-/**
- * Get summary of current events for dashboard
- * @param {string} userId
- * @param {string} userType
- * @returns {object} Event summary
- */
 export async function getEventSummary(userId, userType) {
     try {
-        const [active, upcoming] = await Promise.all([
-            getActiveEvents(),
-            getUpcomingEvents(7)
-        ]);
-
-        // Check participation in active events
-        const participationPromises = active.map(event =>
-            getEventParticipation(userId, event._id)
-        );
-        const participations = await Promise.all(participationPromises);
-
-        const activeWithParticipation = active.map((event, i) => ({
-            ...event,
-            participating: participations[i].participating,
-            stats: participations[i].participant || null
-        }));
-
-        // Get multipliers
-        const xpMultiplier = await getCurrentXPMultiplier();
-        const pointsMultiplier = await getCurrentPointsMultiplier();
-
-        return {
-            activeEvents: activeWithParticipation,
-            upcomingEvents: upcoming,
-            multipliers: {
-                xp: xpMultiplier,
-                points: pointsMultiplier,
-                hasBonus: xpMultiplier > 1.0 || pointsMultiplier > 1.0
-            }
-        };
-    } catch (error) {
-        console.error('getEventSummary error:', error);
-        return { error: error.message };
-    }
+        const [active, upcoming] = await Promise.all([getActiveEvents(), getUpcomingEvents(7)]);
+        const participations = await Promise.all(active.map(e => getEventParticipation(userId, e._id)));
+        const activeWithParticipation = active.map((e, i) => ({ ...e, participating: participations[i].participating, stats: participations[i].participant || null }));
+        const xpM = await getCurrentXPMultiplier(), ptsM = await getCurrentPointsMultiplier();
+        return { activeEvents: activeWithParticipation, upcomingEvents: upcoming, multipliers: { xp: xpM, points: ptsM, hasBonus: xpM > 1.0 || ptsM > 1.0 } };
+    } catch (error) { return { error: error.message }; }
 }
+
+function normalizeEvent(r) {
+    return { _id: r._id, eventId: r.event_id, name: r.name, description: r.description, type: r.event_type, status: r.status, startDate: r.start_date, endDate: r.end_date, xpMultiplier: r.xp_multiplier || 1.0, pointsMultiplier: r.points_multiplier || 1.0, icon: r.icon, bannerImage: r.banner_image, color: r.color, priority: r.priority || 0, isActive: r.is_active === 'Yes', createdAt: r.created_at, updatedAt: r.updated_at };
+}
+
+function normalizeParticipant(r) {
+    return { _id: r._id, userId: r.user_id, userType: r.user_type, eventId: r.event_id, eventName: r.event_name, xpEarned: r.xp_earned || 0, pointsEarned: r.points_earned || 0, challengesCompleted: r.challenges_completed || 0, joinedAt: r.joined_at, createdAt: r.created_at };
+}
+
+export function getEventStatuses() { return EVENT_STATUS; }
 
 // =============================================================================
 // HELPERS

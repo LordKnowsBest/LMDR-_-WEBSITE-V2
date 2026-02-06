@@ -1,9 +1,7 @@
 import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
-import wixData from 'wix-data';
 import { log, logExternalAPI } from 'backend/observabilityService';
-import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================================================
 // CONFIGURATION
@@ -15,8 +13,8 @@ const CONFIG = {
   secretName: 'FMCSA_WEB_KEY',
 
   // Cache Settings
-  safetyDataCollection: 'CarrierSafetyData',
-  cacheExpiryDays: 7, // FMCSA data is relatively stable
+  collectionKey: 'carrierSafetyData',
+  cacheExpiryDays: 7,
 
   // Rate Limiting
   maxRequestsPerMinute: 30,
@@ -28,18 +26,6 @@ const CONFIG = {
     baseDelayMs: 1000,
     maxDelayMs: 8000,
     retryableStatuses: [429, 500, 502, 503, 504]
-  },
-
-  // Circuit Breaker Settings
-  circuitBreaker: {
-    failureThreshold: 5,
-    resetTimeoutMs: 60000,
-    halfOpenMaxAttempts: 2
-  },
-
-  // Request Timeout
-  timeout: {
-    requestMs: 15000
   }
 };
 
@@ -741,45 +727,15 @@ function normalizeApiResponse(dotNumber, carrierData, basicsData) {
 
 /**
  * Get cached safety data for a DOT number
- * Supports both Wix and Airtable data sources based on config
  */
 async function getCachedSafetyData(dotNumber) {
   try {
-    const collectionKey = 'carrierSafetyData';
-    let cached = null;
+    const cached = await dataAccess.findByField(CONFIG.collectionKey, 'dot_number', String(dotNumber), { suppressAuth: true });
+    if (!cached) return null;
 
-    if (await usesAirtable(collectionKey)) {
-      // Airtable path
-      const tableName = await getAirtableTableName(collectionKey);
-      const formula = `{DOT Number} = '${String(dotNumber)}'`;
-      const result = await airtable.queryRecords(tableName, {
-        filterByFormula: formula,
-        maxRecords: 1
-      });
-      if (result.records && result.records.length > 0) {
-        cached = result.records[0];
-      }
-    } else {
-      // Wix path
-      const result = await wixData.query(CONFIG.safetyDataCollection)
-        .eq('dot_number', String(dotNumber))
-        .find();
-      if (result.items.length > 0) {
-        cached = result.items[0];
-      }
-    }
-
-    if (!cached) {
-      return null;
-    }
-
-    // Calculate cache age
     const fetchedDate = cached.fetched_date ? new Date(cached.fetched_date) : null;
-    const ageInDays = fetchedDate
-      ? (Date.now() - fetchedDate.getTime()) / (1000 * 60 * 60 * 24)
-      : 999;
+    const ageInDays = fetchedDate ? (Date.now() - fetchedDate.getTime()) / (1000 * 60 * 60 * 24) : 999;
 
-    // Parse JSON fields
     return {
       ...cached,
       basics: typeof cached.basics === 'string' ? JSON.parse(cached.basics) : cached.basics || {},
@@ -787,35 +743,17 @@ async function getCachedSafetyData(dotNumber) {
       crashes: typeof cached.crashes === 'string' ? JSON.parse(cached.crashes) : cached.crashes || {},
       cache_age_days: Math.round(ageInDays * 10) / 10
     };
-
   } catch (error) {
-    console.error('Cache lookup error:', error.message);
     return null;
   }
 }
 
 /**
- * Check if cached data is stale
- */
-function isStale(fetchedDate) {
-  if (!fetchedDate) return true;
-  const daysSince = (Date.now() - new Date(fetchedDate).getTime()) / (1000 * 60 * 60 * 24);
-  return daysSince > CONFIG.cacheExpiryDays;
-}
-
-/**
  * Save safety data to cache
- * Supports both Wix and Airtable data sources based on config
  */
 async function cacheSafetyData(safetyData) {
   try {
-    const collectionKey = 'carrierSafetyData';
-    const options = { suppressAuth: true };
-
-    // Check for existing record
     const existing = await getCachedSafetyData(safetyData.dot_number);
-
-    // Prepare data for storage (stringify JSON fields)
     const dataToStore = {
       ...safetyData,
       basics: JSON.stringify(safetyData.basics || {}),
@@ -823,52 +761,21 @@ async function cacheSafetyData(safetyData) {
       crashes: JSON.stringify(safetyData.crashes || {})
     };
 
-    if (await usesAirtable(collectionKey)) {
-      // Airtable path
-      const tableName = await getAirtableTableName(collectionKey);
-
-      if (existing && existing._id) {
-        // Update existing
-        await airtable.updateRecord(tableName, existing._id, {
-          ...dataToStore,
-          lookup_count: (existing.lookup_count || 0) + 1,
-          last_lookup_date: new Date()
-        });
-        console.log(`📝 Updated cached safety data in Airtable for DOT ${safetyData.dot_number}`);
-      } else {
-        // Insert new
-        await airtable.createRecord(tableName, {
-          ...dataToStore,
-          lookup_count: 1,
-          last_lookup_date: new Date()
-        });
-        console.log(`📝 Created new cached safety data in Airtable for DOT ${safetyData.dot_number}`);
-      }
+    if (existing && existing._id) {
+      await dataAccess.updateRecord(CONFIG.collectionKey, {
+        ...dataToStore,
+        _id: existing._id,
+        lookup_count: (existing.lookup_count || 0) + 1,
+        last_lookup_date: new Date()
+      }, { suppressAuth: true });
     } else {
-      // Wix path
-      if (existing && existing._id) {
-        // Update existing
-        await wixData.update(CONFIG.safetyDataCollection, {
-          ...dataToStore,
-          _id: existing._id,
-          lookup_count: (existing.lookup_count || 0) + 1,
-          last_lookup_date: new Date()
-        }, options);
-        console.log(`📝 Updated cached safety data for DOT ${safetyData.dot_number}`);
-      } else {
-        // Insert new
-        await wixData.insert(CONFIG.safetyDataCollection, {
-          ...dataToStore,
-          lookup_count: 1,
-          last_lookup_date: new Date()
-        }, options);
-        console.log(`📝 Created new cached safety data for DOT ${safetyData.dot_number}`);
-      }
+      await dataAccess.insertRecord(CONFIG.collectionKey, {
+        ...dataToStore,
+        lookup_count: 1,
+        last_lookup_date: new Date()
+      }, { suppressAuth: true });
     }
-
-  } catch (error) {
-    console.error('Failed to cache safety data:', error.message);
-  }
+  } catch (error) { }
 }
 
 // ============================================================================

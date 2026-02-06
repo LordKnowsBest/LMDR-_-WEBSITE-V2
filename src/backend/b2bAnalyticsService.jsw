@@ -1,18 +1,5 @@
-// ============================================================================
-// B2B ANALYTICS SERVICE - Reporting, KPIs, and attribution
-//
-// Provides pipeline analytics, campaign performance, lead attribution,
-// spend tracking, competitor intel, and analytics snapshot storage.
-//
-// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
-//
-// Used on: B2B Analytics Dashboard, Campaign Reporting
-// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
-// ============================================================================
-
 import wixData from 'wix-data';
-import { usesAirtable, getAirtableTableName } from 'backend/config';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================================================
 // COLLECTION KEYS
@@ -32,142 +19,42 @@ const COLLECTIONS = {
 };
 
 // ============================================================================
-// DUAL-SOURCE HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-      filterByFormula: options.filter || '',
-      sort: options.sort,
-      maxRecords: options.limit || 100
-    });
-    return { items: result.records || [], totalCount: result.records?.length || 0 };
-  }
-  let query = wixData.query(collectionKey);
-  if (options.limit) query = query.limit(options.limit);
-  return await query.find();
-}
-
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.createRecord(tableName, record);
-    return result.record || record;
-  }
-  return await wixData.insert(collectionKey, record);
-}
-
-async function updateData(collectionKey, recordId, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.updateRecord(tableName, recordId, record);
-    return result.record || record;
-  }
-  return await wixData.update(collectionKey, { _id: recordId, ...record });
-}
-
-async function findByField(collectionKey, fieldName, value) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    return await airtable.findByField(tableName, fieldName, value);
-  }
-  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
-  return result.items || [];
-}
-
-async function deleteData(collectionKey, recordId) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    return await airtable.deleteRecord(tableName, recordId);
-  }
-  return await wixData.remove(collectionKey, recordId);
-}
-
-// ============================================================================
 // DASHBOARD KPIs
 // ============================================================================
 
-/**
- * Get comprehensive B2B dashboard KPIs
- *
- * @param {Object} [options]
- * @param {number} [options.days=30] - Lookback period
- * @param {string} [options.ownerId] - Filter by rep
- * @returns {Promise<{success: boolean, kpis?: Object, error?: string}>}
- */
 export async function getDashboardKPIs(options = {}) {
   try {
     const days = options.days || 30;
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString();
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-    // Pipeline data
-    const openFilter = `AND({stage} != "closed_won", {stage} != "closed_lost")`;
-    const openResult = await queryData(COLLECTIONS.opportunities, { filter: openFilter, limit: 500 });
-    const openOpps = openResult.items || [];
+    const [openRes, closedRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.opportunities, { filters: { stage: { ne: ['closed_won', 'closed_lost'] } }, limit: 500, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.opportunities, { filters: { stage: { hasSome: ['closed_won', 'closed_lost'] } }, limit: 500, suppressAuth: true })
+    ]);
 
-    const closedFilter = `OR({stage} = "closed_won", {stage} = "closed_lost")`;
-    const closedResult = await queryData(COLLECTIONS.opportunities, { filter: closedFilter, limit: 500 });
-    const closedOpps = closedResult.items || [];
-
+    const openOpps = openRes.items || [], closedOpps = closedRes.items || [];
     const won = closedOpps.filter(o => o.stage === 'closed_won');
-    const lost = closedOpps.filter(o => o.stage === 'closed_lost');
-
-    // Pipeline coverage
     const pipelineValue = openOpps.reduce((s, o) => s + (Number(o.value_estimate) || 0), 0);
     const wonRevenue = won.reduce((s, o) => s + (Number(o.value_estimate) || 0), 0);
 
-    // Win rate
-    const totalClosed = won.length + lost.length;
+    const totalClosed = closedOpps.length;
     const winRate = totalClosed > 0 ? Math.round((won.length / totalClosed) * 100) : 0;
 
-    // Average cycle length
-    let totalDays = 0, cycleCount = 0;
-    won.forEach(o => {
-      if (o.created_at && o.stage_entered_at) {
-        const diff = (new Date(o.stage_entered_at) - new Date(o.created_at)) / (1000 * 60 * 60 * 24);
-        if (diff >= 0) { totalDays += diff; cycleCount++; }
-      }
-    });
-    const avgCycleDays = cycleCount > 0 ? Math.round(totalDays / cycleCount) : 0;
-
-    // Activity velocity
-    const actFilter = `IS_AFTER({created_at}, "${sinceStr}")`;
-    const actResult = await queryData(COLLECTIONS.activities, { filter: actFilter, limit: 500 });
-    const activities = actResult.items || [];
-
-    const touchesPerWeek = days > 0
-      ? Math.round((activities.length / days) * 7)
-      : 0;
-
-    // Response count (replies in period)
-    const replies = activities.filter(a =>
-      a.outcome === 'replied' || a.outcome === 'connected'
-    ).length;
+    const actRes = await dataAccess.queryRecords(COLLECTIONS.activities, { filters: { created_at: { gte: since.toISOString() } }, limit: 500, suppressAuth: true });
+    const activities = actRes.items || [];
 
     return {
       success: true,
       kpis: {
-        pipeline_coverage: wonRevenue > 0
-          ? Math.round((pipelineValue / wonRevenue) * 10) / 10
-          : pipelineValue > 0 ? 99 : 0,
-        pipeline_value: Math.round(pipelineValue),
-        win_rate: winRate,
-        avg_cycle_days: avgCycleDays,
-        activity_velocity: touchesPerWeek,
-        responses_period: replies,
-        deals_open: openOpps.length,
-        deals_won: won.length,
-        won_revenue: Math.round(wonRevenue),
-        period_days: days
+        pipeline_coverage: wonRevenue > 0 ? Math.round((pipelineValue / wonRevenue) * 10) / 10 : (pipelineValue > 0 ? 99 : 0),
+        pipeline_value: Math.round(pipelineValue), win_rate: winRate,
+        activity_velocity: Math.round((activities.length / days) * 7),
+        responses_period: activities.filter(a => a.outcome === 'replied' || a.outcome === 'connected').length,
+        deals_open: openOpps.length, deals_won: won.length, won_revenue: Math.round(wonRevenue), period_days: days
       }
     };
   } catch (error) {
-    console.error('Error computing dashboard KPIs:', error);
-    return { success: false, error: error.message || 'Failed to compute KPIs' };
+    return { success: false, error: error.message };
   }
 }
 
@@ -175,462 +62,140 @@ export async function getDashboardKPIs(options = {}) {
 // CHANNEL PERFORMANCE
 // ============================================================================
 
-/**
- * Get performance breakdown by outreach channel
- *
- * @param {number} [days=30]
- * @returns {Promise<{success: boolean, channels?: Object[], error?: string}>}
- */
 export async function getChannelPerformance(days = 30) {
   try {
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString();
-
-    // Email
-    const emailFilter = `IS_AFTER({sent_at}, "${sinceStr}")`;
-    const emailResult = await queryData(COLLECTIONS.emails, { filter: emailFilter, limit: 500 });
-    const emails = emailResult.items || [];
-
-    // SMS
-    const smsFilter = `IS_AFTER({sent_at}, "${sinceStr}")`;
-    const smsResult = await queryData(COLLECTIONS.textMessages, { filter: smsFilter, limit: 500 });
-    const sms = smsResult.items || [];
-
-    // Calls
-    const callFilter = `IS_AFTER({created_at}, "${sinceStr}")`;
-    const callResult = await queryData(COLLECTIONS.calls, { filter: callFilter, limit: 500 });
-    const calls = callResult.items || [];
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const [emails, sms, calls] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.emails, { filters: { sent_at: { gte: since } }, limit: 500, suppressAuth: true }).then(r => r.items || []),
+      dataAccess.queryRecords(COLLECTIONS.textMessages, { filters: { sent_at: { gte: since } }, limit: 500, suppressAuth: true }).then(r => r.items || []),
+      dataAccess.queryRecords(COLLECTIONS.calls, { filters: { created_at: { gte: since } }, limit: 500, suppressAuth: true }).then(r => r.items || [])
+    ]);
 
     const channels = [
-      {
-        channel: 'email',
-        sent: emails.length,
-        delivered: emails.filter(e => e.status !== 'bounced' && e.status !== 'failed').length,
-        replied: emails.filter(e => e.status === 'replied').length,
-        meetings: 0 // Would need meeting attribution
-      },
-      {
-        channel: 'sms',
-        sent: sms.length,
-        delivered: sms.filter(s => s.delivered_at || s.status === 'delivered').length,
-        replied: sms.filter(s => s.response_text && s.response_text.trim()).length,
-        meetings: 0
-      },
-      {
-        channel: 'voice',
-        sent: calls.length,
-        delivered: calls.filter(c => c.status === 'completed').length,
-        replied: calls.filter(c => c.disposition === 'connected' || c.status === 'completed').length,
-        meetings: 0
-      }
+      { channel: 'email', sent: emails.length, delivered: emails.filter(e => e.status !== 'bounced').length, replied: emails.filter(e => e.status === 'replied').length },
+      { channel: 'sms', sent: sms.length, delivered: sms.filter(s => s.status === 'delivered').length, replied: sms.filter(s => s.response_text).length },
+      { channel: 'voice', sent: calls.length, delivered: calls.filter(c => c.status === 'completed').length, replied: calls.filter(c => c.disposition === 'connected').length }
     ];
-
     return { success: true, channels, period_days: days };
   } catch (error) {
-    console.error('Error computing channel performance:', error);
-    return { success: false, error: error.message || 'Failed to compute performance' };
+    return { success: false, error: error.message };
   }
 }
 
-/**
- * Get rep-level performance metrics
- *
- * @param {number} [days=30]
- * @returns {Promise<{success: boolean, reps?: Object[], error?: string}>}
- */
 export async function getRepPerformance(days = 30) {
   try {
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString();
-
-    const filter = `IS_AFTER({created_at}, "${sinceStr}")`;
-    const result = await queryData(COLLECTIONS.activities, { filter, limit: 500 });
-    const activities = result.items || [];
-
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const res = await dataAccess.queryRecords(COLLECTIONS.activities, { filters: { created_at: { gte: since } }, limit: 500, suppressAuth: true });
     const repMap = {};
-    activities.forEach(a => {
-      const ownerId = a.owner_id || 'unassigned';
-      if (!repMap[ownerId]) {
-        repMap[ownerId] = { owner_id: ownerId, touches: 0, replies: 0, meetings: 0, deals_won: 0 };
-      }
-      repMap[ownerId].touches++;
-      if (a.outcome === 'replied' || a.outcome === 'connected') repMap[ownerId].replies++;
-      if (a.type === 'meeting') repMap[ownerId].meetings++;
+    (res.items || []).forEach(a => {
+      const oid = a.owner_id || 'unassigned';
+      if (!repMap[oid]) repMap[oid] = { owner_id: oid, touches: 0, replies: 0, meetings: 0 };
+      repMap[oid].touches++;
+      if (a.outcome === 'replied' || a.outcome === 'connected') repMap[oid].replies++;
+      if (a.type === 'meeting') repMap[oid].meetings++;
     });
-
-    const reps = Object.values(repMap).sort((a, b) => b.touches - a.touches);
-
-    return { success: true, reps, period_days: days };
-  } catch (error) {
-    console.error('Error computing rep performance:', error);
-    return { success: false, error: error.message || 'Failed to compute rep performance' };
-  }
+    return { success: true, reps: Object.values(repMap).sort((a, b) => b.touches - a.touches), period_days: days };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
 // ============================================================================
 // LEAD ATTRIBUTION
 // ============================================================================
 
-/**
- * Record a touchpoint for lead attribution
- *
- * @param {Object} touchData
- * @param {string} touchData.account_id
- * @param {string} touchData.source - Source (match_signal, event, referral, website, ad)
- * @param {string} [touchData.medium] - Medium (email, organic, paid, social)
- * @param {string} [touchData.campaign] - Campaign name
- * @returns {Promise<{success: boolean, attribution?: Object, error?: string}>}
- */
 export async function recordTouchpoint(touchData) {
   try {
-    if (!touchData.account_id) return { success: false, error: 'Account ID is required' };
-    if (!touchData.source) return { success: false, error: 'Source is required' };
-
+    if (!touchData.account_id || !touchData.source) return { success: false, error: 'Missing fields' };
     const now = new Date().toISOString();
+    const existing = await dataAccess.findByField(COLLECTIONS.attribution, 'account_id', touchData.account_id, { suppressAuth: true });
 
-    // Check for existing attribution record
-    const existing = await findByField(COLLECTIONS.attribution, 'account_id', touchData.account_id);
-
-    if (existing && existing.length > 0) {
-      // Update last touch
-      const record = existing[0];
+    if (existing) {
       let history = [];
-      try {
-        history = record.touchpoint_history ? JSON.parse(record.touchpoint_history) : [];
-      } catch (e) { history = []; }
-
-      history.push({
-        source: touchData.source,
-        medium: touchData.medium || '',
-        campaign: touchData.campaign || '',
-        timestamp: now
-      });
-
-      const updates = {
-        source: touchData.source,
-        medium: touchData.medium || '',
-        campaign: touchData.campaign || '',
-        last_touch_at: now,
-        touchpoint_history: JSON.stringify(history)
-      };
-
-      const saved = await updateData(COLLECTIONS.attribution, record._id || record.id, updates);
-      return { success: true, attribution: saved };
+      try { history = typeof existing.touchpoint_history === 'string' ? JSON.parse(existing.touchpoint_history) : (existing.touchpoint_history || []); } catch (e) { }
+      history.push({ source: touchData.source, medium: touchData.medium || '', campaign: touchData.campaign || '', timestamp: now });
+      const result = await dataAccess.updateRecord(COLLECTIONS.attribution, { ...existing, source: touchData.source, last_touch_at: now, touchpoint_history: JSON.stringify(history) }, { suppressAuth: true });
+      return { success: true, attribution: result.record };
     } else {
-      // First touch
-      const record = {
-        account_id: touchData.account_id,
-        source: touchData.source,
-        medium: touchData.medium || '',
-        campaign: touchData.campaign || '',
-        first_touch_at: now,
-        last_touch_at: now,
-        touchpoint_history: JSON.stringify([{
-          source: touchData.source,
-          medium: touchData.medium || '',
-          campaign: touchData.campaign || '',
-          timestamp: now
-        }])
-      };
-
-      const saved = await insertData(COLLECTIONS.attribution, record);
-      return { success: true, attribution: saved };
+      const record = { account_id: touchData.account_id, source: touchData.source, medium: touchData.medium || '', campaign: touchData.campaign || '', first_touch_at: now, last_touch_at: now, touchpoint_history: JSON.stringify([{ source: touchData.source, medium: touchData.medium || '', campaign: touchData.campaign || '', timestamp: now }]) };
+      const result = await dataAccess.insertRecord(COLLECTIONS.attribution, record, { suppressAuth: true });
+      return { success: true, attribution: result.record };
     }
-  } catch (error) {
-    console.error('Error recording touchpoint:', error);
-    return { success: false, error: error.message || 'Failed to record touchpoint' };
-  }
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get attribution data for an account
- *
- * @param {string} accountId
- * @returns {Promise<{success: boolean, attribution?: Object, error?: string}>}
- */
 export async function getAttribution(accountId) {
   try {
-    if (!accountId) return { success: false, error: 'Account ID is required' };
-
-    const results = await findByField(COLLECTIONS.attribution, 'account_id', accountId);
-    if (!results || results.length === 0) {
-      return { success: false, error: 'No attribution data found' };
-    }
-
-    const record = results[0];
+    const record = await dataAccess.findByField(COLLECTIONS.attribution, 'account_id', accountId, { suppressAuth: true });
+    if (!record) return { success: false, error: 'Not found' };
     let history = [];
-    try {
-      history = record.touchpoint_history ? JSON.parse(record.touchpoint_history) : [];
-    } catch (e) { history = []; }
-
-    return {
-      success: true,
-      attribution: {
-        ...record,
-        touchpoint_history: history
-      }
-    };
-  } catch (error) {
-    console.error('Error fetching attribution:', error);
-    return { success: false, error: error.message || 'Failed to fetch attribution' };
-  }
+    try { history = typeof record.touchpoint_history === 'string' ? JSON.parse(record.touchpoint_history) : (record.touchpoint_history || []); } catch (e) { }
+    return { success: true, attribution: { ...record, touchpoint_history: history } };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get source performance summary (conversion by source)
- *
- * @returns {Promise<{success: boolean, sources?: Object[], error?: string}>}
- */
 export async function getSourcePerformance() {
   try {
-    const attrResult = await queryData(COLLECTIONS.attribution, { limit: 500 });
-    const attributions = attrResult.items || [];
-
-    // Get won accounts for conversion tracking
-    const wonFilter = `{stage} = "closed_won"`;
-    const wonResult = await queryData(COLLECTIONS.opportunities, { filter: wonFilter, limit: 500 });
-    const wonAccountIds = new Set((wonResult.items || []).map(o => o.account_id));
+    const attrRes = await dataAccess.queryRecords(COLLECTIONS.attribution, { limit: 500, suppressAuth: true });
+    const wonRes = await dataAccess.queryRecords(COLLECTIONS.opportunities, { filters: { stage: 'closed_won' }, limit: 500, suppressAuth: true });
+    const wonIds = new Set((wonRes.items || []).map(o => o.account_id));
 
     const sourceMap = {};
-    attributions.forEach(attr => {
-      const source = attr.source || 'unknown';
-      if (!sourceMap[source]) {
-        sourceMap[source] = { source, total: 0, converted: 0 };
-      }
-      sourceMap[source].total++;
-      if (wonAccountIds.has(attr.account_id)) {
-        sourceMap[source].converted++;
-      }
+    (attrRes.items || []).forEach(attr => {
+      const s = attr.source || 'unknown';
+      if (!sourceMap[s]) sourceMap[s] = { source: s, total: 0, converted: 0 };
+      sourceMap[s].total++;
+      if (wonIds.has(attr.account_id)) sourceMap[s].converted++;
     });
 
-    const sources = Object.values(sourceMap).map(s => ({
-      ...s,
-      conversion_rate: s.total > 0 ? Math.round((s.converted / s.total) * 100) : 0
-    })).sort((a, b) => b.total - a.total);
-
-    return { success: true, sources };
-  } catch (error) {
-    console.error('Error computing source performance:', error);
-    return { success: false, error: error.message || 'Failed to compute source performance' };
-  }
+    return { success: true, sources: Object.values(sourceMap).map(s => ({ ...s, conversion_rate: s.total > 0 ? Math.round((s.converted / s.total) * 100) : 0 })).sort((a,b) => b.total - a.total) };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-// ============================================================================
-// SPEND TRACKING & CPA
-// ============================================================================
-
-/**
- * Record marketing spend
- *
- * @param {Object} spendData
- * @param {string} spendData.period_start - ISO date
- * @param {string} spendData.period_end - ISO date
- * @param {string} spendData.channel - Channel (email, sms, voice, events, ads)
- * @param {number} spendData.amount - Spend amount
- * @param {string} [spendData.notes]
- * @returns {Promise<{success: boolean, spend?: Object, error?: string}>}
- */
 export async function recordSpend(spendData) {
   try {
-    if (!spendData.channel) return { success: false, error: 'Channel is required' };
-    if (!spendData.amount && spendData.amount !== 0) return { success: false, error: 'Amount is required' };
-
-    const record = {
-      period_start: spendData.period_start || new Date().toISOString(),
-      period_end: spendData.period_end || new Date().toISOString(),
-      channel: spendData.channel,
-      amount: spendData.amount,
-      notes: spendData.notes || '',
-      created_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.spend, record);
-    return { success: true, spend: saved };
-  } catch (error) {
-    console.error('Error recording spend:', error);
-    return { success: false, error: error.message || 'Failed to record spend' };
-  }
+    const result = await dataAccess.insertRecord(COLLECTIONS.spend, { ...spendData, created_at: new Date().toISOString() }, { suppressAuth: true });
+    return { success: true, spend: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get CPA (cost per acquisition) by channel
- *
- * @param {number} [days=90]
- * @returns {Promise<{success: boolean, cpa?: Object[], error?: string}>}
- */
 export async function getCostPerAcquisition(days = 90) {
   try {
-    // Get all spend
-    const spendResult = await queryData(COLLECTIONS.spend, { limit: 500 });
-    const spends = spendResult.items || [];
+    const spendRes = await dataAccess.queryRecords(COLLECTIONS.spend, { limit: 500, suppressAuth: true });
+    const spendMap = {};
+    (spendRes.items || []).forEach(s => { const ch = s.channel || 'other'; spendMap[ch] = (spendMap[ch] || 0) + (Number(s.amount) || 0); });
 
-    const spendByChannel = {};
-    spends.forEach(s => {
-      const ch = s.channel || 'other';
-      spendByChannel[ch] = (spendByChannel[ch] || 0) + (Number(s.amount) || 0);
-    });
-
-    // Get won deals
-    const wonFilter = `{stage} = "closed_won"`;
-    const wonResult = await queryData(COLLECTIONS.opportunities, { filter: wonFilter, limit: 500 });
-    const wonCount = (wonResult.items || []).length;
-
-    const cpa = Object.entries(spendByChannel).map(([channel, totalSpend]) => ({
-      channel,
-      total_spend: Math.round(totalSpend),
-      deals_won: wonCount, // Simplified - ideally attributable per channel
-      cpa: wonCount > 0 ? Math.round(totalSpend / wonCount) : null
-    }));
-
-    return { success: true, cpa };
-  } catch (error) {
-    console.error('Error computing CPA:', error);
-    return { success: false, error: error.message || 'Failed to compute CPA' };
-  }
+    const wonRes = await dataAccess.countRecords(COLLECTIONS.opportunities, { stage: 'closed_won' });
+    return { success: true, cpa: Object.entries(spendMap).map(([ch, amt]) => ({ channel: ch, total_spend: Math.round(amt), deals_won: wonRes, cpa: wonRes > 0 ? Math.round(amt / wonRes) : null })) };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-// ============================================================================
-// COMPETITOR INTELLIGENCE
-// ============================================================================
-
-/**
- * Add competitor intel entry
- *
- * @param {Object} intelData
- * @param {string} intelData.competitor_name
- * @param {string} [intelData.region]
- * @param {string} [intelData.offerings]
- * @param {string} [intelData.pricing_notes]
- * @param {string} [intelData.source_url]
- * @returns {Promise<{success: boolean, intel?: Object, error?: string}>}
- */
 export async function addCompetitorIntel(intelData) {
   try {
-    if (!intelData.competitor_name) return { success: false, error: 'Competitor name is required' };
-
-    const record = {
-      competitor_name: intelData.competitor_name,
-      region: intelData.region || '',
-      offerings: intelData.offerings || '',
-      pricing_notes: intelData.pricing_notes || '',
-      source_url: intelData.source_url || '',
-      captured_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.competitorIntel, record);
-    return { success: true, intel: saved };
-  } catch (error) {
-    console.error('Error adding competitor intel:', error);
-    return { success: false, error: error.message || 'Failed to add intel' };
-  }
+    const result = await dataAccess.insertRecord(COLLECTIONS.competitorIntel, { ...intelData, captured_at: new Date().toISOString() }, { suppressAuth: true });
+    return { success: true, intel: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get competitor intel entries
- *
- * @param {Object} [filters]
- * @param {string} [filters.competitor]
- * @param {string} [filters.region]
- * @param {number} [filters.limit=50]
- * @returns {Promise<{success: boolean, intel?: Object[], error?: string}>}
- */
 export async function getCompetitorIntel(filters = {}) {
   try {
-    const parts = [];
-    if (filters.competitor) parts.push(`FIND("${filters.competitor}", {competitor_name})`);
-    if (filters.region) parts.push(`FIND("${filters.region}", {region})`);
-
-    const filter = parts.length > 0
-      ? (parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`)
-      : '';
-
-    const result = await queryData(COLLECTIONS.competitorIntel, {
-      filter,
-      sort: [{ field: 'captured_at', direction: 'desc' }],
-      limit: filters.limit || 50
-    });
-
-    return { success: true, intel: result.items || [] };
-  } catch (error) {
-    console.error('Error fetching competitor intel:', error);
-    return { success: false, error: error.message || 'Failed to fetch intel' };
-  }
+    const res = await dataAccess.queryRecords(COLLECTIONS.competitorIntel, { sort: [{ field: 'captured_at', direction: 'desc' }], limit: filters.limit || 50, suppressAuth: true });
+    return { success: true, intel: res.items || [] };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-// ============================================================================
-// ANALYTICS SNAPSHOTS
-// ============================================================================
-
-/**
- * Save an analytics snapshot (for trend tracking)
- *
- * @param {Object} snapshotData
- * @param {string} [snapshotData.owner_id] - Rep ID or 'all'
- * @returns {Promise<{success: boolean, snapshot?: Object, error?: string}>}
- */
 export async function saveSnapshot(snapshotData = {}) {
   try {
-    const kpisResult = await getDashboardKPIs({
-      days: snapshotData.period_days || 30,
-      ownerId: snapshotData.owner_id
-    });
-
-    if (!kpisResult.success) {
-      return { success: false, error: 'Failed to compute KPIs for snapshot' };
-    }
-
-    const kpis = kpisResult.kpis;
-    const now = new Date();
-    const periodStart = new Date(now);
-    periodStart.setDate(periodStart.getDate() - (snapshotData.period_days || 30));
-
-    const record = {
-      owner_id: snapshotData.owner_id || 'all',
-      period_start: periodStart.toISOString(),
-      period_end: now.toISOString(),
-      pipeline_coverage: kpis.pipeline_coverage,
-      win_rate: kpis.win_rate,
-      avg_cycle_days: kpis.avg_cycle_days,
-      forecast_accuracy: 0, // Requires historical forecast vs actual comparison
-      stage_conversions: '',
-      channel_metrics: '',
-      created_at: now.toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.snapshots, record);
-    return { success: true, snapshot: saved };
-  } catch (error) {
-    console.error('Error saving analytics snapshot:', error);
-    return { success: false, error: error.message || 'Failed to save snapshot' };
-  }
+    const kpisRes = await getDashboardKPIs({ days: snapshotData.period_days || 30, ownerId: snapshotData.owner_id });
+    if (!kpisRes.success) throw new Error('KPI fail');
+    const k = kpisRes.kpis;
+    const record = { owner_id: snapshotData.owner_id || 'all', period_end: new Date().toISOString(), pipeline_coverage: k.pipeline_coverage, win_rate: k.win_rate, avg_cycle_days: k.avg_cycle_days, created_at: new Date().toISOString() };
+    const result = await dataAccess.insertRecord(COLLECTIONS.snapshots, record, { suppressAuth: true });
+    return { success: true, snapshot: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get analytics snapshots for trend view
- *
- * @param {Object} [options]
- * @param {string} [options.ownerId]
- * @param {number} [options.limit=12]
- * @returns {Promise<{success: boolean, snapshots?: Object[], error?: string}>}
- */
 export async function getSnapshots(options = {}) {
   try {
-    const parts = [];
-    if (options.ownerId) parts.push(`{owner_id} = "${options.ownerId}"`);
-
-    const filter = parts.length > 0 ? parts[0] : '';
-
-    const result = await queryData(COLLECTIONS.snapshots, {
-      filter,
-      sort: [{ field: 'period_end', direction: 'desc' }],
-      limit: options.limit || 12
-    });
-
-    return { success: true, snapshots: result.items || [] };
-  } catch (error) {
-    console.error('Error fetching snapshots:', error);
-    return { success: false, error: error.message || 'Failed to fetch snapshots' };
-  }
+    const res = await dataAccess.queryRecords(COLLECTIONS.snapshots, { sort: [{ field: 'period_end', direction: 'desc' }], limit: options.limit || 12, suppressAuth: true });
+    return { success: true, snapshots: res.items || [] };
+  } catch (error) { return { success: false, error: error.message }; }
 }

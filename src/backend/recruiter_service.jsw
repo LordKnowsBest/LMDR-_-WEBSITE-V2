@@ -1,15 +1,6 @@
-// ============================================================================
-// RECRUITER SERVICE - Backend for Recruiter Operating System
-// Supports Agency Model: One recruiter can manage multiple carriers
-//
-// DUAL-SOURCE SUPPORT: Supports both Wix Data and Airtable based on config.jsw settings
-// ============================================================================
-
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
+import * as dataAccess from 'backend/dataAccess';
 import { sendStatusUpdateNotification } from 'backend/emailService';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
 import * as lifecycleService from 'backend/lifecycleService';
 
 // Gamification hooks - lazy-loaded to avoid circular dependencies
@@ -84,12 +75,6 @@ async function emitPipelineEventNonBlocking(carrierDot, eventType, eventData) {
 // ============================================================================
 
 const CONFIG = {
-  recruiterProfilesCollection: 'recruiterProfiles',
-  recruiterCarriersCollection: 'recruiterCarriers',
-  interestsCollection: 'DriverCarrierInterests',
-  driverProfilesCollection: 'DriverProfiles',
-  carriersCollection: 'Carriers',
-
   // Pipeline status values (matches DriverCarrierInterests statuses)
   PIPELINE_STAGES: {
     INTERESTED: 'interested',
@@ -114,89 +99,6 @@ const COLLECTION_KEYS = {
   driverProfiles: 'driverProfiles',
   carriers: 'carriers'
 };
-
-// ============================================================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-      filterByFormula: options.filter || '',
-      sort: options.sort,
-      maxRecords: options.limit || 100
-    });
-    return result.records || [];
-  }
-
-  let query = wixData.query(wixCollectionName);
-  if (options.wixQuery) {
-    query = options.wixQuery;
-  }
-  if (options.limit) {
-    query = query.limit(options.limit);
-  }
-  const result = await query.find(options.suppressAuth ? { suppressAuth: true } : undefined);
-  return result.items;
-}
-
-async function getRecord(collectionKey, wixCollectionName, recordId, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    const result = await airtable.getRecord(tableName, recordId);
-    return result.record || null;
-  }
-  return await wixData.get(wixCollectionName, recordId, options.suppressAuth ? { suppressAuth: true } : undefined);
-}
-
-async function insertData(collectionKey, wixCollectionName, record, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    const result = await airtable.createRecord(tableName, record);
-    return result.record || record;
-  }
-  return await wixData.insert(wixCollectionName, record, options.suppressAuth ? { suppressAuth: true } : undefined);
-}
-
-async function updateData(collectionKey, wixCollectionName, record, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    const result = await airtable.updateRecord(tableName, record._id || record.id, record);
-    return result.record || record;
-  }
-  return await wixData.update(wixCollectionName, record, options.suppressAuth ? { suppressAuth: true } : undefined);
-}
-
-async function findByField(collectionKey, wixCollectionName, conditions, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = getAirtableTableName(collectionKey);
-    // Build filter formula from conditions
-    const filterParts = Object.entries(conditions).map(([field, value]) => {
-      const airtableField = field.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-      return `{${airtableField}} = '${value}'`;
-    });
-    const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : filterParts[0];
-    const result = await airtable.queryRecords(tableName, {
-      filterByFormula: filter,
-      maxRecords: options.limit || 100
-    });
-    return result.records || [];
-  }
-
-  let query = wixData.query(wixCollectionName);
-  Object.entries(conditions).forEach(([field, value]) => {
-    query = query.eq(field, value);
-  });
-  if (options.limit) {
-    query = query.limit(options.limit);
-  }
-  if (options.descending) {
-    query = query.descending(options.descending);
-  }
-  const result = await query.find(options.suppressAuth ? { suppressAuth: true } : undefined);
-  return result.items;
-}
 
 // ============================================================================
 // HELPER: Get current user ID
@@ -224,18 +126,21 @@ async function verifyRecruiterAccess(carrierDOT) {
     const dotString = String(carrierDOT).trim();
 
     // Check RecruiterCarriers for access
-    const items = await findByField(
-      COLLECTION_KEYS.recruiterCarriers,
-      CONFIG.recruiterCarriersCollection,
-      { recruiter_id: userId, carrier_dot: dotString, is_active: true },
-      { limit: 1, suppressAuth: true }
-    );
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+      filters: { 
+        recruiter_id: userId, 
+        carrier_dot: dotString, 
+        is_active: true 
+      },
+      limit: 1,
+      suppressAuth: true
+    });
 
-    if (items.length === 0) {
+    if (!result.success || result.items.length === 0) {
       return { success: false, error: 'No access to this carrier' };
     }
 
-    return { success: true, carrierAccess: items[0] };
+    return { success: true, carrierAccess: result.items[0] };
   } catch (error) {
     console.error('verifyRecruiterAccess error:', error);
     return { success: false, error: error.message };
@@ -261,24 +166,16 @@ export async function getOrCreateRecruiterProfile() {
     const userId = currentUser.id;
     const userEmail = await currentUser.getEmail();
 
-    // Query for existing profile (dual-source)
-    let profileItems = [];
-    if (usesAirtable(COLLECTION_KEYS.recruiterProfiles)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterProfiles);
-      const filter = `{Owner} = '${userId}'`;
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-      profileItems = result.records || [];
-    } else {
-      const result = await wixData.query(CONFIG.recruiterProfilesCollection)
-        .eq('_owner', userId)
-        .limit(1)
-        .find({ suppressAuth: true });
-      profileItems = result.items;
-    }
+    // Query for existing profile
+    const profileResult = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterProfiles, {
+      filters: { _owner: userId },
+      limit: 1,
+      suppressAuth: true
+    });
 
     let profile;
 
-    if (profileItems.length === 0) {
+    if (!profileResult.success || profileResult.items.length === 0) {
       // Create new profile
       const newProfile = {
         display_name: '',
@@ -292,57 +189,40 @@ export async function getOrCreateRecruiterProfile() {
         verification_status: 'pending'
       };
 
-      profile = await insertData(COLLECTION_KEYS.recruiterProfiles, CONFIG.recruiterProfilesCollection, newProfile, { suppressAuth: true });
+      const result = await dataAccess.insertRecord(COLLECTION_KEYS.recruiterProfiles, newProfile, { suppressAuth: true });
+      if (!result.success) throw new Error(result.error);
+      profile = result.record;
       console.log('Created new recruiter profile');
     } else {
-      profile = profileItems[0];
+      profile = profileResult.items[0];
 
       // Update last active date
-      await updateData(COLLECTION_KEYS.recruiterProfiles, CONFIG.recruiterProfilesCollection, {
+      await dataAccess.updateRecord(COLLECTION_KEYS.recruiterProfiles, {
         ...profile,
         last_active_date: new Date()
       }, { suppressAuth: true });
     }
 
-    // Get carriers this recruiter has access to (dual-source)
-    let carriers = [];
-    if (usesAirtable(COLLECTION_KEYS.recruiterCarriers)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterCarriers);
-      const filter = `AND({Recruiter ID} = '${userId}', {Is Active} = TRUE())`;
-      const result = await airtable.queryRecords(tableName, {
-        filterByFormula: filter,
-        sort: [{ field: 'Added Date', direction: 'desc' }],
-        maxRecords: 100
-      });
-      carriers = result.records || [];
-    } else {
-      const carriersResult = await wixData.query(CONFIG.recruiterCarriersCollection)
-        .eq('recruiter_id', userId)
-        .eq('is_active', true)
-        .descending('added_date')
-        .find({ suppressAuth: true });
-      carriers = carriersResult.items;
-    }
+    // Get carriers this recruiter has access to
+    const carriersResult = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+      filters: { 
+        recruiter_id: userId, 
+        is_active: true 
+      },
+      sort: [{ field: 'added_date', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
 
-    // If they have carriers, get full carrier info for the first one (dual-source)
+    const carriers = carriersResult.items || [];
+
+    // If they have carriers, get full carrier info for the first one
     let defaultCarrier = null;
     if (carriers.length > 0) {
       const carrierDot = carriers[0].carrier_dot;
-      if (usesAirtable(COLLECTION_KEYS.carriers)) {
-        const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
-        const filter = `{DOT_NUMBER} = ${carrierDot}`;
-        const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-        if (result.records && result.records.length > 0) {
-          defaultCarrier = result.records[0];
-        }
-      } else {
-        const carrierInfo = await wixData.query(CONFIG.carriersCollection)
-          .eq('dot_number', carrierDot)
-          .limit(1)
-          .find({ suppressAuth: true });
-        if (carrierInfo.items.length > 0) {
-          defaultCarrier = carrierInfo.items[0];
-        }
+      const carrierInfo = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', carrierDot, { suppressAuth: true });
+      if (carrierInfo) {
+        defaultCarrier = carrierInfo;
       }
     }
 
@@ -379,48 +259,28 @@ export async function addCarrier(carrierDOT) {
 
     const dotString = String(carrierDOT).trim();
 
-    // Check if carrier exists (dual-source)
-    let carrierItems = [];
-    if (usesAirtable(COLLECTION_KEYS.carriers)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
-      const filter = `{DOT_NUMBER} = ${dotString}`;
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-      carrierItems = result.records || [];
-    } else {
-      const carrierResult = await wixData.query(CONFIG.carriersCollection)
-        .eq('dot_number', dotString)
-        .limit(1)
-        .find({ suppressAuth: true });
-      carrierItems = carrierResult.items;
-    }
+    // Check if carrier exists
+    const carrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', dotString, { suppressAuth: true });
 
-    if (carrierItems.length === 0) {
+    if (!carrier) {
       return {
         success: false,
         error: `Carrier with DOT ${dotString} not found`
       };
     }
 
-    const carrier = carrierItems[0];
+    // Check if already added
+    const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+      filters: { 
+        recruiter_id: userId, 
+        carrier_dot: dotString 
+      },
+      limit: 1,
+      suppressAuth: true
+    });
 
-    // Check if already added (dual-source)
-    let existingItems = [];
-    if (usesAirtable(COLLECTION_KEYS.recruiterCarriers)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterCarriers);
-      const filter = `AND({Recruiter ID} = '${userId}', {Carrier DOT} = '${dotString}')`;
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-      existingItems = result.records || [];
-    } else {
-      const existingAccess = await wixData.query(CONFIG.recruiterCarriersCollection)
-        .eq('recruiter_id', userId)
-        .eq('carrier_dot', dotString)
-        .limit(1)
-        .find({ suppressAuth: true });
-      existingItems = existingAccess.items;
-    }
-
-    if (existingItems.length > 0) {
-      const existing = existingItems[0];
+    if (existingResult.success && existingResult.items.length > 0) {
+      const existing = existingResult.items[0];
       if (existing.is_active) {
         return {
           success: false,
@@ -428,7 +288,7 @@ export async function addCarrier(carrierDOT) {
         };
       } else {
         // Reactivate
-        await updateData(COLLECTION_KEYS.recruiterCarriers, CONFIG.recruiterCarriersCollection, {
+        await dataAccess.updateRecord(COLLECTION_KEYS.recruiterCarriers, {
           ...existing,
           is_active: true,
           added_date: new Date()
@@ -453,13 +313,13 @@ export async function addCarrier(carrierDOT) {
       verification_status: 'pending_verification'
     };
 
-    const insertedAccess = await insertData(COLLECTION_KEYS.recruiterCarriers, CONFIG.recruiterCarriersCollection, newAccess, { suppressAuth: true });
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.recruiterCarriers, newAccess, { suppressAuth: true });
 
     console.log(`Recruiter added carrier ${dotString} to portfolio`);
 
     return {
       success: true,
-      carrierAccess: insertedAccess,
+      carrierAccess: result.record,
       carrierInfo: carrier
     };
 
@@ -485,29 +345,23 @@ export async function removeCarrier(carrierDOT) {
 
     const dotString = String(carrierDOT).trim();
 
-    // Find the access record (dual-source)
-    let accessItems = [];
-    if (usesAirtable(COLLECTION_KEYS.recruiterCarriers)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterCarriers);
-      const filter = `AND({Recruiter ID} = '${userId}', {Carrier DOT} = '${dotString}')`;
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-      accessItems = result.records || [];
-    } else {
-      const accessResult = await wixData.query(CONFIG.recruiterCarriersCollection)
-        .eq('recruiter_id', userId)
-        .eq('carrier_dot', dotString)
-        .limit(1)
-        .find({ suppressAuth: true });
-      accessItems = accessResult.items;
-    }
+    // Find the access record
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+      filters: { 
+        recruiter_id: userId, 
+        carrier_dot: dotString 
+      },
+      limit: 1,
+      suppressAuth: true
+    });
 
-    if (accessItems.length === 0) {
+    if (!result.success || result.items.length === 0) {
       return { success: false, error: 'Carrier not found in your portfolio' };
     }
 
     // Soft delete - set is_active to false
-    const access = accessItems[0];
-    await updateData(COLLECTION_KEYS.recruiterCarriers, CONFIG.recruiterCarriersCollection, {
+    const access = result.items[0];
+    await dataAccess.updateRecord(COLLECTION_KEYS.recruiterCarriers, {
       ...access,
       is_active: false
     }, { suppressAuth: true });
@@ -536,25 +390,18 @@ export async function getRecruiterCarriers() {
       return { success: false, error: 'User not logged in' };
     }
 
-    // Get all carrier access records (dual-source)
-    let carrierAccess = [];
-    if (usesAirtable(COLLECTION_KEYS.recruiterCarriers)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterCarriers);
-      const filter = `AND({Recruiter ID} = '${userId}', {Is Active} = TRUE())`;
-      const result = await airtable.queryRecords(tableName, {
-        filterByFormula: filter,
-        sort: [{ field: 'Added Date', direction: 'desc' }],
-        maxRecords: 100
-      });
-      carrierAccess = result.records || [];
-    } else {
-      const accessResult = await wixData.query(CONFIG.recruiterCarriersCollection)
-        .eq('recruiter_id', userId)
-        .eq('is_active', true)
-        .descending('added_date')
-        .find({ suppressAuth: true });
-      carrierAccess = accessResult.items;
-    }
+    // Get all carrier access records
+    const accessResult = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+      filters: { 
+        recruiter_id: userId, 
+        is_active: true 
+      },
+      sort: [{ field: 'added_date', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    const carrierAccess = accessResult.items || [];
 
     if (carrierAccess.length === 0) {
       return {
@@ -563,22 +410,15 @@ export async function getRecruiterCarriers() {
       };
     }
 
-    // Get full carrier info for each (dual-source)
+    // Get full carrier info for each
     const dotNumbers = carrierAccess.map(a => a.carrier_dot);
-    let carriersItems = [];
-    if (usesAirtable(COLLECTION_KEYS.carriers)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
-      // Build OR formula for multiple DOT numbers
-      const orClauses = dotNumbers.map(dot => `{DOT_NUMBER} = ${dot}`);
-      const filter = orClauses.length > 1 ? `OR(${orClauses.join(', ')})` : orClauses[0];
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 100 });
-      carriersItems = result.records || [];
-    } else {
-      const carriersResult = await wixData.query(CONFIG.carriersCollection)
-        .hasSome('dot_number', dotNumbers)
-        .find({ suppressAuth: true });
-      carriersItems = carriersResult.items;
-    }
+    const carriersResult = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      filters: { dot_number: { hasSome: dotNumbers } },
+      limit: 100,
+      suppressAuth: true
+    });
+
+    const carriersItems = carriersResult.items || [];
 
     // Create lookup map
     const carrierMap = {};
@@ -622,29 +462,15 @@ export async function validateCarrierDOT(carrierDOT) {
   try {
     const dotString = String(carrierDOT).trim();
 
-    // Query carrier (dual-source)
-    let carrierItems = [];
-    if (usesAirtable(COLLECTION_KEYS.carriers)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
-      const filter = `{DOT_NUMBER} = ${dotString}`;
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-      carrierItems = result.records || [];
-    } else {
-      const result = await wixData.query(CONFIG.carriersCollection)
-        .eq('dot_number', dotString)
-        .limit(1)
-        .find({ suppressAuth: true });
-      carrierItems = result.items;
-    }
+    // Query carrier
+    const carrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', dotString, { suppressAuth: true });
 
-    if (carrierItems.length === 0) {
+    if (!carrier) {
       return {
         success: false,
         error: `No carrier found with DOT ${dotString}`
       };
     }
-
-    const carrier = carrierItems[0];
 
     return {
       success: true,
@@ -681,71 +507,41 @@ export async function getPipelineCandidates(carrierDOT, filters = {}) {
 
     const dotString = String(carrierDOT).trim();
 
-    // Build query (dual-source)
-    let interests = [];
-    if (usesAirtable(COLLECTION_KEYS.interests)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
+    // Build query
+    const interestFilters = { carrier_dot: dotString };
 
-      // Build Airtable filter
-      let filterParts = [`{Carrier DOT} = '${dotString}'`];
-
-      if (filters.status && filters.status !== 'all') {
-        filterParts.push(`{Status} = '${filters.status}'`);
-      }
-
-      if (!filters.includeHidden) {
-        filterParts.push(`{Status} != '${CONFIG.PIPELINE_STAGES.REJECTED}'`);
-        filterParts.push(`{Status} != '${CONFIG.PIPELINE_STAGES.WITHDRAWN}'`);
-      }
-
-      const filter = filterParts.length > 1 ? `AND(${filterParts.join(', ')})` : filterParts[0];
-
-      const result = await airtable.queryRecords(tableName, {
-        filterByFormula: filter,
-        sort: [{ field: 'Action Timestamp', direction: 'desc' }],
-        maxRecords: 100
-      });
-      interests = result.records || [];
-    } else {
-      let query = wixData.query(CONFIG.interestsCollection)
-        .eq('carrier_dot', dotString);
-
-      if (filters.status && filters.status !== 'all') {
-        query = query.eq('status', filters.status);
-      }
-
-      if (!filters.includeHidden) {
-        query = query.ne('status', CONFIG.PIPELINE_STAGES.REJECTED)
-          .ne('status', CONFIG.PIPELINE_STAGES.WITHDRAWN);
-      }
-
-      query = query.descending('action_timestamp');
-      const result = await query.find({ suppressAuth: true });
-      interests = result.items;
+    if (filters.status && filters.status !== 'all') {
+      interestFilters.status = filters.status;
     }
+
+    if (!filters.includeHidden) {
+      interestFilters.status = { 
+        ne: [CONFIG.PIPELINE_STAGES.REJECTED, CONFIG.PIPELINE_STAGES.WITHDRAWN] 
+      };
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: interestFilters,
+      sort: [{ field: 'action_timestamp', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    const interests = result.items || [];
 
     // Get driver profile IDs
     const driverIds = [...new Set(interests.map(i => i.driver_id).filter(Boolean))];
 
-    // Fetch driver profiles (dual-source)
+    // Fetch driver profiles
     let driverProfiles = {};
     if (driverIds.length > 0) {
-      let profileItems = [];
-      if (usesAirtable(COLLECTION_KEYS.driverProfiles)) {
-        const tableName = getAirtableTableName(COLLECTION_KEYS.driverProfiles);
-        // Build OR formula for multiple IDs
-        const orClauses = driverIds.map(id => `RECORD_ID() = '${id}'`);
-        const filter = orClauses.length > 1 ? `OR(${orClauses.join(', ')})` : orClauses[0];
-        const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 100 });
-        profileItems = result.records || [];
-      } else {
-        const profilesResult = await wixData.query(CONFIG.driverProfilesCollection)
-          .hasSome('_id', driverIds)
-          .find({ suppressAuth: true });
-        profileItems = profilesResult.items;
-      }
+      const profilesResult = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
+        filters: { _id: { hasSome: driverIds } },
+        limit: 100,
+        suppressAuth: true
+      });
 
-      profileItems.forEach(p => {
+      (profilesResult.items || []).forEach(p => {
         driverProfiles[p._id] = p;
       });
     }
@@ -766,7 +562,7 @@ export async function getPipelineCandidates(carrierDOT, filters = {}) {
         interestId: interest._id,
         driverId: interest.driver_id,
         status: interest.status || CONFIG.PIPELINE_STAGES.INTERESTED,
-        matchScore: interest.match_score || 0,
+        match_score: interest.match_score || 0,
         actionTimestamp: interest.action_timestamp,
         applicationDate: interest.application_date,
         recruiterNotes: interest.recruiter_notes || '',
@@ -827,15 +623,8 @@ export async function getPipelineCandidates(carrierDOT, filters = {}) {
  */
 export async function updateCandidateStatus(interestId, newStatus, notes = '') {
   try {
-    // Get the interest record (dual-source)
-    let interest = null;
-    if (usesAirtable(COLLECTION_KEYS.interests)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
-      interest = await airtable.getRecord(tableName, interestId);
-      if (interest && interest.error) interest = null;
-    } else {
-      interest = await wixData.get(CONFIG.interestsCollection, interestId, { suppressAuth: true });
-    }
+    // Get the interest record
+    const interest = await dataAccess.getRecord(COLLECTION_KEYS.interests, interestId, { suppressAuth: true });
 
     if (!interest) {
       return { success: false, error: 'Candidate record not found' };
@@ -892,42 +681,23 @@ export async function updateCandidateStatus(interestId, newStatus, notes = '') {
       updatedRecord.outcome_date = now;
     }
 
-    await updateData(COLLECTION_KEYS.interests, CONFIG.interestsCollection, updatedRecord, { suppressAuth: true });
+    await dataAccess.updateRecord(COLLECTION_KEYS.interests, updatedRecord, { suppressAuth: true });
 
     console.log(`Candidate ${interestId} moved to ${newStatus}`);
 
     // Send email notification to driver (non-blocking)
     try {
-      // Get driver profile to find user ID (dual-source)
+      // Get driver profile to find user ID
       if (interest.driver_id) {
-        let driverProfile = null;
-        if (usesAirtable(COLLECTION_KEYS.driverProfiles)) {
-          const tableName = getAirtableTableName(COLLECTION_KEYS.driverProfiles);
-          driverProfile = await airtable.getRecord(tableName, interest.driver_id);
-          if (driverProfile && driverProfile.error) driverProfile = null;
-        } else {
-          driverProfile = await wixData.get(CONFIG.driverProfilesCollection, interest.driver_id, { suppressAuth: true });
-        }
+        const driverProfile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, interest.driver_id, { suppressAuth: true });
 
         if (driverProfile && driverProfile._owner) {
-          // Get carrier name (dual-source)
+          // Get carrier name
           let carrierName = 'the carrier';
-          let carrierItems = [];
-          if (usesAirtable(COLLECTION_KEYS.carriers)) {
-            const tableName = getAirtableTableName(COLLECTION_KEYS.carriers);
-            const filter = `{DOT_NUMBER} = ${parseInt(interest.carrier_dot, 10)}`;
-            const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-            carrierItems = result.records || [];
-          } else {
-            const carrierResult = await wixData.query(CONFIG.carriersCollection)
-              .eq('dot_number', parseInt(interest.carrier_dot, 10))
-              .limit(1)
-              .find({ suppressAuth: true });
-            carrierItems = carrierResult.items;
-          }
+          const carrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', interest.carrier_dot, { suppressAuth: true });
 
-          if (carrierItems.length > 0) {
-            carrierName = carrierItems[0].legal_name || carrierItems[0].title || carrierName;
+          if (carrier) {
+            carrierName = carrier.legal_name || carrier.title || carrierName;
           }
 
           // Send notification
@@ -1031,19 +801,14 @@ export async function getPipelineStats(carrierDOT) {
 
     const dotString = String(carrierDOT).trim();
 
-    // Get all interests for this carrier (dual-source)
-    let interests = [];
-    if (usesAirtable(COLLECTION_KEYS.interests)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
-      const filter = `{Carrier DOT} = '${dotString}'`;
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1000 });
-      interests = result.records || [];
-    } else {
-      const result = await wixData.query(CONFIG.interestsCollection)
-        .eq('carrier_dot', dotString)
-        .find({ suppressAuth: true });
-      interests = result.items;
-    }
+    // Get all interests for this carrier
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
+      filters: { carrier_dot: dotString },
+      limit: 1000,
+      suppressAuth: true
+    });
+
+    const interests = result.items || [];
 
     // Calculate stats
     const stats = {
@@ -1158,15 +923,8 @@ export async function getPipelineStats(carrierDOT) {
  */
 export async function getCandidateDetails(interestId) {
   try {
-    // Get the interest record (dual-source)
-    let interest = null;
-    if (usesAirtable(COLLECTION_KEYS.interests)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
-      interest = await airtable.getRecord(tableName, interestId);
-      if (interest && interest.error) interest = null;
-    } else {
-      interest = await wixData.get(CONFIG.interestsCollection, interestId, { suppressAuth: true });
-    }
+    // Get the interest record
+    const interest = await dataAccess.getRecord(COLLECTION_KEYS.interests, interestId, { suppressAuth: true });
 
     if (!interest) {
       return { success: false, error: 'Candidate record not found' };
@@ -1178,16 +936,10 @@ export async function getCandidateDetails(interestId) {
       return accessCheck;
     }
 
-    // Get driver profile (dual-source)
+    // Get driver profile
     let driverProfile = null;
     if (interest.driver_id) {
-      if (usesAirtable(COLLECTION_KEYS.driverProfiles)) {
-        const tableName = getAirtableTableName(COLLECTION_KEYS.driverProfiles);
-        driverProfile = await airtable.getRecord(tableName, interest.driver_id);
-        if (driverProfile && driverProfile.error) driverProfile = null;
-      } else {
-        driverProfile = await wixData.get(CONFIG.driverProfilesCollection, interest.driver_id, { suppressAuth: true });
-      }
+      driverProfile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, interest.driver_id, { suppressAuth: true });
     }
 
     // Parse status history
@@ -1222,15 +974,8 @@ export async function getCandidateDetails(interestId) {
  */
 export async function addRecruiterNotes(interestId, notes) {
   try {
-    // Get the interest record (dual-source)
-    let interest = null;
-    if (usesAirtable(COLLECTION_KEYS.interests)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.interests);
-      interest = await airtable.getRecord(tableName, interestId);
-      if (interest && interest.error) interest = null;
-    } else {
-      interest = await wixData.get(CONFIG.interestsCollection, interestId, { suppressAuth: true });
-    }
+    // Get the interest record
+    const interest = await dataAccess.getRecord(COLLECTION_KEYS.interests, interestId, { suppressAuth: true });
 
     if (!interest) {
       return { success: false, error: 'Candidate record not found' };
@@ -1248,7 +993,7 @@ export async function addRecruiterNotes(interestId, notes) {
       recruiter_notes: notes
     };
 
-    await updateData(COLLECTION_KEYS.interests, CONFIG.interestsCollection, updatedRecord, { suppressAuth: true });
+    await dataAccess.updateRecord(COLLECTION_KEYS.interests, updatedRecord, { suppressAuth: true });
 
     console.log(`Notes updated for candidate ${interestId}`);
 
@@ -1277,26 +1022,12 @@ export async function updateRecruiterProfile(profileData) {
       return { success: false, error: 'User not logged in' };
     }
 
-    // Get existing profile (dual-source)
-    let profileItems = [];
-    if (usesAirtable(COLLECTION_KEYS.recruiterProfiles)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.recruiterProfiles);
-      const filter = `{Owner} = '${userId}'`;
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-      profileItems = result.records || [];
-    } else {
-      const result = await wixData.query(CONFIG.recruiterProfilesCollection)
-        .eq('_owner', userId)
-        .limit(1)
-        .find({ suppressAuth: true });
-      profileItems = result.items;
-    }
+    // Get existing profile
+    const profile = await dataAccess.findByField(COLLECTION_KEYS.recruiterProfiles, '_owner', userId, { suppressAuth: true });
 
-    if (profileItems.length === 0) {
+    if (!profile) {
       return { success: false, error: 'Profile not found' };
     }
-
-    const profile = profileItems[0];
 
     // Update allowed fields
     const updatedProfile = {
@@ -1309,7 +1040,7 @@ export async function updateRecruiterProfile(profileData) {
       weight_preferences: profileData.weight_preferences || profile.weight_preferences
     };
 
-    await updateData(COLLECTION_KEYS.recruiterProfiles, CONFIG.recruiterProfilesCollection, updatedProfile, { suppressAuth: true });
+    await dataAccess.updateRecord(COLLECTION_KEYS.recruiterProfiles, updatedProfile, { suppressAuth: true });
 
     console.log('Recruiter profile updated');
 
@@ -1336,20 +1067,7 @@ export async function updateRecruiterProfile(profileData) {
 export async function getCarrierByDOT(dotNumber) {
   try {
     if (!dotNumber) return null;
-
-    if (usesAirtable(COLLECTION_KEYS.carriers)) {
-      const tableName = await getAirtableTableName(COLLECTION_KEYS.carriers);
-      const filter = `{DOT_NUMBER} = ${dotNumber}`;
-      const result = await airtable.queryRecords(tableName, { filterByFormula: filter, maxRecords: 1 });
-      return (result.records && result.records.length > 0) ? result.records[0] : null;
-    }
-
-    const result = await wixData.query(CONFIG.carriersCollection)
-      .eq('dot_number', dotNumber)
-      .limit(1)
-      .find({ suppressAuth: true });
-
-    return result.items.length > 0 ? result.items[0] : null;
+    return await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', dotNumber, { suppressAuth: true });
   } catch (error) {
     console.error('getCarrierByDOT error:', error);
     return null;
@@ -1379,8 +1097,8 @@ export async function getCarrierIdentity() {
       needsOnboarding: !hasDOT,
       dotNumber: result.defaultCarrierDOT || null,
       companyName: carrier.legal_name || carrier.company_name || result.profile?.agency_name || null,
-      city: carrier.city || null,
-      state: carrier.state || null,
+      city: carrier.phy_city || null,
+      state: carrier.phy_state || null,
       fleetSize: carrier.fleet_size || null,
       safetyRating: carrier.safety_rating || null,
       recruiterProfile: result.profile,

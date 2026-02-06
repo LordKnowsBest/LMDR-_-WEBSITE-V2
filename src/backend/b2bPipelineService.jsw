@@ -1,24 +1,8 @@
-// ============================================================================
-// B2B PIPELINE SERVICE - Sales pipeline & opportunity management
-//
-// Manages opportunities through pipeline stages, automation rules,
-// SLA timers, forecasting, and deal risk detection.
-//
-// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
-//
-// Used on: Pipeline Kanban, B2B Dashboard, Deal Detail
-// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
-// ============================================================================
-
 import wixData from 'wix-data';
-import { usesAirtable, getAirtableTableName } from 'backend/config';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { logStageChange, logTask } from 'backend/b2bActivityService';
 
-// ============================================================================
-// COLLECTION KEYS
-// ============================================================================
-
+// Collection keys for dataAccess routing
 const COLLECTIONS = {
   opportunities: 'b2bOpportunities',
   automationRules: 'b2bAutomationRules',
@@ -28,859 +12,172 @@ const COLLECTIONS = {
   valueProps: 'b2bValueProps'
 };
 
-// ============================================================================
-// PIPELINE STAGE DEFINITIONS
-// ============================================================================
-
 const STAGES = {
-  PROSPECTING: {
-    id: 'prospecting',
-    name: 'Prospecting',
-    probability: 0.10,
-    order: 1,
-    sla_days: 14
-  },
-  DISCOVERY: {
-    id: 'discovery',
-    name: 'Discovery',
-    probability: 0.25,
-    order: 2,
-    sla_days: 10
-  },
-  PROPOSAL: {
-    id: 'proposal',
-    name: 'Proposal',
-    probability: 0.50,
-    order: 3,
-    sla_days: 7
-  },
-  NEGOTIATION: {
-    id: 'negotiation',
-    name: 'Negotiation',
-    probability: 0.75,
-    order: 4,
-    sla_days: 7
-  },
-  CLOSED_WON: {
-    id: 'closed_won',
-    name: 'Closed Won',
-    probability: 1.0,
-    order: 5,
-    sla_days: null
-  },
-  CLOSED_LOST: {
-    id: 'closed_lost',
-    name: 'Closed Lost',
-    probability: 0,
-    order: 6,
-    sla_days: null
-  }
+  PROSPECTING: { id: 'prospecting', name: 'Prospecting', probability: 0.10, order: 1, sla_days: 14 },
+  DISCOVERY: { id: 'discovery', name: 'Discovery', probability: 0.25, order: 2, sla_days: 10 },
+  PROPOSAL: { id: 'proposal', name: 'Proposal', probability: 0.50, order: 3, sla_days: 7 },
+  NEGOTIATION: { id: 'negotiation', name: 'Negotiation', probability: 0.75, order: 4, sla_days: 7 },
+  CLOSED_WON: { id: 'closed_won', name: 'Closed Won', probability: 1.0, order: 5, sla_days: null },
+  CLOSED_LOST: { id: 'closed_lost', name: 'Closed Lost', probability: 0, order: 6, sla_days: null }
 };
 
 const STAGE_ORDER = ['prospecting', 'discovery', 'proposal', 'negotiation', 'closed_won', 'closed_lost'];
 
 // ============================================================================
-// DUAL-SOURCE HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-      filterByFormula: options.filter || '',
-      sort: options.sort,
-      maxRecords: options.limit || 100
-    });
-    return { items: result.records || [], totalCount: result.records?.length || 0 };
-  }
-  let query = wixData.query(collectionKey);
-  if (options.limit) query = query.limit(options.limit);
-  return await query.find();
-}
-
-async function getRecord(collectionKey, recordId) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.getRecord(tableName, recordId);
-    return result.record || null;
-  }
-  return await wixData.get(collectionKey, recordId);
-}
-
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.createRecord(tableName, record);
-    return result.record || record;
-  }
-  return await wixData.insert(collectionKey, record);
-}
-
-async function updateData(collectionKey, recordId, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.updateRecord(tableName, recordId, record);
-    return result.record || record;
-  }
-  return await wixData.update(collectionKey, { _id: recordId, ...record });
-}
-
-async function findByField(collectionKey, fieldName, value) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    return await airtable.findByField(tableName, fieldName, value);
-  }
-  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
-  return result.items || [];
-}
-
-// ============================================================================
 // OPPORTUNITY CRUD
 // ============================================================================
 
-/**
- * Create a new pipeline opportunity
- *
- * @param {Object} oppData
- * @param {string} oppData.account_id - Parent B2B account
- * @param {string} [oppData.stage='prospecting'] - Pipeline stage
- * @param {number} [oppData.value_estimate=0] - Estimated deal value
- * @param {string} [oppData.match_signal_id] - Linked match signal
- * @param {string} [oppData.owner_id] - Assigned rep
- * @param {string} [oppData.next_step] - Next action description
- * @param {string} [oppData.next_step_at] - Next step due date (ISO)
- * @returns {Promise<{success: boolean, opportunity?: Object, error?: string}>}
- */
 export async function createOpportunity(oppData) {
   try {
-    if (!oppData.account_id) {
-      return { success: false, error: 'Account ID is required' };
-    }
-
+    if (!oppData.account_id) return { success: false, error: 'Account ID required' };
     const stage = oppData.stage || 'prospecting';
-    if (!STAGES[stage.toUpperCase()] && !STAGE_ORDER.includes(stage)) {
-      return { success: false, error: `Invalid stage: ${stage}` };
-    }
+    if (!STAGE_ORDER.includes(stage)) return { success: false, error: 'Invalid stage' };
 
     const record = {
-      account_id: oppData.account_id,
-      stage: stage,
-      value_estimate: oppData.value_estimate || 0,
-      match_signal_id: oppData.match_signal_id || '',
-      owner_id: oppData.owner_id || '',
-      next_step: oppData.next_step || '',
-      next_step_at: oppData.next_step_at || '',
-      close_reason: '',
-      stage_entered_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      account_id: oppData.account_id, stage, value_estimate: oppData.value_estimate || 0,
+      match_signal_id: oppData.match_signal_id || '', owner_id: oppData.owner_id || '',
+      next_step: oppData.next_step || '', next_step_at: oppData.next_step_at || '',
+      stage_entered_at: new Date().toISOString(), created_at: new Date().toISOString(), updated_at: new Date().toISOString()
     };
 
-    const saved = await insertData(COLLECTIONS.opportunities, record);
-
-    return { success: true, opportunity: saved };
-  } catch (error) {
-    console.error('Error creating opportunity:', error);
-    return { success: false, error: error.message || 'Failed to create opportunity' };
-  }
+    const result = await dataAccess.insertRecord(COLLECTIONS.opportunities, record, { suppressAuth: true });
+    return { success: result.success, opportunity: result.record, error: result.error };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get an opportunity by ID
- *
- * @param {string} opportunityId
- * @returns {Promise<{success: boolean, opportunity?: Object, error?: string}>}
- */
 export async function getOpportunity(opportunityId) {
   try {
-    if (!opportunityId) return { success: false, error: 'Opportunity ID is required' };
-
-    const record = await getRecord(COLLECTIONS.opportunities, opportunityId);
-    if (!record) return { success: false, error: 'Opportunity not found' };
-
-    // Compute risk flags
-    const risks = computeRiskFlags(record);
-    record.risk_flags = risks;
-
-    return { success: true, opportunity: record };
-  } catch (error) {
-    console.error('Error fetching opportunity:', error);
-    return { success: false, error: error.message || 'Failed to fetch opportunity' };
-  }
+    const record = await dataAccess.getRecord(COLLECTIONS.opportunities, opportunityId, { suppressAuth: true });
+    if (!record) return { success: false, error: 'Not found' };
+    return { success: true, opportunity: { ...record, risk_flags: computeRiskFlags(record) } };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Update an opportunity (general field update, not stage change)
- *
- * @param {string} opportunityId
- * @param {Object} updates
- * @returns {Promise<{success: boolean, opportunity?: Object, error?: string}>}
- */
 export async function updateOpportunity(opportunityId, updates) {
   try {
-    if (!opportunityId) return { success: false, error: 'Opportunity ID is required' };
-
-    updates.updated_at = new Date().toISOString();
-    const saved = await updateData(COLLECTIONS.opportunities, opportunityId, updates);
-
-    return { success: true, opportunity: saved };
-  } catch (error) {
-    console.error('Error updating opportunity:', error);
-    return { success: false, error: error.message || 'Failed to update opportunity' };
-  }
+    const existing = await dataAccess.getRecord(COLLECTIONS.opportunities, opportunityId, { suppressAuth: true });
+    if (!existing) throw new Error('Not found');
+    const result = await dataAccess.updateRecord(COLLECTIONS.opportunities, { ...existing, ...updates, _id: opportunityId, updated_at: new Date().toISOString() }, { suppressAuth: true });
+    return { success: result.success, opportunity: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Move an opportunity to a new pipeline stage
- * Triggers automation rules and logs activity
- *
- * @param {string} opportunityId
- * @param {string} newStage - Target stage
- * @param {string} [closeReason] - Required when moving to closed_lost
- * @returns {Promise<{success: boolean, opportunity?: Object, automationsTriggered?: number, error?: string}>}
- */
 export async function moveStage(opportunityId, newStage, closeReason = '') {
   try {
-    if (!opportunityId) return { success: false, error: 'Opportunity ID is required' };
-    if (!STAGE_ORDER.includes(newStage)) {
-      return { success: false, error: `Invalid stage: ${newStage}` };
-    }
+    if (!STAGE_ORDER.includes(newStage)) return { success: false, error: 'Invalid stage' };
+    const current = await dataAccess.getRecord(COLLECTIONS.opportunities, opportunityId, { suppressAuth: true });
+    if (!current) return { success: false, error: 'Not found' };
+    if (current.stage === newStage) return { success: false, error: 'Same stage' };
 
-    const current = await getRecord(COLLECTIONS.opportunities, opportunityId);
-    if (!current) return { success: false, error: 'Opportunity not found' };
-
-    const fromStage = current.stage;
-    if (fromStage === newStage) {
-      return { success: false, error: 'Already in this stage' };
-    }
-
-    if (newStage === 'closed_lost' && !closeReason) {
-      return { success: false, error: 'Close reason is required for closed_lost' };
-    }
-
-    const updates = {
-      stage: newStage,
-      stage_entered_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
+    const updates = { stage: newStage, stage_entered_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     if (closeReason) updates.close_reason = closeReason;
 
-    const saved = await updateData(COLLECTIONS.opportunities, opportunityId, updates);
+    const result = await dataAccess.updateRecord(COLLECTIONS.opportunities, { ...current, ...updates, _id: opportunityId }, { suppressAuth: true });
+    logStageChange(current.account_id, current.stage, newStage, current.owner_id).catch(() => {});
+    evaluateAutomationRules(current.stage, newStage, current).catch(() => {});
 
-    // Log stage change activity
-    logStageChange(current.account_id, fromStage, newStage, current.owner_id).catch(() => {});
-
-    // Evaluate automation rules
-    const automations = await evaluateAutomationRules(fromStage, newStage, current);
-
-    return {
-      success: true,
-      opportunity: saved,
-      automationsTriggered: automations
-    };
-  } catch (error) {
-    console.error('Error moving stage:', error);
-    return { success: false, error: error.message || 'Failed to move stage' };
-  }
+    return { success: result.success, opportunity: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
 // ============================================================================
 // PIPELINE VIEWS & ROLLUPS
 // ============================================================================
 
-/**
- * Get pipeline data for Kanban view
- * Returns opportunities grouped by stage with rollups
- *
- * @param {Object} [filters]
- * @param {string} [filters.ownerId] - Filter by rep
- * @param {string} [filters.region] - Filter by account region
- * @param {number} [filters.minSignalScore] - Min match signal score
- * @returns {Promise<{success: boolean, stages?: Object[], summary?: Object, error?: string}>}
- */
 export async function getPipelineView(filters = {}) {
   try {
-    // Exclude closed stages from active pipeline by default
-    const parts = [];
-    parts.push(`AND({stage} != "closed_won", {stage} != "closed_lost")`);
-    if (filters.ownerId) parts.push(`{owner_id} = "${filters.ownerId}"`);
+    const queryFilters = { stage: { ne: ['closed_won', 'closed_lost'] } };
+    if (filters.ownerId) queryFilters.owner_id = filters.ownerId;
 
-    const filter = parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`;
+    const result = await dataAccess.queryRecords(COLLECTIONS.opportunities, { filters: queryFilters, limit: 500, suppressAuth: true });
+    const opps = result.items || [];
 
-    const result = await queryData(COLLECTIONS.opportunities, {
-      filter,
-      limit: 500
-    });
-
-    const opportunities = result.items || [];
-
-    // Group by stage
     const stageMap = {};
-    STAGE_ORDER.filter(s => s !== 'closed_won' && s !== 'closed_lost').forEach(stageId => {
-      const stageDef = Object.values(STAGES).find(s => s.id === stageId);
-      stageMap[stageId] = {
-        stage_id: stageId,
-        name: stageDef ? stageDef.name : stageId,
-        probability: stageDef ? stageDef.probability : 0,
-        opportunities: [],
-        opportunity_count: 0,
-        value_sum: 0,
-        weighted_value: 0
-      };
+    STAGE_ORDER.filter(s => s !== 'closed_won' && s !== 'closed_lost').forEach(s => {
+      const def = Object.values(STAGES).find(st => st.id === s);
+      stageMap[s] = { stage_id: s, name: def.name, probability: def.probability, opportunities: [], value_sum: 0, weighted_value: 0 };
     });
 
-    opportunities.forEach(opp => {
-      const stage = opp.stage || 'prospecting';
-      if (stageMap[stage]) {
-        const risks = computeRiskFlags(opp);
-        stageMap[stage].opportunities.push({ ...opp, risk_flags: risks });
-        stageMap[stage].opportunity_count++;
-        const val = Number(opp.value_estimate) || 0;
-        stageMap[stage].value_sum += val;
-        stageMap[stage].weighted_value += val * (stageMap[stage].probability || 0);
+    opps.forEach(o => {
+      if (stageMap[o.stage]) {
+        stageMap[o.stage].opportunities.push({ ...o, risk_flags: computeRiskFlags(o) });
+        const val = Number(o.value_estimate) || 0;
+        stageMap[o.stage].value_sum += val;
+        stageMap[o.stage].weighted_value += val * stageMap[o.stage].probability;
       }
     });
 
-    const stages = STAGE_ORDER
-      .filter(s => s !== 'closed_won' && s !== 'closed_lost')
-      .map(s => stageMap[s]);
-
-    // Summary
-    const totalPipeline = stages.reduce((sum, s) => sum + s.value_sum, 0);
-    const weightedPipeline = stages.reduce((sum, s) => sum + s.weighted_value, 0);
-    const totalDeals = stages.reduce((sum, s) => sum + s.opportunity_count, 0);
-
-    return {
-      success: true,
-      stages,
-      summary: {
-        total_pipeline: totalPipeline,
-        weighted_pipeline: Math.round(weightedPipeline),
-        total_deals: totalDeals,
-        pipeline_coverage: 0 // Requires quota to compute
-      }
-    };
-  } catch (error) {
-    console.error('Error fetching pipeline view:', error);
-    return { success: false, error: error.message || 'Failed to fetch pipeline' };
-  }
+    const stages = STAGE_ORDER.filter(s => s !== 'closed_won' && s !== 'closed_lost').map(s => stageMap[s]);
+    return { success: true, stages, summary: { total_pipeline: stages.reduce((s, st) => s + st.value_sum, 0), weighted_pipeline: Math.round(stages.reduce((s, st) => s + st.weighted_value, 0)), total_deals: opps.length } };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get forecast view with commit/best/pipeline breakdown
- *
- * @param {Object} [options]
- * @param {string} [options.ownerId] - Filter by rep
- * @returns {Promise<{success: boolean, forecast?: Object, error?: string}>}
- */
 export async function getForecast(options = {}) {
   try {
-    const parts = [`AND({stage} != "closed_won", {stage} != "closed_lost")`];
-    if (options.ownerId) parts.push(`{owner_id} = "${options.ownerId}"`);
-    const filter = parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`;
-
-    const result = await queryData(COLLECTIONS.opportunities, { filter, limit: 500 });
-    const opps = result.items || [];
-
-    let commit = 0;   // Negotiation stage (high probability)
-    let best = 0;     // Proposal + Negotiation
-    let pipeline = 0; // Everything
-
-    opps.forEach(opp => {
-      const val = Number(opp.value_estimate) || 0;
-      pipeline += val;
-      if (opp.stage === 'negotiation') {
-        commit += val;
-        best += val;
-      } else if (opp.stage === 'proposal') {
-        best += val;
-      }
+    const res = await getPipelineView(options);
+    if (!res.success) throw new Error(res.error);
+    const opps = res.stages.flatMap(s => s.opportunities);
+    let commit = 0, best = 0, pipeline = 0;
+    opps.forEach(o => {
+      const v = Number(o.value_estimate) || 0; pipeline += v;
+      if (o.stage === 'negotiation') { commit += v; best += v; }
+      else if (o.stage === 'proposal') { best += v; }
     });
-
-    return {
-      success: true,
-      forecast: {
-        commit: Math.round(commit),
-        best: Math.round(best),
-        pipeline: Math.round(pipeline),
-        deal_count: opps.length
-      }
-    };
-  } catch (error) {
-    console.error('Error computing forecast:', error);
-    return { success: false, error: error.message || 'Failed to compute forecast' };
-  }
+    return { success: true, forecast: { commit: Math.round(commit), best: Math.round(best), pipeline: Math.round(pipeline), deal_count: opps.length } };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get opportunities by account
- *
- * @param {string} accountId
- * @returns {Promise<{success: boolean, opportunities?: Object[], error?: string}>}
- */
-export async function getOpportunitiesByAccount(accountId) {
-  try {
-    if (!accountId) return { success: false, error: 'Account ID is required' };
-
-    const results = await findByField(COLLECTIONS.opportunities, 'account_id', accountId);
-
-    return { success: true, opportunities: results || [] };
-  } catch (error) {
-    console.error('Error fetching account opportunities:', error);
-    return { success: false, error: error.message || 'Failed to fetch opportunities' };
-  }
-}
-
-/**
- * Get stage definitions (for pipeline configuration)
- *
- * @returns {{success: boolean, stages: Object[]}}
- */
-export function getStageDefinitions() {
-  const stages = STAGE_ORDER.map(id => {
-    const def = Object.values(STAGES).find(s => s.id === id);
-    return def || { id, name: id, probability: 0, order: 0, sla_days: null };
-  });
-  return { success: true, stages };
-}
-
-// ============================================================================
-// PIPELINE ANALYTICS
-// ============================================================================
-
-/**
- * Get pipeline KPIs (win rate, cycle length, conversion rates)
- *
- * @param {Object} [options]
- * @param {number} [options.days=90] - Lookback period
- * @param {string} [options.ownerId] - Filter by rep
- * @returns {Promise<{success: boolean, kpis?: Object, error?: string}>}
- */
 export async function getPipelineKPIs(options = {}) {
   try {
-    const days = options.days || 90;
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-
-    // Get closed deals in period
-    const closedFilter = `OR({stage} = "closed_won", {stage} = "closed_lost")`;
-    const closedResult = await queryData(COLLECTIONS.opportunities, {
-      filter: closedFilter,
-      limit: 500
-    });
-
-    const closed = closedResult.items || [];
+    const res = await dataAccess.queryRecords(COLLECTIONS.opportunities, { filters: { stage: { hasSome: ['closed_won', 'closed_lost'] } }, limit: 500, suppressAuth: true });
+    const closed = res.items || [];
     const won = closed.filter(o => o.stage === 'closed_won');
-    const lost = closed.filter(o => o.stage === 'closed_lost');
-
-    const winRate = closed.length > 0
-      ? Math.round((won.length / closed.length) * 100)
-      : 0;
-
-    // Average cycle length (created_at to stage_entered_at for closed_won)
-    let totalCycleDays = 0;
-    let cycleCount = 0;
-    won.forEach(opp => {
-      if (opp.created_at && opp.stage_entered_at) {
-        const created = new Date(opp.created_at);
-        const closed_at = new Date(opp.stage_entered_at);
-        const diffDays = Math.round((closed_at - created) / (1000 * 60 * 60 * 24));
-        if (diffDays >= 0) {
-          totalCycleDays += diffDays;
-          cycleCount++;
-        }
-      }
-    });
-    const avgCycleDays = cycleCount > 0 ? Math.round(totalCycleDays / cycleCount) : 0;
-
-    // Revenue from closed won
-    const wonRevenue = won.reduce((sum, o) => sum + (Number(o.value_estimate) || 0), 0);
-
-    return {
-      success: true,
-      kpis: {
-        win_rate: winRate,
-        avg_cycle_days: avgCycleDays,
-        deals_won: won.length,
-        deals_lost: lost.length,
-        won_revenue: Math.round(wonRevenue),
-        period_days: days
-      }
-    };
-  } catch (error) {
-    console.error('Error computing pipeline KPIs:', error);
-    return { success: false, error: error.message || 'Failed to compute KPIs' };
-  }
+    const winRate = closed.length > 0 ? Math.round((won.length / closed.length) * 100) : 0;
+    const wonRev = won.reduce((s, o) => s + (Number(o.value_estimate) || 0), 0);
+    return { success: true, kpis: { win_rate: winRate, deals_won: won.length, won_revenue: Math.round(wonRev), period_days: options.days || 90 } };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get stage-to-stage conversion rates
- *
- * @returns {Promise<{success: boolean, conversions?: Object[], error?: string}>}
- */
-export async function getStageConversions() {
-  try {
-    const result = await queryData(COLLECTIONS.opportunities, { limit: 500 });
-    const opps = result.items || [];
-
-    const stageCounts = {};
-    STAGE_ORDER.forEach(s => { stageCounts[s] = 0; });
-    opps.forEach(opp => {
-      const s = opp.stage || 'prospecting';
-      if (stageCounts[s] !== undefined) stageCounts[s]++;
-    });
-
-    const conversions = [];
-    for (let i = 0; i < STAGE_ORDER.length - 2; i++) {
-      const from = STAGE_ORDER[i];
-      const to = STAGE_ORDER[i + 1];
-      if (to === 'closed_won' || to === 'closed_lost') continue;
-
-      const fromCount = stageCounts[from] || 0;
-      // Count deals that reached this stage or beyond
-      let reachedCount = 0;
-      for (let j = i + 1; j < STAGE_ORDER.length; j++) {
-        reachedCount += stageCounts[STAGE_ORDER[j]] || 0;
-      }
-
-      const totalFromStage = fromCount + reachedCount;
-      const rate = totalFromStage > 0
-        ? Math.round((reachedCount / totalFromStage) * 100)
-        : 0;
-
-      conversions.push({
-        from_stage: from,
-        to_stage: to,
-        from_count: totalFromStage,
-        converted_count: reachedCount,
-        conversion_rate: rate
-      });
-    }
-
-    return { success: true, conversions };
-  } catch (error) {
-    console.error('Error computing conversions:', error);
-    return { success: false, error: error.message || 'Failed to compute conversions' };
-  }
-}
-
-// ============================================================================
-// AUTOMATION RULES
-// ============================================================================
-
-/**
- * Create an automation rule
- *
- * @param {Object} ruleData
- * @param {string} ruleData.rule_name - Human-readable name
- * @param {string} ruleData.trigger_event - Event type (stage_change, no_activity, etc.)
- * @param {string} [ruleData.from_stage] - Source stage (for stage_change triggers)
- * @param {string} [ruleData.to_stage] - Target stage (for stage_change triggers)
- * @param {string} [ruleData.conditions] - JSON conditions
- * @param {string} ruleData.actions - JSON actions to execute
- * @returns {Promise<{success: boolean, rule?: Object, error?: string}>}
- */
 export async function createAutomationRule(ruleData) {
   try {
-    if (!ruleData.rule_name) return { success: false, error: 'Rule name is required' };
-    if (!ruleData.trigger_event) return { success: false, error: 'Trigger event is required' };
-    if (!ruleData.actions) return { success: false, error: 'Actions are required' };
-
-    const record = {
-      rule_name: ruleData.rule_name,
-      trigger_event: ruleData.trigger_event,
-      from_stage: ruleData.from_stage || '',
-      to_stage: ruleData.to_stage || '',
-      conditions: ruleData.conditions || '',
-      actions: typeof ruleData.actions === 'string' ? ruleData.actions : JSON.stringify(ruleData.actions),
-      is_active: true,
-      priority: ruleData.priority || 0,
-      created_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.automationRules, record);
-    return { success: true, rule: saved };
-  } catch (error) {
-    console.error('Error creating automation rule:', error);
-    return { success: false, error: error.message || 'Failed to create rule' };
-  }
+    const res = await dataAccess.insertRecord(COLLECTIONS.automationRules, { ...ruleData, is_active: true, created_at: new Date().toISOString() }, { suppressAuth: true });
+    return { success: res.success, rule: res.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * List all automation rules
- *
- * @param {boolean} [activeOnly=true]
- * @returns {Promise<{success: boolean, rules?: Object[], error?: string}>}
- */
-export async function listAutomationRules(activeOnly = true) {
-  try {
-    const filter = activeOnly ? `{is_active} = TRUE()` : '';
-    const result = await queryData(COLLECTIONS.automationRules, {
-      filter,
-      sort: [{ field: 'priority', direction: 'desc' }],
-      limit: 100
-    });
-
-    return { success: true, rules: result.items || [] };
-  } catch (error) {
-    console.error('Error listing automation rules:', error);
-    return { success: false, error: error.message || 'Failed to list rules' };
-  }
-}
-
-// ============================================================================
-// PLAYBOOKS & VALUE PROPOSITIONS
-// ============================================================================
-
-/**
- * Create a playbook
- *
- * @param {Object} playbookData
- * @param {string} playbookData.name - Playbook name
- * @param {string} playbookData.segment - Target segment
- * @param {string} playbookData.stage - Applicable stage
- * @param {string} playbookData.steps - JSON steps
- * @returns {Promise<{success: boolean, playbook?: Object, error?: string}>}
- */
-export async function createPlaybook(playbookData) {
-  try {
-    if (!playbookData.name) return { success: false, error: 'Playbook name is required' };
-
-    const record = {
-      name: playbookData.name,
-      segment: playbookData.segment || '',
-      stage: playbookData.stage || '',
-      steps: typeof playbookData.steps === 'string' ? playbookData.steps : JSON.stringify(playbookData.steps || []),
-      is_active: true,
-      created_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.playbooks, record);
-    return { success: true, playbook: saved };
-  } catch (error) {
-    console.error('Error creating playbook:', error);
-    return { success: false, error: error.message || 'Failed to create playbook' };
-  }
-}
-
-/**
- * Get playbook suggestions based on carrier segment and pipeline stage
- *
- * @param {string} segment - Carrier segment
- * @param {string} stage - Current pipeline stage
- * @returns {Promise<{success: boolean, playbooks?: Object[], error?: string}>}
- */
 export async function getPlaybookSuggestions(segment, stage) {
   try {
-    const parts = [];
-    if (segment) parts.push(`{segment} = "${segment}"`);
-    if (stage) parts.push(`{stage} = "${stage}"`);
-    parts.push(`{is_active} = TRUE()`);
-
-    const filter = parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`;
-
-    const result = await queryData(COLLECTIONS.playbooks, { filter, limit: 10 });
-    return { success: true, playbooks: result.items || [] };
-  } catch (error) {
-    console.error('Error fetching playbook suggestions:', error);
-    return { success: false, error: error.message || 'Failed to fetch playbooks' };
-  }
+    const res = await dataAccess.queryRecords(COLLECTIONS.playbooks, { filters: { segment, stage, is_active: true }, limit: 10, suppressAuth: true });
+    return { success: true, playbooks: res.items || [] };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Create a value proposition template
- *
- * @param {Object} vpData
- * @param {string} vpData.name - Template name
- * @param {string} vpData.template - Message template with variables
- * @param {string} vpData.segment - Target segment
- * @param {string} vpData.signal_type - Match signal type this applies to
- * @returns {Promise<{success: boolean, valueProp?: Object, error?: string}>}
- */
-export async function createValueProp(vpData) {
-  try {
-    if (!vpData.name) return { success: false, error: 'Name is required' };
-    if (!vpData.template) return { success: false, error: 'Template is required' };
-
-    const record = {
-      name: vpData.name,
-      template: vpData.template,
-      segment: vpData.segment || '',
-      signal_type: vpData.signal_type || '',
-      is_active: true,
-      created_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.valueProps, record);
-    return { success: true, valueProp: saved };
-  } catch (error) {
-    console.error('Error creating value prop:', error);
-    return { success: false, error: error.message || 'Failed to create value prop' };
-  }
-}
-
-/**
- * Get value propositions for a specific signal context
- *
- * @param {string} [segment] - Carrier segment
- * @param {string} [signalType] - Signal type
- * @returns {Promise<{success: boolean, valueProps?: Object[], error?: string}>}
- */
-export async function getValueProps(segment = '', signalType = '') {
-  try {
-    const parts = [`{is_active} = TRUE()`];
-    if (segment) parts.push(`{segment} = "${segment}"`);
-    if (signalType) parts.push(`{signal_type} = "${signalType}"`);
-
-    const filter = parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`;
-    const result = await queryData(COLLECTIONS.valueProps, { filter, limit: 20 });
-
-    return { success: true, valueProps: result.items || [] };
-  } catch (error) {
-    console.error('Error fetching value props:', error);
-    return { success: false, error: error.message || 'Failed to fetch value props' };
-  }
-}
-
-// ============================================================================
-// SLA & RISK DETECTION
-// ============================================================================
-
-/**
- * Get deals at risk (stalled, no next-step, overdue SLA)
- *
- * @param {Object} [options]
- * @param {string} [options.ownerId]
- * @returns {Promise<{success: boolean, atRisk?: Object[], error?: string}>}
- */
 export async function getDealsAtRisk(options = {}) {
   try {
-    const parts = [`AND({stage} != "closed_won", {stage} != "closed_lost")`];
-    if (options.ownerId) parts.push(`{owner_id} = "${options.ownerId}"`);
-    const filter = parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`;
-
-    const result = await queryData(COLLECTIONS.opportunities, { filter, limit: 200 });
-    const opps = result.items || [];
-
-    const atRisk = opps
-      .map(opp => ({ ...opp, risk_flags: computeRiskFlags(opp) }))
-      .filter(opp => opp.risk_flags.length > 0)
-      .sort((a, b) => b.risk_flags.length - a.risk_flags.length);
-
-    return { success: true, atRisk };
-  } catch (error) {
-    console.error('Error fetching deals at risk:', error);
-    return { success: false, error: error.message || 'Failed to fetch at-risk deals' };
-  }
+    const res = await dataAccess.queryRecords(COLLECTIONS.opportunities, { filters: { stage: { ne: ['closed_won', 'closed_lost'] } }, limit: 200, suppressAuth: true });
+    const atRisk = (res.items || []).map(o => ({ ...o, risk_flags: computeRiskFlags(o) })).filter(o => o.risk_flags.length > 0);
+    return { success: true, atRisk: atRisk.sort((a,b) => b.risk_flags.length - a.risk_flags.length) };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-// ============================================================================
-// INTERNAL HELPERS
-// ============================================================================
-
-/**
- * Compute risk flags for an opportunity
- */
 function computeRiskFlags(opp) {
-  const flags = [];
-  const now = new Date();
-
-  // Stalled: no update in >10 days
-  if (opp.updated_at) {
-    const updated = new Date(opp.updated_at);
-    const daysSinceUpdate = (now - updated) / (1000 * 60 * 60 * 24);
-    if (daysSinceUpdate > 10) {
-      flags.push({ type: 'stalled', message: `No activity in ${Math.round(daysSinceUpdate)} days` });
-    }
-  }
-
-  // No next step set
-  if (!opp.next_step || !opp.next_step.trim()) {
-    flags.push({ type: 'no_next_step', message: 'No next step defined' });
-  }
-
-  // Overdue next step
-  if (opp.next_step_at) {
-    const dueDate = new Date(opp.next_step_at);
-    if (dueDate < now) {
-      const daysOverdue = Math.round((now - dueDate) / (1000 * 60 * 60 * 24));
-      flags.push({ type: 'overdue', message: `Next step overdue by ${daysOverdue} days` });
-    }
-  }
-
-  // SLA breach check
-  if (opp.stage_entered_at && opp.stage) {
-    const stageDef = Object.values(STAGES).find(s => s.id === opp.stage);
-    if (stageDef && stageDef.sla_days) {
-      const entered = new Date(opp.stage_entered_at);
-      const daysInStage = (now - entered) / (1000 * 60 * 60 * 24);
-      if (daysInStage > stageDef.sla_days) {
-        flags.push({ type: 'sla_breach', message: `In ${stageDef.name} for ${Math.round(daysInStage)} days (SLA: ${stageDef.sla_days}d)` });
-      }
-    }
-  }
-
+  const flags = [], now = new Date();
+  if (opp.updated_at && (now - new Date(opp.updated_at)) / 86400000 > 10) flags.push({ type: 'stalled', message: 'No activity > 10 days' });
+  if (!opp.next_step?.trim()) flags.push({ type: 'no_next_step', message: 'No next step' });
+  if (opp.next_step_at && new Date(opp.next_step_at) < now) flags.push({ type: 'overdue', message: 'Next step overdue' });
   return flags;
 }
 
-/**
- * Evaluate automation rules after a stage change
- * Returns count of rules triggered
- */
-async function evaluateAutomationRules(fromStage, toStage, opportunity) {
+async function evaluateAutomationRules(from, to, opp) {
   try {
-    const filter = `AND({trigger_event} = "stage_change", {is_active} = TRUE(), {from_stage} = "${fromStage}", {to_stage} = "${toStage}")`;
-    const result = await queryData(COLLECTIONS.automationRules, { filter, limit: 20 });
-    const rules = result.items || [];
-
-    let triggered = 0;
-    for (const rule of rules) {
-      try {
-        const actions = typeof rule.actions === 'string' ? JSON.parse(rule.actions) : rule.actions;
-        if (Array.isArray(actions)) {
-          for (const action of actions) {
-            await executeAction(action, opportunity);
-          }
-        }
-        triggered++;
-      } catch (err) {
-        console.warn(`Automation rule ${rule.rule_name} failed:`, err.message);
-      }
+    const res = await dataAccess.queryRecords(COLLECTIONS.automationRules, { filters: { trigger_event: 'stage_change', is_active: true, from_stage: from, to_stage: to }, limit: 20, suppressAuth: true });
+    for (const rule of (res.items || [])) {
+      const actions = typeof rule.actions === 'string' ? JSON.parse(rule.actions) : rule.actions;
+      if (Array.isArray(actions)) for (const a of actions) await executeAction(a, opp);
     }
-
-    return triggered;
-  } catch (err) {
-    console.warn('Automation rule evaluation failed:', err.message);
-    return 0;
-  }
+  } catch (e) { }
 }
 
-/**
- * Execute a single automation action
- */
-async function executeAction(action, opportunity) {
-  if (!action || !action.type) return;
-
-  switch (action.type) {
-    case 'create_task':
-      await logTask(
-        opportunity.account_id,
-        action.subject || 'Auto-generated task',
-        'scheduled',
-        opportunity.owner_id
-      );
-      break;
-
-    case 'update_account_status':
-      if (action.status && usesAirtable(COLLECTIONS.accounts)) {
-        const tableName = await getAirtableTableName(COLLECTIONS.accounts);
-        await airtable.updateRecord(tableName, opportunity.account_id, {
-          status: action.status
-        });
-      }
-      break;
-
-    default:
-      console.log(`Unknown automation action type: ${action.type}`);
-  }
+async function executeAction(action, opp) {
+  if (action?.type === 'create_task') await logTask(opp.account_id, action.subject || 'Auto task', 'scheduled', opp.owner_id);
 }

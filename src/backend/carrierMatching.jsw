@@ -1,11 +1,6 @@
-import wixData from 'wix-data';
-import { getOrCreateDriverProfile, updateDriverPreferences, logCarrierInterest } from 'backend/driverProfiles';
+import { updateDriverPreferences, logCarrierInterest } from 'backend/driverProfiles';
 import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
-
-// Dual-source data access
-import { usesAirtable, getWixCollectionName } from 'backend/configData';
 import * as dataAccess from 'backend/dataAccess';
-import * as airtable from 'backend/airtableClient';
 import { seedCarriers } from 'backend/seeds/seedMockData';
 
 // ============================================================================
@@ -14,9 +9,6 @@ import { seedCarriers } from 'backend/seeds/seedMockData';
 const { calculateMatchScore, CONFIG: SCORING_CONFIG } = require('backend/scoring');
 
 const CONFIG = {
-  collectionsName: 'Carriers',
-  enrichmentsCollection: 'CarrierEnrichments',
-  
   // MATCH LIMITS - Free vs Premium
   freeUserMaxResults: 2,
   premiumUserMaxResults: 10,
@@ -30,34 +22,18 @@ const CONFIG = {
 
 /**
  * Get existing enrichments from cache
- * Supports dual data sources via config.jsw
  */
 async function getExistingEnrichments(dotNumbers) {
   if (!dotNumbers || dotNumbers.length === 0) return {};
 
   try {
     const dotStrings = dotNumbers.map(d => String(d));
-    let items = [];
+    
+    const result = await dataAccess.queryRecords('carrierEnrichments', {
+      filters: { dot_number: { hasSome: dotStrings } }
+    });
 
-    // Check which data source to use for CarrierEnrichments
-    if (usesAirtable('carrierEnrichments')) {
-      // Airtable query - build OR formula for multiple DOT numbers
-      const dotConditions = dotStrings.map(d => `{DOT Number} = '${d}'`).join(', ');
-      const filterFormula = `OR(${dotConditions})`;
-
-      const result = await airtable.queryRecords('CarrierEnrichments', {
-        filterByFormula: filterFormula
-      });
-
-      items = result.records || [];
-    } else {
-      // Wix Data query (existing logic)
-      const result = await wixData.query(CONFIG.enrichmentsCollection)
-        .hasSome('dot_number', dotStrings)
-        .find();
-      items = result.items;
-    }
-
+    const items = result.items || [];
     const enrichmentMap = {};
     for (const item of items) {
       const enrichedDate = item.enriched_date;
@@ -85,7 +61,6 @@ async function getExistingEnrichments(dotNumbers) {
 
 // ============================================================================
 // MAIN EXPORTED FUNCTION - findMatchingCarriers
-// Now integrates with Driver Profile system
 // ============================================================================
 
 export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
@@ -110,48 +85,32 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
 
   console.log(`📊 Max results to return: ${maxResults}`);
   
-  // =========================================================================
   // NEW: Update driver profile with search preferences
-  // =========================================================================
   let driverProfile = null;
   try {
     const profileResult = await updateDriverPreferences(driverPrefs);
     if (profileResult.success) {
       driverProfile = profileResult.profile;
       console.log(`👤 Updated driver profile: ${driverProfile._id}`);
-      console.log(`   Completeness: ${driverProfile.profile_completeness_score}%`);
-      console.log(`   Total searches: ${driverProfile.total_searches}`);
-    } else {
-      console.log(`⚠️ Profile update skipped: ${profileResult.error}`);
     }
   } catch (profileError) {
     console.log('⚠️ Profile system unavailable:', profileError.message);
-    // Continue without profile - anonymous user
   }
   
   try {
-    // STEP 1: Query the database (supports dual data sources)
+    // STEP 1: Query the database
     console.log('📌 Step 1: Querying Carriers collection...');
     const queryStartTime = Date.now();
-    let carrierItems = [];
+    
+    const result = await dataAccess.queryRecords('carriers', {
+      limit: 500
+    });
 
-    // Check which data source to use for Carriers
-    if (usesAirtable('carriers')) {
-      // Airtable query path
-      const airtableResult = await airtable.queryRecords('Carriers', {
-        maxRecords: 500
-      });
-      carrierItems = airtableResult.records || [];
-    } else {
-      // Wix Data query path (existing logic)
-      const query = wixData.query(CONFIG.collectionsName).limit(500);
-      const results = await query.find();
-      carrierItems = results.items;
-    }
+    if (!result.success) throw new Error(result.error);
+    let carrierItems = result.items || [];
 
     const queryLatency = Date.now() - queryStartTime;
-
-    await logDatabase({ operation: 'query', collection: CONFIG.collectionsName, affectedRows: carrierItems.length, latencyMs: queryLatency, traceId });
+    await logDatabase({ operation: 'query', collection: 'Carriers', affectedRows: carrierItems.length, latencyMs: queryLatency, traceId });
 
     // SEEDING LOGIC
     if (carrierItems.length === 0) {
@@ -160,26 +119,14 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
 
       const seedResult = await seedCarriers();
       if (seedResult.seeded) {
-          // Re-query
-          if (usesAirtable('carriers')) {
-              const result = await airtable.queryRecords('Carriers', { maxRecords: 500 });
-              carrierItems = result.records || [];
-          } else {
-              const query = wixData.query(CONFIG.collectionsName).limit(500);
-              const results = await query.find();
-              carrierItems = results.items;
-          }
+          const reQueryResult = await dataAccess.queryRecords('carriers', { limit: 500 });
+          carrierItems = reQueryResult.items || [];
       }
     }
 
     console.log(`📊 Step 2: Query complete. Found ${carrierItems.length} carriers`);
 
-    // Create a results object for compatibility with existing code
-    const results = { items: carrierItems };
-    
-    if (results.items.length === 0) {
-      console.warn('⚠️ No carriers found in database even after seed');
-      await log({ level: 'WARN', source: 'carrier-matching', message: 'No carriers in database', traceId });
+    if (carrierItems.length === 0) {
       await endTrace(traceId, 'completed', { totalMatches: 0, elapsed: Date.now() - startTime });
       return {
         success: true,
@@ -191,49 +138,33 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
       };
     }
     
-    // STEP 2: Log first raw carrier for debugging
-    console.log('🔍 Step 3: Sample raw carrier data:');
-    const sampleCarrier = results.items[0];
-    console.log('   Raw fields:', Object.keys(sampleCarrier).join(', '));
-    console.log('   dot_number:', sampleCarrier.dot_number);
-    console.log('   legal_name:', sampleCarrier.legal_name);
-    console.log('   phy_city:', sampleCarrier.phy_city);
-    console.log('   phy_state:', sampleCarrier.phy_state);
-    console.log('   phy_zip:', sampleCarrier.phy_zip);
-    
-    // STEP 3: Score all carriers
-    console.log('🧮 Step 4: Scoring carriers...');
+    // STEP 2: Score all carriers
+    console.log('🧮 Step 3: Scoring carriers...');
     const customWeights = driverPrefs.customWeights || SCORING_CONFIG.weights;
-    const scoredCarriers = results.items.map(rawCarrier => 
+    const scoredCarriers = carrierItems.map(rawCarrier => 
       calculateMatchScore(driverPrefs, rawCarrier, customWeights)
     );
     
-    // STEP 4: Composite Scoring - Group divisions of the same carrier
-    console.log('🔄 Step 5: Performing composite grouping...');
+    // STEP 3: Composite Scoring - Group divisions of the same carrier
+    console.log('🔄 Step 4: Performing composite grouping...');
     const groupedCarriers = {};
     for (const scored of scoredCarriers) {
       const legalName = scored.carrier.LEGAL_NAME;
-      // Keep the best division match for each legal entity
       if (!groupedCarriers[legalName] || scored.overallScore > groupedCarriers[legalName].overallScore) {
         groupedCarriers[legalName] = scored;
       }
     }
     const distinctCarriers = Object.values(groupedCarriers);
 
-    // STEP 5: Filter and sort
-    console.log('🔄 Step 6: Filtering and sorting...');
+    // STEP 4: Filter and sort
+    console.log('🔄 Step 5: Filtering and sorting...');
     const validCarriers = distinctCarriers.filter(c => c.overallScore >= 10);
     validCarriers.sort((a, b) => b.overallScore - a.overallScore);
     
-    console.log(`   Total scored: ${scoredCarriers.length}`);
-    console.log(`   Distinct carriers: ${distinctCarriers.length}`);
-    console.log(`   Valid (score >= 10): ${validCarriers.length}`);
-    
     const topMatches = validCarriers.slice(0, maxResults);
-    console.log(`   Returning top: ${topMatches.length}`);
     
-    // STEP 6: Check enrichment cache & responsiveness
-    console.log('📦 Step 7: Checking enrichment cache & responsiveness...');
+    // STEP 5: Check enrichment cache & responsiveness
+    console.log('📦 Step 6: Checking enrichment cache & responsiveness...');
     const dotNumbers = topMatches.map(m => m.carrier.DOT_NUMBER);
     const { getRecruiterStats } = await import('backend/recruiterStats');
     
@@ -243,21 +174,17 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     try {
       cachedEnrichments = await getExistingEnrichments(dotNumbers);
       
-      // Get responsiveness for top matches
       await Promise.all(dotNumbers.map(async (dot) => {
         try {
           const stats = await getRecruiterStats(dot);
           responsivenessStats[dot] = stats;
-        } catch (e) {
-          console.warn(`Could not get stats for ${dot}:`, e.message);
-        }
+        } catch (e) { /* ignore */ }
       }));
     } catch (cacheErr) {
       console.warn('⚠️ Cache/Stats lookup failed:', cacheErr.message);
     }
     
-    // STEP 7: Build final response
-    console.log('🏗️ Step 8: Building response...');
+    // STEP 6: Build final response
     const matchesWithStatus = topMatches.map(m => {
       const dotNum = String(m.carrier.DOT_NUMBER);
       const cached = cachedEnrichments[dotNum];
@@ -272,22 +199,8 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     });
 
     const needsFreshCount = matchesWithStatus.filter(m => m.needsEnrichment).length;
-    
-    // Log what we're returning
-    console.log('✅ Step 9: Response ready');
-    console.log(`   Matches: ${matchesWithStatus.length}`);
-    console.log(`   Cached: ${matchesWithStatus.length - needsFreshCount}`);
-    console.log(`   Need enrichment: ${needsFreshCount}`);
-    
-    if (matchesWithStatus.length > 0) {
-      console.log('🏆 Top match:');
-      const top = matchesWithStatus[0];
-      console.log(`   ${top.carrier.LEGAL_NAME} (DOT: ${top.carrier.DOT_NUMBER})`);
-      console.log(`   ${top.carrier.PHY_CITY}, ${top.carrier.PHY_STATE}`);
-      console.log(`   Score: ${top.overallScore}%`);
-    }
-
     const elapsed = Date.now() - startTime;
+
     await log({
       level: 'INFO',
       source: 'carrier-matching',
@@ -307,8 +220,6 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
       maxAllowed: maxResults,
       cachedCount: matchesWithStatus.length - needsFreshCount,
       needsEnrichmentCount: needsFreshCount,
-
-      // NEW: Include driver profile info for frontend personalization
       driverProfile: driverProfile ? {
         id: driverProfile._id,
         displayName: driverProfile.display_name,
@@ -317,16 +228,12 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
         isComplete: driverProfile.is_complete,
         missingFields: driverProfile.missing_fields
       } : null,
-
       upsellMessage: !isPremiumUser && validCarriers.length > maxResults
         ? `${validCarriers.length - maxResults} more matches available! Sign up to see all your matches.`
         : null
     };
 
   } catch (error) {
-    console.error('❌ BACKEND ERROR:', error);
-    console.error('   Message:', error.message);
-    console.error('   Stack:', error.stack);
     await log({ level: 'ERROR', source: 'carrier-matching', message: `Match failed: ${error.message}`, traceId, details: { error: error.message } });
     await endTrace(traceId, 'error', { error: error.message });
 
@@ -342,13 +249,9 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
 
 // ============================================================================
 // EXPORTED FUNCTION - logMatchEvent
-// Now uses the new DriverCarrierInterests system for logged-in users
-// Falls back to anonymous MatchEvents for non-logged-in users
 // ============================================================================
 
 export async function logMatchEvent(matchEvent) {
-  console.log('📝 Logging match event:', matchEvent.carrierName);
-  
   // Try to use the new driver-linked system first
   try {
     const interestResult = await logCarrierInterest({
@@ -359,35 +262,18 @@ export async function logMatchEvent(matchEvent) {
     });
     
     if (interestResult.success) {
-      console.log('✅ Interest logged to DriverCarrierInterests');
-      return { 
-        success: true, 
-        method: 'driver_linked',
-        isNew: interestResult.isNew
-      };
+      return { success: true, method: 'driver_linked', isNew: interestResult.isNew };
     }
-    
-    // If user is anonymous, fall back to old system
-    if (interestResult.isAnonymous) {
-      console.log('👤 Anonymous user - falling back to MatchEvents');
-    }
-    
   } catch (interestError) {
     console.log('⚠️ Driver interest system unavailable:', interestError.message);
   }
   
-  // FALLBACK: Use the legacy MatchEvents collection for anonymous users
-  // Supports dual data sources via config.jsw
+  // FALLBACK: MatchEvents collection for anonymous users
   try {
     const score = parseInt(matchEvent.matchScore);
-
-    // Airtable expects numeric fields for DOT and ZIP
     const dotNumber = parseInt(matchEvent.carrierDOT, 10);
     const zipNumber = parseInt(matchEvent.driverZip, 10);
-
-    // Format timestamp as YYYY-MM-DD for Airtable date field (not datetime)
-    const now = new Date();
-    const formattedDate = now.toISOString().split('T')[0];
+    const formattedDate = new Date().toISOString().split('T')[0];
 
     const matchEventData = {
       driver_zip: isNaN(zipNumber) ? 0 : zipNumber,
@@ -400,14 +286,9 @@ export async function logMatchEvent(matchEvent) {
     };
 
     const insertResult = await dataAccess.insertRecord('matchEvents', matchEventData, { suppressAuth: true });
+    if (!insertResult.success) throw new Error(insertResult.error);
 
-    if (!insertResult.success) {
-      throw new Error(insertResult.error);
-    }
-
-    console.log('✅ Match event logged to MatchEvents (legacy)');
     return { success: true, method: 'legacy' };
-
   } catch (error) {
     console.error('❌ Error logging match:', error);
     return { success: false, error: error.message };
@@ -420,47 +301,23 @@ export async function logMatchEvent(matchEvent) {
 
 export async function getDriverSavedCarriers() {
   try {
-    // Import at runtime to avoid circular dependency
     const { getDriverInterests } = await import('backend/driverProfiles');
-    
     const result = await getDriverInterests();
     
-    if (!result.success) {
-      return { success: false, carriers: [], error: result.error };
-    }
+    if (!result.success) return { success: false, carriers: [], error: result.error };
     
-    // Enrich with carrier data
     const dotNumbers = result.interests.map(i => i.carrier_dot);
+    if (dotNumbers.length === 0) return { success: true, carriers: [], totalCount: 0 };
     
-    if (dotNumbers.length === 0) {
-      return { success: true, carriers: [], totalCount: 0 };
-    }
-    
-    // Get carrier details using dual-source data access
-    let carrierItems = [];
-
-    if (usesAirtable('carriers')) {
-      // Airtable query - build OR formula for multiple DOT numbers
-      const dotConditions = dotNumbers.map(d => `{DOT Number} = '${d}'`).join(', ');
-      const filterFormula = `OR(${dotConditions})`;
-
-      const airtableResult = await airtable.queryRecords('Carriers', {
-        filterByFormula: filterFormula
-      });
-      carrierItems = airtableResult.records || [];
-    } else {
-      const carrierResult = await wixData.query(CONFIG.collectionsName)
-        .hasSome('dot_number', dotNumbers)
-        .find();
-      carrierItems = carrierResult.items;
-    }
+    const carrierResult = await dataAccess.queryRecords('carriers', {
+      filters: { dot_number: { hasSome: dotNumbers } }
+    });
 
     const carrierMap = {};
-    for (const carrier of carrierItems) {
+    (carrierResult.items || []).forEach(carrier => {
       carrierMap[carrier.dot_number] = normalizeCarrier(carrier);
-    }
+    });
     
-    // Combine interests with carrier data
     const enrichedCarriers = result.interests.map(interest => ({
       ...interest,
       carrier: carrierMap[interest.carrier_dot] || null

@@ -1,25 +1,9 @@
-// ============================================================================
-// B2B SEQUENCE SERVICE - Multi-channel outreach sequences
-//
-// Manages email, SMS, and voice outreach sequences with scheduling,
-// throttle rules, template variable injection, and compliance tracking.
-//
-// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
-//
-// Used on: Outreach Workspace, Campaign Reporting, Account Detail
-// @see Conductor/tracks/b2b_business_development_suite_20260128/spec.md
-// ============================================================================
-
 import wixData from 'wix-data';
-import { usesAirtable, getAirtableTableName } from 'backend/config';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { logEmail, logSms, logCall } from 'backend/b2bActivityService';
 import { validateConsent, checkQuietHours, isDoNotContact } from 'backend/b2bSecurityService';
 
-// ============================================================================
-// COLLECTION KEYS
-// ============================================================================
-
+// Collection keys for dataAccess
 const COLLECTIONS = {
   sequences: 'b2bSequences',
   sequenceSteps: 'b2bSequenceSteps',
@@ -30,690 +14,167 @@ const COLLECTIONS = {
   contacts: 'b2bContacts'
 };
 
-// ============================================================================
-// STEP TYPES & STATUSES
-// ============================================================================
-
-const STEP_TYPES = {
-  EMAIL: 'email',
-  SMS: 'sms',
-  CALL: 'call',
-  WAIT: 'wait',
-  TASK: 'task'
-};
-
-const SEQUENCE_STATUS = {
-  DRAFT: 'draft',
-  ACTIVE: 'active',
-  PAUSED: 'paused',
-  ARCHIVED: 'archived'
-};
-
-const MESSAGE_STATUS = {
-  QUEUED: 'queued',
-  SENT: 'sent',
-  DELIVERED: 'delivered',
-  OPENED: 'opened',
-  CLICKED: 'clicked',
-  REPLIED: 'replied',
-  BOUNCED: 'bounced',
-  FAILED: 'failed',
-  OPTED_OUT: 'opted_out'
-};
-
-// ============================================================================
-// THROTTLE CONFIG
-// ============================================================================
-
-const THROTTLE = {
-  maxEmailsPerDay: 200,
-  maxSmsPerDay: 100,
-  maxCallsPerDay: 50,
-  quietHoursStart: 21, // 9 PM
-  quietHoursEnd: 8,    // 8 AM
-  minDelayBetweenMs: 60000 // 1 minute between sends
-};
-
-// ============================================================================
-// DUAL-SOURCE HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-      filterByFormula: options.filter || '',
-      sort: options.sort,
-      maxRecords: options.limit || 100
-    });
-    return { items: result.records || [], totalCount: result.records?.length || 0 };
-  }
-  let query = wixData.query(collectionKey);
-  if (options.limit) query = query.limit(options.limit);
-  return await query.find();
-}
-
-async function getRecord(collectionKey, recordId) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.getRecord(tableName, recordId);
-    return result.record || null;
-  }
-  return await wixData.get(collectionKey, recordId);
-}
-
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.createRecord(tableName, record);
-    return result.record || record;
-  }
-  return await wixData.insert(collectionKey, record);
-}
-
-async function updateData(collectionKey, recordId, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.updateRecord(tableName, recordId, record);
-    return result.record || record;
-  }
-  return await wixData.update(collectionKey, { _id: recordId, ...record });
-}
-
-async function findByField(collectionKey, fieldName, value) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    return await airtable.findByField(tableName, fieldName, value);
-  }
-  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
-  return result.items || [];
-}
+const SEQUENCE_STATUS = { DRAFT: 'draft', ACTIVE: 'active', PAUSED: 'paused', ARCHIVED: 'archived' };
+const MESSAGE_STATUS = { QUEUED: 'queued', SENT: 'sent', DELIVERED: 'delivered', REPLIED: 'replied' };
+const THROTTLE = { maxEmailsPerDay: 200, maxSmsPerDay: 100, maxCallsPerDay: 50 };
 
 // ============================================================================
 // SEQUENCE CRUD
 // ============================================================================
 
-/**
- * Create a new outreach sequence
- *
- * @param {Object} seqData
- * @param {string} seqData.name - Sequence name
- * @param {string[]} [seqData.channel_mix] - Channels used (email, sms, call)
- * @param {string} [seqData.owner_id] - Creator/owner
- * @param {Object} [seqData.throttle_rules] - Custom throttle overrides
- * @returns {Promise<{success: boolean, sequence?: Object, error?: string}>}
- */
 export async function createSequence(seqData) {
   try {
-    if (!seqData.name || !seqData.name.trim()) {
-      return { success: false, error: 'Sequence name is required' };
-    }
-
+    if (!seqData.name?.trim()) return { success: false, error: 'Name required' };
     const record = {
-      name: seqData.name.trim(),
-      channel_mix: Array.isArray(seqData.channel_mix) ? seqData.channel_mix.join(', ') : (seqData.channel_mix || 'email'),
-      status: SEQUENCE_STATUS.DRAFT,
-      owner_id: seqData.owner_id || '',
-      steps: '[]',
-      throttle_rules: seqData.throttle_rules ? JSON.stringify(seqData.throttle_rules) : JSON.stringify(THROTTLE),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      name: seqData.name.trim(), channel_mix: Array.isArray(seqData.channel_mix) ? seqData.channel_mix.join(', ') : (seqData.channel_mix || 'email'),
+      status: SEQUENCE_STATUS.DRAFT, owner_id: seqData.owner_id || '', steps: '[]',
+      throttle_rules: JSON.stringify(seqData.throttle_rules || THROTTLE),
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString()
     };
-
-    const saved = await insertData(COLLECTIONS.sequences, record);
-    return { success: true, sequence: saved };
-  } catch (error) {
-    console.error('Error creating sequence:', error);
-    return { success: false, error: error.message || 'Failed to create sequence' };
-  }
+    const result = await dataAccess.insertRecord(COLLECTIONS.sequences, record, { suppressAuth: true });
+    return { success: result.success, sequence: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Get a sequence by ID
- *
- * @param {string} sequenceId
- * @returns {Promise<{success: boolean, sequence?: Object, steps?: Object[], error?: string}>}
- */
 export async function getSequence(sequenceId) {
   try {
-    if (!sequenceId) return { success: false, error: 'Sequence ID is required' };
-
-    const sequence = await getRecord(COLLECTIONS.sequences, sequenceId);
-    if (!sequence) return { success: false, error: 'Sequence not found' };
-
-    // Get steps
-    const steps = await findByField(COLLECTIONS.sequenceSteps, 'sequence_id', sequenceId);
-    const sortedSteps = (steps || []).sort((a, b) => (a.step_order || 0) - (b.step_order || 0));
-
-    return { success: true, sequence, steps: sortedSteps };
-  } catch (error) {
-    console.error('Error fetching sequence:', error);
-    return { success: false, error: error.message || 'Failed to fetch sequence' };
-  }
+    const sequence = await dataAccess.getRecord(COLLECTIONS.sequences, sequenceId, { suppressAuth: true });
+    if (!sequence) return { success: false, error: 'Not found' };
+    const stepsRes = await dataAccess.queryRecords(COLLECTIONS.sequenceSteps, { filters: { sequence_id: sequenceId }, sort: [{ field: 'step_order', direction: 'asc' }], limit: 100, suppressAuth: true });
+    return { success: true, sequence, steps: stepsRes.items || [] };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Update sequence metadata
- *
- * @param {string} sequenceId
- * @param {Object} updates
- * @returns {Promise<{success: boolean, sequence?: Object, error?: string}>}
- */
 export async function updateSequence(sequenceId, updates) {
   try {
-    if (!sequenceId) return { success: false, error: 'Sequence ID is required' };
-
-    updates.updated_at = new Date().toISOString();
-    if (updates.throttle_rules && typeof updates.throttle_rules !== 'string') {
-      updates.throttle_rules = JSON.stringify(updates.throttle_rules);
-    }
-
-    const saved = await updateData(COLLECTIONS.sequences, sequenceId, updates);
-    return { success: true, sequence: saved };
-  } catch (error) {
-    console.error('Error updating sequence:', error);
-    return { success: false, error: error.message || 'Failed to update sequence' };
-  }
+    const existing = await dataAccess.getRecord(COLLECTIONS.sequences, sequenceId, { suppressAuth: true });
+    if (!existing) throw new Error('Not found');
+    const result = await dataAccess.updateRecord(COLLECTIONS.sequences, { ...existing, ...updates, _id: sequenceId, updated_at: new Date().toISOString() }, { suppressAuth: true });
+    return { success: result.success, sequence: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * List all sequences
- *
- * @param {Object} [filters]
- * @param {string} [filters.status] - Filter by status
- * @param {string} [filters.ownerId] - Filter by owner
- * @param {number} [filters.limit=50]
- * @returns {Promise<{success: boolean, sequences?: Object[], error?: string}>}
- */
 export async function listSequences(filters = {}) {
   try {
-    const parts = [];
-    if (filters.status) parts.push(`{status} = "${filters.status}"`);
-    if (filters.ownerId) parts.push(`{owner_id} = "${filters.ownerId}"`);
-
-    const filter = parts.length > 0
-      ? (parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`)
-      : '';
-
-    const result = await queryData(COLLECTIONS.sequences, {
-      filter,
-      sort: [{ field: 'updated_at', direction: 'desc' }],
-      limit: filters.limit || 50
-    });
-
+    const queryFilters = {};
+    if (filters.status) queryFilters.status = filters.status;
+    const result = await dataAccess.queryRecords(COLLECTIONS.sequences, { filters: queryFilters, sort: [{ field: 'updated_at', direction: 'desc' }], limit: filters.limit || 50, suppressAuth: true });
     return { success: true, sequences: result.items || [] };
-  } catch (error) {
-    console.error('Error listing sequences:', error);
-    return { success: false, error: error.message || 'Failed to list sequences' };
-  }
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
 // ============================================================================
 // SEQUENCE STEPS
 // ============================================================================
 
-/**
- * Add a step to a sequence
- *
- * @param {Object} stepData
- * @param {string} stepData.sequence_id - Parent sequence
- * @param {string} stepData.step_type - email, sms, call, wait, task
- * @param {string} [stepData.template] - Message template with {{variables}}
- * @param {string} [stepData.subject] - Email subject (for email steps)
- * @param {number} [stepData.delay_hours=24] - Delay before executing (hours)
- * @param {string} [stepData.conditions] - JSON conditions for execution
- * @param {number} [stepData.step_order] - Position in sequence
- * @returns {Promise<{success: boolean, step?: Object, error?: string}>}
- */
 export async function addStep(stepData) {
   try {
-    if (!stepData.sequence_id) return { success: false, error: 'Sequence ID is required' };
-    if (!stepData.step_type) return { success: false, error: 'Step type is required' };
-
-    const record = {
-      sequence_id: stepData.sequence_id,
-      step_type: stepData.step_type,
-      template: stepData.template || '',
-      subject: stepData.subject || '',
-      delay_hours: stepData.delay_hours || 24,
-      conditions: stepData.conditions || '',
-      step_order: stepData.step_order || 0,
-      created_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.sequenceSteps, record);
-    return { success: true, step: saved };
-  } catch (error) {
-    console.error('Error adding sequence step:', error);
-    return { success: false, error: error.message || 'Failed to add step' };
-  }
+    if (!stepData.sequence_id || !stepData.step_type) return { success: false, error: 'Missing fields' };
+    const result = await dataAccess.insertRecord(COLLECTIONS.sequenceSteps, { ...stepData, created_at: new Date().toISOString() }, { suppressAuth: true });
+    return { success: result.success, step: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Update a sequence step
- *
- * @param {string} stepId
- * @param {Object} updates
- * @returns {Promise<{success: boolean, step?: Object, error?: string}>}
- */
 export async function updateStep(stepId, updates) {
   try {
-    if (!stepId) return { success: false, error: 'Step ID is required' };
-    const saved = await updateData(COLLECTIONS.sequenceSteps, stepId, updates);
-    return { success: true, step: saved };
-  } catch (error) {
-    console.error('Error updating step:', error);
-    return { success: false, error: error.message || 'Failed to update step' };
-  }
+    const existing = await dataAccess.getRecord(COLLECTIONS.sequenceSteps, stepId, { suppressAuth: true });
+    if (!existing) throw new Error('Not found');
+    const result = await dataAccess.updateRecord(COLLECTIONS.sequenceSteps, { ...existing, ...updates, _id: stepId }, { suppressAuth: true });
+    return { success: true, step: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
 // ============================================================================
-// TEMPLATE VARIABLE INJECTION
+// OUTREACH TRACKING
 // ============================================================================
 
-/**
- * Render a template with variable substitution
- * Supports {{carrier_name}}, {{match_count}}, {{top_regions}}, {{contact_name}}, etc.
- *
- * @param {string} template - Template string with {{variable}} placeholders
- * @param {Object} variables - Key-value pairs for substitution
- * @returns {string} Rendered template
- */
-export function renderTemplate(template, variables = {}) {
-  if (!template) return '';
-
-  let rendered = template;
-  Object.entries(variables).forEach(([key, value]) => {
-    const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
-    rendered = rendered.replace(regex, String(value || ''));
-  });
-
-  // Clean up any remaining unresolved variables
-  rendered = rendered.replace(/\{\{[^}]+\}\}/g, '');
-
-  return rendered;
-}
-
-// ============================================================================
-// OUTREACH TRACKING (EMAIL, SMS, CALLS)
-// ============================================================================
-
-/**
- * Record an email send
- *
- * @param {Object} emailData
- * @param {string} emailData.account_id
- * @param {string} emailData.contact_id
- * @param {string} emailData.subject
- * @param {string} [emailData.sequence_id]
- * @param {string} [emailData.step_id]
- * @returns {Promise<{success: boolean, email?: Object, error?: string}>}
- */
 export async function recordEmail(emailData) {
   try {
-    if (!emailData.account_id) return { success: false, error: 'Account ID is required' };
-    if (!emailData.contact_id) return { success: false, error: 'Contact ID is required' };
-
-    // Compliance: Check consent (email allows until opt-out)
+    if (!emailData.account_id || !emailData.contact_id) return { success: false, error: 'Missing fields' };
     const consent = await validateConsent(emailData.contact_id, 'email');
-    if (!consent.allowed) {
-      return { success: false, error: consent.reason };
-    }
+    if (!consent.allowed) return { success: false, error: consent.reason };
 
-    // Compliance: Quiet hours check
-    const { inQuietHours } = checkQuietHours();
-    if (inQuietHours) {
-      return { success: false, error: 'Cannot send email during quiet hours (9PM-8AM UTC)' };
-    }
-
-    const record = {
-      account_id: emailData.account_id,
-      contact_id: emailData.contact_id,
-      subject: emailData.subject || '',
-      status: MESSAGE_STATUS.SENT,
-      opened: false,
-      clicked: false,
-      sequence_id: emailData.sequence_id || '',
-      step_id: emailData.step_id || '',
-      sent_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.emails, record);
-
-    // Log activity (fire-and-forget)
+    const result = await dataAccess.insertRecord(COLLECTIONS.emails, { ...emailData, status: MESSAGE_STATUS.SENT, opened: false, clicked: false, sent_at: new Date().toISOString() }, { suppressAuth: true });
     logEmail(emailData.account_id, emailData.contact_id, emailData.subject, 'sent').catch(() => {});
-
-    return { success: true, email: saved };
-  } catch (error) {
-    console.error('Error recording email:', error);
-    return { success: false, error: error.message || 'Failed to record email' };
-  }
+    return { success: result.success, email: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Update email tracking status (open, click, reply, bounce)
- *
- * @param {string} emailId
- * @param {string} status - New status
- * @returns {Promise<{success: boolean, error?: string}>}
- */
 export async function updateEmailStatus(emailId, status) {
   try {
-    if (!emailId) return { success: false, error: 'Email ID is required' };
-
-    const updates = { status };
+    const existing = await dataAccess.getRecord(COLLECTIONS.emails, emailId, { suppressAuth: true });
+    const updates = { ...existing, _id: emailId, status };
     if (status === 'opened') updates.opened = true;
     if (status === 'clicked') updates.clicked = true;
-
-    await updateData(COLLECTIONS.emails, emailId, updates);
+    await dataAccess.updateRecord(COLLECTIONS.emails, updates, { suppressAuth: true });
     return { success: true };
-  } catch (error) {
-    console.error('Error updating email status:', error);
-    return { success: false, error: error.message || 'Failed to update email' };
-  }
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Record an SMS send
- *
- * @param {Object} smsData
- * @param {string} smsData.account_id
- * @param {string} smsData.contact_id
- * @param {string} smsData.message - Message body
- * @param {string} [smsData.sequence_id]
- * @returns {Promise<{success: boolean, textMessage?: Object, error?: string}>}
- */
 export async function recordSms(smsData) {
   try {
-    if (!smsData.account_id) return { success: false, error: 'Account ID is required' };
-    if (!smsData.contact_id) return { success: false, error: 'Contact ID is required' };
-
-    // Compliance: Consent check (SMS requires explicit opt-in)
     const consent = await validateConsent(smsData.contact_id, 'sms');
-    if (!consent.allowed) {
-      return { success: false, error: consent.reason };
-    }
+    if (!consent.allowed) return { success: false, error: consent.reason };
+    if (await isDoNotContact(smsData.contact_id)) return { success: false, error: 'DNC' };
 
-    // Compliance: Quiet hours check
-    const { inQuietHours } = checkQuietHours();
-    if (inQuietHours) {
-      return { success: false, error: 'Cannot send SMS during quiet hours (9PM-8AM UTC)' };
-    }
-
-    // Compliance: Do-not-contact check
-    const dnc = await isDoNotContact(smsData.contact_id);
-    if (dnc) {
-      return { success: false, error: 'Contact is on do-not-contact list' };
-    }
-
-    const record = {
-      account_id: smsData.account_id,
-      contact_id: smsData.contact_id,
-      message: smsData.message || '',
-      status: MESSAGE_STATUS.SENT,
-      sequence_id: smsData.sequence_id || '',
-      sent_at: new Date().toISOString(),
-      delivered_at: '',
-      response_text: ''
-    };
-
-    const saved = await insertData(COLLECTIONS.textMessages, record);
-
-    // Log activity
+    const result = await dataAccess.insertRecord(COLLECTIONS.textMessages, { ...smsData, status: MESSAGE_STATUS.SENT, sent_at: new Date().toISOString() }, { suppressAuth: true });
     logSms(smsData.account_id, smsData.contact_id, (smsData.message || '').substring(0, 50), 'sent').catch(() => {});
-
-    return { success: true, textMessage: saved };
-  } catch (error) {
-    console.error('Error recording SMS:', error);
-    return { success: false, error: error.message || 'Failed to record SMS' };
-  }
+    return { success: result.success, textMessage: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Record a call
- *
- * @param {Object} callData
- * @param {string} callData.account_id
- * @param {string} callData.contact_id
- * @param {string} [callData.campaign_id]
- * @param {string} [callData.direction='outbound']
- * @param {string} [callData.status='completed']
- * @param {number} [callData.duration] - Duration in seconds
- * @param {string} [callData.disposition] - Disposition code
- * @param {string} [callData.notes] - Call notes
- * @returns {Promise<{success: boolean, call?: Object, error?: string}>}
- */
 export async function recordCall(callData) {
   try {
-    if (!callData.account_id) return { success: false, error: 'Account ID is required' };
-    if (!callData.contact_id) return { success: false, error: 'Contact ID is required' };
-
-    // Compliance: Consent check (calls require explicit opt-in)
     const consent = await validateConsent(callData.contact_id, 'call');
-    if (!consent.allowed) {
-      return { success: false, error: consent.reason };
-    }
+    if (!consent.allowed) return { success: false, error: consent.reason };
+    if (await isDoNotContact(callData.contact_id)) return { success: false, error: 'DNC' };
 
-    // Compliance: Quiet hours check
-    const { inQuietHours } = checkQuietHours();
-    if (inQuietHours) {
-      return { success: false, error: 'Cannot make calls during quiet hours (9PM-8AM UTC)' };
-    }
-
-    // Compliance: Do-not-contact check
-    const dnc = await isDoNotContact(callData.contact_id);
-    if (dnc) {
-      return { success: false, error: 'Contact is on do-not-contact list' };
-    }
-
-    const record = {
-      account_id: callData.account_id,
-      contact_id: callData.contact_id,
-      campaign_id: callData.campaign_id || '',
-      direction: callData.direction || 'outbound',
-      status: callData.status || 'completed',
-      duration: callData.duration || 0,
-      recording_url: callData.recording_url || '',
-      transcript: callData.transcript || '',
-      disposition: callData.disposition || '',
-      notes: callData.notes || '',
-      created_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.calls, record);
-
-    // Log activity
-    logCall(callData.account_id, callData.contact_id, {
-      outcome: callData.disposition || callData.status || 'completed',
-      duration: callData.duration,
-      notes: callData.notes
-    }).catch(() => {});
-
-    return { success: true, call: saved };
-  } catch (error) {
-    console.error('Error recording call:', error);
-    return { success: false, error: error.message || 'Failed to record call' };
-  }
+    const result = await dataAccess.insertRecord(COLLECTIONS.calls, { ...callData, direction: 'outbound', status: 'completed', created_at: new Date().toISOString() }, { suppressAuth: true });
+    logCall(callData.account_id, callData.contact_id, { outcome: callData.disposition || 'completed', duration: callData.duration }).catch(() => {});
+    return { success: result.success, call: result.record };
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-// ============================================================================
-// CALL CAMPAIGNS
-// ============================================================================
-
-/**
- * Create a call campaign
- *
- * @param {Object} campaignData
- * @param {string} campaignData.name - Campaign name
- * @param {string} [campaignData.owner_id]
- * @param {string} [campaignData.script] - Call script
- * @returns {Promise<{success: boolean, campaign?: Object, error?: string}>}
- */
-export async function createCallCampaign(campaignData) {
-  try {
-    if (!campaignData.name) return { success: false, error: 'Campaign name is required' };
-
-    const record = {
-      name: campaignData.name.trim(),
-      owner_id: campaignData.owner_id || '',
-      script: campaignData.script || '',
-      status: 'active',
-      call_count: 0,
-      connect_count: 0,
-      created_at: new Date().toISOString()
-    };
-
-    const saved = await insertData(COLLECTIONS.callCampaigns, record);
-    return { success: true, campaign: saved };
-  } catch (error) {
-    console.error('Error creating call campaign:', error);
-    return { success: false, error: error.message || 'Failed to create campaign' };
-  }
-}
-
-// ============================================================================
-// OUTREACH METRICS
-// ============================================================================
-
-/**
- * Get outreach metrics for a sequence or across all sequences
- *
- * @param {Object} [options]
- * @param {string} [options.sequenceId] - Filter by sequence
- * @param {number} [options.days=30] - Lookback period
- * @returns {Promise<{success: boolean, metrics?: Object, error?: string}>}
- */
 export async function getOutreachMetrics(options = {}) {
   try {
-    const days = options.days || 30;
-    const since = new Date();
-    since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString();
-
-    // Email metrics
-    const emailFilter = options.sequenceId
-      ? `AND({sequence_id} = "${options.sequenceId}", IS_AFTER({sent_at}, "${sinceStr}"))`
-      : `IS_AFTER({sent_at}, "${sinceStr}")`;
-    const emailResult = await queryData(COLLECTIONS.emails, { filter: emailFilter, limit: 500 });
-    const emails = emailResult.items || [];
-
-    const emailSent = emails.length;
-    const emailOpened = emails.filter(e => e.opened).length;
-    const emailClicked = emails.filter(e => e.clicked).length;
-    const emailReplied = emails.filter(e => e.status === 'replied').length;
-    const emailBounced = emails.filter(e => e.status === 'bounced').length;
-
-    // SMS metrics
-    const smsFilter = `IS_AFTER({sent_at}, "${sinceStr}")`;
-    const smsResult = await queryData(COLLECTIONS.textMessages, { filter: smsFilter, limit: 500 });
-    const sms = smsResult.items || [];
-
-    const smsSent = sms.length;
-    const smsDelivered = sms.filter(s => s.status === 'delivered' || s.delivered_at).length;
-    const smsReplied = sms.filter(s => s.response_text && s.response_text.trim()).length;
-
-    // Call metrics
-    const callFilter = `IS_AFTER({created_at}, "${sinceStr}")`;
-    const callResult = await queryData(COLLECTIONS.calls, { filter: callFilter, limit: 500 });
-    const calls = callResult.items || [];
-
-    const callTotal = calls.length;
-    const callConnected = calls.filter(c => c.status === 'completed' || c.disposition === 'connected').length;
+    const since = new Date(Date.now() - (options.days || 30) * 24 * 60 * 60 * 1000).toISOString();
+    const [emails, sms, calls] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.emails, { filters: { sent_at: { gte: since } }, limit: 500, suppressAuth: true }).then(r => r.items || []),
+      dataAccess.queryRecords(COLLECTIONS.textMessages, { filters: { sent_at: { gte: since } }, limit: 500, suppressAuth: true }).then(r => r.items || []),
+      dataAccess.queryRecords(COLLECTIONS.calls, { filters: { created_at: { gte: since } }, limit: 500, suppressAuth: true }).then(r => r.items || [])
+    ]);
 
     return {
       success: true,
       metrics: {
-        period_days: days,
-        email: {
-          sent: emailSent,
-          opened: emailOpened,
-          clicked: emailClicked,
-          replied: emailReplied,
-          bounced: emailBounced,
-          open_rate: emailSent > 0 ? Math.round((emailOpened / emailSent) * 100) : 0,
-          reply_rate: emailSent > 0 ? Math.round((emailReplied / emailSent) * 1000) / 10 : 0
-        },
-        sms: {
-          sent: smsSent,
-          delivered: smsDelivered,
-          replied: smsReplied,
-          reply_rate: smsSent > 0 ? Math.round((smsReplied / smsSent) * 100) : 0
-        },
-        call: {
-          total: callTotal,
-          connected: callConnected,
-          connect_rate: callTotal > 0 ? Math.round((callConnected / callTotal) * 100) : 0
-        }
+        email: { sent: emails.length, opened: emails.filter(e => e.opened).length, replied: emails.filter(e => e.status === 'replied').length },
+        sms: { sent: sms.length, replied: sms.filter(s => s.response_text).length },
+        call: { total: calls.length, connected: calls.filter(c => c.disposition === 'connected').length }
       }
     };
-  } catch (error) {
-    console.error('Error computing outreach metrics:', error);
-    return { success: false, error: error.message || 'Failed to compute metrics' };
-  }
+  } catch (error) { return { success: false, error: error.message }; }
 }
 
-/**
- * Check if outreach is within throttle limits
- *
- * @param {string} channel - email, sms, call
- * @param {string} [ownerId]
- * @returns {Promise<{success: boolean, allowed: boolean, remaining?: number, error?: string}>}
- */
-export async function checkThrottleLimits(channel, ownerId = '') {
+export async function checkThrottleLimits(channel) {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayStr = today.toISOString();
+    const today = new Date(); today.setHours(0,0,0,0);
+    const key = channel === 'email' ? COLLECTIONS.emails : (channel === 'sms' ? COLLECTIONS.textMessages : COLLECTIONS.calls);
+    const dateField = channel === 'call' ? 'created_at' : 'sent_at';
+    const limit = channel === 'email' ? THROTTLE.maxEmailsPerDay : (channel === 'sms' ? THROTTLE.maxSmsPerDay : THROTTLE.maxCallsPerDay);
 
-    let collection;
-    let maxPerDay;
-    let dateField;
-
-    switch (channel) {
-      case 'email':
-        collection = COLLECTIONS.emails;
-        maxPerDay = THROTTLE.maxEmailsPerDay;
-        dateField = 'sent_at';
-        break;
-      case 'sms':
-        collection = COLLECTIONS.textMessages;
-        maxPerDay = THROTTLE.maxSmsPerDay;
-        dateField = 'sent_at';
-        break;
-      case 'call':
-        collection = COLLECTIONS.calls;
-        maxPerDay = THROTTLE.maxCallsPerDay;
-        dateField = 'created_at';
-        break;
-      default:
-        return { success: false, error: `Unknown channel: ${channel}` };
-    }
-
-    const filter = `IS_AFTER({${dateField}}, "${todayStr}")`;
-    const result = await queryData(collection, { filter, limit: 500 });
+    const result = await dataAccess.queryRecords(key, { filters: { [dateField]: { gte: today.toISOString() } }, limit: 500, suppressAuth: true });
     const count = (result.items || []).length;
-
-    return {
-      success: true,
-      allowed: count < maxPerDay,
-      remaining: Math.max(0, maxPerDay - count),
-      used: count,
-      limit: maxPerDay
-    };
-  } catch (error) {
-    console.error('Error checking throttle limits:', error);
-    return { success: false, allowed: false, error: error.message };
-  }
+    return { success: true, allowed: count < limit, remaining: Math.max(0, limit - count), used: count, limit };
+  } catch (error) { return { success: false, allowed: false, error: error.message }; }
 }
 
-/**
- * Check if current time is within quiet hours
- *
- * @param {string} [timezone] - Contact's timezone (not yet implemented, uses UTC)
- * @returns {boolean}
- */
-export function isQuietHours(timezone = '') {
-  const now = new Date();
-  const hour = now.getUTCHours();
-  return hour >= THROTTLE.quietHoursStart || hour < THROTTLE.quietHoursEnd;
+export function isQuietHours() {
+  const hour = new Date().getUTCHours();
+  return hour >= 21 || hour < 8;
+}
+
+export function renderTemplate(template, variables = {}) {
+  let rendered = template || '';
+  Object.entries(variables).forEach(([k, v]) => { rendered = rendered.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v || '')); });
+  return rendered.replace(/\{\{[^}]+\}\}/g, '');
 }

@@ -1,28 +1,11 @@
-/**
- * Driver Matching Service - Reverse Matching Engine
- *
- * Enables carriers to search, filter, and match with qualified CDL drivers.
- * This is the primary revenue driver for the platform (paid subscription service).
- *
- * Supports dual data sources (Wix and Airtable) via config.jsw feature flags.
- *
- * @module backend/driverMatching
- * @see conductor/tracks/reverse_matching_20251225/spec.md
- */
-
 import wixData from 'wix-data';
 import { currentUser } from 'wix-users-backend';
-// import { getSubscription, checkViewQuota, recordProfileView } from 'backend/dummySub.jsw';
 import { getSubscription, checkViewQuota, recordProfileView } from 'backend/subscriptionService';
 import { calculateDriverMatchScore, generateDriverMatchRationale, getCarrierFeedbackWeights, applyFeedbackAdjustments } from 'backend/driverScoring';
 import { startTrace, endTrace, log, logDatabase } from 'backend/observabilityService';
 import { withRetry } from 'backend/utils/retryUtils';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
-
-// Dual-source data access
-import { usesAirtable, getWixCollectionName } from 'backend/configData';
 import * as dataAccess from 'backend/dataAccess';
-import * as airtable from 'backend/airtableClient';
 
 // Gamification hooks - lazy-loaded to avoid circular dependencies
 async function getGamificationService() {
@@ -94,7 +77,6 @@ async function verifyAuthenticated() {
 /**
  * Verifies the user has an allowed role/badge (recruiter or admin)
  * Checks both Wix roles and member badges
- * Supports dual data sources via config.jsw
  * @returns {Promise<{success: boolean, roles?: Array, error?: string}>}
  */
 async function verifyRole() {
@@ -115,7 +97,6 @@ async function verifyRole() {
     }
 
     // If no Wix role, check for badge assignments
-    // Query the member's badges via the MemberBadges collection
     // Note: Member badges always use Wix (system collection)
     const badgeResult = await wixData.query('Members/Badges')
       .eq('memberId', currentUser.id)
@@ -148,7 +129,6 @@ async function verifyRole() {
 /**
  * Verifies the user is authorized to access the specified carrier.
  * Checks the 'recruiterCarriers' collection for a valid recruiter-carrier association.
- * Supports dual data sources via config.jsw
  *
  * @param {string} carrierDot - The carrier DOT number
  * @param {string} userId - The user ID
@@ -156,7 +136,7 @@ async function verifyRole() {
  */
 async function verifyCarrierAuthorization(carrierDot, userId) {
   try {
-    // Check if the user has access to this carrier using dual-source data access
+    // Check if the user has access to this carrier using dataAccess
     const accessResult = await dataAccess.queryRecords('recruiterCarriers', {
       filters: {
         recruiter_id: userId,
@@ -228,40 +208,7 @@ function maskPII(driver) {
 }
 
 /**
- * Applies filters to the driver query
- * @param {Object} query - The wixData query object
- * @param {Object} filters - The filter criteria
- * @returns {Object} The modified query
- */
-function applyFilters(query, filters) {
-  if (!filters) return query;
-
-  // CDL type filter
-  if (filters.cdl_types && Array.isArray(filters.cdl_types) && filters.cdl_types.length > 0) {
-    query = query.hasSome('cdl_class', filters.cdl_types);
-  }
-
-  // Endorsements filter (must have ALL specified endorsements)
-  if (filters.endorsements && Array.isArray(filters.endorsements) && filters.endorsements.length > 0) {
-    query = query.hasAll('endorsements', filters.endorsements);
-  }
-
-  // Minimum experience filter
-  if (filters.min_experience && typeof filters.min_experience === 'number') {
-    query = query.ge('years_experience', filters.min_experience);
-  }
-
-  // Availability filter
-  if (filters.availability && typeof filters.availability === 'string') {
-    query = query.eq('availability', filters.availability);
-  }
-
-  return query;
-}
-
-/**
  * Gets carrier hiring preferences if available
- * Supports dual data sources via config.jsw
  * @param {string} carrierDot - The carrier DOT number
  * @returns {Promise<Object|null>}
  */
@@ -283,7 +230,6 @@ async function getCarrierPreferences(carrierDot) {
 
 /**
  * Checks if a driver has expressed interest in a carrier
- * Supports dual data sources via config.jsw
  * @param {string} carrierDot - The carrier DOT number
  * @param {string} driverId - The driver ID
  * @returns {Promise<{hasInterest: boolean, interestDate?: Date}>}
@@ -383,69 +329,35 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
     }
 
     // Build base query FIRST - exclude non-searchable and hidden drivers
-    // (Query drivers before preferences to avoid mock state issues in tests)
-    // Supports dual data sources via config.jsw
-
     const queryStartTime = Date.now();
-    let drivers = [];
+    
+    // Use dataAccess for DriverProfiles query
+    const driverFilters = {
+      is_searchable: true,
+      visibility_level: { ne: 'hidden' }
+    };
 
-    // Check which data source to use for DriverProfiles
-    if (usesAirtable('driverProfiles')) {
-      // Airtable query path
-      const airtableFilters = {
-        is_searchable: true
-      };
-
-      // Build filter formula for Airtable
-      let filterFormula = "AND({Is Searchable} = TRUE(), {Visibility Level} != 'hidden'";
-
-      // Add dynamic filters
-      if (filters.cdl_types && Array.isArray(filters.cdl_types) && filters.cdl_types.length > 0) {
-        const cdlConditions = filters.cdl_types.map(t => `{CDL Class} = '${t}'`).join(', ');
-        filterFormula += `, OR(${cdlConditions})`;
-      }
-
-      if (filters.min_experience && typeof filters.min_experience === 'number') {
-        filterFormula += `, {Years Experience} >= ${filters.min_experience}`;
-      }
-
-      if (filters.availability && typeof filters.availability === 'string') {
-        filterFormula += `, {Availability} = '${filters.availability}'`;
-      }
-
-      filterFormula += ')';
-
-      const airtableResult = await withRetry(async () => {
-        return await airtable.queryRecords('DriverProfiles', {
-          filterByFormula: filterFormula,
-          maxRecords: 1000
-        });
-      }, {
-        context: 'findMatchingDrivers_airtable_query',
-        traceId
-      });
-
-      drivers = airtableResult.records || [];
-    } else {
-      // Wix Data query path (existing logic)
-      let query = wixData.query('DriverProfiles')
-        .eq('is_searchable', true)
-        .ne('visibility_level', 'hidden');
-
-      // Apply filters
-      query = applyFilters(query, filters);
-
-      // Execute query with timing and retry
-      // Wrap database query in retry logic
-      const queryResult = await withRetry(async () => {
-        return await query.find();
-      }, {
-        context: 'findMatchingDrivers_query',
-        traceId
-      });
-
-      drivers = queryResult.items;
+    // Add dynamic filters
+    if (filters.cdl_types && Array.isArray(filters.cdl_types) && filters.cdl_types.length > 0) {
+      driverFilters.cdl_class = { hasSome: filters.cdl_types };
     }
+
+    if (filters.min_experience && typeof filters.min_experience === 'number') {
+      driverFilters.years_experience = { gte: filters.min_experience };
+    }
+
+    if (filters.availability && typeof filters.availability === 'string') {
+      driverFilters.availability = filters.availability;
+    }
+
+    const result = await dataAccess.queryRecords('driverProfiles', {
+      filters: driverFilters,
+      limit: 1000,
+      suppressAuth: true
+    });
+
+    if (!result.success) throw new Error(result.error);
+    let drivers = result.items || [];
 
     const queryLatency = Date.now() - queryStartTime;
 
@@ -488,19 +400,13 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
       };
     }
 
-    // Get carrier preferences if requested (after driver query)
+    // Get carrier preferences if requested
     let carrierPrefs = null;
     if (options.usePreferences) {
       carrierPrefs = await getCarrierPreferences(carrierDot);
     }
 
-    // Additional filtering that couldn't be done in query
-    // Filter by CDL type if specified (post-query validation)
-    if (filters.cdl_types && Array.isArray(filters.cdl_types) && filters.cdl_types.length > 0) {
-      drivers = drivers.filter(d => filters.cdl_types.includes(d.cdl_class));
-    }
-
-    // Filter by endorsements (must have ALL)
+    // Filter by endorsements (must have ALL) - post-query validation for complex logic
     if (filters.endorsements && Array.isArray(filters.endorsements) && filters.endorsements.length > 0) {
       drivers = drivers.filter(d => {
         if (!d.endorsements || !Array.isArray(d.endorsements)) return false;
@@ -508,128 +414,76 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
       });
     }
 
-    // Filter by min experience
-    if (filters.min_experience && typeof filters.min_experience === 'number') {
-      drivers = drivers.filter(d => d.years_experience >= filters.min_experience);
-    }
-
-    // Filter by availability
-    if (filters.availability && typeof filters.availability === 'string') {
-      drivers = drivers.filter(d => d.availability === filters.availability);
-    }
-
-    // Score each driver with DYNAMIC WEIGHTS
-    // Weights are now influenced by:
-    // 1. Carrier Hiring Preferences (what this carrier values)
-    // 2. Active Filters (what recruiter prioritizes in this search)
+    // Score each driver with DYNAMIC WEIGHTS in parallel chunks
+    const scoringStartTime = Date.now();
     const scoredDrivers = [];
     const scoringPrefs = carrierPrefs || {};
     let scoringFailures = 0;
 
-    for (const driver of drivers) {
-      let score = 0;
-      let rationale = [];
-      let scoringFailed = false;
+    // Fetch carrier feedback weights once per search
+    let feedbackWeights = null;
+    try {
+      feedbackWeights = await getCarrierFeedbackWeights(carrierDot);
+    } catch (e) { /* ignore */ }
 
-      try {
-        // Fetch and apply carrier feedback weight adjustments (non-blocking fallback)
-        let feedbackAdjustedWeights = null;
+    // Process in parallel chunks to maximize throughput
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < drivers.length; i += CHUNK_SIZE) {
+      const chunk = drivers.slice(i, i + CHUNK_SIZE);
+      const chunkResults = await Promise.all(chunk.map(async (driver) => {
         try {
-          const feedbackWeights = await getCarrierFeedbackWeights(carrierDot);
+          // Apply feedback adjustments if available
+          let finalWeights = scoringPrefs;
           if (feedbackWeights) {
-            feedbackAdjustedWeights = applyFeedbackAdjustments(scoringPrefs, feedbackWeights);
+            finalWeights = applyFeedbackAdjustments(scoringPrefs, feedbackWeights);
           }
-        } catch (fbErr) {
-          // Non-critical: feedback weights are optional
+
+          const scoreResult = calculateDriverMatchScore(driver, finalWeights, null, filters);
+          const rationaleResult = generateDriverMatchRationale(scoreResult.scores || {}, driver, scoringPrefs);
+          
+          // Check for mutual match
+          let isMutualMatch = false;
+          let mutualMatchBoost = 0;
+          if (options.includeMutualMatches) {
+            const interest = await checkDriverInterest(carrierDot, driver._id);
+            if (interest.hasInterest) {
+              isMutualMatch = true;
+              mutualMatchBoost = MUTUAL_MATCH_SCORE_BOOST;
+            }
+          }
+
+          return {
+            driver,
+            score: Math.min(100, (scoreResult.overallScore || 0) + mutualMatchBoost),
+            rationale: rationaleResult.points || [],
+            summary: rationaleResult.summary,
+            isMutualMatch,
+            scoringFailed: false
+          };
+        } catch (err) {
+          scoringFailures++;
+          return {
+            driver,
+            score: 0,
+            rationale: ['Match score based on available criteria.'],
+            summary: 'Error calculating score',
+            isMutualMatch: false,
+            scoringFailed: true,
+            error: err.message
+          };
         }
-
-        // Pass filters as 4th parameter for dynamic weight boosting
-        const scoreResult = calculateDriverMatchScore(driver, feedbackAdjustedWeights || scoringPrefs, null, filters);
-        score = scoreResult.overallScore || scoreResult.totalScore || 0;
-
-        // generateDriverMatchRationale returns {summary, points, concerns}
-        // Convert to array of strings for the frontend
-        const rationaleResult = generateDriverMatchRationale(scoreResult.scores || {}, driver, scoringPrefs);
-        rationale = [];
-        if (rationaleResult.summary) {
-          rationale.push(rationaleResult.summary);
-        }
-        if (rationaleResult.points && Array.isArray(rationaleResult.points)) {
-          rationale = rationale.concat(rationaleResult.points);
-        }
-
-        // Add weight context if using dynamic weights
-        if (scoreResult.weightSource === 'dynamic') {
-          // Check which filters were active and boosted
-          const boostedCriteria = [];
-          if (filters.cdl_types?.length > 0 || filters.endorsements?.length > 0) {
-            boostedCriteria.push('qualifications');
-          }
-          if (filters.min_experience) {
-            boostedCriteria.push('experience');
-          }
-          if (filters.zip_code || filters.radius_miles) {
-            boostedCriteria.push('location');
-          }
-          if (filters.availability) {
-            boostedCriteria.push('availability');
-          }
-
-          if (boostedCriteria.length > 0) {
-            rationale.push(`Score weighted by your filter priorities: ${boostedCriteria.join(', ')}`);
-          }
-        }
-      } catch (err) {
-        // Scoring failed - log the issue and use 0 score with observability
-        console.error('[driverMatching] Scoring error:', err.message);
-        scoringFailures++;
-        scoringFailed = true;
-        score = 0;
-        rationale = ['Match score based on available criteria.'];
-
-        await log({
-          level: 'WARN',
-          source: 'driver-matching',
-          message: `Scoring failed for driver ${driver._id}`,
-          traceId,
-          details: {
-            driverId: driver._id,
-            error: err.message,
-            driverFields: Object.keys(driver)
-          }
-        });
-      }
-
-      // Check for mutual match if requested
-      let isMutualMatch = false;
-      if (options.includeMutualMatches) {
-        const interest = await checkDriverInterest(carrierDot, driver._id);
-        if (interest.hasInterest) {
-          isMutualMatch = true;
-          score += MUTUAL_MATCH_SCORE_BOOST;
-          rationale.push('Driver has expressed interest in your company');
-        }
-      }
-
-      scoredDrivers.push({
-        driver,
-        score,
-        rationale,
-        isMutualMatch,
-        scoringFailed
-      });
+      }));
+      scoredDrivers.push(...chunkResults);
     }
 
-    // Log scoring summary if there were failures
-    if (scoringFailures > 0) {
-      await log({
-        level: 'WARN',
-        source: 'driver-matching',
-        message: `Scoring completed with ${scoringFailures} failures out of ${drivers.length} drivers`,
-        traceId,
-        details: { scoringFailures, totalDrivers: drivers.length, failureRate: ((scoringFailures / drivers.length) * 100).toFixed(1) + '%' }
-      });
-    }
+    const scoringDuration = Date.now() - scoringStartTime;
+    await log({
+      level: 'INFO',
+      source: 'driver-matching',
+      message: `Scoring complete for ${scoredDrivers.length} drivers`,
+      traceId,
+      duration: scoringDuration
+    });
 
     // Sort by score descending
     scoredDrivers.sort((a, b) => b.score - a.score);
@@ -680,7 +534,6 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
     });
 
     // Log for Feature Adoption Tracking
-    // Fire and forget - don't await strictly if performance matters, but await is safer for serverless
     await logFeatureInteraction('recruiter_driver_search', accessCheck.userId, 'recruiter', 'search', {
       filters: Object.keys(filters),
       resultCount: paginatedResults.length,
@@ -706,7 +559,7 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
         views_used: subscription.views_used_this_month,
         views_total: subscription.monthly_view_quota
       },
-      traceId // Include traceId for debugging
+      traceId
     };
 
   } catch (err) {
@@ -723,7 +576,7 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
       success: false,
       error: err.message || 'An unexpected error occurred while searching for drivers.',
       code: 'SEARCH_ERROR',
-      traceId // Include traceId for debugging
+      traceId
     };
   }
 }
@@ -773,7 +626,7 @@ export async function getDriverProfile(carrierDot, driverId, options = {}) {
       };
     }
 
-    // Get driver profile using dual-source data access
+    // Get driver profile using dataAccess
     const driver = await dataAccess.getRecord('driverProfiles', driverId, { suppressAuth: true });
 
     if (!driver) {
@@ -791,7 +644,7 @@ export async function getDriverProfile(carrierDot, driverId, options = {}) {
       };
     }
 
-    // Record the view in CarrierDriverViews using dual-source data access
+    // Record the view in CarrierDriverViews using dataAccess
     const viewRecord = {
       carrier_dot: carrierDot,
       driver_id: driverId,
@@ -846,7 +699,7 @@ export async function detectMutualMatch(carrierDot, driverId) {
       return { success: false, error: accessCheck.error };
     }
 
-    // Query DriverInterests collection for this driver-carrier pair using dual-source
+    // Query DriverInterests collection using dataAccess
     const result = await dataAccess.queryRecords('driverInterests', {
       filters: {
         driver_id: driverId,

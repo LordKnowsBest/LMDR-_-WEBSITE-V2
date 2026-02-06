@@ -14,10 +14,9 @@
 import wixData from 'wix-data';
 import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
-import { usesAirtable, getAirtableTableName } from 'backend/config';
-import * as airtable from 'backend/airtableClient';
 import { getCarrierSafetyData } from 'backend/fmcsaService';
 import { logAIOperation, startTrace, endTrace } from 'backend/observabilityService';
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================================================
 // COLLECTION KEYS
@@ -56,65 +55,11 @@ const SEGMENT_TONE = {
 };
 
 // ============================================================================
-// DUAL-SOURCE HELPERS
-// ============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.queryRecords(tableName, {
-      filterByFormula: options.filter || '',
-      sort: options.sort,
-      maxRecords: options.limit || 100
-    });
-    return { items: result.records || [], totalCount: result.records?.length || 0 };
-  }
-  let query = wixData.query(collectionKey);
-  if (options.limit) query = query.limit(options.limit);
-  return await query.find();
-}
-
-async function insertData(collectionKey, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.createRecord(tableName, record);
-    return result.record || record;
-  }
-  return await wixData.insert(collectionKey, record);
-}
-
-async function updateData(collectionKey, recordId, record) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    const result = await airtable.updateRecord(tableName, recordId, record);
-    return result.record || record;
-  }
-  return await wixData.update(collectionKey, { _id: recordId, ...record });
-}
-
-async function findByField(collectionKey, fieldName, value) {
-  if (usesAirtable(collectionKey)) {
-    const tableName = await getAirtableTableName(collectionKey);
-    return await airtable.findByField(tableName, fieldName, value);
-  }
-  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
-  return result.items || [];
-}
-
-// ============================================================================
 // RESEARCH BRIEF GENERATION
 // ============================================================================
 
 /**
  * Generate a research brief for a carrier account
- * Aggregates FMCSA data, match signals, safety records, and hiring signals
- * into an actionable brief for business development.
- *
- * Uses 7-day cache - returns cached brief if fresh enough.
- *
- * @param {string} accountId - B2B Account ID
- * @param {boolean} [forceRefresh=false] - Skip cache and regenerate
- * @returns {Promise<{success: boolean, brief?: Object, cached?: boolean, error?: string}>}
  */
 export async function generateBrief(accountId, forceRefresh = false) {
   const trace = await startTrace('b2b-research-brief', {
@@ -141,8 +86,7 @@ export async function generateBrief(accountId, forceRefresh = false) {
     }
 
     // Get account details
-    const accounts = await findByField(COLLECTIONS.accounts, '_id', accountId);
-    const account = accounts && accounts.length > 0 ? accounts[0] : null;
+    const account = await dataAccess.getRecord(COLLECTIONS.accounts, accountId, { suppressAuth: true });
     if (!account) {
       await endTrace(traceId, 'failed', { reason: 'account_not_found' }).catch(() => {});
       return { success: false, error: 'Account not found' };
@@ -216,12 +160,14 @@ export async function generateBrief(accountId, forceRefresh = false) {
     };
 
     // Save/update the brief
-    const existing = await findByField(COLLECTIONS.research, 'account_id', accountId);
+    const existing = await dataAccess.findByField(COLLECTIONS.research, 'account_id', accountId, { suppressAuth: true });
     let saved;
-    if (existing && existing.length > 0) {
-      saved = await updateData(COLLECTIONS.research, existing[0]._id || existing[0].id, brief);
+    if (existing) {
+      const updateResult = await dataAccess.updateRecord(COLLECTIONS.research, { ...existing, ...brief }, { suppressAuth: true });
+      saved = updateResult.record;
     } else {
-      saved = await insertData(COLLECTIONS.research, brief);
+      const insertResult = await dataAccess.insertRecord(COLLECTIONS.research, brief, { suppressAuth: true });
+      saved = insertResult.record;
     }
 
     await endTrace(traceId, 'completed', {
@@ -241,29 +187,25 @@ export async function generateBrief(accountId, forceRefresh = false) {
 
 /**
  * Get existing research brief for an account (no generation)
- *
- * @param {string} accountId
- * @returns {Promise<{success: boolean, brief?: Object, error?: string}>}
  */
 export async function getBrief(accountId) {
   try {
     if (!accountId) return { success: false, error: 'Account ID is required' };
 
-    const results = await findByField(COLLECTIONS.research, 'account_id', accountId);
-    if (!results || results.length === 0) {
+    const record = await dataAccess.findByField(COLLECTIONS.research, 'account_id', accountId, { suppressAuth: true });
+    if (!record) {
       return { success: false, error: 'No research brief found. Generate one first.' };
     }
 
-    const brief = results[0];
     // Parse JSON fields for frontend consumption
-    try { brief.highlights = JSON.parse(brief.highlights || '[]'); } catch (e) { brief.highlights = []; }
-    try { brief.next_steps = JSON.parse(brief.next_steps || '[]'); } catch (e) { brief.next_steps = []; }
-    try { brief.sources = JSON.parse(brief.sources || '[]'); } catch (e) { brief.sources = []; }
-    try { brief.signals = JSON.parse(brief.signals || '{}'); } catch (e) { brief.signals = {}; }
-    brief.confidence = brief.confidence || 'medium';
-    brief.generated_by = brief.generated_by || 'research_agent';
+    try { record.highlights = JSON.parse(record.highlights || '[]'); } catch (e) { record.highlights = []; }
+    try { record.next_steps = JSON.parse(record.next_steps || '[]'); } catch (e) { record.next_steps = []; }
+    try { record.sources = JSON.parse(record.sources || '[]'); } catch (e) { record.sources = []; }
+    try { record.signals = JSON.parse(record.signals || '{}'); } catch (e) { record.signals = {}; }
+    record.confidence = record.confidence || 'medium';
+    record.generated_by = record.generated_by || 'research_agent';
 
-    return { success: true, brief };
+    return { success: true, brief: record };
   } catch (error) {
     console.error('Error fetching research brief:', error);
     return { success: false, error: error.message || 'Failed to fetch brief' };
@@ -280,9 +222,8 @@ export async function getBrief(accountId) {
 async function getCarrierProfile(carrierDot) {
   if (!carrierDot) return {};
   try {
-    const results = await findByField(COLLECTIONS.carriers, 'dot_number', carrierDot);
-    if (results && results.length > 0) {
-      const c = results[0];
+    const c = await dataAccess.findByField(COLLECTIONS.carriers, 'dot_number', carrierDot, { suppressAuth: true });
+    if (c) {
       return {
         legal_name: c.legal_name || c.carrier_name || '',
         fleet_size: c.total_drivers || c.fleet_size || 0,
@@ -306,9 +247,8 @@ async function getCarrierProfile(carrierDot) {
 async function getEnrichmentData(carrierDot) {
   if (!carrierDot) return {};
   try {
-    const results = await findByField(COLLECTIONS.enrichments, 'carrier_dot', carrierDot);
-    if (results && results.length > 0) {
-      const e = results[0];
+    const e = await dataAccess.findByField(COLLECTIONS.enrichments, 'carrier_dot', carrierDot, { suppressAuth: true });
+    if (e) {
       return {
         pay_range: e.pay_range || '',
         benefits_summary: e.benefits_summary || '',
@@ -329,9 +269,8 @@ async function getEnrichmentData(carrierDot) {
 async function getSafetyProfile(carrierDot) {
   if (!carrierDot) return {};
   try {
-    const results = await findByField(COLLECTIONS.safetyData, 'carrier_dot', carrierDot);
-    if (results && results.length > 0) {
-      const s = results[0];
+    const s = await dataAccess.findByField(COLLECTIONS.safetyData, 'carrier_dot', carrierDot, { suppressAuth: true });
+    if (s) {
       return {
         rating: s.safety_rating || s.overall_rating || 'unknown',
         basic_alerts: s.basic_alerts || '',
@@ -353,8 +292,8 @@ async function getSafetyProfile(carrierDot) {
 async function getSignalProfile(carrierDot) {
   if (!carrierDot) return {};
   try {
-    const results = await findByField(COLLECTIONS.signals, 'carrier_dot', carrierDot);
-    if (results && results.length > 0) return results[0];
+    const s = await dataAccess.findByField(COLLECTIONS.signals, 'carrier_dot', carrierDot, { suppressAuth: true });
+    if (s) return s;
   } catch (err) {
     console.warn('Signal lookup failed:', err.message);
   }
@@ -367,9 +306,8 @@ async function getSignalProfile(carrierDot) {
 async function getHiringSignals(carrierDot) {
   if (!carrierDot) return {};
   try {
-    const results = await findByField(COLLECTIONS.hiringPrefs, 'carrier_dot', carrierDot);
-    if (results && results.length > 0) {
-      const h = results[0];
+    const h = await dataAccess.findByField(COLLECTIONS.hiringPrefs, 'carrier_dot', carrierDot, { suppressAuth: true });
+    if (h) {
       return {
         regions: h.regions || '',
         equipment_types: h.equipment_types || '',
@@ -390,8 +328,11 @@ async function getHiringSignals(carrierDot) {
  */
 async function getAccountContacts(accountId) {
   try {
-    const results = await findByField(COLLECTIONS.contacts, 'account_id', accountId);
-    return results || [];
+    const result = await dataAccess.queryRecords(COLLECTIONS.contacts, {
+      filters: { account_id: accountId },
+      suppressAuth: true
+    });
+    return result.items || [];
   } catch (err) {
     console.warn('Contacts lookup failed:', err.message);
     return [];

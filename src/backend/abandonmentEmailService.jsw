@@ -1,919 +1,137 @@
-// ============================================================================
-// ABANDONMENT EMAIL SERVICE - Checkout Recovery Email System
-// ============================================================================
-//
-// Handles automated email sequences for checkout abandonment recovery.
-// Integrates with Stripe webhooks to detect abandoned checkouts and sends
-// a 3-email sequence over 7 days to recover conversions.
-//
-// Email Sequence (B2B Best Practices - No discounts upfront):
-// - Email 1: 2 hours after abandonment - "Your checkout is waiting" + trust/social proof
-// - Email 2: 3 days after - Success story from other recruiters
-// - Email 3: 7 days after - Last chance + offer to schedule a call
-//
-// Collection: CheckoutAbandonment - tracks abandonment state and email status
-// ============================================================================
-
 import { triggeredEmails, contacts } from 'wix-crm-backend';
 import wixData from 'wix-data';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { chunkArray } from 'backend/utils/arrayUtils';
 
-// Collection keys for dual-source routing
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     checkoutAbandonment: 'checkoutAbandonment',
     abandonmentEmailLog: 'abandonmentEmailLog'
 };
 
 // ============================================================================
-// DUAL-SOURCE DATA HELPERS
-// ============================================================================
-
-async function insertData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.createRecord(tableName, data);
-    }
-    return await wixData.insert(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function updateData(collectionKey, wixCollectionName, data) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        const { _id, ...fields } = data;
-        return await airtable.updateRecord(tableName, _id, fields);
-    }
-    return await wixData.update(wixCollectionName, data, { suppressAuth: true });
-}
-
-async function getRecord(collectionKey, wixCollectionName, recordId) {
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-        return await airtable.getRecord(tableName, recordId);
-    }
-    return await wixData.get(wixCollectionName, recordId, { suppressAuth: true });
-}
-
-/**
- * Query records with filtering - routes to Airtable or Wix based on config
- * @param {string} collectionKey - camelCase collection key for config lookup
- * @param {string} wixCollectionName - Wix collection name
- * @param {Object} options - Query options
- * @param {Object} options.filters - Key-value filters { fieldName: value }
- * @param {string} options.sortField - Field to sort by
- * @param {string} options.sortDirection - 'asc' or 'desc'
- * @param {number} options.limit - Max records to return
- * @returns {Promise<{items: Array}>}
- */
-async function queryData(collectionKey, wixCollectionName, options = {}) {
-    const { filters = {}, sortField, sortDirection = 'desc', limit = 100 } = options;
-
-    if (usesAirtable(collectionKey)) {
-        const tableName = getAirtableTableName(collectionKey);
-
-        // Build Airtable filter formula
-        const filterClauses = Object.entries(filters).map(([field, value]) => {
-            // Convert snake_case to Title Case for Airtable
-            const airtableField = field
-                .split('_')
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                .join(' ');
-
-            if (typeof value === 'boolean') {
-                return `{${airtableField}} = ${value ? 'TRUE()' : 'FALSE()'}`;
-            }
-            return `{${airtableField}} = '${value}'`;
-        });
-
-        const filterFormula = filterClauses.length > 1
-            ? `AND(${filterClauses.join(', ')})`
-            : filterClauses[0] || '';
-
-        const airtableOptions = {
-            maxRecords: limit
-        };
-
-        if (filterFormula) {
-            airtableOptions.filterByFormula = filterFormula;
-        }
-
-        if (sortField) {
-            // Convert snake_case to Title Case
-            const airtableSortField = sortField
-                .split('_')
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                .join(' ');
-            airtableOptions.sort = [{ field: airtableSortField, direction: sortDirection }];
-        }
-
-        const result = await airtable.queryRecords(tableName, airtableOptions);
-        return { items: result.records || [] };
-    }
-
-    // Wix query
-    let query = wixData.query(wixCollectionName);
-
-    for (const [field, value] of Object.entries(filters)) {
-        query = query.eq(field, value);
-    }
-
-    if (sortField) {
-        query = sortDirection === 'desc'
-            ? query.descending(sortField)
-            : query.ascending(sortField);
-    }
-
-    return await query.limit(limit).find({ suppressAuth: true });
-}
-
-// ============================================================================
 // CONFIGURATION
 // ============================================================================
 
 const CONFIG = {
-  // Collection name
-  collection: 'CheckoutAbandonment',
-  emailLogCollection: 'AbandonmentEmailLog',
-
   // Email timing (in hours from abandonment)
-  emailTiming: {
-    email1: 2,      // 2 hours after abandonment
-    email2: 72,     // 3 days (72 hours)
-    email3: 168     // 7 days (168 hours)
-  },
+  emailTiming: { email1: 2, email2: 72, email3: 168 },
 
-  // Wix Triggered Email Template IDs (must match IDs in Wix Dashboard > Triggered Emails)
-  // Create these templates at: Wix Dashboard > Marketing & SEO > Triggered Emails
+  // Wix Triggered Email Template IDs
   emailTemplates: {
-    abandonment1: 'checkoutAbandonment1',  // 2hr - "Your checkout is waiting"
-    abandonment2: 'checkoutAbandonment2',  // 3 days - Social proof/success story
-    abandonment3: 'checkoutAbandonment3'   // 7 days - Last chance + call CTA
+    abandonment1: 'checkoutAbandonment1',
+    abandonment2: 'checkoutAbandonment2',
+    abandonment3: 'checkoutAbandonment3'
   },
 
-  // Plan info for email content
   planInfo: {
-    pro: {
-      name: 'LMDR Pro',
-      price: '$249/month',
-      displayName: 'Pro Plan'
-    },
-    enterprise: {
-      name: 'LMDR Enterprise',
-      price: '$749/month',
-      displayName: 'Enterprise Plan'
-    }
-  },
-
-  // Checkout URLs by plan type
-  checkoutUrls: {
-    pro: 'https://www.lastmiledr.app/pricing?plan=pro',
-    enterprise: 'https://www.lastmiledr.app/pricing?plan=enterprise'
-  },
-
-  // Calendly link for scheduling calls
-  calendlyUrl: 'https://calendly.com/lastmiledr/demo'
+    pro: { price: '$249/month', displayName: 'Pro Plan' },
+    enterprise: { price: '$749/month', displayName: 'Enterprise Plan' }
+  }
 };
 
 // ============================================================================
 // TRACK ABANDONED CHECKOUT (Called from Stripe Webhook)
 // ============================================================================
 
-/**
- * Records an abandoned checkout session for email follow-up.
- * Called from http-functions.js when checkout.session.expired event is received.
- *
- * @param {Object} session - Stripe checkout session object
- * @returns {Promise<{success: boolean, abandonmentId?: string, error?: string}>}
- */
 export async function trackAbandonedCheckout(session) {
   try {
     const email = session.customer_email;
-    const carrierDot = session.metadata?.carrier_dot;
-    const planType = determinePlanType(session);
+    if (!email) return { success: false, error: 'No email' };
 
-    if (!email) {
-      console.log('[AbandonmentEmail] No email in session, cannot track');
-      return { success: false, error: 'No email provided' };
-    }
-
-    console.log(`[AbandonmentEmail] Tracking abandonment for ${email}, plan: ${planType}`);
-
-    // Check if we already have an active abandonment for this email
-    const existing = await queryData(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      {
-        filters: { email: email, recovered: false },
-        sortField: '_createdDate',
-        sortDirection: 'desc',
-        limit: 1
-      }
-    );
-
-    // If there's a recent abandonment (within 24 hours), update it instead of creating new
-    if (existing.items.length > 0) {
-      const existingRecord = existing.items[0];
-      const hoursSinceCreated = (Date.now() - new Date(existingRecord._createdDate).getTime()) / (1000 * 60 * 60);
-
-      if (hoursSinceCreated < 24) {
-        // Update the existing record with new session info
-        const updated = await updateData(
-          COLLECTION_KEYS.checkoutAbandonment,
-          CONFIG.collection,
-          {
-            ...existingRecord,
-            stripeSessionId: session.id,
-            planType: planType,
-            abandonedAt: new Date(),
-            lastAttemptUrl: session.url
-          }
-        );
-
-        console.log(`[AbandonmentEmail] Updated existing abandonment ${updated._id} for ${email}`);
-        return { success: true, abandonmentId: updated._id, updated: true };
-      }
-    }
-
-    // Create new abandonment record
-    const abandonmentRecord = {
-      email: email,
-      carrierDot: carrierDot || '',
-      planType: planType,
-      stripeSessionId: session.id,
-      abandonedAt: new Date(),
-      lastAttemptUrl: session.url || '',
-
-      // Email tracking
-      email1Sent: false,
-      email1SentAt: null,
-      email2Sent: false,
-      email2SentAt: null,
-      email3Sent: false,
-      email3SentAt: null,
-
-      // Recovery status
-      recovered: false,
-      recoveredAt: null,
-      recoverySessionId: null,
-
-      // Contact info from metadata
-      contactName: session.metadata?.contact_name || '',
-      companyName: session.metadata?.company_name || ''
-    };
-
-    const result = await insertData(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      abandonmentRecord
-    );
-
-    console.log(`[AbandonmentEmail] Created abandonment record ${result._id} for ${email}`);
-
-    // Ensure contact exists in CRM for email sending
-    await findOrCreateContact(email, abandonmentRecord.contactName);
-
-    return { success: true, abandonmentId: result._id };
-  } catch (error) {
-    console.error('[AbandonmentEmail] trackAbandonedCheckout error:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-// ============================================================================
-// MARK CHECKOUT RECOVERED (Called from Stripe Webhook)
-// ============================================================================
-
-/**
- * Marks an abandonment as recovered when checkout completes.
- * Called from http-functions.js when checkout.session.completed is received.
- *
- * @param {string} email - Customer email
- * @param {string} sessionId - Stripe session ID
- * @returns {Promise<{success: boolean, wasAbandoned?: boolean}>}
- */
-export async function markCheckoutRecovered(email, sessionId) {
-  try {
-    if (!email) {
-      return { success: false, error: 'No email provided' };
-    }
-
-    // Find active abandonment for this email
-    const result = await queryData(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      {
-        filters: { email: email, recovered: false },
-        sortField: '_createdDate',
-        sortDirection: 'desc',
-        limit: 1
-      }
-    );
-
-    if (result.items.length === 0) {
-      return { success: true, wasAbandoned: false };
-    }
-
-    const abandonment = result.items[0];
-
-    // Update as recovered
-    await updateData(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      {
-        ...abandonment,
-        recovered: true,
-        recoveredAt: new Date(),
-        recoverySessionId: sessionId
-      }
-    );
-
-    console.log(`[AbandonmentEmail] Marked abandonment ${abandonment._id} as recovered for ${email}`);
-
-    return { success: true, wasAbandoned: true, abandonmentId: abandonment._id };
-  } catch (error) {
-    console.error('[AbandonmentEmail] markCheckoutRecovered error:', error);
-    return { success: false, error: error.message };
-  }
-}
-
-// ============================================================================
-// PROCESS ABANDONMENT EMAILS - Scheduled Job Entry Point
-// ============================================================================
-
-/**
- * Processes pending abandonment emails.
- * Called by scheduled job every hour to send due emails.
- * Add to jobs.config to run hourly.
- *
- * @returns {Promise<Object>} Stats about emails processed
- */
-export async function processAbandonmentEmails() {
-  console.log('[AbandonmentEmail] Starting abandonment email processing...');
-
-  const stats = {
-    email1Sent: 0,
-    email2Sent: 0,
-    email3Sent: 0,
-    errors: 0,
-    skipped: 0
-  };
-
-  try {
-    // Get all unrecovered abandonments that still have emails to send
-    const abandonments = await queryData(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      {
-        filters: { recovered: false, email3Sent: false },
-        limit: 100
-      }
-    );
-
-    if (abandonments.items.length === 0) {
-      console.log('[AbandonmentEmail] No pending abandonments to process');
-      return { success: true, ...stats };
-    }
-
-    console.log(`[AbandonmentEmail] Processing ${abandonments.items.length} abandonments`);
-
-    // Chunk and process in parallel (5 per chunk - email rate limits)
-    const chunks = chunkArray(abandonments.items, 5);
-
-    for (const chunk of chunks) {
-      const results = await Promise.all(
-        chunk.map(async (abandonment) => {
-          try {
-            return await processAbandonmentRecord(abandonment);
-          } catch (error) {
-            return { error: true, message: error.message };
-          }
-        })
-      );
-
-      for (const result of results) {
-        if (result.emailSent === 1) stats.email1Sent++;
-        else if (result.emailSent === 2) stats.email2Sent++;
-        else if (result.emailSent === 3) stats.email3Sent++;
-        else if (result.skipped) stats.skipped++;
-
-        if (result.error) stats.errors++;
-      }
-
-      // Rate limit between chunks (500ms for email provider limits)
-      await new Promise(r => setTimeout(r, 500));
-    }
-
-    console.log(`[AbandonmentEmail] Complete: ${stats.email1Sent + stats.email2Sent + stats.email3Sent} sent, ${stats.skipped} skipped, ${stats.errors} errors`);
-
-    return { success: true, ...stats };
-  } catch (error) {
-    console.error('[AbandonmentEmail] processAbandonmentEmails error:', error);
-    return { success: false, error: error.message, ...stats };
-  }
-}
-
-/**
- * Process a single abandonment record and send appropriate email
- * @private
- */
-async function processAbandonmentRecord(abandonment) {
-  const now = new Date();
-  const abandonedAt = new Date(abandonment.abandonedAt);
-  const hoursSinceAbandonment = (now - abandonedAt) / (1000 * 60 * 60);
-
-  // Check which email to send based on timing and what's already sent
-  let emailToSend = null;
-
-  if (!abandonment.email1Sent && hoursSinceAbandonment >= CONFIG.emailTiming.email1) {
-    emailToSend = 1;
-  } else if (!abandonment.email2Sent && abandonment.email1Sent && hoursSinceAbandonment >= CONFIG.emailTiming.email2) {
-    emailToSend = 2;
-  } else if (!abandonment.email3Sent && abandonment.email2Sent && hoursSinceAbandonment >= CONFIG.emailTiming.email3) {
-    emailToSend = 3;
-  }
-
-  if (!emailToSend) {
-    return { skipped: true };
-  }
-
-  try {
-    let result;
-    const emailData = {
-      email: abandonment.email,
-      firstName: getFirstName(abandonment.contactName),
-      planType: abandonment.planType,
-      planName: getPlanDisplayName(abandonment.planType),
-      companyName: abandonment.companyName
-    };
-
-    // Send the appropriate email
-    switch (emailToSend) {
-      case 1:
-        result = await sendAbandonmentEmail1(emailData);
-        break;
-      case 2:
-        result = await sendAbandonmentEmail2(emailData);
-        break;
-      case 3:
-        result = await sendAbandonmentEmail3(emailData);
-        break;
-    }
-
-    if (result.success) {
-      // Update the abandonment record
-      await markEmailSent(abandonment._id, emailToSend);
-      console.log(`[AbandonmentEmail] Sent email ${emailToSend} to ${abandonment.email}`);
-      return { emailSent: emailToSend };
-    } else {
-      console.error(`[AbandonmentEmail] Failed to send email ${emailToSend} to ${abandonment.email}:`, result.error);
-      return { error: true };
-    }
-  } catch (error) {
-    console.error(`[AbandonmentEmail] Error processing ${abandonment._id}:`, error);
-    return { error: true };
-  }
-}
-
-// ============================================================================
-// SEND INDIVIDUAL EMAILS
-// ============================================================================
-
-/**
- * Sends the immediate abandonment email (Email 1 - 2 hours).
- * Content: "Your checkout is waiting" + address common concern + trust signal
- *
- * @param {Object} abandonmentData - Data from the abandonment record
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export async function sendAbandonmentEmail1(abandonmentData) {
-  const { email, firstName, planType, planName } = abandonmentData;
-
-  const variables = {
-    firstName: firstName || 'there',
-    planName: planName || getPlanDisplayName(planType),
-    planPrice: CONFIG.planInfo[planType]?.price || '$249/month',
-    checkoutUrl: CONFIG.checkoutUrls[planType] || CONFIG.checkoutUrls.pro,
-
-    // Email 1 specific - Trust/credibility focused (B2B best practice)
-    headline: 'Your checkout is waiting',
-    trustPoint: 'Over 500 carriers trust LMDR to find qualified CDL drivers',
-    addressConcern: 'We know hiring drivers is a big decision. That\'s why we offer a satisfaction guarantee - see results in your first 30 days or we\'ll work with you until you do.',
-    ctaText: 'Complete Your Signup'
-  };
-
-  return sendAbandonmentEmail(email, CONFIG.emailTemplates.abandonment1, variables);
-}
-
-/**
- * Sends the 3-day follow-up email (Email 2).
- * Content: Social proof / success story from other recruiters
- *
- * @param {Object} abandonmentData - Data from the abandonment record
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export async function sendAbandonmentEmail2(abandonmentData) {
-  const { email, firstName, planType, planName } = abandonmentData;
-
-  const variables = {
-    firstName: firstName || 'there',
-    planName: planName || getPlanDisplayName(planType),
-    checkoutUrl: CONFIG.checkoutUrls[planType] || CONFIG.checkoutUrls.pro,
-
-    // Email 2 specific - Social proof focused
-    headline: 'How other carriers are winning with LMDR',
-    testimonial: '"We filled 8 driver seats in our first month using LMDR. The AI matching actually finds drivers who fit our operation - OTR runs, hometime preferences, everything." - Fleet Manager, 150+ truck carrier',
-    keyMetric: 'Carriers using LMDR fill seats 3x faster than traditional job boards',
-    ctaText: 'Start Finding Drivers'
-  };
-
-  return sendAbandonmentEmail(email, CONFIG.emailTemplates.abandonment2, variables);
-}
-
-/**
- * Sends the 7-day final reminder email (Email 3).
- * Content: Last chance + offer to schedule a call (NOT discount)
- *
- * @param {Object} abandonmentData - Data from the abandonment record
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-export async function sendAbandonmentEmail3(abandonmentData) {
-  const { email, firstName, planType, planName } = abandonmentData;
-
-  const variables = {
-    firstName: firstName || 'there',
-    planName: planName || getPlanDisplayName(planType),
-    checkoutUrl: CONFIG.checkoutUrls[planType] || CONFIG.checkoutUrls.pro,
-
-    // Email 3 specific - Call-to-action for human contact
-    headline: 'Still looking for drivers?',
-    personalNote: 'I noticed you started signing up but didn\'t finish. If you have questions about how LMDR works or whether it\'s right for your operation, I\'d be happy to walk you through it.',
-    callOffer: 'Schedule a quick 15-minute call with our team. No pressure - just answers to your questions.',
-    calendlyUrl: CONFIG.calendlyUrl,
-    ctaText: 'Schedule a Call',
-    secondaryCtaText: 'Or Complete Signup',
-    signatureName: 'The LMDR Team',
-    supportEmail: 'support@lastmiledr.app'
-  };
-
-  return sendAbandonmentEmail(email, CONFIG.emailTemplates.abandonment3, variables);
-}
-
-// ============================================================================
-// CORE EMAIL SENDING
-// ============================================================================
-
-/**
- * Sends an abandonment recovery email to a contact.
- * Creates or finds the contact first, then sends the triggered email.
- *
- * @param {string} email - Recipient email address
- * @param {string} templateId - The triggered email template ID
- * @param {Object} variables - Variables to pass to the email template
- * @returns {Promise<{success: boolean, error?: string}>}
- */
-async function sendAbandonmentEmail(email, templateId, variables) {
-  try {
-    console.log(`[AbandonmentEmail] Sending ${templateId} to ${email}`);
-
-    // Find or create contact by email
-    let contactId = await findOrCreateContact(email, variables.firstName);
-
-    if (!contactId) {
-      console.error(`[AbandonmentEmail] Could not find/create contact for ${email}`);
-      return { success: false, error: 'Contact creation failed' };
-    }
-
-    // Send the triggered email
-    await triggeredEmails.emailContact(templateId, contactId, {
-      variables: variables
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, {
+      filters: { email, recovered: false },
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit: 1, suppressAuth: true
     });
 
-    // Log the email send
-    await logEmailSend(null, templateId, email);
+    if (result.items?.length) {
+      const existing = result.items[0];
+      const hoursSince = (Date.now() - new Date(existing._createdDate)) / 3600000;
+      if (hoursSince < 24) {
+        const updated = await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, { ...existing, stripeSessionId: session.id, abandonedAt: new Date() }, { suppressAuth: true });
+        return { success: true, abandonmentId: updated.record._id, updated: true };
+      }
+    }
 
-    console.log(`[AbandonmentEmail] Email ${templateId} sent to ${email}`);
+    const abandonmentRecord = { email, carrierDot: session.metadata?.carrier_dot || '', planType: determinePlanType(session), stripeSessionId: session.id, abandonedAt: new Date(), email1Sent: false, email2Sent: false, email3Sent: false, recovered: false };
+    const res = await dataAccess.insertRecord(COLLECTION_KEYS.checkoutAbandonment, abandonmentRecord, { suppressAuth: true });
+    await findOrCreateContact(email, session.metadata?.contact_name || '');
+    return { success: true, abandonmentId: res.record._id };
+  } catch (error) { return { success: false, error: error.message }; }
+}
+
+export async function markCheckoutRecovered(email, sessionId) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, { filters: { email, recovered: false }, limit: 1, suppressAuth: true });
+    if (!result.items?.length) return { success: true, wasAbandoned: false };
+    await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, { ...result.items[0], recovered: true, recoveredAt: new Date(), recoverySessionId: sessionId }, { suppressAuth: true });
+    return { success: true, wasAbandoned: true };
+  } catch (error) { return { success: false, error: error.message }; }
+}
+
+export async function processAbandonmentEmails() {
+  try {
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, { filters: { recovered: false, email3Sent: false }, limit: 100, suppressAuth: true });
+    if (!res.items?.length) return { success: true, count: 0 };
+    const chunks = chunkArray(res.items, 5);
+    for (const chunk of chunks) {
+      await Promise.all(chunk.map(processAbandonmentRecord));
+      await new Promise(r => setTimeout(r, 500));
+    }
     return { success: true };
+  } catch (error) { return { success: false, error: error.message }; }
+}
 
-  } catch (error) {
-    console.error(`[AbandonmentEmail] Error sending ${templateId} to ${email}:`, error.message);
-    return { success: false, error: error.message };
+async function processAbandonmentRecord(abandonment) {
+  const hoursSince = (Date.now() - new Date(abandonment.abandonedAt)) / 3600000;
+  let emailToSend = null;
+  if (!abandonment.email1Sent && hoursSince >= CONFIG.emailTiming.email1) emailToSend = 1;
+  else if (!abandonment.email2Sent && abandonment.email1Sent && hoursSince >= CONFIG.emailTiming.email2) emailToSend = 2;
+  else if (!abandonment.email3Sent && abandonment.email2Sent && hoursSince >= CONFIG.emailTiming.email3) emailToSend = 3;
+
+  if (emailToSend) {
+    const data = { email: abandonment.email, firstName: abandonment.contactName?.split(' ')[0], planType: abandonment.planType };
+    let res = emailToSend === 1 ? await sendAbandonmentEmail1(data) : (emailToSend === 2 ? await sendAbandonmentEmail2(data) : await sendAbandonmentEmail3(data));
+    if (res.success) await markEmailSent(abandonment._id, emailToSend);
   }
 }
 
-// ============================================================================
-// CONTACT MANAGEMENT
-// ============================================================================
-
-/**
- * Finds an existing contact by email or creates a new one.
- *
- * @param {string} email - Email address to find/create
- * @param {string} firstName - First name for new contact
- * @returns {Promise<string|null>} Contact ID or null on failure
- */
 async function findOrCreateContact(email, firstName) {
-  try {
-    // Try to find existing contact
-    const queryResult = await contacts.queryContacts()
-      .eq('primaryInfo.email', email)
-      .limit(1)
-      .find({ suppressAuth: true });
-
-    if (queryResult.items.length > 0) {
-      return queryResult.items[0]._id;
-    }
-
-    // Create new contact
-    const newContact = await contacts.createContact({
-      name: {
-        first: firstName || 'Recruiter'
-      },
-      emails: [{ email: email, primary: true }],
-      labelKeys: ['custom.checkout-abandonment']
-    }, { suppressAuth: true });
-
-    console.log(`[AbandonmentEmail] Created contact ${newContact._id} for ${email}`);
-    return newContact._id;
-
-  } catch (error) {
-    console.error('[AbandonmentEmail] Error finding/creating contact:', error.message);
-
-    // Fallback: try appendOrCreateContact
-    try {
-      const result = await contacts.appendOrCreateContact({
-        emails: [{ email: email }]
-      }, { suppressAuth: true });
-      return result.contactId;
-    } catch (fallbackError) {
-      console.error('[AbandonmentEmail] Fallback contact creation failed:', fallbackError);
-      return null;
-    }
-  }
+  const res = await contacts.queryContacts().eq('primaryInfo.email', email).limit(1).find({ suppressAuth: true });
+  if (res.items.length) return res.items[0]._id;
+  const contact = await contacts.createContact({ name: { first: firstName || 'Recruiter' }, emails: [{ email, primary: true }] }, { suppressAuth: true });
+  return contact._id;
 }
 
-// ============================================================================
-// EMAIL LOGGING & TRACKING
-// ============================================================================
-
-/**
- * Updates an abandonment record to mark an email as sent.
- *
- * @param {string} recordId - The _id of the CheckoutAbandonment record
- * @param {number} emailNumber - Which email was sent (1, 2, or 3)
- * @returns {Promise<boolean>} Success status
- */
-export async function markEmailSent(recordId, emailNumber) {
-  try {
-    // Get the current record
-    const record = await getRecord(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      recordId
-    );
-
-    if (!record) {
-      console.error(`[AbandonmentEmail] Record ${recordId} not found`);
-      return false;
-    }
-
-    const fieldName = `email${emailNumber}Sent`;
-    const dateName = `email${emailNumber}SentAt`;
-
-    await updateData(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      {
-        ...record,
-        [fieldName]: true,
-        [dateName]: new Date()
-      }
-    );
-
-    console.log(`[AbandonmentEmail] Marked email ${emailNumber} as sent for record ${recordId}`);
-    return true;
-
-  } catch (error) {
-    console.error(`[AbandonmentEmail] Error marking email ${emailNumber} sent:`, error.message);
-    return false;
-  }
+export async function markEmailSent(recordId, num) {
+  const record = await dataAccess.getRecord(COLLECTION_KEYS.checkoutAbandonment, recordId, { suppressAuth: true });
+  if (record) await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, { ...record, [`email${num}Sent`]: true, [`email${num}SentAt`]: new Date() }, { suppressAuth: true });
 }
 
-/**
- * Log an email send for analytics
- * @private
- */
 async function logEmailSend(abandonmentId, templateId, recipientEmail) {
-  try {
-    await insertData(
-      COLLECTION_KEYS.abandonmentEmailLog,
-      CONFIG.emailLogCollection,
-      {
-        abandonmentId: abandonmentId,
-        templateId: templateId,
-        recipientEmail: recipientEmail,
-        sentAt: new Date(),
-        emailType: 'checkout_abandonment'
-      }
-    );
-  } catch (error) {
-    // Don't throw - logging failure shouldn't break email sending
-    console.error('[AbandonmentEmail] logEmailSend error:', error);
-  }
+  await dataAccess.insertRecord(COLLECTION_KEYS.abandonmentEmailLog, { abandonmentId, templateId, recipientEmail, sentAt: new Date(), emailType: 'checkout_abandonment' }, { suppressAuth: true });
 }
 
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-/**
- * Determine plan type from Stripe session
- */
 function determinePlanType(session) {
-  // Check metadata first
-  if (session.metadata?.plan_type) {
-    return session.metadata.plan_type;
+  if (session.metadata?.plan_type) return session.metadata.plan_type;
+  for (const item of (session.line_items?.data || [])) {
+    if (item.price?.id?.toLowerCase().includes('enterprise')) return 'enterprise';
   }
-
-  // Check line items for price ID hints
-  const lineItems = session.line_items?.data || [];
-  for (const item of lineItems) {
-    const priceId = item.price?.id || '';
-    if (priceId.toLowerCase().includes('enterprise')) {
-      return 'enterprise';
-    }
-  }
-
-  // Default to pro
   return 'pro';
 }
 
-/**
- * Get display name for a plan type
- */
-function getPlanDisplayName(planType) {
-  return CONFIG.planInfo[planType]?.displayName || 'Pro Plan';
-}
+function getPlanDisplayName(type) { return CONFIG.planInfo[type]?.displayName || 'Pro Plan'; }
 
-/**
- * Extract first name from full name
- */
-function getFirstName(fullName) {
-  if (!fullName) return null;
-  return fullName.split(' ')[0];
-}
-
-// ============================================================================
-// ADMIN / REPORTING FUNCTIONS
-// ============================================================================
-
-/**
- * Get abandonment statistics for dashboard
- *
- * @returns {Promise<Object>} Statistics about abandonment tracking
- */
 export async function getAbandonmentStats() {
-  try {
-    const now = new Date();
-    const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
-
-    // Get total abandonments in last 30 days
-    // Note: For date range queries, we need to use the Airtable-specific or Wix-specific approach
-    let totalResult;
-    if (usesAirtable(COLLECTION_KEYS.checkoutAbandonment)) {
-      const tableName = getAirtableTableName(COLLECTION_KEYS.checkoutAbandonment);
-      const filter = `IS_AFTER({Abandoned At}, '${thirtyDaysAgo.toISOString()}')`;
-      const result = await airtable.queryRecords(tableName, {
-        filterByFormula: filter,
-        maxRecords: 1000
-      });
-      totalResult = { items: result.records || [] };
-    } else {
-      totalResult = await wixData.query(CONFIG.collection)
-        .ge('abandonedAt', thirtyDaysAgo)
-        .find({ suppressAuth: true });
-    }
-
-    const total = totalResult.items.length;
-
-    // Count recovered
-    const recovered = totalResult.items.filter(item => item.recovered).length;
-
-    // Count pending (not recovered, not all emails sent)
-    const pending = totalResult.items.filter(item => !item.recovered && !item.email3Sent).length;
-
-    // Count completed sequence but not recovered
-    const completedSequence = totalResult.items.filter(item => !item.recovered && item.email3Sent).length;
-
-    // Calculate recovery rate
-    const recoveryRate = total > 0 ? ((recovered / total) * 100).toFixed(1) : 0;
-
-    return {
-      success: true,
-      stats: {
-        total,
-        recovered,
-        pending,
-        completedSequence,
-        recoveryRate: `${recoveryRate}%`,
-        period: 'last_30_days'
-      }
-    };
-  } catch (error) {
-    console.error('[AbandonmentEmail] getAbandonmentStats error:', error);
-    return { success: false, error: error.message };
-  }
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, { filters: { abandonedAt: { gte: thirtyDaysAgo } }, limit: 1000, suppressAuth: true });
+  const items = res.items || [];
+  const recovered = items.filter(i => i.recovered).length;
+  return { success: true, stats: { total: items.length, recovered, recoveryRate: items.length > 0 ? (recovered / items.length * 100).toFixed(1) : 0 } };
 }
 
-/**
- * Get list of recent abandonments for admin dashboard
- *
- * @param {number} limit - Max records to return
- * @returns {Promise<Object>} { success, abandonments[] }
- */
 export async function getRecentAbandonments(limit = 50) {
-  try {
-    const result = await queryData(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      {
-        sortField: 'abandonedAt',
-        sortDirection: 'desc',
-        limit: limit
-      }
-    );
-
-    return {
-      success: true,
-      abandonments: result.items.map(item => ({
-        id: item._id,
-        email: item.email,
-        planType: item.planType,
-        abandonedAt: item.abandonedAt,
-        email1Sent: item.email1Sent,
-        email2Sent: item.email2Sent,
-        email3Sent: item.email3Sent,
-        recovered: item.recovered,
-        recoveredAt: item.recoveredAt
-      }))
-    };
-  } catch (error) {
-    console.error('[AbandonmentEmail] getRecentAbandonments error:', error);
-    return { success: false, error: error.message, abandonments: [] };
-  }
-}
-
-/**
- * Manually send a specific abandonment email (for testing)
- *
- * @param {string} abandonmentId - The abandonment record ID
- * @param {number} emailNumber - 1, 2, or 3
- * @returns {Promise<Object>} { success }
- */
-export async function sendManualAbandonmentEmail(abandonmentId, emailNumber) {
-  try {
-    if (!abandonmentId || ![1, 2, 3].includes(emailNumber)) {
-      return { success: false, error: 'Invalid parameters' };
-    }
-
-    const abandonment = await getRecord(
-      COLLECTION_KEYS.checkoutAbandonment,
-      CONFIG.collection,
-      abandonmentId
-    );
-
-    if (!abandonment) {
-      return { success: false, error: 'Abandonment not found' };
-    }
-
-    const emailData = {
-      email: abandonment.email,
-      firstName: getFirstName(abandonment.contactName),
-      planType: abandonment.planType,
-      planName: getPlanDisplayName(abandonment.planType),
-      companyName: abandonment.companyName
-    };
-
-    let result;
-    switch (emailNumber) {
-      case 1:
-        result = await sendAbandonmentEmail1(emailData);
-        break;
-      case 2:
-        result = await sendAbandonmentEmail2(emailData);
-        break;
-      case 3:
-        result = await sendAbandonmentEmail3(emailData);
-        break;
-    }
-
-    if (result.success) {
-      await markEmailSent(abandonmentId, emailNumber);
-    }
-
-    return result;
-  } catch (error) {
-    console.error('[AbandonmentEmail] sendManualAbandonmentEmail error:', error);
-    return { success: false, error: error.message };
-  }
+  const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, { sort: [{ field: 'abandonedAt', direction: 'desc' }], limit, suppressAuth: true });
+  return { success: true, abandonments: res.items || [] };
 }

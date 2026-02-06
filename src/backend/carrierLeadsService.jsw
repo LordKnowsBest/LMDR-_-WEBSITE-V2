@@ -1,59 +1,38 @@
-// ============================================================================
-// CARRIER LEADS SERVICE - Handles inbound carrier staffing requests
-// ============================================================================
-
-import wixData from 'wix-data';
 import wixUsersBackend from 'wix-users-backend';
-import { usesAirtable, getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
 
 const CONFIG = {
-  leadsCollection: 'carrierStaffingRequests',
-  carriersCollection: 'Carriers',
-
   // Lead status values
   STATUS: {
-    NEW: 'new',
-    CONTACTED: 'contacted',
-    QUALIFIED: 'qualified',
-    IN_PROGRESS: 'in_progress',
-    CLOSED_WON: 'closed_won',
-    CLOSED_LOST: 'closed_lost'
+    NEW: 'new', CONTACTED: 'contacted', QUALIFIED: 'qualified',
+    IN_PROGRESS: 'in_progress', CLOSED_WON: 'closed_won', CLOSED_LOST: 'closed_lost'
   },
-
   // Staffing type values
-  STAFFING_TYPE: {
-    EMERGENCY: 'emergency',
-    STRATEGIC: 'strategic'
-  }
+  STAFFING_TYPE: { EMERGENCY: 'emergency', STRATEGIC: 'strategic' }
+};
+
+const COLLECTION_KEYS = {
+  leads: 'carrierStaffingRequests',
+  carriers: 'carriers',
+  carrierAccounts: 'carriers',
+  hiringPreferences: 'carrierHiringPreferences'
 };
 
 /**
  * Parse a driver count range string and extract the max number
- * Handles formats like: "1-5 drivers", "6-15", "50+", "50+ drivers"
- * @param {string} rangeStr - The range string from form
- * @returns {number|null} - The max number or null if unparseable
  */
 function parseDriverCount(rangeStr) {
   if (!rangeStr) return null;
-
-  // Handle "50+" or "50+ drivers" format
   if (rangeStr.includes('+')) {
     const match = rangeStr.match(/(\d+)\+/);
     return match ? parseInt(match[1], 10) : null;
   }
-
-  // Handle "1-5" or "1-5 drivers" format - extract the max (second number)
   const rangeMatch = rangeStr.match(/(\d+)\s*-\s*(\d+)/);
-  if (rangeMatch) {
-    return parseInt(rangeMatch[2], 10);
-  }
-
-  // Handle plain number
+  if (rangeMatch) return parseInt(rangeMatch[2], 10);
   const plainMatch = rangeStr.match(/(\d+)/);
   return plainMatch ? parseInt(plainMatch[1], 10) : null;
 }
@@ -64,400 +43,115 @@ function parseDriverCount(rangeStr) {
 
 /**
  * Submit a new carrier staffing request (lead)
- * Called from the Last Mile Staffing landing page form
- * Supports both Wix and Airtable data sources based on config
- *
- * @param {Object} leadData
- * @param {string} leadData.companyName - Carrier company name
- * @param {string} leadData.contactName - Contact person name
- * @param {string} leadData.email - Contact email
- * @param {string} leadData.phone - Contact phone
- * @param {string} [leadData.dotNumber] - Optional DOT number
- * @param {string} leadData.staffingType - 'emergency' or 'strategic'
- * @param {string} leadData.driversNeeded - Number or range of drivers needed
- * @param {Array<string>} leadData.driverTypes - Array of driver types/endorsements needed
- * @param {string} [leadData.additionalNotes] - Optional notes
- * @returns {Promise<{success: boolean, leadId?: string, error?: string}>}
  */
 export async function submitCarrierStaffingRequest(leadData) {
   try {
-    // Validate required fields
-    if (!leadData.companyName || !leadData.companyName.trim()) {
-      return { success: false, error: 'Company name is required' };
-    }
-    if (!leadData.contactName || !leadData.contactName.trim()) {
-      return { success: false, error: 'Contact name is required' };
-    }
-    if (!leadData.email || !leadData.email.trim()) {
-      return { success: false, error: 'Email is required' };
-    }
-    if (!leadData.phone || !leadData.phone.trim()) {
-      return { success: false, error: 'Phone number is required' };
-    }
-    if (!leadData.staffingType) {
-      return { success: false, error: 'Staffing type is required' };
+    if (!leadData.companyName || !leadData.contactName || !leadData.email || !leadData.phone || !leadData.staffingType) {
+      return { success: false, error: 'Missing required fields' };
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(leadData.email)) {
-      return { success: false, error: 'Please enter a valid email address' };
-    }
+    if (!emailRegex.test(leadData.email)) return { success: false, error: 'Invalid email' };
 
     const now = new Date();
-    const carriersCollectionKey = 'carriers';
-    const leadsCollectionKey = 'carrierStaffingRequests';
-
-    // Check if we can link to an existing carrier by DOT number
     let linkedCarrierId = null;
-    if (leadData.dotNumber && leadData.dotNumber.trim()) {
+
+    if (leadData.dotNumber?.trim()) {
       try {
-        // Convert DOT number to number for query (Carriers collection stores dot_number as NUMBER)
-        const dotNumberAsNumber = parseInt(leadData.dotNumber.trim(), 10);
-
-        if (usesAirtable(carriersCollectionKey)) {
-          // Airtable path - query Carriers (Master) FMCSA reference table directly
-          // Use 'Carriers' (PascalCase TABLE_NAMES key), not config key, to hit the FMCSA table
-          const formula = `{DOT_NUMBER} = ${dotNumberAsNumber}`;
-          const result = await airtable.queryRecords('Carriers', {
-            filterByFormula: formula,
-            maxRecords: 1
-          });
-          if (result.records && result.records.length > 0) {
-            linkedCarrierId = result.records[0]._id;
-            console.log(`✅ Linked to existing carrier (Airtable): ${linkedCarrierId}`);
-          }
-        } else {
-          // Wix path for carrier lookup
-          const carrierResult = await wixData.query(CONFIG.carriersCollection)
-            .eq('dot_number', dotNumberAsNumber)
-            .limit(1)
-            .find({ suppressAuth: true });
-
-          if (carrierResult.items.length > 0) {
-            linkedCarrierId = carrierResult.items[0]._id;
-            console.log(`✅ Linked to existing carrier: ${linkedCarrierId}`);
-          }
-        }
-      } catch (e) {
-        // Continue without linking - carrier lookup is optional
-        console.log('Carrier lookup skipped:', e.message);
-      }
+        const dotNum = parseInt(leadData.dotNumber.trim(), 10);
+        const carrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', dotNum, { suppressAuth: true });
+        if (carrier) linkedCarrierId = carrier._id;
+      } catch (e) { }
     }
 
-    // Parse the driver count range to a number (Airtable field is NUMBER type)
     const driversNeededNum = parseDriverCount(leadData.driversNeeded);
-    const driversNeededText = leadData.driversNeeded || '';
+    const formatDate = (date) => new Date(date).toISOString().split('T')[0];
 
-    // Format date as YYYY-MM-DD for Airtable Date fields
-    const formatDate = (date) => {
-      const d = new Date(date);
-      return d.toISOString().split('T')[0]; // Returns "YYYY-MM-DD"
-    };
-
-    // Convert driver types array to JSON string (Airtable field is Single line text)
-    const driverTypesArray = Array.isArray(leadData.driverTypes) ? leadData.driverTypes : [];
-    const driverTypesString = JSON.stringify(driverTypesArray);
-
-    // Normalize staffing type to lowercase (Airtable single select expects: "emergency" or "strategic")
-    const normalizedStaffingType = leadData.staffingType ? leadData.staffingType.toLowerCase() : '';
-
-    // Build the lead record
     const leadRecord = {
-      // Contact Information
-      company_name: leadData.companyName.trim(),
-      contact_name: leadData.contactName.trim(),
-      email: leadData.email.trim().toLowerCase(),
-      phone: leadData.phone.trim(),
+      company_name: leadData.companyName.trim(), contact_name: leadData.contactName.trim(),
+      email: leadData.email.trim().toLowerCase(), phone: leadData.phone.trim(),
       dot_number: leadData.dotNumber ? leadData.dotNumber.trim() : null,
-
-      // Staffing Requirements
-      staffing_type: normalizedStaffingType,
-      drivers_needed: driversNeededNum,
-      driver_types: driverTypesString,
-      // Prepend the original range text to notes for context
-      additional_notes: driversNeededText
-        ? `Drivers needed: ${driversNeededText}. ${leadData.additionalNotes || ''}`.trim()
-        : (leadData.additionalNotes || ''),
-
-      // Linking
-      linked_carrier_id: linkedCarrierId,
-
-      // Status & Tracking
-      status: CONFIG.STATUS.NEW,
-      submitted_date: formatDate(now),
-      last_updated: formatDate(now),
-
-      // Source tracking
-      source: 'landing_page',
-      source_url: leadData.sourceUrl || '/last-mile-staffing'
+      staffing_type: leadData.staffingType ? leadData.staffingType.toLowerCase() : '',
+      drivers_needed: driversNeededNum, driver_types: JSON.stringify(leadData.driverTypes || []),
+      additional_notes: leadData.driversNeeded ? `Drivers needed: ${leadData.driversNeeded}. ${leadData.additionalNotes || ''}`.trim() : (leadData.additionalNotes || ''),
+      linked_carrier_id: linkedCarrierId, status: CONFIG.STATUS.NEW,
+      submitted_date: formatDate(now), last_updated: formatDate(now),
+      source: 'landing_page', source_url: leadData.sourceUrl || '/last-mile-staffing'
     };
 
-    // Insert the lead based on data source
-    let inserted;
-    if (usesAirtable(leadsCollectionKey)) {
-      // Airtable path - pass collection key directly, createRecord handles table name transformation
-      inserted = await airtable.createRecord(leadsCollectionKey, leadRecord);
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.leads, leadRecord, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error);
 
-      // Check if Airtable returned an error
-      if (inserted && inserted.success === false) {
-        console.error(`❌ Airtable createRecord failed: ${inserted.error}`);
-        return {
-          success: false,
-          error: inserted.error || 'Failed to create record in database'
-        };
-      }
-
-      console.log(`✅ New carrier staffing request submitted to Airtable: ${inserted._id} from ${leadData.companyName}`);
-    } else {
-      // Wix path
-      inserted = await wixData.insert(CONFIG.leadsCollection, leadRecord, { suppressAuth: true });
-      console.log(`✅ New carrier staffing request submitted: ${inserted._id} from ${leadData.companyName}`);
-    }
-
-    return {
-      success: true,
-      leadId: inserted._id,
-      checkoutToken: inserted._id, // Using leadId as token for now
-      message: 'Your staffing request has been submitted. Redirecting to secure checkout...'
-    };
-
+    return { success: true, leadId: result.record._id, checkoutToken: result.record._id, message: 'Staffing request submitted.' };
   } catch (error) {
-    console.error('❌ Error submitting carrier staffing request:', error);
-    return {
-      success: false,
-      error: 'There was an error submitting your request. Please try again or call us directly.'
-    };
+    console.error('❌ submitCarrierStaffingRequest error:', error);
+    return { success: false, error: 'Failed to submit request.' };
   }
 }
 
 // ============================================================================
-// GET LEAD STATUS (for follow-up pages if needed)
+// GET LEAD STATUS
 // ============================================================================
 
-/**
- * Get the status of a submitted lead by ID
- * Supports both Wix and Airtable data sources based on config
- * @param {string} leadId - The lead ID
- * @returns {Promise<{success: boolean, lead?: Object, error?: string}>}
- */
 export async function getLeadStatus(leadId) {
   try {
-    const collectionKey = 'carrierStaffingRequests';
-    let lead = null;
+    const lead = await dataAccess.getRecord(COLLECTION_KEYS.leads, leadId, { suppressAuth: true });
+    if (!lead) return { success: false, error: 'Lead not found' };
 
-    if (usesAirtable(collectionKey)) {
-      // Airtable path - pass collection key directly for field mapping
-      lead = await airtable.getRecord(collectionKey, leadId);
-      if (lead && lead.error) {
-        lead = null;
-      }
-    } else {
-      // Wix path
-      lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
-    }
-
-    if (!lead) {
-      return { success: false, error: 'Lead not found' };
-    }
-
-    return {
-      success: true,
-      lead: {
-        id: lead._id,
-        companyName: lead.company_name,
-        status: lead.status,
-        submittedDate: lead.submitted_date,
-        lastUpdated: lead.last_updated
-      }
-    };
+    return { success: true, lead: { id: lead._id, companyName: lead.company_name, status: lead.status, submittedDate: lead.submitted_date, lastUpdated: lead.last_updated } };
   } catch (error) {
-    console.error('❌ Error getting lead status:', error);
+    console.error('❌ getLeadStatus error:', error);
     return { success: false, error: error.message };
   }
 }
 
 // ============================================================================
-// ADMIN: GET ALL LEADS (for admin dashboard)
+// ADMIN: GET ALL LEADS
 // ============================================================================
 
-/**
- * Get all carrier staffing requests for admin review
- * Supports both Wix and Airtable data sources based on config
- * @param {Object} options
- * @param {string} [options.status] - Filter by status
- * @param {number} [options.limit] - Max results (default 50)
- * @param {number} [options.skip] - Skip results for pagination
- * @returns {Promise<{success: boolean, leads?: Array, totalCount?: number, error?: string}>}
- */
 export async function getCarrierLeads(options = {}) {
   try {
-    const collectionKey = 'carrierStaffingRequests';
-    const limit = options.limit || 50;
-    const skip = options.skip || 0;
+    const filters = {};
+    if (options.status) filters.status = options.status;
 
-    if (usesAirtable(collectionKey)) {
-      // Airtable path - pass collection key directly for field mapping
-      let filterFormula = null;
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.leads, {
+      filters, sort: [{ field: 'submitted_date', direction: 'desc' }],
+      limit: options.limit || 50, skip: options.skip || 0, suppressAuth: true
+    });
 
-      // Apply status filter if provided
-      if (options.status) {
-        filterFormula = `{Status} = '${options.status}'`;
-      }
-
-      const result = await airtable.queryRecords(collectionKey, {
-        filterByFormula: filterFormula,
-        sort: [{ field: 'Submitted Date', direction: 'desc' }],
-        maxRecords: limit
-        // Note: Airtable pagination uses offset token, not skip
-      });
-
-      return {
-        success: true,
-        leads: result.records || [],
-        totalCount: result.records ? result.records.length : 0,
-        hasMore: !!result.offset
-      };
-    } else {
-      // Wix path
-      let query = wixData.query(CONFIG.leadsCollection);
-
-      // Apply status filter if provided
-      if (options.status) {
-        query = query.eq('status', options.status);
-      }
-
-      // Sort by newest first
-      query = query.descending('submitted_date');
-
-      // Pagination
-      query = query.limit(limit).skip(skip);
-
-      const result = await query.find({ suppressAuth: true });
-
-      return {
-        success: true,
-        leads: result.items,
-        totalCount: result.totalCount,
-        hasMore: result.hasNext()
-      };
-    }
+    return { success: true, leads: result.items || [], totalCount: result.totalCount || (result.items || []).length };
   } catch (error) {
-    console.error('❌ Error getting carrier leads:', error);
+    console.error('❌ getCarrierLeads error:', error);
     return { success: false, error: error.message, leads: [] };
   }
 }
 
 // ============================================================================
-// SUBMIT CARRIER INTAKE PREFERENCES (Public — no auth required)
+// SUBMIT CARRIER INTAKE PREFERENCES (Public)
 // ============================================================================
 
-/**
- * Submit carrier hiring preferences from the public Intake Questionnaire form.
- * This is a lightweight wrapper that writes to CarrierHiringPreferences WITHOUT
- * requiring a logged-in user — unlike carrierPreferences.jsw which is auth-gated.
- *
- * Called via PostMessage from Carrier_Intake_Questionnaire.html as the second
- * message (after submitCarrierStaffingRequest creates the lead).
- *
- * @param {Object} prefData
- * @param {string} [prefData.carrier_dot] - DOT number (links to carrier)
- * @param {Array<string>} prefData.required_cdl_types - e.g. ['A','B']
- * @param {Array<string>} [prefData.required_endorsements] - e.g. ['Hazmat','Tanker']
- * @param {number} [prefData.target_radius_miles] - Default 100
- * @param {Array<string>} [prefData.target_states] - e.g. ['TX','OK','LA']
- * @param {Array<string>} [prefData.route_types] - e.g. ['OTR','Regional']
- * @param {Array<string>} [prefData.equipment_types] - e.g. ['Dry Van','Reefer']
- * @param {number} [prefData.offered_pay_min] - Min CPM or weekly pay
- * @param {number} [prefData.offered_pay_max] - Max CPM or weekly pay
- * @param {number} [prefData.min_experience_years] - e.g. 0, 0.5, 1, 2
- * @param {number} [prefData.positions_open] - How many drivers needed
- * @param {string} [prefData.urgency] - 'immediate' | '30_day' | 'ongoing'
- * @returns {Promise<{success: boolean, preferenceId?: string, error?: string}>}
- */
 export async function submitCarrierIntakePreferences(prefData) {
   try {
-    // Basic validation — CDL types are the only truly required field
-    if (!prefData.required_cdl_types || !Array.isArray(prefData.required_cdl_types) || prefData.required_cdl_types.length === 0) {
-      return { success: false, error: 'At least one CDL type is required' };
-    }
+    if (!prefData.required_cdl_types?.length) return { success: false, error: 'CDL type required' };
 
-    // Validate CDL types
-    const validCdlTypes = ['A', 'B', 'C'];
-    for (const cdl of prefData.required_cdl_types) {
-      if (!validCdlTypes.includes(cdl)) {
-        return { success: false, error: `Invalid CDL type: ${cdl}` };
-      }
-    }
-
-    // Validate urgency if provided
-    const validUrgency = ['immediate', '30_day', 'ongoing'];
-    if (prefData.urgency && !validUrgency.includes(prefData.urgency)) {
-      return { success: false, error: `Invalid urgency value: ${prefData.urgency}` };
-    }
-
-    // Validate pay range if both provided
-    if (prefData.offered_pay_min != null && prefData.offered_pay_max != null) {
-      if (typeof prefData.offered_pay_min !== 'number' || typeof prefData.offered_pay_max !== 'number') {
-        return { success: false, error: 'Pay range values must be numbers' };
-      }
-      if (prefData.offered_pay_max < prefData.offered_pay_min) {
-        return { success: false, error: 'Max pay must be greater than or equal to min pay' };
-      }
-    }
-
-    const collectionKey = 'carrierHiringPreferences';
-    const collectionName = 'CarrierHiringPreferences';
-
-    // Build the preference record
     const preferenceRecord = {
-      carrier_dot: prefData.carrier_dot || null,
-      recruiter_id: 'public_intake_form',  // No auth — mark source
-      required_cdl_types: prefData.required_cdl_types,
-      required_endorsements: prefData.required_endorsements || [],
-      target_radius_miles: prefData.target_radius_miles || 100,
-      target_states: prefData.target_states || [],
-      target_zip_codes: [],
-      route_types: prefData.route_types || [],
-      equipment_types: prefData.equipment_types || [],
-      offered_pay_min: prefData.offered_pay_min ?? null,
-      offered_pay_max: prefData.offered_pay_max ?? null,
-      min_experience_years: prefData.min_experience_years ?? null,
-      max_experience_years: null,
-      positions_open: prefData.positions_open ?? null,
-      urgency: prefData.urgency || null,
-      is_active: true,
-      source: 'carrier_intake_form'
+      carrier_dot: prefData.carrier_dot || null, recruiter_id: 'public_intake_form',
+      required_cdl_types: prefData.required_cdl_types, required_endorsements: prefData.required_endorsements || [],
+      target_radius_miles: prefData.target_radius_miles || 100, target_states: prefData.target_states || [],
+      target_zip_codes: [], route_types: prefData.route_types || [],
+      equipment_types: prefData.equipment_types || [], offered_pay_min: prefData.offered_pay_min ?? null,
+      offered_pay_max: prefData.offered_pay_max ?? null, min_experience_years: prefData.min_experience_years ?? null,
+      max_experience_years: null, positions_open: prefData.positions_open ?? null,
+      urgency: prefData.urgency || null, is_active: true, source: 'carrier_intake_form'
     };
 
-    // Insert using dual-source pattern
-    let inserted;
-    if (usesAirtable(collectionKey)) {
-      inserted = await airtable.createRecord(collectionKey, preferenceRecord);
+    const result = await dataAccess.insertRecord(COLLECTION_KEYS.hiringPreferences, preferenceRecord, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error);
 
-      if (inserted && inserted.success === false) {
-        console.error(`❌ Airtable createRecord failed for intake preferences: ${inserted.error}`);
-        return { success: false, error: inserted.error || 'Failed to save preferences' };
-      }
-
-      console.log(`✅ Carrier intake preferences saved to Airtable: ${inserted._id} (DOT: ${prefData.carrier_dot || 'N/A'})`);
-    } else {
-      inserted = await wixData.insert(collectionName, preferenceRecord, { suppressAuth: true });
-      console.log(`✅ Carrier intake preferences saved: ${inserted._id} (DOT: ${prefData.carrier_dot || 'N/A'})`);
-    }
-
-    return {
-      success: true,
-      preferenceId: inserted._id,
-      message: 'Carrier preferences saved successfully.'
-    };
-
+    return { success: true, preferenceId: result.record._id, message: 'Preferences saved.' };
   } catch (error) {
-    console.error('❌ Error submitting carrier intake preferences:', error);
-    return {
-      success: false,
-      error: 'There was an error saving your preferences. Your contact info was already submitted.'
-    };
+    console.error('❌ submitCarrierIntakePreferences error:', error);
+    return { success: false, error: 'Failed to save preferences.' };
   }
 }
 
@@ -465,306 +159,86 @@ export async function submitCarrierIntakePreferences(prefData) {
 // ADMIN: UPDATE LEAD STATUS
 // ============================================================================
 
-/**
- * Update the status of a lead (admin function)
- * Supports both Wix and Airtable data sources based on config
- * @param {string} leadId - The lead ID
- * @param {string} newStatus - The new status
- * @param {string} [notes] - Optional notes about the status change
- * @returns {Promise<{success: boolean, lead?: Object, error?: string}>}
- */
 export async function updateLeadStatus(leadId, newStatus, notes = '') {
   try {
-    const collectionKey = 'carrierStaffingRequests';
-    let lead = null;
+    const lead = await dataAccess.getRecord(COLLECTION_KEYS.leads, leadId, { suppressAuth: true });
+    if (!lead) return { success: false, error: 'Lead not found' };
 
-    if (usesAirtable(collectionKey)) {
-      // Airtable path - pass collection key directly for field mapping
-      lead = await airtable.getRecord(collectionKey, leadId);
-      if (lead && lead.error) {
-        return { success: false, error: 'Lead not found' };
-      }
-    } else {
-      // Wix path - get existing record
-      lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
-    }
-
-    if (!lead) {
-      return { success: false, error: 'Lead not found' };
-    }
-
-    const now = new Date();
-
-    // Build status history
     let statusHistory = [];
-    try {
-      statusHistory = lead.status_history ? JSON.parse(lead.status_history) : [];
-    } catch (e) {
-      statusHistory = [];
-    }
+    try { statusHistory = typeof lead.status_history === 'string' ? JSON.parse(lead.status_history) : (lead.status_history || []); } catch (e) { }
+    statusHistory.push({ from: lead.status, to: newStatus, timestamp: new Date().toISOString(), notes });
 
-    statusHistory.push({
-      from: lead.status,
-      to: newStatus,
-      timestamp: now.toISOString(),
-      notes: notes
-    });
-
-    // Prepare update fields
-    const updateFields = {
-      status: newStatus,
-      last_updated: now,
-      status_history: JSON.stringify(statusHistory)
-    };
-
-    let updated;
-    if (usesAirtable(collectionKey)) {
-      // Airtable path - pass collection key directly for field mapping
-      updated = await airtable.updateRecord(collectionKey, leadId, updateFields);
-      console.log(`✅ Lead ${leadId} status updated in Airtable: ${lead.status} → ${newStatus}`);
-    } else {
-      // Wix path - update record
-      const updatedLead = {
-        ...lead,
-        ...updateFields
-      };
-      updated = await wixData.update(CONFIG.leadsCollection, updatedLead, { suppressAuth: true });
-      console.log(`✅ Lead ${leadId} status updated: ${lead.status} → ${newStatus}`);
-    }
-
-    return { success: true, lead: updated };
+    const result = await dataAccess.updateRecord(COLLECTION_KEYS.leads, { ...lead, _id: leadId, status: newStatus, last_updated: new Date(), status_history: JSON.stringify(statusHistory) }, { suppressAuth: true });
+    return { success: result.success, lead: result.record, error: result.error };
   } catch (error) {
-    console.error('❌ Error updating lead status:', error);
+    console.error('❌ updateLeadStatus error:', error);
     return { success: false, error: error.message };
   }
 }
 
 // ============================================================================
-// ENSURE CARRIER RECORD - Bridge lead → Carrier on first login
+// ENSURE CARRIER RECORD
 // ============================================================================
 
-/**
- * Ensures a Carrier account record exists in v2_Carriers for the current logged-in user.
- *
- * v2_Carriers is the user-facing carrier accounts table (has Owner field).
- * Carriers (Master) is the FMCSA reference table (~25k records, read-only).
- *
- * Flow:
- * 1. Check if a record already exists in v2_Carriers with this user as Owner → return it
- * 2. Look up the lead by leadId (or by email) in v2_Carrier Staffing Requests
- * 3. If the lead has a linked_carrier_id, pull FMCSA data from Carriers (Master) to enrich
- * 4. Create a new record in v2_Carriers from the lead data (+ FMCSA enrichment if available)
- *
- * This is called after login on the pricing page so that getCurrentCarrier()
- * in subscriptionService works natively on subsequent calls.
- *
- * @param {string|null} leadId - Airtable record ID from URL param (e.g. rec7W9737BAlDO606)
- * @param {string|null} fallbackEmail - Email from URL param as a second lookup key
- * @returns {Promise<{success: boolean, carrier?: Object, created?: boolean, error?: string}>}
- */
 export async function ensureCarrierRecord(leadId = null, fallbackEmail = null) {
   try {
     const user = wixUsersBackend.currentUser;
-    if (!user.loggedIn) {
-      return { success: false, error: 'User not logged in' };
-    }
+    if (!user.loggedIn) return { success: false, error: 'User not logged in' };
 
     const userId = user.id;
     const userEmail = await user.getEmail();
-    // v2_Carriers table name resolved via config → airtableClient TABLE_NAMES
-    const v2CarriersTable = getAirtableTableName('carrierAccounts'); // → 'v2_Carriers'
 
-    // ----- Step 1: Check if carrier account already exists for this user -----
-    let existingCarrier = null;
-    if (usesAirtable('carrierAccounts')) {
-      const ownerFilter = `{Owner} = '${userId}'`;
-      const ownerResult = await airtable.queryRecords(v2CarriersTable, {
-        filterByFormula: ownerFilter,
-        maxRecords: 1
-      });
-      if (ownerResult.records && ownerResult.records.length > 0) {
-        existingCarrier = ownerResult.records[0];
-      }
-    } else {
-      const ownerResult = await wixData.query(CONFIG.carriersCollection)
-        .eq('_owner', userId)
-        .limit(1)
-        .find({ suppressAuth: true });
-      if (ownerResult.items.length > 0) {
-        existingCarrier = ownerResult.items[0];
-      }
+    // Check if account exists
+    const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.carrierAccounts, {
+      filters: { _owner: userId }, limit: 1, suppressAuth: true
+    });
+
+    if (existingResult.success && existingResult.items.length > 0) {
+      return { success: true, carrier: { id: existingResult.items[0]._id, dotNumber: existingResult.items[0].dot_number, email: userEmail }, created: false };
     }
 
-    if (existingCarrier) {
-      console.log(`✅ ensureCarrierRecord: Carrier account already exists for user ${userId}`);
-      return {
-        success: true,
-        carrier: { id: existingCarrier._id, dotNumber: existingCarrier.dot_number, email: userEmail },
-        created: false
-      };
-    }
-
-    // ----- Step 2: Look up the lead -----
+    // Look up lead
     let lead = null;
-    const leadsKey = 'carrierStaffingRequests';
-
-    // Try by leadId first
-    if (leadId) {
-      try {
-        if (usesAirtable(leadsKey)) {
-          lead = await airtable.getRecord(leadsKey, leadId);
-          if (lead && lead.error) lead = null;
-        } else {
-          lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
-        }
-      } catch (e) {
-        console.warn('ensureCarrierRecord: Lead lookup by ID failed:', e.message);
-      }
-    }
-
-    // Fallback: search by email
+    if (leadId) lead = await dataAccess.getRecord(COLLECTION_KEYS.leads, leadId, { suppressAuth: true });
     if (!lead && (fallbackEmail || userEmail)) {
-      const searchEmail = (fallbackEmail || userEmail).toLowerCase();
-      try {
-        if (usesAirtable(leadsKey)) {
-          const emailFilter = `LOWER({email}) = '${searchEmail}'`;
-          const emailResult = await airtable.queryRecords(leadsKey, {
-            filterByFormula: emailFilter,
-            maxRecords: 1,
-            sort: [{ field: 'submitted_date', direction: 'desc' }]
-          });
-          if (emailResult.records && emailResult.records.length > 0) {
-            lead = emailResult.records[0];
-          }
-        } else {
-          const emailResult = await wixData.query(CONFIG.leadsCollection)
-            .eq('email', searchEmail)
-            .descending('submitted_date')
-            .limit(1)
-            .find({ suppressAuth: true });
-          if (emailResult.items.length > 0) {
-            lead = emailResult.items[0];
-          }
-        }
-      } catch (e) {
-        console.warn('ensureCarrierRecord: Lead lookup by email failed:', e.message);
-      }
+      const emailRes = await dataAccess.queryRecords(COLLECTION_KEYS.leads, { filters: { email: (fallbackEmail || userEmail).toLowerCase() }, sort: [{ field: 'submitted_date', direction: 'desc' }], limit: 1, suppressAuth: true });
+      lead = emailRes.items?.[0];
     }
 
-    if (!lead) {
-      console.warn('ensureCarrierRecord: No lead found for user', userId);
-      return { success: false, error: 'No lead record found to create carrier from' };
-    }
+    if (!lead) return { success: false, error: 'No lead found' };
 
-    console.log(`✅ ensureCarrierRecord: Found lead ${lead._id} for user ${userId}`);
-
-    // ----- Step 3: If lead has a linked FMCSA carrier, pull reference data -----
+    // Enrichment if available
     let fmcsaData = null;
     if (lead.linked_carrier_id) {
-      try {
-        // Fetch from Carriers (Master) — the FMCSA reference table (read-only)
-        fmcsaData = await airtable.getRecord('Carriers', lead.linked_carrier_id);
-        if (fmcsaData && fmcsaData.error) fmcsaData = null;
-        if (fmcsaData) {
-          console.log(`✅ ensureCarrierRecord: Found FMCSA data for DOT ${fmcsaData.dot_number}`);
-        }
-      } catch (e) {
-        console.warn('ensureCarrierRecord: FMCSA lookup failed, continuing with lead data only:', e.message);
-      }
+      fmcsaData = await dataAccess.getRecord(COLLECTION_KEYS.carriers, lead.linked_carrier_id, { suppressAuth: true });
     }
 
-    // ----- Step 4: Create carrier account in v2_Carriers -----
-    // Field names match v2_Carriers schema (Title Case in Airtable, snake_case in Wix)
-    const dotNum = fmcsaData?.dot_number
-      || (lead.dot_number ? parseInt(lead.dot_number, 10) : null);
-
+    const dotNum = fmcsaData?.dot_number || (lead.dot_number ? parseInt(lead.dot_number, 10) : null);
     const newCarrier = {
-      owner: userId,
-      legal_name: fmcsaData?.legal_name || lead.company_name || '',
-      dot_number: dotNum,
-      email_address: lead.email || userEmail,
-      telephone: fmcsaData?.telephone || lead.phone || '',
-      city: fmcsaData?.phy_city || '',
-      state: fmcsaData?.phy_state || '',
-      carrier_operation: fmcsaData?.carrier_operation || '',
-      driver_total: fmcsaData?.driver_total || null,
+      _owner: userId, legal_name: fmcsaData?.legal_name || lead.company_name || '', dot_number: dotNum,
+      email_address: lead.email || userEmail, telephone: fmcsaData?.telephone || lead.phone || '',
+      city: fmcsaData?.phy_city || '', state: fmcsaData?.phy_state || '',
+      carrier_operation: fmcsaData?.carrier_operation || '', driver_total: fmcsaData?.driver_total || null,
       power_units: fmcsaData?.nbr_power_unit || null
     };
 
-    let created;
-    if (usesAirtable('carrierAccounts')) {
-      created = await airtable.createRecord(v2CarriersTable, newCarrier);
-      if (created && created.success === false) {
-        console.error('❌ ensureCarrierRecord: Airtable create failed:', created.error);
-        return { success: false, error: created.error };
-      }
-    } else {
-      created = await wixData.insert(CONFIG.carriersCollection, newCarrier, { suppressAuth: true });
-    }
+    const createdResult = await dataAccess.insertRecord(COLLECTION_KEYS.carrierAccounts, newCarrier, { suppressAuth: true });
+    if (!createdResult.success) throw new Error(createdResult.error);
 
-    console.log(`✅ ensureCarrierRecord: Created carrier account ${created._id} from lead ${lead._id} for user ${userId}`);
-    return {
-      success: true,
-      carrier: {
-        id: created._id,
-        dotNumber: dotNum ? String(dotNum) : 'PENDING',
-        email: newCarrier.email_address
-      },
-      created: true
-    };
-
+    return { success: true, carrier: { id: createdResult.record._id, dotNumber: dotNum ? String(dotNum) : 'PENDING', email: newCarrier.email_address }, created: true };
   } catch (error) {
     console.error('❌ ensureCarrierRecord error:', error);
     return { success: false, error: error.message };
   }
 }
-// ============================================================================
-// GET LEAD DETAILS (for checkout)
-// ============================================================================
 
-/**
- * Get lead details for checkout page
- * @param {string} leadId - The lead ID
- * @returns {Promise<Object>} - The lead details
- */
 export async function getLeadDetails(leadId) {
   try {
-    const statusResult = await getLeadStatus(leadId);
-    if (!statusResult.success || !statusResult.lead) {
-      return null;
-    }
-
-    // Reuse getLeadStatus basic data but we need full details
-    // Since getLeadStatus already fetches from DB, let's just use that logic
-    // but return more fields or just fetch again here for clarity
-
-    // For now, let's just fetch it freshly as getLeadStatus returns a limited subset
-
-    const collectionKey = 'carrierStaffingRequests';
-    let lead = null;
-
-    if (usesAirtable(collectionKey)) {
-      lead = await airtable.getRecord(collectionKey, leadId);
-      if (lead && lead.error) return null;
-    } else {
-      lead = await wixData.get(CONFIG.leadsCollection, leadId, { suppressAuth: true });
-    }
-
+    const lead = await dataAccess.getRecord(COLLECTION_KEYS.leads, leadId, { suppressAuth: true });
     if (!lead) return null;
-
-    // Map to standardized format
-    return {
-      _id: lead._id,
-      companyName: lead.company_name,
-      contactName: lead.contact_name,
-      email: lead.email,
-      phone: lead.phone,
-      driversNeeded: lead.drivers_needed,
-      staffingType: lead.staffing_type
-    };
-
+    return { _id: lead._id, companyName: lead.company_name, contactName: lead.contact_name, email: lead.email, phone: lead.phone, driversNeeded: lead.drivers_needed, staffingType: lead.staffing_type };
   } catch (error) {
-    console.error('❌ Error getting lead details:', error);
+    console.error('❌ getLeadDetails error:', error);
     throw error;
   }
 }

@@ -10,16 +10,12 @@
  * This service uses Airtable-only collections (no Wix fallback).
  */
 
-import { getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 import { createNotification } from 'backend/memberService';
 import { awardDriverXP, awardRecruiterPoints, logGamificationEvent } from 'backend/gamificationService';
 import { chunkArray } from 'backend/utils/arrayUtils';
 
-// =============================================================================
-// COLLECTION KEYS (Airtable-only)
-// =============================================================================
-
+// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
   challengeDefinitions: 'challengeDefinitions',
   driverChallenges: 'driverChallenges',
@@ -81,133 +77,60 @@ const CHALLENGE_STATUS = {
 };
 
 // =============================================================================
-// AIRTABLE-ONLY HELPER FUNCTIONS
-// =============================================================================
-
-async function queryData(collectionKey, options = {}) {
-  const tableName = getAirtableTableName(collectionKey);
-  const result = await airtable.queryRecords(tableName, {
-    filterByFormula: options.filter || '',
-    sort: options.sort,
-    maxRecords: options.limit || 100
-  });
-  return result.records || [];
-}
-
-async function insertData(collectionKey, data) {
-  const tableName = getAirtableTableName(collectionKey);
-  return await airtable.createRecord(tableName, data);
-}
-
-async function updateData(collectionKey, recordId, data) {
-  const tableName = getAirtableTableName(collectionKey);
-  return await airtable.updateRecord(tableName, recordId, data);
-}
-
-async function getRecord(collectionKey, recordId) {
-  const tableName = getAirtableTableName(collectionKey);
-  return await airtable.getRecord(tableName, recordId);
-}
-
-// =============================================================================
 // GET CHALLENGE DEFINITIONS
 // =============================================================================
 
 /**
  * Get all challenge definitions
- * @param {string} userType - 'driver' or 'recruiter'
- * @param {string} challengeType - Optional filter: 'daily', 'weekly', 'monthly', 'event', 'onetime'
- * @returns {array} Challenge definitions
  */
 export async function getChallengeDefinitions(userType, challengeType = null) {
   try {
-    let filter = `AND({Is Active} = "Yes", {User Type} = "${userType}")`;
+    const filters = { is_active: 'Yes', user_type: userType };
+    if (challengeType) filters.challenge_type = challengeType;
 
-    if (challengeType) {
-      filter = `AND(${filter}, {Challenge Type} = "${challengeType}")`;
-    }
-
-    const records = await queryData(COLLECTION_KEYS.challengeDefinitions, {
-      filter,
-      sort: [{ field: 'Display Order', direction: 'asc' }],
-      limit: 100
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.challengeDefinitions, {
+      filters, sort: [{ field: 'display_order', direction: 'asc' }], limit: 100, suppressAuth: true
     });
 
-    return records.map(normalizeChallengeDefinition);
+    return (result.items || []).map(normalizeChallengeDefinition);
   } catch (error) {
     console.error('getChallengeDefinitions error:', error);
     return [];
   }
 }
 
-// =============================================================================
-// GET ACTIVE CHALLENGES
-// =============================================================================
-
 /**
  * Get user's active challenges with progress
- * @param {string} userId - User ID
- * @param {string} userType - 'driver' or 'recruiter'
- * @returns {array} Active challenges with progress
  */
 export async function getActiveChallenges(userId, userType) {
   try {
-    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
-
-    const records = await queryData(collectionKey, {
-      filter: `AND({User ID} = "${userId}", {Status} = "${CHALLENGE_STATUS.ACTIVE}")`,
-      limit: 50
+    const key = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const result = await dataAccess.queryRecords(key, {
+      filters: { user_id: userId, status: CHALLENGE_STATUS.ACTIVE }, limit: 50, suppressAuth: true
     });
 
-    const challenges = [];
-    const now = new Date();
-
-    // Separate expired and active challenges
-    const expiredRecords = [];
-    const activeRecords = [];
-
-    for (const record of records) {
+    const challenges = [], now = new Date(), expiredRecords = [], activeRecords = [];
+    (result.items || []).forEach(record => {
       const challenge = normalizeUserChallenge(record);
-      if (challenge.expiresAt && new Date(challenge.expiresAt) < now) {
-        expiredRecords.push({ record, challenge });
-      } else {
-        activeRecords.push({ record, challenge });
-      }
-    }
+      if (challenge.expiresAt && new Date(challenge.expiresAt) < now) expiredRecords.push(record);
+      else activeRecords.push(challenge);
+    });
 
-    // Process expired challenges in parallel (chunks of 20)
     if (expiredRecords.length > 0) {
-      const chunks = chunkArray(expiredRecords, 20);
-      for (const chunk of chunks) {
-        await Promise.all(
-          chunk.map(({ record }) =>
-            updateData(collectionKey, record.id, {
-              'Status': CHALLENGE_STATUS.EXPIRED,
-              'Expired At': now.toISOString()
-            }).catch(() => null) // Swallow errors for cleanup
-          )
-        );
+      for (const record of expiredRecords) {
+        await dataAccess.updateRecord(key, { ...record, status: CHALLENGE_STATUS.EXPIRED, expired_at: now.toISOString() }, { suppressAuth: true }).catch(() => {});
       }
     }
 
-    // Process active challenges (no DB calls, just calculations)
-    for (const { challenge } of activeRecords) {
-      // Calculate progress percentage
-      challenge.progressPercent = challenge.targetValue > 0
-        ? Math.min(100, Math.round((challenge.currentValue / challenge.targetValue) * 100))
-        : 0;
-
-      // Calculate time remaining
+    for (const challenge of activeRecords) {
+      challenge.progressPercent = challenge.targetValue > 0 ? Math.min(100, Math.round((challenge.currentValue / challenge.targetValue) * 100)) : 0;
       if (challenge.expiresAt) {
-        const expiresAt = new Date(challenge.expiresAt);
-        challenge.timeRemaining = expiresAt - now;
+        challenge.timeRemaining = new Date(challenge.expiresAt) - now;
         challenge.timeRemainingFormatted = formatTimeRemaining(challenge.timeRemaining);
-        challenge.isExpiringSoon = challenge.timeRemaining < 2 * 60 * 60 * 1000; // 2 hours
+        challenge.isExpiringSoon = challenge.timeRemaining < 2 * 3600000;
       }
-
       challenges.push(challenge);
     }
-
     return challenges;
   } catch (error) {
     console.error('getActiveChallenges error:', error);
@@ -215,817 +138,228 @@ export async function getActiveChallenges(userId, userType) {
   }
 }
 
-// =============================================================================
-// GET AVAILABLE CHALLENGES
-// =============================================================================
-
 /**
  * Get challenges available for user to start
- * @param {string} userId - User ID
- * @param {string} userType - 'driver' or 'recruiter'
- * @returns {array} Available challenges
  */
 export async function getAvailableChallenges(userId, userType) {
   try {
-    // Get all active challenge definitions for this user type
     const definitions = await getChallengeDefinitions(userType);
-
-    // Get user's current and completed challenges
-    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
-
-    const userChallenges = await queryData(collectionKey, {
-      filter: `{User ID} = "${userId}"`,
-      limit: 500
-    });
-
-    // Build map of user's challenge states
+    const key = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const userRes = await dataAccess.queryRecords(key, { filters: { user_id: userId }, limit: 500, suppressAuth: true });
+    
     const challengeStates = new Map();
-    for (const uc of userChallenges) {
-      const defId = uc['Challenge Definition ID'];
-      const status = uc['Status'];
-      const startedAt = uc['Started At'];
+    (userRes.items || []).forEach(uc => {
+      const defId = uc.challenge_definition_id;
+      if (!challengeStates.has(defId)) challengeStates.set(defId, []);
+      challengeStates.get(defId).push(uc);
+    });
 
-      if (!challengeStates.has(defId)) {
-        challengeStates.set(defId, []);
-      }
-      challengeStates.get(defId).push({ status, startedAt, record: uc });
-    }
-
-    const available = [];
-    const now = new Date();
-
+    const available = [], now = new Date();
     for (const def of definitions) {
-      const states = challengeStates.get(def.challengeId) || [];
-
-      // Check if challenge is available based on type
-      const isAvailable = checkChallengeAvailability(def, states, now);
-
-      if (isAvailable) {
-        available.push({
-          ...def,
-          canStart: true,
-          typeInfo: CHALLENGE_TYPES[def.challengeType] || CHALLENGE_TYPES.daily
-        });
+      if (checkChallengeAvailability(def, challengeStates.get(def.challengeId) || [], now)) {
+        available.push({ ...def, canStart: true, typeInfo: CHALLENGE_TYPES[def.challengeType] || CHALLENGE_TYPES.daily });
       }
     }
-
     return available;
-  } catch (error) {
-    console.error('getAvailableChallenges error:', error);
-    return [];
-  }
+  } catch (error) { return []; }
 }
-
-/**
- * Check if a challenge is available based on type and history
- */
-function checkChallengeAvailability(definition, userStates, now) {
-  const { challengeType, isRepeatable } = definition;
-
-  // Check for active instance
-  const hasActive = userStates.some(s => s.status === CHALLENGE_STATUS.ACTIVE);
-  if (hasActive) return false;
-
-  // For one-time challenges, check if ever completed/claimed
-  if (challengeType === 'onetime') {
-    const everCompleted = userStates.some(s =>
-      s.status === CHALLENGE_STATUS.COMPLETED || s.status === CHALLENGE_STATUS.CLAIMED
-    );
-    return !everCompleted;
-  }
-
-  // For recurring challenges, check if already done this period
-  if (['daily', 'weekly', 'monthly'].includes(challengeType)) {
-    const periodStart = getPeriodStart(challengeType, now);
-
-    const completedThisPeriod = userStates.some(s => {
-      if (s.status !== CHALLENGE_STATUS.COMPLETED && s.status !== CHALLENGE_STATUS.CLAIMED) {
-        return false;
-      }
-      const startedAt = new Date(s.startedAt);
-      return startedAt >= periodStart;
-    });
-
-    return !completedThisPeriod;
-  }
-
-  // For event challenges, check if within event dates
-  if (challengeType === 'event') {
-    const eventStart = definition.eventStartDate ? new Date(definition.eventStartDate) : null;
-    const eventEnd = definition.eventEndDate ? new Date(definition.eventEndDate) : null;
-
-    if (eventStart && now < eventStart) return false;
-    if (eventEnd && now > eventEnd) return false;
-
-    // Check if already completed during this event
-    const completedDuringEvent = userStates.some(s => {
-      if (s.status !== CHALLENGE_STATUS.COMPLETED && s.status !== CHALLENGE_STATUS.CLAIMED) {
-        return false;
-      }
-      const startedAt = new Date(s.startedAt);
-      return (!eventStart || startedAt >= eventStart) && (!eventEnd || startedAt <= eventEnd);
-    });
-
-    return !completedDuringEvent;
-  }
-
-  return isRepeatable !== false;
-}
-
-/**
- * Get start of current period for recurring challenges
- */
-function getPeriodStart(challengeType, now) {
-  const periodStart = new Date(now);
-
-  switch (challengeType) {
-    case 'daily':
-      periodStart.setUTCHours(0, 0, 0, 0);
-      break;
-    case 'weekly':
-      const dayOfWeek = periodStart.getUTCDay();
-      const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-      periodStart.setUTCDate(periodStart.getUTCDate() - daysToMonday);
-      periodStart.setUTCHours(0, 0, 0, 0);
-      break;
-    case 'monthly':
-      periodStart.setUTCDate(1);
-      periodStart.setUTCHours(0, 0, 0, 0);
-      break;
-  }
-
-  return periodStart;
-}
-
-// =============================================================================
-// START CHALLENGE
-// =============================================================================
 
 /**
  * Start a challenge for a user
- * @param {string} userId - User ID
- * @param {string} challengeId - Challenge definition ID
- * @param {string} userType - 'driver' or 'recruiter'
- * @returns {object} Started challenge or error
  */
 export async function startChallenge(userId, challengeId, userType) {
   try {
-    // Get challenge definition
     const definitions = await getChallengeDefinitions(userType);
     const definition = definitions.find(d => d.challengeId === challengeId);
+    if (!definition) return { success: false, error: 'challenge_not_found' };
 
-    if (!definition) {
-      return { success: false, error: 'challenge_not_found' };
-    }
-
-    // Check availability
     const available = await getAvailableChallenges(userId, userType);
-    const isAvailable = available.some(a => a.challengeId === challengeId);
+    if (!available.some(a => a.challengeId === challengeId)) return { success: false, error: 'challenge_not_available' };
 
-    if (!isAvailable) {
-      return { success: false, error: 'challenge_not_available' };
-    }
-
-    // Calculate expiration
-    const now = new Date();
-    let expiresAt = null;
-
-    if (definition.challengeType === 'daily') {
-      expiresAt = new Date(now);
-      expiresAt.setUTCDate(expiresAt.getUTCDate() + 1);
-      expiresAt.setUTCHours(0, 0, 0, 0);
-    } else if (definition.challengeType === 'weekly') {
-      expiresAt = new Date(now);
-      const daysUntilMonday = (8 - expiresAt.getUTCDay()) % 7 || 7;
-      expiresAt.setUTCDate(expiresAt.getUTCDate() + daysUntilMonday);
-      expiresAt.setUTCHours(0, 0, 0, 0);
-    } else if (definition.challengeType === 'monthly') {
-      expiresAt = new Date(now);
-      expiresAt.setUTCMonth(expiresAt.getUTCMonth() + 1);
-      expiresAt.setUTCDate(1);
-      expiresAt.setUTCHours(0, 0, 0, 0);
-    } else if (definition.challengeType === 'event' && definition.eventEndDate) {
-      expiresAt = new Date(definition.eventEndDate);
-    }
-
-    // Create challenge record
-    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const now = new Date(); let expiresAt = null;
+    if (definition.challengeType === 'daily') { expiresAt = new Date(now); expiresAt.setUTCDate(expiresAt.getUTCDate() + 1); expiresAt.setUTCHours(0,0,0,0); }
+    else if (definition.challengeType === 'weekly') { expiresAt = new Date(now); expiresAt.setUTCDate(expiresAt.getUTCDate() + ((8 - expiresAt.getUTCDay()) % 7 || 7)); expiresAt.setUTCHours(0,0,0,0); }
+    else if (definition.challengeType === 'monthly') { expiresAt = new Date(now); expiresAt.setUTCMonth(expiresAt.getUTCMonth() + 1); expiresAt.setUTCDate(1); expiresAt.setUTCHours(0,0,0,0); }
+    else if (definition.challengeType === 'event' && definition.eventEndDate) expiresAt = new Date(definition.eventEndDate);
 
     const challengeData = {
-      'User ID': userId,
-      'Challenge Definition ID': challengeId,
-      'Challenge Name': definition.name,
-      'Challenge Type': definition.challengeType,
-      'Status': CHALLENGE_STATUS.ACTIVE,
-      'Current Value': 0,
-      'Target Value': definition.targetValue,
-      'XP Reward': definition.xpReward,
-      'Points Reward': definition.pointsReward || 0,
-      'Started At': now.toISOString(),
-      'Expires At': expiresAt ? expiresAt.toISOString() : null,
-      'Created At': now.toISOString(),
-      'Updated At': now.toISOString()
+      user_id: userId, challenge_definition_id: challengeId, challenge_name: definition.name,
+      challenge_type: definition.challengeType, status: CHALLENGE_STATUS.ACTIVE, current_value: 0,
+      target_value: definition.targetValue, xp_reward: definition.xpReward, points_reward: definition.pointsReward || 0,
+      started_at: now.toISOString(), expires_at: expiresAt ? expiresAt.toISOString() : null,
+      created_at: now.toISOString(), updated_at: now.toISOString()
     };
 
-    const result = await insertData(collectionKey, challengeData);
+    const key = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const result = await dataAccess.insertRecord(key, challengeData, { suppressAuth: true });
+    if (!result.success) throw new Error(result.error);
 
-    // Log event
-    await logGamificationEvent(userId, userType, {
-      eventType: 'challenge_started',
-      action: 'start_challenge',
-      metadata: {
-        challengeId,
-        challengeName: definition.name,
-        challengeType: definition.challengeType
-      }
-    });
-
-    return {
-      success: true,
-      challenge: {
-        _id: result.id,
-        ...challengeData,
-        definition
-      }
-    };
-  } catch (error) {
-    console.error('startChallenge error:', error);
-    return { success: false, error: error.message };
-  }
+    await logGamificationEvent(userId, userType, { eventType: 'challenge_started', action: 'start_challenge', metadata: { challengeId, challengeName: definition.name } });
+    return { success: true, challenge: { _id: result.record._id, ...challengeData, definition } };
+  } catch (error) { return { success: false, error: error.message }; }
 }
-
-// =============================================================================
-// UPDATE CHALLENGE PROGRESS
-// =============================================================================
 
 /**
  * Update progress on challenges based on user action
- * @param {string} userId - User ID
- * @param {string} userType - 'driver' or 'recruiter'
- * @param {string} action - Action type (e.g., 'apply_job', 'send_message', 'complete_interview')
- * @param {object} metadata - Additional data about the action
- * @returns {object} { updated, completed }
  */
 export async function updateChallengeProgress(userId, userType, action, metadata = {}) {
   try {
-    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
-
-    // Get active challenges for this user
-    const activeChallenges = await queryData(collectionKey, {
-      filter: `AND({User ID} = "${userId}", {Status} = "${CHALLENGE_STATUS.ACTIVE}")`,
-      limit: 50
-    });
-
-    const results = {
-      updated: [],
-      completed: []
-    };
-
-    const now = new Date();
+    const key = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const result = await dataAccess.queryRecords(key, { filters: { user_id: userId, status: CHALLENGE_STATUS.ACTIVE }, limit: 50, suppressAuth: true });
+    const activeChallenges = result.items || [];
+    const definitions = await getChallengeDefinitions(userType);
+    const results = { updated: [], completed: [] }, now = new Date();
 
     for (const challenge of activeChallenges) {
-      // Get the challenge definition to check action type
-      const defId = challenge['Challenge Definition ID'];
-      const definitions = await getChallengeDefinitions(userType);
-      const definition = definitions.find(d => d.challengeId === defId);
+      const definition = definitions.find(d => d.challengeId === challenge.challenge_definition_id);
+      if (!definition || !doesActionApply(definition, action, metadata)) continue;
 
-      if (!definition) continue;
+      const currentValue = (challenge.current_value || 0) + 1;
+      const targetValue = challenge.target_value || definition.targetValue;
+      const updateData = { ...challenge, current_value: currentValue, updated_at: now.toISOString() };
 
-      // Check if this action applies to this challenge
-      if (!doesActionApply(definition, action, metadata)) {
-        continue;
-      }
-
-      // Calculate new progress
-      const currentValue = (challenge['Current Value'] || 0) + 1;
-      const targetValue = challenge['Target Value'] || definition.targetValue;
-
-      const updateData = {
-        'Current Value': currentValue,
-        'Updated At': now.toISOString()
-      };
-
-      // Check if completed
       if (currentValue >= targetValue) {
-        updateData['Status'] = CHALLENGE_STATUS.COMPLETED;
-        updateData['Completed At'] = now.toISOString();
-
-        results.completed.push({
-          challengeId: defId,
-          challengeName: challenge['Challenge Name'],
-          xpReward: challenge['XP Reward'],
-          pointsReward: challenge['Points Reward']
-        });
-
-        // Send completion notification
-        await sendChallengeCompleteNotification(userId, userType, {
-          challengeName: challenge['Challenge Name'],
-          xpReward: challenge['XP Reward'],
-          pointsReward: challenge['Points Reward']
-        });
+        updateData.status = CHALLENGE_STATUS.COMPLETED;
+        updateData.completed_at = now.toISOString();
+        results.completed.push({ challengeId: definition.challengeId, challengeName: challenge.challenge_name, xpReward: challenge.xp_reward, pointsReward: challenge.points_reward });
+        await sendChallengeCompleteNotification(userId, userType, { challengeName: challenge.challenge_name, xpReward: challenge.xp_reward, pointsReward: challenge.points_reward });
       } else {
-        results.updated.push({
-          challengeId: defId,
-          challengeName: challenge['Challenge Name'],
-          currentValue,
-          targetValue,
-          progressPercent: Math.round((currentValue / targetValue) * 100)
-        });
+        results.updated.push({ challengeId: definition.challengeId, challengeName: challenge.challenge_name, currentValue, targetValue, progressPercent: Math.round((currentValue / targetValue) * 100) });
       }
-
-      await updateData(collectionKey, challenge.id, updateData);
+      await dataAccess.updateRecord(key, updateData, { suppressAuth: true });
     }
-
     return results;
-  } catch (error) {
-    console.error('updateChallengeProgress error:', error);
-    return { updated: [], completed: [], error: error.message };
-  }
+  } catch (error) { return { updated: [], completed: [], error: error.message }; }
 }
-
-/**
- * Check if an action applies to a challenge
- */
-function doesActionApply(definition, action, metadata) {
-  const actionType = definition.actionType;
-  const actionSubtype = definition.actionSubtype;
-
-  // Direct action match
-  if (actionType === action) {
-    // Check subtype if specified
-    if (actionSubtype && metadata.subtype !== actionSubtype) {
-      return false;
-    }
-    return true;
-  }
-
-  // Action group matches
-  const actionGroups = {
-    'engagement': ['daily_login', 'view_carrier', 'view_job', 'save_job'],
-    'application': ['apply_job', 'complete_application', 'respond_to_recruiter'],
-    'interview': ['schedule_interview', 'attend_interview', 'complete_interview'],
-    'hiring': ['make_offer', 'accept_offer', 'successful_hire'],
-    'outreach': ['view_driver', 'send_message', 'send_personalized_message'],
-    'response': ['respond_fast', 'respond_normal', 'driver_responds']
-  };
-
-  if (actionGroups[actionType] && actionGroups[actionType].includes(action)) {
-    return true;
-  }
-
-  return false;
-}
-
-// =============================================================================
-// CLAIM CHALLENGE REWARD
-// =============================================================================
 
 /**
  * Claim reward for a completed challenge
- * @param {string} userId - User ID
- * @param {string} challengeRecordId - Challenge record ID (not definition ID)
- * @param {string} userType - 'driver' or 'recruiter'
- * @returns {object} { success, xpAwarded, pointsAwarded }
  */
 export async function claimChallengeReward(userId, challengeRecordId, userType) {
   try {
-    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const key = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const challenge = await dataAccess.getRecord(key, challengeRecordId, { suppressAuth: true });
+    if (!challenge || challenge.user_id !== userId) return { success: false, error: 'not_authorized' };
+    if (challenge.status !== CHALLENGE_STATUS.COMPLETED) return { success: false, error: challenge.status === CHALLENGE_STATUS.CLAIMED ? 'already_claimed' : 'not_completed' };
 
-    // Get the challenge record
-    const challenge = await getRecord(collectionKey, challengeRecordId);
+    const xp = challenge.xp_reward || 0, pts = challenge.points_reward || 0;
+    if (userType === 'driver' && xp > 0) await awardDriverXP(userId, 'challenge_complete', { challengeId: challenge.challenge_definition_id, challengeName: challenge.challenge_name, xpAmount: xp });
+    if (userType === 'recruiter' && pts > 0) await awardRecruiterPoints(userId, 'challenge_complete', { challengeId: challenge.challenge_definition_id, challengeName: challenge.challenge_name, pointsAmount: pts });
 
-    if (!challenge) {
-      return { success: false, error: 'challenge_not_found' };
-    }
-
-    // Verify ownership
-    if (challenge['User ID'] !== userId) {
-      return { success: false, error: 'not_authorized' };
-    }
-
-    // Verify status is completed (not already claimed)
-    if (challenge['Status'] !== CHALLENGE_STATUS.COMPLETED) {
-      if (challenge['Status'] === CHALLENGE_STATUS.CLAIMED) {
-        return { success: false, error: 'already_claimed' };
-      }
-      return { success: false, error: 'not_completed' };
-    }
-
-    const now = new Date();
-    const xpReward = challenge['XP Reward'] || 0;
-    const pointsReward = challenge['Points Reward'] || 0;
-
-    // Award XP/Points
-    if (userType === 'driver' && xpReward > 0) {
-      await awardDriverXP(userId, 'challenge_complete', {
-        challengeId: challenge['Challenge Definition ID'],
-        challengeName: challenge['Challenge Name'],
-        xpAmount: xpReward
-      });
-    }
-
-    if (userType === 'recruiter' && pointsReward > 0) {
-      await awardRecruiterPoints(userId, 'challenge_complete', {
-        challengeId: challenge['Challenge Definition ID'],
-        challengeName: challenge['Challenge Name'],
-        pointsAmount: pointsReward
-      });
-    }
-
-    // Update challenge status
-    await updateData(collectionKey, challengeRecordId, {
-      'Status': CHALLENGE_STATUS.CLAIMED,
-      'Claimed At': now.toISOString(),
-      'Updated At': now.toISOString()
-    });
-
-    // Log event
-    await logGamificationEvent(userId, userType, {
-      eventType: 'challenge_reward_claimed',
-      action: 'claim_reward',
-      metadata: {
-        challengeId: challenge['Challenge Definition ID'],
-        challengeName: challenge['Challenge Name'],
-        xpAwarded: xpReward,
-        pointsAwarded: pointsReward
-      }
-    });
-
-    return {
-      success: true,
-      xpAwarded: xpReward,
-      pointsAwarded: pointsReward,
-      challengeName: challenge['Challenge Name']
-    };
-  } catch (error) {
-    console.error('claimChallengeReward error:', error);
-    return { success: false, error: error.message };
-  }
+    await dataAccess.updateRecord(key, { ...challenge, status: CHALLENGE_STATUS.CLAIMED, claimed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { suppressAuth: true });
+    await logGamificationEvent(userId, userType, { eventType: 'challenge_reward_claimed', action: 'claim_reward', metadata: { challengeId: challenge.challenge_definition_id, xpAwarded: xp, pointsAwarded: pts } });
+    return { success: true, xpAwarded: xp, pointsAwarded: pts, challengeName: challenge.challenge_name };
+  } catch (error) { return { success: false, error: error.message }; }
 }
-
-// =============================================================================
-// GET CHALLENGE HISTORY
-// =============================================================================
 
 /**
  * Get user's challenge history
- * @param {string} userId - User ID
- * @param {string} userType - 'driver' or 'recruiter'
- * @param {object} options - { limit, offset, status, challengeType }
- * @returns {object} { challenges, total, hasMore }
  */
 export async function getChallengeHistory(userId, userType, options = {}) {
   try {
-    const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const key = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+    const filters = { user_id: userId };
+    if (options.status) filters.status = options.status;
+    if (options.challengeType) filters.challenge_type = options.challengeType;
 
-    const limit = options.limit || 20;
-    const offset = options.offset || 0;
-
-    // Build filter
-    let filter = `{User ID} = "${userId}"`;
-
-    if (options.status) {
-      filter = `AND(${filter}, {Status} = "${options.status}")`;
-    }
-
-    if (options.challengeType) {
-      filter = `AND(${filter}, {Challenge Type} = "${options.challengeType}")`;
-    }
-
-    const records = await queryData(collectionKey, {
-      filter,
-      sort: [{ field: 'Started At', direction: 'desc' }],
-      limit: limit + 1 // Fetch one extra to check hasMore
+    const result = await dataAccess.queryRecords(key, {
+      filters, sort: [{ field: 'started_at', direction: 'desc' }],
+      limit: (options.limit || 20) + 1, suppressAuth: true
     });
 
-    const hasMore = records.length > limit;
-    const challenges = records.slice(offset, offset + limit).map(normalizeUserChallenge);
+    const items = result.items || [];
+    const hasMore = items.length > (options.limit || 20);
+    const challenges = items.slice(0, options.limit || 20).map(normalizeUserChallenge);
+    const stats = { totalCompleted: 0, totalXpEarned: 0, totalPointsEarned: 0 };
+    challenges.forEach(c => { if (c.status === CHALLENGE_STATUS.CLAIMED) { stats.totalCompleted++; stats.totalXpEarned += c.xpReward || 0; stats.totalPointsEarned += c.pointsReward || 0; } });
 
-    // Calculate stats
-    const stats = {
-      totalCompleted: 0,
-      totalXpEarned: 0,
-      totalPointsEarned: 0
-    };
-
-    for (const c of challenges) {
-      if (c.status === CHALLENGE_STATUS.CLAIMED) {
-        stats.totalCompleted++;
-        stats.totalXpEarned += c.xpReward || 0;
-        stats.totalPointsEarned += c.pointsReward || 0;
-      }
-    }
-
-    return {
-      challenges,
-      total: records.length,
-      hasMore,
-      stats
-    };
-  } catch (error) {
-    console.error('getChallengeHistory error:', error);
-    return { challenges: [], total: 0, hasMore: false, error: error.message };
-  }
+    return { challenges, total: result.totalCount || items.length, hasMore, stats };
+  } catch (error) { return { challenges: [], total: 0, hasMore: false, error: error.message }; }
 }
-
-// =============================================================================
-// CHALLENGE EXPIRATION
-// =============================================================================
 
 /**
  * Process expired challenges (called by scheduled job)
- * @returns {object} { processed, expired, errors }
  */
 export async function processExpiredChallenges() {
   try {
-    const now = new Date();
-    const results = {
-      processed: 0,
-      expired: 0,
-      notified: 0,
-      errors: 0
-    };
-
-    console.log('[processExpiredChallenges] Starting');
-
-    // Process for both user types
+    const now = new Date(), results = { processed: 0, expired: 0, errors: 0 };
     for (const userType of ['driver', 'recruiter']) {
-      const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+      const key = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+      const res = await dataAccess.queryRecords(key, { filters: { status: CHALLENGE_STATUS.ACTIVE, expires_at: { le: now.toISOString() } }, limit: 500, suppressAuth: true });
+      const expired = res.items || [];
+      results.processed += expired.length;
 
-      // Get active challenges that have expired
-      const expiredChallenges = await queryData(collectionKey, {
-        filter: `AND({Status} = "${CHALLENGE_STATUS.ACTIVE}", {Expires At} != BLANK())`,
-        limit: 500
-      });
-
-      // Filter to only truly expired challenges
-      const trulyExpired = expiredChallenges.filter(challenge => {
-        const expiresAt = new Date(challenge['Expires At']);
-        return expiresAt <= now;
-      });
-
-      results.processed += expiredChallenges.length;
-
-      // Chunk and process in parallel (10 per chunk - update + notification)
-      const chunks = chunkArray(trulyExpired, 10);
-
-      for (const chunk of chunks) {
-        const chunkResults = await Promise.all(
-          chunk.map(async (challenge) => {
-            try {
-              // Mark as expired
-              await updateData(collectionKey, challenge.id, {
-                'Status': CHALLENGE_STATUS.EXPIRED,
-                'Expired At': now.toISOString(),
-                'Updated At': now.toISOString()
-              });
-
-              // Send expiration notification
-              await createNotification(
-                challenge['User ID'],
-                'challenge_expired',
-                `Challenge Expired: ${challenge['Challenge Name']}`,
-                `Your challenge "${challenge['Challenge Name']}" has expired. Better luck next time!`,
-                userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
-              );
-
-              return { success: true };
-            } catch (error) {
-              return { success: false, id: challenge.id, error: error.message };
-            }
-          })
-        );
-
-        for (const r of chunkResults) {
-          if (r.success) {
-            results.expired++;
-          } else {
-            results.errors++;
-          }
-        }
-
-        // Rate limit between chunks (200ms = 5 req/sec)
-        await new Promise(r => setTimeout(r, 200));
+      for (const challenge of expired) {
+        try {
+          await dataAccess.updateRecord(key, { ...challenge, status: CHALLENGE_STATUS.EXPIRED, expired_at: now.toISOString(), updated_at: now.toISOString() }, { suppressAuth: true });
+          await createNotification(challenge.user_id, 'challenge_expired', `Challenge Expired: ${challenge.challenge_name}`, `Your challenge "${challenge.challenge_name}" has expired.`, userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges');
+          results.expired++;
+        } catch (e) { results.errors++; }
       }
     }
-
-    console.log(`[processExpiredChallenges] Complete: ${results.processed} checked, ${results.expired} expired, ${results.errors} errors`);
     return results;
-  } catch (error) {
-    console.error('processExpiredChallenges error:', error);
-    return { processed: 0, expired: 0, error: error.message };
-  }
+  } catch (error) { return { processed: 0, expired: 0, error: error.message }; }
 }
 
 /**
  * Send reminders for challenges expiring soon
- * @returns {object} { processed, reminded, errors }
  */
 export async function sendExpiringChallengeReminders() {
   try {
-    const now = new Date();
-    const twoHoursFromNow = new Date(now.getTime() + 2 * 60 * 60 * 1000);
-    const results = {
-      processed: 0,
-      reminded: 0,
-      errors: 0
-    };
-
-    console.log('[sendExpiringChallengeReminders] Starting');
-
+    const now = new Date(), twoHours = new Date(now.getTime() + 7200000), results = { processed: 0, reminded: 0, errors: 0 };
     for (const userType of ['driver', 'recruiter']) {
-      const collectionKey = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+      const key = userType === 'driver' ? COLLECTION_KEYS.driverChallenges : COLLECTION_KEYS.recruiterChallenges;
+      const res = await dataAccess.queryRecords(key, { filters: { status: CHALLENGE_STATUS.ACTIVE, expires_at: { gt: now.toISOString(), le: twoHours.toISOString() }, reminder_sent: { ne: 'Yes' } }, limit: 500, suppressAuth: true });
+      const needsReminder = res.items || [];
+      results.processed += needsReminder.length;
 
-      // Get active challenges expiring in the next 2 hours
-      const expiringChallenges = await queryData(collectionKey, {
-        filter: `AND({Status} = "${CHALLENGE_STATUS.ACTIVE}", {Expires At} != BLANK(), {Reminder Sent} != "Yes")`,
-        limit: 500
-      });
-
-      // Filter to only challenges expiring within the window
-      const needsReminder = expiringChallenges.filter(challenge => {
-        const expiresAt = new Date(challenge['Expires At']);
-        return expiresAt > now && expiresAt <= twoHoursFromNow;
-      });
-
-      results.processed += expiringChallenges.length;
-
-      // Chunk and process in parallel (10 per chunk - notification + update)
-      const chunks = chunkArray(needsReminder, 10);
-
-      for (const chunk of chunks) {
-        const chunkResults = await Promise.all(
-          chunk.map(async (challenge) => {
-            try {
-              const currentValue = challenge['Current Value'] || 0;
-              const targetValue = challenge['Target Value'] || 1;
-              const progressPercent = Math.round((currentValue / targetValue) * 100);
-              const expiresAt = new Date(challenge['Expires At']);
-              const timeRemaining = formatTimeRemaining(expiresAt - now);
-
-              await createNotification(
-                challenge['User ID'],
-                'challenge_expiring',
-                `Challenge Expiring Soon!`,
-                `Your challenge "${challenge['Challenge Name']}" expires in ${timeRemaining}! You're ${progressPercent}% complete.`,
-                userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
-              );
-
-              // Mark reminder as sent
-              await updateData(collectionKey, challenge.id, {
-                'Reminder Sent': 'Yes',
-                'Updated At': now.toISOString()
-              });
-
-              return { success: true };
-            } catch (error) {
-              return { success: false, id: challenge.id, error: error.message };
-            }
-          })
-        );
-
-        for (const r of chunkResults) {
-          if (r.success) {
-            results.reminded++;
-          } else {
-            results.errors++;
-          }
-        }
-
-        // Rate limit between chunks (200ms = 5 req/sec)
-        await new Promise(r => setTimeout(r, 200));
+      for (const challenge of needsReminder) {
+        try {
+          const time = formatTimeRemaining(new Date(challenge.expires_at) - now);
+          await createNotification(challenge.user_id, 'challenge_expiring', `Challenge Expiring Soon!`, `Your challenge "${challenge.challenge_name}" expires in ${time}!`, userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges');
+          await dataAccess.updateRecord(key, { ...challenge, reminder_sent: 'Yes', updated_at: now.toISOString() }, { suppressAuth: true });
+          results.reminded++;
+        } catch (e) { results.errors++; }
       }
     }
-
-    console.log(`[sendExpiringChallengeReminders] Complete: ${results.processed} checked, ${results.reminded} reminded, ${results.errors} errors`);
     return results;
-  } catch (error) {
-    console.error('sendExpiringChallengeReminders error:', error);
-    return { processed: 0, reminded: 0, error: error.message };
-  }
+  } catch (error) { return { processed: 0, reminded: 0, error: error.message }; }
 }
-
-// =============================================================================
-// AUTO-ASSIGN CHALLENGES
-// =============================================================================
-
-/**
- * Auto-assign daily challenges to active users
- * @returns {object} { processed, assigned }
- */
-export async function assignDailyChallenges() {
-  try {
-    const results = {
-      driversProcessed: 0,
-      driversAssigned: 0,
-      recruitersProcessed: 0,
-      recruitersAssigned: 0
-    };
-
-    // Get daily challenge definitions
-    const driverDailyChallenges = await getChallengeDefinitions('driver', 'daily');
-    const recruiterDailyChallenges = await getChallengeDefinitions('recruiter', 'daily');
-
-    // Get auto-assignable challenges
-    const driverAutoAssign = driverDailyChallenges.filter(d => d.autoAssign);
-    const recruiterAutoAssign = recruiterDailyChallenges.filter(d => d.autoAssign);
-
-    // For now, we'll auto-assign to users who have logged in recently
-    // This would be expanded to work with actual active user lists
-
-    console.log(`✅ Daily challenges assigned: Drivers ${results.driversAssigned}, Recruiters ${results.recruitersAssigned}`);
-    return results;
-  } catch (error) {
-    console.error('assignDailyChallenges error:', error);
-    return { error: error.message };
-  }
-}
-
-// =============================================================================
-// NOTIFICATIONS
-// =============================================================================
-
-/**
- * Send challenge complete notification
- */
-async function sendChallengeCompleteNotification(userId, userType, data) {
-  try {
-    const rewardText = userType === 'driver'
-      ? `+${data.xpReward} XP`
-      : `+${data.pointsReward} Points`;
-
-    await createNotification(
-      userId,
-      'challenge_complete',
-      `Challenge Complete: ${data.challengeName}`,
-      `Congratulations! You completed "${data.challengeName}"! Claim your reward: ${rewardText}`,
-      userType === 'driver' ? '/driver/challenges' : '/recruiter/challenges'
-    );
-  } catch (error) {
-    console.error('sendChallengeCompleteNotification error:', error);
-  }
-}
-
-// =============================================================================
-// CHALLENGE SUMMARY
-// =============================================================================
 
 /**
  * Get challenge summary for dashboard
- * @param {string} userId - User ID
- * @param {string} userType - 'driver' or 'recruiter'
- * @returns {object} Challenge summary
  */
 export async function getChallengeSummary(userId, userType) {
   try {
     const [active, available, history] = await Promise.all([
-      getActiveChallenges(userId, userType),
-      getAvailableChallenges(userId, userType),
-      getChallengeHistory(userId, userType, { limit: 100 })
+      getActiveChallenges(userId, userType), getAvailableChallenges(userId, userType), getChallengeHistory(userId, userType, { limit: 100 })
     ]);
+    const completedByType = { daily: 0, weekly: 0, monthly: 0, event: 0, onetime: 0 };
+    history.challenges.forEach(c => { if (c.status === CHALLENGE_STATUS.CLAIMED && completedByType[c.challengeType] !== undefined) completedByType[c.challengeType]++; });
+    return { active: { count: active.length, challenges: active }, available: { count: available.length, challenges: available.slice(0, 5) }, readyToClaim: { count: history.challenges.filter(c => c.status === CHALLENGE_STATUS.COMPLETED).length, challenges: history.challenges.filter(c => c.status === CHALLENGE_STATUS.COMPLETED) }, stats: { totalCompleted: history.stats.totalCompleted, totalXpEarned: history.stats.totalXpEarned, totalPointsEarned: history.stats.totalPointsEarned, completedByType } };
+  } catch (error) { return { error: error.message }; }
+}
 
-    // Count completed challenges by type
-    const completedByType = {
-      daily: 0,
-      weekly: 0,
-      monthly: 0,
-      event: 0,
-      onetime: 0
-    };
+function normalizeChallengeDefinition(record) {
+  return {
+    _id: record._id || record.id, challengeId: record.challenge_id, name: record.name, description: record.description,
+    challengeType: record.challenge_type, userType: record.user_type, actionType: record.action_type,
+    actionSubtype: record.action_subtype, targetValue: record.target_value || 1, xpReward: record.xp_reward || 0,
+    pointsReward: record.points_reward || 0, icon: record.icon, color: record.color,
+    isRepeatable: record.is_repeatable !== 'No', autoAssign: record.auto_assign === 'Yes',
+    isActive: record.is_active === 'Yes', displayOrder: record.display_order || 0,
+    eventStartDate: record.event_start_date, eventEndDate: record.event_end_date
+  };
+}
 
-    for (const c of history.challenges) {
-      if (c.status === CHALLENGE_STATUS.CLAIMED && completedByType[c.challengeType] !== undefined) {
-        completedByType[c.challengeType]++;
-      }
-    }
-
-    // Find challenges ready to claim
-    const readyToClaim = history.challenges.filter(c => c.status === CHALLENGE_STATUS.COMPLETED);
-
-    return {
-      active: {
-        count: active.length,
-        challenges: active
-      },
-      available: {
-        count: available.length,
-        challenges: available.slice(0, 5) // Top 5 available
-      },
-      readyToClaim: {
-        count: readyToClaim.length,
-        challenges: readyToClaim
-      },
-      stats: {
-        totalCompleted: history.stats.totalCompleted,
-        totalXpEarned: history.stats.totalXpEarned,
-        totalPointsEarned: history.stats.totalPointsEarned,
-        completedByType
-      }
-    };
-  } catch (error) {
-    console.error('getChallengeSummary error:', error);
-    return { error: error.message };
-  }
+function normalizeUserChallenge(record) {
+  return {
+    _id: record._id || record.id, challengeDefinitionId: record.challenge_definition_id, challengeName: record.challenge_name,
+    challengeType: record.challenge_type, status: record.status, currentValue: record.current_value || 0,
+    targetValue: record.target_value || 1, xpReward: record.xp_reward || 0, pointsReward: record.points_reward || 0,
+    startedAt: record.started_at, expiresAt: record.expires_at, completedAt: record.completed_at,
+    claimedAt: record.claimed_at, expiredAt: record.expired_at
+  };
 }
 
 // =============================================================================
