@@ -1,0 +1,687 @@
+/**
+ * B2B AI Service - Intelligent Action Scoring & Recommendations
+ *
+ * Phase 11: Next-Best-Action Engine
+ * - Scores and prioritizes actions based on multiple engagement signals
+ * - Provides reason codes for each recommendation
+ * - Tracks outcomes for learning loop
+ *
+ * @module backend/b2bAIService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+// ============================================================================
+// COLLECTION KEYS
+// ============================================================================
+
+const COLLECTIONS = {
+  accounts: 'b2bAccounts',
+  contacts: 'b2bContacts',
+  opportunities: 'b2bOpportunities',
+  activities: 'b2bActivities',
+  emails: 'b2bEmails',
+  textMessages: 'b2bTextMessages',
+  calls: 'b2bCalls',
+  signals: 'b2bMatchSignals',
+  aiActionLog: 'b2bAIActionLog'
+};
+
+// ============================================================================
+// SCORING CONFIGURATION
+// ============================================================================
+
+const SCORING_WEIGHTS = {
+  // Days since last touch (decay factor)
+  touchRecency: 25,
+  // Engagement signals (opens, replies, clicks)
+  engagement: 30,
+  // Match signal strength and trend
+  signalStrength: 20,
+  // Stage-appropriate timing
+  stageTiming: 15,
+  // Deal value factor
+  dealValue: 10
+};
+
+const STAGE_SLA_DAYS = {
+  prospecting: 14,
+  discovery: 10,
+  proposal: 7,
+  negotiation: 7
+};
+
+const ENGAGEMENT_MULTIPLIERS = {
+  email_opened_recent: 2.0,    // Opened in last 24h
+  email_opened_3x: 1.8,        // Opened 3+ times
+  email_clicked: 2.2,          // Clicked a link
+  email_replied: 3.0,          // Replied
+  sms_replied: 2.5,            // SMS reply
+  call_connected: 1.5,         // Successful call
+  meeting_completed: 2.0       // Had a meeting
+};
+
+const REASON_CODES = {
+  OPENED_RECENTLY: { code: 'OPENED_RECENTLY', text: 'Opened your email recently', priority: 'high' },
+  OPENED_MULTIPLE: { code: 'OPENED_MULTIPLE', text: 'Opened email 3+ times', priority: 'high' },
+  CLICKED_LINK: { code: 'CLICKED_LINK', text: 'Clicked link in email', priority: 'high' },
+  REPLIED: { code: 'REPLIED', text: 'Replied to outreach', priority: 'critical' },
+  NO_TOUCH_SLA: { code: 'NO_TOUCH_SLA', text: 'Approaching SLA deadline', priority: 'medium' },
+  OVERDUE_SLA: { code: 'OVERDUE_SLA', text: 'Past SLA - needs immediate action', priority: 'high' },
+  SIGNAL_SPIKE: { code: 'SIGNAL_SPIKE', text: 'Signal score increased', priority: 'high' },
+  HIGH_VALUE: { code: 'HIGH_VALUE', text: 'High-value opportunity', priority: 'medium' },
+  PROPOSAL_STALE: { code: 'PROPOSAL_STALE', text: 'Proposal needs follow-up', priority: 'high' },
+  NEGOTIATION_ACTIVE: { code: 'NEGOTIATION_ACTIVE', text: 'Active negotiation', priority: 'critical' },
+  PREFERRED_TIME: { code: 'PREFERRED_TIME', text: 'Optimal contact time', priority: 'low' },
+  WARM_LEAD: { code: 'WARM_LEAD', text: 'Warm lead - high engagement', priority: 'high' }
+};
+
+// ============================================================================
+// NEXT-BEST-ACTION SCORING
+// ============================================================================
+
+/**
+ * Score and rank next-best-actions across all active accounts
+ *
+ * @param {Object} options - Scoring options
+ * @param {string} [options.ownerId] - Filter by rep owner
+ * @param {number} [options.limit=20] - Max actions to return
+ * @param {string[]} [options.excludeAccountIds] - Accounts to exclude (snoozed/skipped)
+ * @returns {Promise<{success: boolean, actions?: Array, error?: string}>}
+ */
+export async function scoreNextActions(options = {}) {
+  try {
+    const { ownerId, limit = 20, excludeAccountIds = [] } = options;
+
+    // Fetch all active opportunities and accounts
+    const [oppsRes, accountsRes] = await Promise.all([
+      fetchActiveOpportunities(ownerId),
+      fetchActiveAccounts(ownerId)
+    ]);
+
+    if (!oppsRes.success || !accountsRes.success) {
+      throw new Error('Failed to fetch pipeline data');
+    }
+
+    const opportunities = oppsRes.opportunities;
+    const accounts = accountsRes.accounts;
+
+    // Build account map
+    const accountMap = new Map();
+    accounts.forEach(a => accountMap.set(a._id, a));
+
+    // Fetch engagement data in batch
+    const accountIds = [...new Set([
+      ...opportunities.map(o => o.account_id),
+      ...accounts.map(a => a._id)
+    ])].filter(id => !excludeAccountIds.includes(id));
+
+    const engagementData = await fetchEngagementBatch(accountIds);
+    const signalData = await fetchSignalBatch(accounts.map(a => a.carrier_dot).filter(Boolean));
+
+    // Score each opportunity
+    const scoredActions = [];
+
+    for (const opp of opportunities) {
+      if (excludeAccountIds.includes(opp.account_id)) continue;
+
+      const account = accountMap.get(opp.account_id);
+      if (!account) continue;
+
+      const engagement = engagementData.get(opp.account_id) || {};
+      const signal = signalData.get(account.carrier_dot) || {};
+
+      const scored = scoreOpportunityAction(opp, account, engagement, signal);
+      if (scored.score > 0) {
+        scoredActions.push(scored);
+      }
+    }
+
+    // Also add accounts without opportunities (prospecting targets)
+    for (const account of accounts) {
+      if (excludeAccountIds.includes(account._id)) continue;
+
+      const hasOpp = opportunities.some(o => o.account_id === account._id);
+      if (hasOpp) continue; // Already scored via opportunity
+
+      if (['target', 'prospecting'].includes(account.status)) {
+        const engagement = engagementData.get(account._id) || {};
+        const signal = signalData.get(account.carrier_dot) || {};
+
+        const scored = scoreAccountAction(account, engagement, signal);
+        if (scored.score > 0) {
+          scoredActions.push(scored);
+        }
+      }
+    }
+
+    // Sort by score descending
+    scoredActions.sort((a, b) => b.score - a.score);
+
+    // Return top N
+    const topActions = scoredActions.slice(0, limit);
+
+    return {
+      success: true,
+      actions: topActions,
+      totalScored: scoredActions.length
+    };
+  } catch (error) {
+    console.error('[b2bAIService] scoreNextActions error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Score an opportunity-based action
+ */
+function scoreOpportunityAction(opp, account, engagement, signal) {
+  let score = 0;
+  const reasons = [];
+  const now = new Date();
+
+  // 1. Touch recency scoring
+  const lastActivity = engagement.lastActivityAt ? new Date(engagement.lastActivityAt) : null;
+  const daysSinceTouch = lastActivity
+    ? Math.floor((now - lastActivity) / (1000 * 60 * 60 * 24))
+    : 999;
+
+  const slaDays = STAGE_SLA_DAYS[opp.stage] || 14;
+
+  if (daysSinceTouch > slaDays) {
+    score += SCORING_WEIGHTS.touchRecency * 1.5; // Overdue penalty/boost
+    reasons.push(REASON_CODES.OVERDUE_SLA);
+  } else if (daysSinceTouch > slaDays * 0.7) {
+    score += SCORING_WEIGHTS.touchRecency;
+    reasons.push(REASON_CODES.NO_TOUCH_SLA);
+  } else {
+    score += SCORING_WEIGHTS.touchRecency * (1 - daysSinceTouch / slaDays);
+  }
+
+  // 2. Engagement scoring
+  const engagementScore = calculateEngagementScore(engagement, reasons);
+  score += engagementScore * SCORING_WEIGHTS.engagement / 100;
+
+  // 3. Signal strength
+  if (signal.signal_score) {
+    const signalBoost = Math.min(signal.signal_score / 100, 1) * SCORING_WEIGHTS.signalStrength;
+    score += signalBoost;
+
+    if (signal.urgency === 'high') {
+      score += 10;
+      reasons.push(REASON_CODES.SIGNAL_SPIKE);
+    }
+  }
+
+  // 4. Stage timing
+  if (opp.stage === 'proposal') {
+    const stageEntered = opp.stage_entered_at ? new Date(opp.stage_entered_at) : now;
+    const daysInStage = Math.floor((now - stageEntered) / (1000 * 60 * 60 * 24));
+    if (daysInStage > 5) {
+      score += SCORING_WEIGHTS.stageTiming * 1.2;
+      reasons.push(REASON_CODES.PROPOSAL_STALE);
+    }
+  } else if (opp.stage === 'negotiation') {
+    score += SCORING_WEIGHTS.stageTiming * 1.5;
+    reasons.push(REASON_CODES.NEGOTIATION_ACTIVE);
+  }
+
+  // 5. Deal value
+  const value = Number(opp.value_estimate) || 0;
+  if (value > 50000) {
+    score += SCORING_WEIGHTS.dealValue;
+    reasons.push(REASON_CODES.HIGH_VALUE);
+  } else if (value > 25000) {
+    score += SCORING_WEIGHTS.dealValue * 0.5;
+  }
+
+  // Determine recommended channel based on engagement
+  const recommendedChannel = determineChannel(engagement, account);
+
+  return {
+    type: 'opportunity',
+    score: Math.round(score),
+    accountId: account._id,
+    accountName: account.carrier_name,
+    opportunityId: opp._id,
+    stage: opp.stage,
+    value: value,
+    reasons: reasons.slice(0, 3), // Top 3 reasons
+    recommendedChannel,
+    daysSinceTouch,
+    contact: engagement.primaryContact || null
+  };
+}
+
+/**
+ * Score an account-based action (no opportunity yet)
+ */
+function scoreAccountAction(account, engagement, signal) {
+  let score = 0;
+  const reasons = [];
+  const now = new Date();
+
+  // Touch recency
+  const lastActivity = engagement.lastActivityAt ? new Date(engagement.lastActivityAt) : null;
+  const daysSinceTouch = lastActivity
+    ? Math.floor((now - lastActivity) / (1000 * 60 * 60 * 24))
+    : 999;
+
+  if (daysSinceTouch > 14) {
+    score += SCORING_WEIGHTS.touchRecency * 0.5;
+    reasons.push(REASON_CODES.NO_TOUCH_SLA);
+  }
+
+  // Engagement scoring
+  const engagementScore = calculateEngagementScore(engagement, reasons);
+  score += engagementScore * SCORING_WEIGHTS.engagement / 100;
+
+  // Signal strength (primary driver for prospects)
+  if (signal.signal_score) {
+    const signalBoost = Math.min(signal.signal_score / 100, 1) * SCORING_WEIGHTS.signalStrength * 1.5;
+    score += signalBoost;
+
+    if (signal.urgency === 'high') {
+      score += 15;
+      reasons.push(REASON_CODES.SIGNAL_SPIKE);
+    }
+  }
+
+  // Warm lead detection
+  if (engagementScore > 50) {
+    reasons.push(REASON_CODES.WARM_LEAD);
+  }
+
+  const recommendedChannel = determineChannel(engagement, account);
+
+  return {
+    type: 'account',
+    score: Math.round(score),
+    accountId: account._id,
+    accountName: account.carrier_name,
+    status: account.status,
+    segment: account.segment,
+    reasons: reasons.slice(0, 3),
+    recommendedChannel,
+    daysSinceTouch,
+    contact: engagement.primaryContact || null
+  };
+}
+
+/**
+ * Calculate engagement score from email/sms/call data
+ */
+function calculateEngagementScore(engagement, reasons) {
+  let score = 0;
+  const now = Date.now();
+
+  // Email engagement
+  if (engagement.emails?.length) {
+    const recentEmails = engagement.emails.filter(e => {
+      const sent = new Date(e.sent_at).getTime();
+      return (now - sent) < 7 * 24 * 60 * 60 * 1000; // Last 7 days
+    });
+
+    const openedRecently = recentEmails.some(e => {
+      if (!e.opened) return false;
+      const sent = new Date(e.sent_at).getTime();
+      return (now - sent) < 24 * 60 * 60 * 1000;
+    });
+
+    const openCount = recentEmails.filter(e => e.opened).length;
+    const clickedAny = recentEmails.some(e => e.clicked);
+    const repliedAny = recentEmails.some(e => e.status === 'replied');
+
+    if (repliedAny) {
+      score += 100 * ENGAGEMENT_MULTIPLIERS.email_replied;
+      reasons.push(REASON_CODES.REPLIED);
+    } else if (clickedAny) {
+      score += 70 * ENGAGEMENT_MULTIPLIERS.email_clicked;
+      reasons.push(REASON_CODES.CLICKED_LINK);
+    } else if (openedRecently) {
+      score += 50 * ENGAGEMENT_MULTIPLIERS.email_opened_recent;
+      reasons.push(REASON_CODES.OPENED_RECENTLY);
+    } else if (openCount >= 3) {
+      score += 40 * ENGAGEMENT_MULTIPLIERS.email_opened_3x;
+      reasons.push(REASON_CODES.OPENED_MULTIPLE);
+    } else if (openCount > 0) {
+      score += 20;
+    }
+  }
+
+  // SMS engagement
+  if (engagement.textMessages?.length) {
+    const hasReply = engagement.textMessages.some(s => s.response_text);
+    if (hasReply) {
+      score += 80 * ENGAGEMENT_MULTIPLIERS.sms_replied;
+      if (!reasons.some(r => r.code === 'REPLIED')) {
+        reasons.push(REASON_CODES.REPLIED);
+      }
+    }
+  }
+
+  // Call engagement
+  if (engagement.calls?.length) {
+    const connected = engagement.calls.filter(c => c.disposition === 'connected').length;
+    if (connected > 0) {
+      score += 30 * ENGAGEMENT_MULTIPLIERS.call_connected;
+    }
+  }
+
+  // Meetings
+  if (engagement.meetingCount > 0) {
+    score += 50 * ENGAGEMENT_MULTIPLIERS.meeting_completed;
+  }
+
+  return Math.min(score, 100); // Cap at 100
+}
+
+/**
+ * Determine best channel based on engagement and preferences
+ */
+function determineChannel(engagement, account) {
+  // If they've replied via SMS, SMS is working
+  if (engagement.textMessages?.some(s => s.response_text)) {
+    return 'sms';
+  }
+
+  // If they've had successful calls, phone is working
+  if (engagement.calls?.some(c => c.disposition === 'connected')) {
+    return 'call';
+  }
+
+  // If they've replied to email, email is working
+  if (engagement.emails?.some(e => e.status === 'replied')) {
+    return 'email';
+  }
+
+  // If they've clicked/opened, email might work
+  if (engagement.emails?.some(e => e.clicked || e.opened)) {
+    return 'email';
+  }
+
+  // Check contact preferred channel
+  if (engagement.primaryContact?.preferred_channel) {
+    return engagement.primaryContact.preferred_channel;
+  }
+
+  // Default based on segment
+  const segment = account?.segment || '';
+  if (segment === 'enterprise') return 'email';
+  if (segment === 'owner_operator') return 'call';
+
+  return 'email';
+}
+
+// ============================================================================
+// DATA FETCHING HELPERS
+// ============================================================================
+
+async function fetchActiveOpportunities(ownerId) {
+  try {
+    const filters = {
+      stage: { ne: ['closed_won', 'closed_lost'] }
+    };
+    if (ownerId) filters.owner_id = ownerId;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.opportunities, {
+      filters,
+      limit: 200,
+      suppressAuth: true
+    });
+
+    return { success: true, opportunities: result.items || [] };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function fetchActiveAccounts(ownerId) {
+  try {
+    const filters = {
+      status: { ne: ['client', 'churned', 'disqualified'] }
+    };
+    if (ownerId) filters.owner_id = ownerId;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.accounts, {
+      filters,
+      limit: 300,
+      suppressAuth: true
+    });
+
+    return { success: true, accounts: result.items || [] };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function fetchEngagementBatch(accountIds) {
+  const engagementMap = new Map();
+
+  if (!accountIds.length) return engagementMap;
+
+  try {
+    // Fetch recent activities, emails, SMS, calls in parallel
+    const [activitiesRes, emailsRes, smsRes, callsRes, contactsRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.activities, {
+        filters: { account_id: { hasSome: accountIds } },
+        sort: [{ field: 'created_at', direction: 'desc' }],
+        limit: 500,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.emails, {
+        filters: { account_id: { hasSome: accountIds } },
+        sort: [{ field: 'sent_at', direction: 'desc' }],
+        limit: 500,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.textMessages, {
+        filters: { account_id: { hasSome: accountIds } },
+        sort: [{ field: 'sent_at', direction: 'desc' }],
+        limit: 200,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.calls, {
+        filters: { account_id: { hasSome: accountIds } },
+        sort: [{ field: 'created_at', direction: 'desc' }],
+        limit: 200,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.contacts, {
+        filters: { account_id: { hasSome: accountIds } },
+        limit: 500,
+        suppressAuth: true
+      })
+    ]);
+
+    const activities = activitiesRes.items || [];
+    const emails = emailsRes.items || [];
+    const sms = smsRes.items || [];
+    const calls = callsRes.items || [];
+    const contacts = contactsRes.items || [];
+
+    // Group by account
+    accountIds.forEach(accountId => {
+      const accountActivities = activities.filter(a => a.account_id === accountId);
+      const accountEmails = emails.filter(e => e.account_id === accountId);
+      const accountSms = sms.filter(s => s.account_id === accountId);
+      const accountCalls = calls.filter(c => c.account_id === accountId);
+      const accountContacts = contacts.filter(c => c.account_id === accountId);
+
+      const lastActivity = accountActivities[0];
+      const meetingCount = accountActivities.filter(a => a.type === 'meeting').length;
+
+      // Primary contact - first decision maker or first contact
+      const primaryContact = accountContacts.find(c =>
+        c.role?.toLowerCase().includes('owner') ||
+        c.role?.toLowerCase().includes('decision')
+      ) || accountContacts[0] || null;
+
+      engagementMap.set(accountId, {
+        lastActivityAt: lastActivity?.created_at || null,
+        activityCount: accountActivities.length,
+        emails: accountEmails,
+        textMessages: accountSms,
+        calls: accountCalls,
+        meetingCount,
+        primaryContact
+      });
+    });
+  } catch (error) {
+    console.error('[b2bAIService] fetchEngagementBatch error:', error);
+  }
+
+  return engagementMap;
+}
+
+async function fetchSignalBatch(carrierDots) {
+  const signalMap = new Map();
+
+  if (!carrierDots.length) return signalMap;
+
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.signals, {
+      filters: {
+        carrier_dot: { hasSome: carrierDots },
+        snapshot_date: '' // Current signals only
+      },
+      limit: 500,
+      suppressAuth: true
+    });
+
+    (result.items || []).forEach(signal => {
+      signalMap.set(signal.carrier_dot, signal);
+    });
+  } catch (error) {
+    console.error('[b2bAIService] fetchSignalBatch error:', error);
+  }
+
+  return signalMap;
+}
+
+// ============================================================================
+// ACTION TRACKING (LEARNING LOOP)
+// ============================================================================
+
+/**
+ * Record when a recommended action was taken
+ */
+export async function recordActionTaken(actionData) {
+  try {
+    const record = {
+      account_id: actionData.accountId,
+      opportunity_id: actionData.opportunityId || '',
+      recommended_channel: actionData.recommendedChannel,
+      actual_channel: actionData.actualChannel,
+      recommended_score: actionData.score || 0,
+      reasons: JSON.stringify(actionData.reasons || []),
+      action_type: actionData.actionType || 'contact', // contact, snooze, skip
+      owner_id: actionData.ownerId || '',
+      created_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.aiActionLog, record, { suppressAuth: true });
+    return { success: result.success, actionLog: result.record };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Record the outcome of a recommended action (for learning)
+ */
+export async function recordActionOutcome(actionLogId, outcome) {
+  try {
+    const existing = await dataAccess.getRecord(COLLECTIONS.aiActionLog, actionLogId, { suppressAuth: true });
+    if (!existing) return { success: false, error: 'Action log not found' };
+
+    const updates = {
+      ...existing,
+      outcome: outcome.type, // reply, meeting, stage_advance, no_response
+      outcome_value: outcome.value || '',
+      outcome_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.updateRecord(COLLECTIONS.aiActionLog, updates, { suppressAuth: true });
+    return { success: result.success };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Snooze an action (temporarily remove from queue)
+ */
+export async function snoozeAction(actionData, snoozeDays = 1) {
+  try {
+    const snoozeUntil = new Date();
+    snoozeUntil.setDate(snoozeUntil.getDate() + snoozeDays);
+
+    const record = {
+      account_id: actionData.accountId,
+      opportunity_id: actionData.opportunityId || '',
+      action_type: 'snooze',
+      snooze_until: snoozeUntil.toISOString(),
+      owner_id: actionData.ownerId || '',
+      created_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.aiActionLog, record, { suppressAuth: true });
+    return { success: result.success, snoozeUntil: snoozeUntil.toISOString() };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Skip an action (mark as not relevant)
+ */
+export async function skipAction(actionData, skipReason = '') {
+  try {
+    const record = {
+      account_id: actionData.accountId,
+      opportunity_id: actionData.opportunityId || '',
+      action_type: 'skip',
+      skip_reason: skipReason,
+      owner_id: actionData.ownerId || '',
+      created_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.aiActionLog, record, { suppressAuth: true });
+    return { success: result.success };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Get snoozed account IDs that should still be excluded
+ */
+export async function getSnoozedAccountIds(ownerId) {
+  try {
+    const now = new Date().toISOString();
+    const result = await dataAccess.queryRecords(COLLECTIONS.aiActionLog, {
+      filters: {
+        action_type: 'snooze',
+        snooze_until: { gt: now },
+        ...(ownerId ? { owner_id: ownerId } : {})
+      },
+      limit: 200,
+      suppressAuth: true
+    });
+
+    const snoozedIds = (result.items || []).map(item => item.account_id);
+    return { success: true, accountIds: [...new Set(snoozedIds)] };
+  } catch (error) {
+    return { success: false, error: error.message, accountIds: [] };
+  }
+}
+
+// ============================================================================
+// EXPORTS
+// ============================================================================
+
+export {
+  REASON_CODES,
+  SCORING_WEIGHTS
+};

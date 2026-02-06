@@ -14,6 +14,11 @@
 //   { action: 'getNextActions', limit }
 //   { action: 'quickAction', type, carrierDot }
 //   { action: 'viewAccount', accountId }
+//   { action: 'getAINextActions', ownerId?, limit? }
+//   { action: 'snoozeAction', accountId, opportunityId?, snoozeDays? }
+//   { action: 'skipAction', accountId, opportunityId?, skipReason? }
+//   { action: 'recordActionTaken', accountId, ... }
+//   { action: 'recordActionOutcome', actionLogId, outcomeType, outcomeValue? }
 //
 // PostMessage contract (Velo -> HTML):
 //   { action: 'init' }
@@ -23,6 +28,11 @@
 //   { action: 'topOpportunitiesLoaded', payload }
 //   { action: 'nextActionsLoaded', payload }
 //   { action: 'signalSpikesLoaded', payload }
+//   { action: 'aiNextActionsLoaded', payload }
+//   { action: 'actionSnoozed', payload }
+//   { action: 'actionSkipped', payload }
+//   { action: 'actionRecorded', payload }
+//   { action: 'outcomeRecorded', payload }
 //   { action: 'actionSuccess', message }
 //   { action: 'actionError', message }
 // ============================================================================
@@ -40,7 +50,13 @@ const BRIDGE_ACTIONS = [
   'getTopOpportunities',
   'getNextActions',
   'quickAction',
-  'getSignalSpikes'
+  'getSignalSpikes',
+  // AI Next-Best-Action Engine (Phase 11)
+  'getAINextActions',
+  'snoozeAction',
+  'skipAction',
+  'recordActionTaken',
+  'recordActionOutcome'
 ];
 
 $w.onReady(function () {

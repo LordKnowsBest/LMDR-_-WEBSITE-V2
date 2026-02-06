@@ -160,15 +160,19 @@
                         </div>
                     </div>
 
-                    <!-- Next Actions -->
+                    <!-- AI Next Actions -->
                     <div class="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-                        <div class="px-4 md:px-5 py-3 border-b border-slate-800">
-                            <h2 class="text-sm font-bold text-slate-200 uppercase tracking-wider">Next Actions</h2>
+                        <div class="px-4 md:px-5 py-3 border-b border-slate-800 flex items-center justify-between">
+                            <div class="flex items-center gap-2">
+                                <h2 class="text-sm font-bold text-slate-200 uppercase tracking-wider">Next Actions</h2>
+                                <span class="text-xs px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-400 font-medium">AI</span>
+                            </div>
+                            <span id="actionCount" class="text-xs text-slate-500"></span>
                         </div>
-                        <div id="nextActionsList" class="divide-y divide-slate-800/50 max-h-[300px] overflow-auto scrollbar-thin">
+                        <div id="nextActionsList" class="divide-y divide-slate-800/50 max-h-[350px] overflow-auto scrollbar-thin">
                             <div class="p-6 text-center text-slate-500">
-                                <span class="material-symbols-outlined text-3xl mb-2 block">task_alt</span>
-                                <p class="text-sm">No pending actions</p>
+                                <span class="material-symbols-outlined text-3xl mb-2 block animate-spin">progress_activity</span>
+                                <p class="text-sm">Loading AI recommendations...</p>
                             </div>
                         </div>
                     </div>
@@ -184,7 +188,9 @@
         const VALID_ACTIONS = [
             'init', 'kpisLoaded', 'topProspectsLoaded', 'alertsLoaded',
             'topOpportunitiesLoaded', 'nextActionsLoaded',
-            'signalSpikesLoaded', 'actionSuccess', 'actionError'
+            'signalSpikesLoaded', 'actionSuccess', 'actionError',
+            // AI Next-Best-Action Engine (Phase 11)
+            'aiNextActionsLoaded', 'actionSnoozed', 'actionSkipped', 'actionRecorded'
         ];
 
         function isValidMessage(data) {
@@ -220,6 +226,20 @@
                     break;
                 case 'signalSpikesLoaded':
                     // Signal spike data received — could be used for enhanced alerts
+                    break;
+                case 'aiNextActionsLoaded':
+                    renderAINextActions(data.payload);
+                    break;
+                case 'actionSnoozed':
+                    showToast('Action snoozed', 'info');
+                    refreshAIActions();
+                    break;
+                case 'actionSkipped':
+                    showToast('Action skipped', 'info');
+                    refreshAIActions();
+                    break;
+                case 'actionRecorded':
+                    // Action tracking recorded - no UI feedback needed
                     break;
                 case 'actionSuccess':
                     showToast(data.message || 'Done', 'success');
@@ -332,22 +352,81 @@
         }
 
         function renderNextActions(actions) {
+            // Legacy fallback - redirect to AI version
+            renderAINextActions({ actions: actions || [] });
+        }
+
+        function renderAINextActions(data) {
             const container = document.getElementById('nextActionsList');
+            const countEl = document.getElementById('actionCount');
+            const actions = data?.actions || [];
+            const totalScored = data?.totalScored || actions.length;
+
+            if (countEl) {
+                countEl.textContent = totalScored > 0 ? `${actions.length} of ${totalScored} shown` : '';
+            }
+
             if (!actions || actions.length === 0) {
-                container.innerHTML = '<div class="p-6 text-center text-slate-500"><span class="material-symbols-outlined text-3xl mb-2 block">event_available</span><p class="text-sm">All caught up!</p></div>';
+                container.innerHTML = '<div class="p-6 text-center text-slate-500"><span class="material-symbols-outlined text-3xl mb-2 block">event_available</span><p class="text-sm">All caught up! No actions needed.</p></div>';
                 return;
             }
-            const iconMap = { call: 'call', email: 'mail', sms: 'sms', task: 'task_alt', meeting: 'groups' };
-            container.innerHTML = actions.map(a => `
-                <div class="px-4 md:px-5 py-3 flex items-center gap-3 prospect-row">
-                    <span class="material-symbols-outlined text-[20px] text-blue-400">${iconMap[a.action_type] || 'task_alt'}</span>
-                    <div class="flex-1 min-w-0">
-                        <p class="text-sm text-slate-200 truncate">${esc(a.subject || a.action_type)}</p>
-                        <p class="text-xs text-slate-500">${esc(a.due_label || '')}</p>
+
+            const channelIcon = { call: 'call', email: 'mail', sms: 'sms' };
+            const priorityColor = (score) => {
+                if (score >= 70) return 'bg-red-500/20 text-red-400';
+                if (score >= 50) return 'bg-amber-500/20 text-amber-400';
+                if (score >= 30) return 'bg-blue-500/20 text-blue-400';
+                return 'bg-slate-700 text-slate-400';
+            };
+
+            container.innerHTML = actions.map((a, idx) => {
+                const icon = channelIcon[a.recommendedChannel] || 'task_alt';
+                const topReason = a.reasons && a.reasons[0] ? a.reasons[0].text : '';
+                const reasonPriority = a.reasons && a.reasons[0] ? a.reasons[0].priority : 'low';
+                const reasonColor = reasonPriority === 'critical' ? 'text-red-400' :
+                                    reasonPriority === 'high' ? 'text-amber-400' : 'text-cyan-400';
+                const daysText = a.daysSinceTouch !== undefined
+                    ? (a.daysSinceTouch === 0 ? 'Today' : a.daysSinceTouch === 1 ? 'Yesterday' : `${a.daysSinceTouch}d ago`)
+                    : '';
+
+                return `
+                    <div class="px-4 md:px-5 py-3 hover:bg-slate-800/50 transition-colors">
+                        <div class="flex items-start gap-3">
+                            <div class="flex-shrink-0 w-8 h-8 rounded-full bg-cyan-500/10 flex items-center justify-center">
+                                <span class="material-symbols-outlined text-[18px] text-cyan-400">${icon}</span>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center gap-2">
+                                    <p class="text-sm font-medium text-slate-100 truncate cursor-pointer hover:text-cyan-400" onclick="startAction(${idx})">${esc(a.accountName)}</p>
+                                    <span class="text-xs px-1.5 py-0.5 rounded font-medium ${priorityColor(a.score)}">${a.score}</span>
+                                </div>
+                                <p class="text-xs ${reasonColor} mt-0.5 flex items-center gap-1">
+                                    <span class="material-symbols-outlined text-[14px]">lightbulb</span>
+                                    ${esc(topReason)}
+                                </p>
+                                <div class="flex items-center gap-2 mt-1">
+                                    ${a.stage ? `<span class="text-xs text-slate-500">${esc(a.stage)}</span>` : ''}
+                                    ${a.value ? `<span class="text-xs text-slate-500">${formatCurrency(a.value)}</span>` : ''}
+                                    ${daysText ? `<span class="text-xs text-slate-600">• ${daysText}</span>` : ''}
+                                </div>
+                            </div>
+                            <div class="flex-shrink-0 flex items-center gap-1">
+                                <button onclick="startAction(${idx})" class="p-1.5 rounded hover:bg-emerald-500/20 text-emerald-400 transition-colors" title="Start action">
+                                    <span class="material-symbols-outlined text-[18px]">play_arrow</span>
+                                </button>
+                                <button onclick="snoozeAction(${idx})" class="p-1.5 rounded hover:bg-blue-500/20 text-blue-400 transition-colors" title="Snooze 1 day">
+                                    <span class="material-symbols-outlined text-[18px]">snooze</span>
+                                </button>
+                                <button onclick="skipAction(${idx})" class="p-1.5 rounded hover:bg-slate-500/20 text-slate-500 transition-colors" title="Skip">
+                                    <span class="material-symbols-outlined text-[18px]">close</span>
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                    <span class="text-xs px-2 py-0.5 rounded-full font-medium ${a.priority === 'high' ? 'bg-red-500/20 text-red-400' : 'bg-slate-700 text-slate-400'}">${esc(a.priority || 'normal')}</span>
-                </div>
-            `).join('');
+                `;
+            }).join('');
+
+            window._aiActions = actions;
         }
 
         // ============================================================
@@ -360,7 +439,11 @@
             sendToVelo({ action: 'getTopProspects', limit: 15 });
             sendToVelo({ action: 'getAlerts' });
             sendToVelo({ action: 'getTopOpportunities', limit: 10 });
-            sendToVelo({ action: 'getNextActions', limit: 10 });
+            sendToVelo({ action: 'getAINextActions', limit: 15 });
+        }
+
+        function refreshAIActions() {
+            sendToVelo({ action: 'getAINextActions', limit: 15 });
         }
 
         function handleDateRangeChange() {
@@ -374,6 +457,50 @@
 
         function viewAccount(accountId) {
             sendToVelo({ action: 'viewAccount', accountId });
+        }
+
+        // AI Action Handlers
+        function startAction(idx) {
+            const action = window._aiActions && window._aiActions[idx];
+            if (!action) return;
+
+            // Record that this action was taken
+            sendToVelo({
+                action: 'recordActionTaken',
+                accountId: action.accountId,
+                opportunityId: action.opportunityId,
+                recommendedChannel: action.recommendedChannel,
+                actualChannel: action.recommendedChannel,
+                score: action.score,
+                reasons: action.reasons
+            });
+
+            // Navigate to account
+            viewAccount(action.accountId);
+        }
+
+        function snoozeAction(idx) {
+            const action = window._aiActions && window._aiActions[idx];
+            if (!action) return;
+
+            sendToVelo({
+                action: 'snoozeAction',
+                accountId: action.accountId,
+                opportunityId: action.opportunityId,
+                snoozeDays: 1
+            });
+        }
+
+        function skipAction(idx) {
+            const action = window._aiActions && window._aiActions[idx];
+            if (!action) return;
+
+            sendToVelo({
+                action: 'skipAction',
+                accountId: action.accountId,
+                opportunityId: action.opportunityId,
+                skipReason: 'User skipped'
+            });
         }
 
         // ============================================================
