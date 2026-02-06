@@ -886,21 +886,17 @@ const generateDriverMatchRationale = (scores, driver, preferences) => {
  */
 const getCarrierFeedbackWeights = async (carrierDot) => {
   try {
-    const { usesAirtable, getAirtableTableName } = require('backend/config');
-    const airtable = require('backend/airtableClient');
+    const dataAccess = require('backend/dataAccess');
 
-    if (usesAirtable('callFeedback')) {
-      const tableName = getAirtableTableName('callFeedback');
-      const result = await airtable.queryRecords(tableName, {
-        filterByFormula: `{Carrier DOT} = '${carrierDot}'`,
-        maxRecords: 1
-      });
-      const records = result.records || [];
-      return records.length > 0 ? records[0] : null;
-    }
-    return null;
+    const result = await dataAccess.queryRecords('callFeedback', {
+      filters: { carrier_dot: String(carrierDot) },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    return result.items?.[0] || null;
   } catch (err) {
-    console.warn('getCarrierFeedbackWeights failed:', err.message);
+    console.warn('[driverScoring] getCarrierFeedbackWeights failed:', err.message);
     return null;
   }
 };

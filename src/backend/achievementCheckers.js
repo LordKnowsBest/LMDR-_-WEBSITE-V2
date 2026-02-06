@@ -3,10 +3,11 @@
  *
  * Maps achievement IDs to their specific checking logic.
  * Each checker defines how to calculate progress for an achievement.
+ *
+ * Integrated with the unified dataAccess layer for dual-source support.
  */
 
-import { getAirtableTableName } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import * as dataAccess from 'backend/dataAccess';
 
 // =============================================================================
 // DRIVER ACHIEVEMENT CHECKERS
@@ -120,7 +121,7 @@ export const DRIVER_ACHIEVEMENT_CHECKERS = {
   quick_draw: {
     name: 'Quick Draw',
     check: async (driverId, context) => {
-      const fastResponses = await getFastResponseCount(driverId, 1); // Under 1 hour
+      const fastResponses = await getFastResponseCount(driverId); // Under 1 hour
       return { current: Math.min(fastResponses, 1), target: 1 };
     }
   },
@@ -128,7 +129,7 @@ export const DRIVER_ACHIEVEMENT_CHECKERS = {
   speed_demon: {
     name: 'Speed Demon',
     check: async (driverId, context) => {
-      const fastResponses = await getFastResponseCount(driverId, 1);
+      const fastResponses = await getFastResponseCount(driverId);
       return { current: Math.min(fastResponses, 10), target: 10 };
     }
   },
@@ -346,155 +347,142 @@ export const RECRUITER_ACHIEVEMENT_CHECKERS = {
 
 async function getProfileCompletion(driverId) {
   try {
-    const tableName = getAirtableTableName('driverProfiles');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{_id} = "${driverId}"`,
-      maxRecords: 1
-    });
-    return records.records?.[0]?.['Profile Completion'] || 0;
+    const record = await dataAccess.getRecord('driverProfiles', driverId, { suppressAuth: true });
+    return record?.profile_completeness_score || record?.profile_completion || 0;
   } catch { return 0; }
 }
 
 async function getCDLVerificationStatus(driverId) {
   try {
-    const tableName = getAirtableTableName('driverProfiles');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{_id} = "${driverId}"`,
-      maxRecords: 1
-    });
-    return records.records?.[0]?.['CDL Verified'] === 'Yes';
+    const record = await dataAccess.getRecord('driverProfiles', driverId, { suppressAuth: true });
+    return record?.cdl_verified === 'Yes' || record?.cdl_verified === true;
   } catch { return false; }
 }
 
 async function hasProfilePhoto(driverId) {
   try {
-    const tableName = getAirtableTableName('driverProfiles');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{_id} = "${driverId}"`,
-      maxRecords: 1
-    });
-    return !!(records.records?.[0]?.['Photo URL']);
+    const record = await dataAccess.getRecord('driverProfiles', driverId, { suppressAuth: true });
+    return !!(record?.photo_url || record?.profile_image);
   } catch { return false; }
 }
 
 async function getBioLength(driverId) {
   try {
-    const tableName = getAirtableTableName('driverProfiles');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{_id} = "${driverId}"`,
-      maxRecords: 1
-    });
-    return (records.records?.[0]?.['Bio'] || '').length;
+    const record = await dataAccess.getRecord('driverProfiles', driverId, { suppressAuth: true });
+    return (record?.bio || '').length;
   } catch { return 0; }
 }
 
 async function getStreakDays(driverId) {
   try {
-    const tableName = getAirtableTableName('driverProgression');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Driver ID} = "${driverId}"`,
-      maxRecords: 1
+    const res = await dataAccess.queryRecords('driverProgression', {
+      filters: { driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
     });
-    return records.records?.[0]?.['Streak Days'] || 0;
+    return res.items?.[0]?.streak_days || 0;
   } catch { return 0; }
 }
 
 async function getApplicationCount(driverId) {
   try {
-    const tableName = getAirtableTableName('driverCarrierInterests');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Driver ID} = "${driverId}"`,
-      maxRecords: 1000
+    const res = await dataAccess.queryRecords('driverCarrierInterests', {
+      filters: { driver_id: driverId },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
-async function getFastResponseCount(driverId, maxHours) {
+async function getFastResponseCount(driverId) {
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${driverId}", {Action} = "respond_fast")`,
-      maxRecords: 1000
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: driverId, action: 'respond_fast' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getMessageCount(driverId) {
   try {
-    const tableName = getAirtableTableName('messages');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Sender ID} = "${driverId}"`,
-      maxRecords: 1000
+    const res = await dataAccess.queryRecords('messages', {
+      filters: { sender_id: driverId },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function hasRecruiterContact(driverId) {
   try {
-    const tableName = getAirtableTableName('messages');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `OR({Sender ID} = "${driverId}", {Recipient ID} = "${driverId}")`,
-      maxRecords: 1
+    const res = await dataAccess.queryRecords('messages', {
+      filters: { 
+        sender_id: driverId,
+        recipient_id: { ne: driverId } // Simplified: just check if they sent a message
+      },
+      limit: 1,
+      suppressAuth: true
     });
-    return (records.records?.length || 0) > 0;
+    if (res.items?.length > 0) return true;
+
+    const res2 = await dataAccess.queryRecords('messages', {
+      filters: { recipient_id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+    return (res2.items?.length || 0) > 0;
   } catch { return false; }
 }
 
 async function getHireCount(driverId) {
   try {
-    const tableName = getAirtableTableName('driverCarrierInterests');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({Driver ID} = "${driverId}", {Status} = "hired")`,
-      maxRecords: 100
+    const res = await dataAccess.queryRecords('driverCarrierInterests', {
+      filters: { driver_id: driverId, status: 'hired' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getDriverLevel(driverId) {
   try {
-    const tableName = getAirtableTableName('driverProgression');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Driver ID} = "${driverId}"`,
-      maxRecords: 1
+    const res = await dataAccess.queryRecords('driverProgression', {
+      filters: { driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
     });
-    return records.records?.[0]?.['Level'] || 1;
+    return res.items?.[0]?.level || 1;
   } catch { return 1; }
 }
 
 async function getReferralCount(driverId) {
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${driverId}", {Action} = "refer_driver")`,
-      maxRecords: 100
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: driverId, action: 'refer_driver' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getReviewCount(driverId) {
   try {
-    const tableName = getAirtableTableName('carrierReviews');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Driver ID} = "${driverId}"`,
-      maxRecords: 100
+    const res = await dataAccess.queryRecords('carrierReviews', {
+      filters: { driver_id: driverId },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getHelpfulVoteCount(driverId) {
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${driverId}", {Action} = "review_helpful")`,
-      maxRecords: 100
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: driverId, action: 'review_helpful' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
@@ -504,140 +492,124 @@ async function getHelpfulVoteCount(driverId) {
 
 async function getRecruiterHireCount(recruiterId) {
   try {
-    const tableName = getAirtableTableName('recruiterProgression');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Recruiter ID} = "${recruiterId}"`,
-      maxRecords: 1
+    const res = await dataAccess.queryRecords('recruiterProgression', {
+      filters: { recruiter_id: recruiterId },
+      limit: 1,
+      suppressAuth: true
     });
-    return records.records?.[0]?.['Total Hires'] || 0;
+    return res.items?.[0]?.total_hires || 0;
   } catch { return 0; }
 }
 
 async function get90DayRetentionCount(recruiterId) {
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${recruiterId}", {Action} = "retention_90_day")`,
-      maxRecords: 1000
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: recruiterId, action: 'retention_90_day' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getFastResponseDays(recruiterId) {
-  // Count consecutive days with fast responses
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${recruiterId}", {Action} = "respond_fast")`,
-      maxRecords: 100
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: recruiterId, action: 'respond_fast' },
+      suppressAuth: true
     });
-    // Simplified: count total fast response events
-    return Math.min(records.records?.length || 0, 7);
+    return Math.min(res.totalCount || res.items?.length || 0, 7);
   } catch { return 0; }
 }
 
 async function getRecruiterMessageCount(recruiterId) {
   try {
-    const tableName = getAirtableTableName('messages');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Sender ID} = "${recruiterId}"`,
-      maxRecords: 1000
+    const res = await dataAccess.queryRecords('messages', {
+      filters: { sender_id: recruiterId },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getHighMatchApplicationCount(recruiterId) {
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${recruiterId}", {Action} = "high_match_application")`,
-      maxRecords: 100
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: recruiterId, action: 'high_match_application' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getRecruiterApplicationCount(recruiterId) {
   try {
-    const tableName = getAirtableTableName('driverCarrierInterests');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Recruiter ID} = "${recruiterId}"`,
-      maxRecords: 1000
+    const res = await dataAccess.queryRecords('driverCarrierInterests', {
+      filters: { recruiter_id: recruiterId },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getCarrierProfileCompletion(recruiterId) {
-  // Simplified: check if carrier profile exists
   try {
-    const tableName = getAirtableTableName('carriers');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `{Recruiter ID} = "${recruiterId}"`,
-      maxRecords: 1
+    const res = await dataAccess.queryRecords('recruiterCarriers', {
+      filters: { recruiter_id: recruiterId },
+      limit: 1,
+      suppressAuth: true
     });
-    return records.records?.length > 0 ? 100 : 0;
+    return res.items?.length > 0 ? 100 : 0;
   } catch { return 0; }
 }
 
 async function getHighRatingMonths(recruiterId) {
-  // Simplified: count monthly high rating events
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${recruiterId}", {Action} = "maintain_high_rating")`,
-      maxRecords: 12
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: recruiterId, action: 'maintain_high_rating' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getSprintsWon(recruiterId) {
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${recruiterId}", {Action} = "sprint_won")`,
-      maxRecords: 10
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: recruiterId, action: 'sprint_won' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function getUniqueHireStates(recruiterId) {
-  // Simplified: count unique states from hires
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${recruiterId}", {Action} = "successful_hire")`,
-      maxRecords: 100
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: recruiterId, action: 'successful_hire' },
+      suppressAuth: true
     });
-    // Would need to parse metadata for states - simplified to count/5
-    return Math.min(Math.floor((records.records?.length || 0) / 2), 5);
+    return Math.min(Math.floor((res.totalCount || res.items?.length || 0) / 2), 5);
   } catch { return 0; }
 }
 
 async function getHighEngagementMonths(recruiterId) {
   try {
-    const tableName = getAirtableTableName('gamificationEvents');
-    const records = await airtable.queryRecords(tableName, {
-      filterByFormula: `AND({User ID} = "${recruiterId}", {Action} = "high_engagement_month")`,
-      maxRecords: 12
+    const res = await dataAccess.queryRecords('gamificationEvents', {
+      filters: { user_id: recruiterId, action: 'high_engagement_month' },
+      suppressAuth: true
     });
-    return records.records?.length || 0;
+    return res.totalCount || res.items?.length || 0;
   } catch { return 0; }
 }
 
 async function isEarlyAdopterRecruiter(recruiterId) {
-  // Check if recruiter was among first 100
   try {
-    const tableName = getAirtableTableName('recruiterProgression');
-    const records = await airtable.queryRecords(tableName, {
-      sort: [{ field: 'Created At', direction: 'asc' }],
-      maxRecords: 100
+    const res = await dataAccess.queryRecords('recruiterProgression', {
+      sort: [{ field: '_createdDate', direction: 'asc' }],
+      limit: 100,
+      suppressAuth: true
     });
-    const earlyIds = new Set((records.records || []).map(r => r['Recruiter ID']));
+    const earlyIds = new Set((res.items || []).map(r => r.recruiter_id));
     return earlyIds.has(recruiterId);
   } catch { return false; }
 }
@@ -669,7 +641,7 @@ export async function runAchievementChecker(achievementId, userId, userType, con
       qualifies: result.current >= result.target
     };
   } catch (error) {
-    console.error(`runAchievementChecker error for ${achievementId}:`, error);
+    console.error(`[achievementCheckers] runAchievementChecker error for ${achievementId}:`, error.message);
     return { current: 0, target: 0, qualifies: false, error: error.message };
   }
 }

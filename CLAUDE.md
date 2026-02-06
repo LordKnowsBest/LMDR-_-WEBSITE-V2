@@ -46,20 +46,63 @@ The Wix CLI must be installed globally: `npm install -g @wix/cli`
 
 **NEVER call `wixData.*` directly in business logic functions.** Always use the dual-source helper functions.
 
-### Collections That Stay in Wix (ONLY THESE TWO)
+### Universal Data Access Pattern (Recommended)
+
+The project uses a unified **`dataAccess.jsw`** layer to handle all database operations. This layer automatically routes to the correct source based on `configData.js`.
+
+**Import:** `import * as dataAccess from 'backend/dataAccess';`
+
+**Pattern Example:**
+```javascript
+// 1. Define collection keys (camelCase from configData.js)
+const COLLECTIONS = {
+  drivers: 'driverProfiles',
+  interests: 'driverCarrierInterests'
+};
+
+// 2. Query with filters and options
+const result = await dataAccess.queryRecords(COLLECTIONS.drivers, {
+  filters: {
+    status: 'active',
+    years_experience: { gte: 2 }
+  },
+  limit: 50,
+  suppressAuth: true // Use for backend-initiated operations
+});
+
+// 3. Insert or Update
+await dataAccess.insertRecord(COLLECTIONS.interests, {
+  driver_id: 'rec123',
+  carrier_dot: '1234567',
+  status: 'applied'
+}, { suppressAuth: true });
+```
+
+**Type Safety Rule:** Data received from forms (`formData`) is always string. **YOU MUST convert numeric strings to `Number`** before passing them to queries or filters for number-type fields in Airtable/Wix.
+
+```javascript
+// CORRECT - Type conversion
+const dotNum = Number(formData.dotNumber);
+const result = await dataAccess.findByField('carriers', 'dot_number', dotNum);
+```
+
+### Collections That Stay in Wix (ONLY THESE)
 
 | Collection | Reason |
 |------------|--------|
 | `AdminUsers` | Auth/permissions - must stay in Wix |
 | `MemberNotifications` | Wix member system integration |
+| `memberBadges` | `Members/Badges` system collection |
+| `memberPrivateData` | `Members/PrivateMembersData` system collection |
 
 **Everything else (~65+ collections) routes to Airtable.**
 
 ### Config File Reference
 
-Routing is controlled by `backend/config.jsw`:
+Routing is controlled by `backend/configData.js` (synchronous helpers):
 - `usesAirtable(collectionKey)` - Returns `true` if collection routes to Airtable
 - `getAirtableTableName(collectionKey)` - Returns the Airtable table name
+- `getWixCollectionName(collectionKey)` - Returns the Wix PascalCase name
 
 ### Airtable Base Reference
 
