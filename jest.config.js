@@ -49,8 +49,10 @@ module.exports = {
     '!src/backend/**/*.config.js'
   ],
 
-  // Transform settings (no transform needed for plain JS)
-  transform: {},
+  // Transform ESM backend sources (.js/.jsw) so CJS tests can import them.
+  transform: {
+    '^.+\\.(js|jsx|mjs|cjs|jsw)$': 'babel-jest'
+  },
 
   // Verbose output
   verbose: true,
