@@ -1,0 +1,201 @@
+/**
+ * Driver Scorecard Service - Performance Tracking
+ * Handles driver performance metrics across safety, efficiency, service, and compliance.
+ *
+ * DUAL-SOURCE SUPPORT: Uses dataAccess.jsw for routing between Wix and Airtable.
+ */
+
+import { queryRecords, getRecord, insertRecord, updateRecord, findByField, getAllRecords } from 'backend/dataAccess';
+import { verifyCarrierAccess } from 'backend/fleetService';
+
+// ============================================
+// PERFORMANCE TRACKING
+// ============================================
+
+/**
+ * Get driver scorecard for a specific period
+ * @param {string} driverId - FleetDrivers record ID
+ * @param {string} periodType - 'weekly', 'monthly', 'quarterly'
+ * @param {string} periodStart - Optional start date ISO string
+ * @returns {Promise<Object>} Scorecard data
+ */
+export async function getDriverScorecard(driverId, periodType = 'monthly', periodStart = null) {
+    const driver = await getRecord('fleetDrivers', driverId);
+    if (!driver) throw new Error('Driver not found');
+    
+    await verifyCarrierAccess(driver.carrier_dot);
+
+    const filters = {
+        driver_id: driverId,
+        period_type: periodType
+    };
+
+    if (periodStart) {
+        filters.period_start = periodStart;
+    }
+
+    const result = await queryRecords('driverScores', {
+        filters,
+        sort: [{ field: 'period_start', direction: 'desc' }],
+        limit: 1
+    });
+
+    if (!result.success || result.items.length === 0) {
+        return { message: 'No scorecard found for this period' };
+    }
+
+    return result.items[0];
+}
+
+/**
+ * Get fleet-wide scorecard summary
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {string} periodType - 'weekly', 'monthly', 'quarterly'
+ * @returns {Promise<Object>} Summary stats
+ */
+export async function getFleetScoreboardSummary(carrierDot, periodType = 'monthly') {
+    await verifyCarrierAccess(carrierDot);
+
+    // Get most recent scores for all drivers
+    const result = await queryRecords('driverScores', {
+        filters: { carrier_dot: carrierDot, period_type: periodType },
+        sort: [{ field: 'period_start', direction: 'desc' }]
+    });
+
+    if (!result.success || result.items.length === 0) return null;
+
+    // Use only the most recent period records
+    const latestPeriod = result.items[0].period_start;
+    const latestScores = result.items.filter(s => s.period_start === latestPeriod);
+
+    const avgScore = latestScores.reduce((acc, s) => acc + s.overall_score, 0) / latestScores.length;
+    
+    const sorted = [...latestScores].sort((a, b) => b.overall_score - a.overall_score);
+    const topPerformer = sorted[0];
+    const bottomPerformer = sorted[sorted.length - 1];
+
+    const coachingThreshold = 70;
+    const needsCoaching = latestScores.filter(s => s.overall_score < coachingThreshold).length;
+
+    return {
+        average_score: Math.round(avgScore * 10) / 10,
+        top_performer: topPerformer,
+        bottom_performer: bottomPerformer,
+        needs_coaching_count: needsCoaching,
+        period_start: latestPeriod,
+        driver_count: latestScores.length
+    };
+}
+
+/**
+ * Get performance rankings
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {string} category - 'overall', 'safety', 'efficiency', 'service', 'compliance'
+ * @param {number} limit - Number of drivers to return
+ * @returns {Promise<Array>} Sorted rankings
+ */
+export async function getPerformanceRankings(carrierDot, category = 'overall', limit = 10) {
+    await verifyCarrierAccess(carrierDot);
+
+    const field = category === 'overall' ? 'overall_score' : `${category}_score`;
+
+    const result = await queryRecords('driverScores', {
+        filters: { carrier_dot: carrierDot },
+        sort: [{ field, direction: 'desc' }],
+        limit
+    });
+
+    return result.success ? result.items : [];
+}
+
+/**
+ * Get driver performance trend over time
+ * @param {string} driverId - FleetDrivers record ID
+ * @param {number} periods - Number of periods to look back
+ * @returns {Promise<Array>} Historical scores
+ */
+export async function getDriverTrend(driverId, periods = 6) {
+    const driver = await getRecord('fleetDrivers', driverId);
+    if (!driver) throw new Error('Driver not found');
+    await verifyCarrierAccess(driver.carrier_dot);
+
+    const result = await queryRecords('driverScores', {
+        filters: { driver_id: driverId, period_type: 'monthly' },
+        sort: [{ field: 'period_start', direction: 'desc' }],
+        limit: periods
+    });
+
+    return result.success ? result.items.reverse() : [];
+}
+
+/**
+ * Calculate and store scorecard for a period (Scheduled Job logic)
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {Date} startDate - Period start
+ * @param {Date} endDate - Period end
+ * 
+ * @note This is currently a MOCK implementation for demonstration.
+ * In production, this must be connected to real data sources:
+ * - ELD/Telematics API (Motive/Samsara) for safety/efficiency
+ * - TMS API for service/on-time performance
+ * - FMCSA data for compliance scores
+ */
+export async function calculateScorecards(carrierDot, startDate, endDate) {
+    // This would be called by a scheduled job
+    // It should fetch data from ELD (locations, speeds, HOS) and TMS (loads, on-time)
+    // and aggregate them using the scoring logic.
+    
+    // Placeholder implementation
+    const drivers = await getAllRecords('fleetDrivers', { filters: { carrier_dot: carrierDot } });
+    
+    const scores = drivers.map(d => {
+        // Mock score generation for now
+        const safety = 70 + Math.random() * 30;
+        const efficiency = 65 + Math.random() * 35;
+        const service = 75 + Math.random() * 25;
+        const compliance = 80 + Math.random() * 20;
+
+        const overall = (safety * 0.4) + (efficiency * 0.25) + (service * 0.2) + (compliance * 0.15);
+
+        return {
+            carrier_dot: carrierDot,
+            driver_id: d._id,
+            period_start: startDate.toISOString(),
+            period_end: endDate.toISOString(),
+            period_type: 'monthly',
+            overall_score: Math.round(overall),
+            safety_score: Math.round(safety),
+            efficiency_score: Math.round(efficiency),
+            service_score: Math.round(service),
+            compliance_score: Math.round(compliance),
+            _createdDate: new Date()
+        };
+    });
+
+    // Bulk insert scores
+    // Need to ensure dataAccess supports bulkInsert for both sources
+    for (const score of scores) {
+        await insertRecord('driverScores', score);
+    }
+
+    return { success: true, count: scores.length };
+}
+
+/**
+ * Get drivers needing coaching (below threshold)
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {number} threshold - Score threshold
+ * @returns {Promise<Array>} Drivers below threshold
+ */
+export async function getCoachingCandidates(carrierDot, threshold = 70) {
+    await verifyCarrierAccess(carrierDot);
+
+    const result = await queryRecords('driverScores', {
+        filters: { 
+            carrier_dot: carrierDot, 
+            overall_score: { lt: threshold } 
+        }
+    });
+
+    return result.success ? result.items : [];
+}

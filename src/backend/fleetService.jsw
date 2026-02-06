@@ -1,0 +1,308 @@
+/**
+ * Carrier Fleet Service - Operations Visibility
+ * Handles driver roster, equipment assignments, performance metrics, and capacity planning.
+ *
+ * DUAL-SOURCE SUPPORT: Uses dataAccess.jsw for routing between Wix and Airtable.
+ */
+
+import { currentMember } from 'wix-members-backend';
+import { queryRecords, getRecord, insertRecord, updateRecord, findByField, countRecords, getAllRecords } from 'backend/dataAccess';
+
+// ============================================
+// AUTHORIZATION HELPER
+// ============================================
+
+/**
+ * Verify that the current user has access to the specified carrier
+ * @param {number} carrierDot - Carrier DOT number
+ * @throws {Error} If unauthorized
+ */
+export async function verifyCarrierAccess(carrierDot) {
+    const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+    if (!member) {
+        throw new Error('Unauthorized: Please log in');
+    }
+
+    const memberRole = member.contactDetails?.customFields?.role || '';
+    const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+
+    // Admins have access to all carriers
+    if (adminRoles.includes(memberRole.toLowerCase())) {
+        return true;
+    }
+
+    // Check if member is associated with this carrier
+    const userCarrierDot = member.contactDetails?.customFields?.carrier_dot;
+
+    if (String(userCarrierDot) === String(carrierDot)) {
+        return true;
+    }
+
+    throw new Error('Unauthorized: You do not have access to this carrier');
+}
+
+// ============================================
+// DRIVER ROSTER
+// ============================================
+
+/**
+ * Get all drivers for a carrier with filtering and pagination
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} { drivers, totalCount, page, pageSize, totalPages }
+ */
+export async function getFleetDrivers(carrierDot, options = {}) {
+    try {
+        await verifyCarrierAccess(carrierDot);
+
+        const {
+            status = 'all',
+            search = '',
+            terminal = 'all',
+            sortBy = 'name',
+            sortOrder = 'asc',
+            page = 1,
+            pageSize = 25
+        } = options;
+
+        const filters = { carrier_dot: carrierDot };
+
+        if (status && status !== 'all') {
+            filters.status = status;
+        }
+
+        if (terminal && terminal !== 'all') {
+            filters.home_terminal = terminal;
+        }
+
+        // For search, we might need to fetch all and filter if dataAccess doesn't support complex OR filters yet
+        // but let's try to use the filters object first.
+        // If search is provided, we'll try to match name or employee_id.
+        
+        // Note: This pattern assumes dataAccess can handle 'contains' operator.
+        if (search) {
+            filters.name = { contains: search };
+            // Ideally we want OR(name contains search, employee_id contains search)
+        }
+
+        const sort = [{ field: sortBy === 'name' ? 'name' : sortBy, direction: sortOrder }];
+
+        const result = await queryRecords('fleetDrivers', {
+            filters,
+            sort,
+            limit: pageSize,
+            skip: (page - 1) * pageSize
+        });
+
+        if (!result.success) {
+            throw new Error(result.error || 'Failed to fetch drivers');
+        }
+
+        return {
+            drivers: result.items,
+            totalCount: result.totalCount,
+            page,
+            pageSize,
+            totalPages: Math.ceil(result.totalCount / pageSize)
+        };
+    } catch (error) {
+        console.error(`[fleetService] getFleetDrivers error for DOT ${carrierDot}:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Get single driver with full details including equipment
+ * @param {string} driverId - FleetDrivers record ID
+ * @returns {Promise<Object>} Full driver record
+ */
+export async function getDriverDetails(driverId) {
+    const driver = await getRecord('fleetDrivers', driverId);
+    if (!driver) {
+        throw new Error('Driver not found');
+    }
+
+    await verifyCarrierAccess(driver.carrier_dot);
+
+    // Fetch assigned equipment if exists
+    if (driver.assigned_equipment_id) {
+        try {
+            const equipment = await getRecord('equipmentAssets', driver.assigned_equipment_id);
+            driver.equipment = equipment;
+        } catch (e) {
+            console.warn('Could not fetch assigned equipment:', e.message);
+        }
+    }
+
+    return driver;
+}
+
+/**
+ * Update driver status with logging
+ * @param {string} driverId - FleetDrivers record ID
+ * @param {string} newStatus - New status value
+ * @param {string} reason - Reason for status change
+ * @returns {Promise<Object>} Updated driver record
+ */
+export async function updateDriverStatus(driverId, newStatus, reason = '') {
+    const driver = await getRecord('fleetDrivers', driverId);
+    if (!driver) {
+        throw new Error('Driver not found');
+    }
+
+    await verifyCarrierAccess(driver.carrier_dot);
+
+    const previousStatus = driver.status;
+    driver.status = newStatus;
+    driver.status_updated_at = new Date();
+    
+    // Initialize status history if not exists
+    driver.status_history = driver.status_history || [];
+    driver.status_history.push({
+        from: previousStatus,
+        to: newStatus,
+        reason,
+        timestamp: new Date()
+    });
+
+    const result = await updateRecord('fleetDrivers', driver);
+    if (!result.success) {
+        throw new Error(result.error || 'Failed to update driver status');
+    }
+
+    return result.record;
+}
+
+/**
+ * Add new driver to fleet
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {Object} driverData - Driver information
+ * @returns {Promise<Object>} Created driver record
+ */
+export async function addFleetDriver(carrierDot, driverData) {
+    await verifyCarrierAccess(carrierDot);
+
+    // Basic validation
+    if (!driverData.name || !driverData.email) {
+        throw new Error('Name and Email are required');
+    }
+
+    // Check for duplicate employee ID if provided
+    if (driverData.employee_id) {
+        const existing = await findByField('fleetDrivers', 'employee_id', driverData.employee_id);
+        if (existing && existing.carrier_dot === carrierDot) {
+            throw new Error(`Driver with employee ID ${driverData.employee_id} already exists in your fleet`);
+        }
+    }
+
+    const newDriver = {
+        ...driverData,
+        carrier_dot: carrierDot,
+        status: driverData.status || 'active',
+        status_updated_at: new Date(),
+        _createdDate: new Date(),
+        _updatedDate: new Date()
+    };
+
+    const result = await insertRecord('fleetDrivers', newDriver);
+    if (!result.success) {
+        throw new Error(result.error || 'Failed to add driver to fleet');
+    }
+
+    return result.record;
+}
+
+/**
+ * Export driver roster to CSV
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {Object} filters - Active filters
+ * @returns {Promise<string>} CSV data string
+ */
+export async function exportDriverRoster(carrierDot, filters = {}) {
+    await verifyCarrierAccess(carrierDot);
+
+    const allDrivers = await getAllRecords('fleetDrivers', {
+        filters: { ...filters, carrier_dot: carrierDot }
+    });
+
+    if (!allDrivers || allDrivers.length === 0) {
+        return 'No drivers found';
+    }
+
+    const headers = [
+        'Name', 'Employee ID', 'Status', 'Home Terminal', 
+        'License State', 'License Expiry', 'Medical Card Expiry', 
+        'Phone', 'Email', 'Hire Date'
+    ];
+
+    const rows = allDrivers.map(d => [
+        d.name || '',
+        d.employee_id || '',
+        d.status || '',
+        d.home_terminal || '',
+        d.license_state || '',
+        d.license_expiry ? new Date(d.license_expiry).toLocaleDateString() : '',
+        d.medical_card_expiry ? new Date(d.medical_card_expiry).toLocaleDateString() : '',
+        d.phone_primary || '',
+        d.email || '',
+        d.hire_date ? new Date(d.hire_date).toLocaleDateString() : ''
+    ]);
+
+    const csv = [
+        headers.join(','),
+        ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+    ].join('
+');
+
+    return csv;
+}
+
+/**
+ * Get expiring credentials (CDL, medical cards)
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {number} daysAhead - Days to look ahead (default 30)
+ * @returns {Promise<Array>} Drivers with expiring credentials
+ */
+export async function getExpiringCredentials(carrierDot, daysAhead = 30) {
+    await verifyCarrierAccess(carrierDot);
+
+    const now = new Date();
+    const futureDate = new Date();
+    futureDate.setDate(now.getDate() + daysAhead);
+
+    // CDL Expiry
+    const cdlExpiring = await queryRecords('fleetDrivers', {
+        filters: {
+            carrier_dot: carrierDot,
+            license_expiry: { lte: futureDate, gte: now }
+        }
+    });
+
+    // Medical Card Expiry
+    const medExpiring = await queryRecords('fleetDrivers', {
+        filters: {
+            carrier_dot: carrierDot,
+            medical_card_expiry: { lte: futureDate, gte: now }
+        }
+    });
+
+    const drivers = new Map();
+
+    if (cdlExpiring.success) {
+        cdlExpiring.items.forEach(d => {
+            drivers.set(d._id, { ...d, alertType: 'cdl' });
+        });
+    }
+
+    if (medExpiring.success) {
+        medExpiring.items.forEach(d => {
+            if (drivers.has(d._id)) {
+                drivers.get(d._id).alertType = 'both';
+            } else {
+                drivers.set(d._id, { ...d, alertType: 'medical' });
+            }
+        });
+    }
+
+    return Array.from(drivers.values());
+}

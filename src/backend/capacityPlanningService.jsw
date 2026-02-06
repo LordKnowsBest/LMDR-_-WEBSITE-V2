@@ -1,0 +1,161 @@
+/**
+ * Capacity Planning Service - Fleet Utilization
+ * Analyzes driver availability versus load commitments to identify capacity gaps.
+ *
+ * DUAL-SOURCE SUPPORT: Uses dataAccess.jsw for routing between Wix and Airtable.
+ */
+
+import { queryRecords, getRecord, insertRecord, updateRecord, findByField, getAllRecords } from 'backend/dataAccess';
+import { verifyCarrierAccess } from 'backend/fleetService';
+
+// ============================================
+// CAPACITY ANALYSIS
+// ============================================
+
+/**
+ * Calculate daily capacity metrics for a carrier
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {Date} date - Date to calculate for
+ * @returns {Promise<Object>} Capacity metrics
+ * 
+ * @note Load data is currently MOCKED.
+ * In production, integrate with TMS (McLeod, TMW, Rose Rocket)
+ * to fetch actual load volume and driver assignments.
+ */
+export async function calculateDailyCapacity(carrierDot, date) {
+    await verifyCarrierAccess(carrierDot);
+
+    const dateStr = date.toISOString().split('T')[0];
+    
+    // 1. Get all drivers
+    const drivers = await getAllRecords('fleetDrivers', { filters: { carrier_dot: carrierDot } });
+    
+    // 2. Filter available drivers (not on leave)
+    const availableDrivers = drivers.filter(d => d.status === 'active' || d.status === 'driving' || d.status === 'resting');
+    const onLeave = drivers.filter(d => ['on_leave', 'medical_leave'].includes(d.status)).length;
+    
+    // 3. Get loads for the day (Placeholder for TMS integration)
+    // For now, mock load data
+    const bookedLoads = 30 + Math.floor(Math.random() * 20);
+    const driversOnLoad = Math.min(availableDrivers.length, bookedLoads);
+    
+    const utilization = (driversOnLoad / availableDrivers.length) * 100;
+    const gap = bookedLoads - availableDrivers.length;
+
+    const plan = {
+        carrier_dot: carrierDot,
+        plan_date: dateStr,
+        total_drivers: drivers.length,
+        available_drivers: availableDrivers.length,
+        drivers_on_load: driversOnLoad,
+        drivers_available: availableDrivers.length - driversOnLoad,
+        booked_loads: bookedLoads,
+        utilization_pct: Math.round(utilization),
+        capacity_gap: gap,
+        _createdDate: new Date()
+    };
+
+    // Save plan
+    await insertRecord('capacityPlans', plan);
+
+    return plan;
+}
+
+/**
+ * Get capacity overview for a period
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {string} period - 'week', 'month'
+ * @returns {Promise<Object>} Summary metrics
+ */
+export async function getCapacityOverview(carrierDot, period = 'week') {
+    await verifyCarrierAccess(carrierDot);
+
+    const now = new Date();
+    const startDate = new Date();
+    if (period === 'week') startDate.setDate(now.getDate() - 7);
+    else startDate.setDate(now.getDate() - 30);
+
+    const result = await queryRecords('capacityPlans', {
+        filters: {
+            carrier_dot: carrierDot,
+            plan_date: { gte: startDate.toISOString().split('T')[0] }
+        },
+        sort: [{ field: 'plan_date', direction: 'asc' }]
+    });
+
+    if (!result.success || result.items.length === 0) return null;
+
+    const items = result.items;
+    const avgUtil = items.reduce((acc, i) => acc + i.utilization_pct, 0) / items.length;
+    const totalGaps = items.filter(i => i.capacity_gap > 0).length;
+
+    return {
+        average_utilization: Math.round(avgUtil),
+        available_drivers: items[items.length - 1].available_drivers,
+        capacity_gap_days: totalGaps,
+        period_start: items[0].plan_date,
+        period_end: items[items.length - 1].plan_date
+    };
+}
+
+/**
+ * Get daily breakdown for charts
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {string} startDate - ISO date string
+ * @param {string} endDate - ISO date string
+ * @returns {Promise<Array>} Daily capacity records
+ */
+export async function getDailyBreakdown(carrierDot, startDate, endDate) {
+    await verifyCarrierAccess(carrierDot);
+
+    const result = await queryRecords('capacityPlans', {
+        filters: {
+            carrier_dot: carrierDot,
+            plan_date: { gte: startDate, lte: endDate }
+        },
+        sort: [{ field: 'plan_date', direction: 'asc' }]
+    });
+
+    return result.success ? result.items : [];
+}
+
+/**
+ * Generate capacity recommendations using AI logic
+ * @param {number} carrierDot - Carrier DOT number
+ * @returns {Promise<Array>} List of recommendations
+ */
+export async function generateCapacityRecommendations(carrierDot) {
+    const overview = await getCapacityOverview(carrierDot, 'week');
+    if (!overview) return [];
+
+    const recommendations = [];
+
+    if (overview.average_utilization > 85) {
+        recommendations.push({
+            type: 'warning',
+            title: 'High Utilization Alert',
+            message: 'Your fleet utilization is consistently over 85%. Consider hiring 2-3 additional drivers to handle surge loads.',
+            action: 'View Recruiting Dashboard'
+        });
+    }
+
+    if (overview.capacity_gap_days > 2) {
+        recommendations.push({
+            type: 'critical',
+            title: 'Under Capacity',
+            message: 'You missed load commitments on 2 days this week. Consider partnering with owner-operators for overflow.',
+            action: 'Post to Load Board'
+        });
+    }
+
+    if (overview.average_utilization < 60) {
+        recommendations.push({
+            type: 'info',
+            title: 'Low Utilization',
+            message: 'Significant idle capacity detected. Good opportunity for spot market loads this weekend.',
+            action: 'Search Spot Loads'
+        });
+    }
+
+    return recommendations;
+}

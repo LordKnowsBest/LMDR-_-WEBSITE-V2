@@ -1,0 +1,360 @@
+/**
+ * Equipment Service - Fleet Asset Management
+ * Handles trucks, trailers, and their assignments to drivers.
+ *
+ * DUAL-SOURCE SUPPORT: Uses dataAccess.jsw for routing between Wix and Airtable.
+ */
+
+import { currentMember } from 'wix-members-backend';
+import { queryRecords, getRecord, insertRecord, updateRecord, findByField, countRecords, getAllRecords } from 'backend/dataAccess';
+import { verifyCarrierAccess } from 'backend/fleetService';
+
+// ============================================
+// EQUIPMENT MANAGEMENT
+// ============================================
+
+/**
+ * Get all equipment for a carrier with filtering
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {Object} options - Query options
+ * @returns {Promise<Object>} { equipment, totalCount }
+ */
+export async function getEquipmentList(carrierDot, options = {}) {
+    try {
+        await verifyCarrierAccess(carrierDot);
+
+        const {
+            type = 'all',
+            status = 'all',
+            search = '',
+            showUnassigned = false
+        } = options;
+
+        const filters = { carrier_dot: carrierDot };
+
+        if (type && type !== 'all') {
+            filters.asset_type = type;
+        }
+
+        if (status && status !== 'all') {
+            filters.status = status;
+        }
+
+        if (showUnassigned) {
+            filters.current_driver_id = { isEmpty: true };
+        }
+
+        if (search) {
+            filters.unit_number = { contains: search };
+        }
+
+        const result = await queryRecords('equipmentAssets', {
+            filters,
+            sort: [{ field: 'unit_number', direction: 'asc' }]
+        });
+
+        if (!result.success) {
+            throw new Error(result.error || 'Failed to fetch equipment');
+        }
+
+        return {
+            equipment: result.items,
+            totalCount: result.totalCount
+        };
+    } catch (error) {
+        console.error(`[equipmentService] getEquipmentList error for DOT ${carrierDot}:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Get single equipment details with current assignment
+ * @param {string} equipmentId - EquipmentAssets record ID
+ * @returns {Promise<Object>} Full equipment record
+ */
+export async function getEquipmentDetails(equipmentId) {
+    const asset = await getRecord('equipmentAssets', equipmentId);
+    if (!asset) {
+        throw new Error('Equipment not found');
+    }
+
+    await verifyCarrierAccess(asset.carrier_dot);
+
+    // Fetch current driver details if assigned
+    if (asset.current_driver_id) {
+        try {
+            const driver = await getRecord('fleetDrivers', asset.current_driver_id);
+            asset.current_driver = driver;
+        } catch (e) {
+            console.warn('Could not fetch current driver:', e.message);
+        }
+    }
+
+    return asset;
+}
+
+/**
+ * Add new equipment to fleet
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {Object} equipmentData - Equipment information
+ * @returns {Promise<Object>} Created equipment record
+ */
+export async function addEquipment(carrierDot, equipmentData) {
+    await verifyCarrierAccess(carrierDot);
+
+    if (!equipmentData.unit_number || !equipmentData.vin || !equipmentData.asset_type) {
+        throw new Error('Unit Number, VIN, and Asset Type are required');
+    }
+
+    // Check for duplicate unit number
+    const existing = await findByField('equipmentAssets', 'unit_number', equipmentData.unit_number);
+    if (existing && existing.carrier_dot === carrierDot) {
+        throw new Error(`Equipment with unit number ${equipmentData.unit_number} already exists in your fleet`);
+    }
+
+    const newAsset = {
+        ...equipmentData,
+        carrier_dot: carrierDot,
+        status: equipmentData.status || 'active',
+        _createdDate: new Date(),
+        _updatedDate: new Date()
+    };
+
+    const result = await insertRecord('equipmentAssets', newAsset);
+    if (!result.success) {
+        throw new Error(result.error || 'Failed to add equipment to fleet');
+    }
+
+    return result.record;
+}
+
+/**
+ * Update equipment record
+ * @param {string} equipmentId - EquipmentAssets record ID
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<Object>} Updated equipment record
+ */
+export async function updateEquipment(equipmentId, updates) {
+    const asset = await getRecord('equipmentAssets', equipmentId);
+    if (!asset) {
+        throw new Error('Equipment not found');
+    }
+
+    await verifyCarrierAccess(asset.carrier_dot);
+
+    const updatedAsset = {
+        ...asset,
+        ...updates,
+        _updatedDate: new Date()
+    };
+
+    const result = await updateRecord('equipmentAssets', updatedAsset);
+    if (!result.success) {
+        throw new Error(result.error || 'Failed to update equipment');
+    }
+
+    return result.record;
+}
+
+// ============================================
+// ASSIGNMENT MANAGEMENT
+// ============================================
+
+/**
+ * Assign equipment to a driver
+ * @param {string} equipmentId - EquipmentAssets record ID
+ * @param {string} driverId - FleetDrivers record ID
+ * @param {string} type - Assignment type (primary, temporary, slip_seat)
+ * @param {string} reason - Reason for assignment
+ * @returns {Promise<Object>} The assignment record
+ */
+export async function assignEquipment(equipmentId, driverId, type = 'primary', reason = '') {
+    const asset = await getRecord('equipmentAssets', equipmentId);
+    if (!asset) {
+        throw new Error('Equipment not found');
+    }
+
+    await verifyCarrierAccess(asset.carrier_dot);
+
+    const driver = await getRecord('fleetDrivers', driverId);
+    if (!driver) {
+        throw new Error('Driver not found');
+    }
+
+    // 1. If equipment is already assigned, unassign current driver
+    if (asset.current_driver_id) {
+        await unassignEquipment(equipmentId, `Automatic unassign for new assignment to ${driver.name}`);
+    }
+
+    // 2. If driver is already assigned to other primary equipment, handle that?
+    // (Skipping for now, multiple assignments allowed in some fleets)
+
+    // 3. Create new assignment record
+    const assignment = {
+        carrier_dot: asset.carrier_dot,
+        equipment_id: equipmentId,
+        driver_id: driverId,
+        assigned_date: new Date(),
+        assignment_type: type,
+        reason,
+        starting_mileage: asset.current_mileage || 0,
+        _createdDate: new Date()
+    };
+
+    const assignResult = await insertRecord('equipmentAssignments', assignment);
+    if (!assignResult.success) {
+        throw new Error(assignResult.error || 'Failed to create assignment record');
+    }
+
+    // 4. Update equipment with current driver
+    await updateEquipment(equipmentId, {
+        current_driver_id: driverId
+    });
+
+    // 5. Update driver with assigned equipment
+    await updateRecord('fleetDrivers', {
+        ...driver,
+        assigned_equipment_id: equipmentId
+    });
+
+    return assignResult.record;
+}
+
+/**
+ * Unassign equipment from its current driver
+ * @param {string} equipmentId - EquipmentAssets record ID
+ * @param {string} reason - Reason for unassignment
+ * @returns {Promise<boolean>} Success status
+ */
+export async function unassignEquipment(equipmentId, reason = '') {
+    const asset = await getRecord('equipmentAssets', equipmentId);
+    if (!asset || !asset.current_driver_id) {
+        return true; // Already unassigned
+    }
+
+    await verifyCarrierAccess(asset.carrier_dot);
+
+    const driverId = asset.current_driver_id;
+
+    // 1. Find active assignment record
+    const activeAssignments = await queryRecords('equipmentAssignments', {
+        filters: {
+            equipment_id: equipmentId,
+            driver_id: driverId,
+            unassigned_date: { isEmpty: true }
+        },
+        limit: 1
+    });
+
+    if (activeAssignments.success && activeAssignments.items.length > 0) {
+        const assignment = activeAssignments.items[0];
+        await updateRecord('equipmentAssignments', {
+            ...assignment,
+            unassigned_date: new Date(),
+            reason: reason || assignment.reason,
+            ending_mileage: asset.current_mileage || 0
+        });
+    }
+
+    // 2. Update equipment
+    await updateEquipment(equipmentId, {
+        current_driver_id: null
+    });
+
+    // 3. Update driver
+    const driver = await getRecord('fleetDrivers', driverId);
+    if (driver) {
+        await updateRecord('fleetDrivers', {
+            ...driver,
+            assigned_equipment_id: null
+        });
+    }
+
+    return true;
+}
+
+/**
+ * Get assignment history for a specific equipment
+ * @param {string} equipmentId - EquipmentAssets record ID
+ * @returns {Promise<Array>} List of past assignments
+ */
+export async function getAssignmentHistory(equipmentId) {
+    const asset = await getRecord('equipmentAssets', equipmentId);
+    if (!asset) throw new Error('Equipment not found');
+    
+    await verifyCarrierAccess(asset.carrier_dot);
+
+    const result = await queryRecords('equipmentAssignments', {
+        filters: { equipment_id: equipmentId },
+        sort: [{ field: 'assigned_date', direction: 'desc' }]
+    });
+
+    if (!result.success) return [];
+
+    // Enrich with driver names
+    const enriched = await Promise.all(result.items.map(async (a) => {
+        try {
+            const driver = await getRecord('fleetDrivers', a.driver_id);
+            return { ...a, driver_name: driver?.name || 'Unknown Driver' };
+        } catch (e) {
+            return { ...a, driver_name: 'Unknown Driver' };
+        }
+    }));
+
+    return enriched;
+}
+
+/**
+ * Get equipment assignment history for a driver
+ * @param {string} driverId - FleetDrivers record ID
+ * @returns {Promise<Array>} List of past assignments
+ */
+export async function getDriverAssignmentHistory(driverId) {
+    const driver = await getRecord('fleetDrivers', driverId);
+    if (!driver) throw new Error('Driver not found');
+
+    await verifyCarrierAccess(driver.carrier_dot);
+
+    const result = await queryRecords('equipmentAssignments', {
+        filters: { driver_id: driverId },
+        sort: [{ field: 'assigned_date', direction: 'desc' }]
+    });
+
+    if (!result.success) return [];
+
+    // Enrich with unit numbers
+    const enriched = await Promise.all(result.items.map(async (a) => {
+        try {
+            const asset = await getRecord('equipmentAssets', a.equipment_id);
+            return { ...a, unit_number: asset?.unit_number || 'Unknown Unit' };
+        } catch (e) {
+            return { ...a, unit_number: 'Unknown Unit' };
+        }
+    }));
+
+    return enriched;
+}
+
+/**
+ * Get equipment due for maintenance
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {number} daysAhead - Days to look ahead
+ * @returns {Promise<Array>} List of equipment due for service
+ */
+export async function getMaintenanceDue(carrierDot, daysAhead = 30) {
+    await verifyCarrierAccess(carrierDot);
+
+    const now = new Date();
+    const futureDate = new Date();
+    futureDate.setDate(now.getDate() + daysAhead);
+
+    const result = await queryRecords('equipmentAssets', {
+        filters: {
+            carrier_dot: carrierDot,
+            'next_service_due.date': { lte: futureDate }
+            // Note: complex object filtering might need custom handling depending on dataAccess
+        }
+    });
+
+    return result.success ? result.items : [];
+}

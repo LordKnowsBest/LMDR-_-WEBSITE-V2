@@ -1,0 +1,171 @@
+/**
+ * ELD Integration Service - Real-Time Telematics
+ * Handles connections to ELD providers (Motive, Samsara) and synchronizes location/HOS data.
+ *
+ * DUAL-SOURCE SUPPORT: Uses dataAccess.jsw for routing between Wix and Airtable.
+ */
+
+import { queryRecords, getRecord, insertRecord, updateRecord, findByField, deleteRecord } from 'backend/dataAccess';
+import { verifyCarrierAccess } from 'backend/fleetService';
+
+// ============================================
+// PROVIDER CONNECTIONS
+// ============================================
+
+/**
+ * Connect carrier to an ELD provider
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {string} provider - 'motive', 'samsara', 'omnitracs'
+ * @param {Object} credentials - API keys/tokens
+ * @returns {Promise<Object>} Connection record
+ */
+export async function connectELDProvider(carrierDot, provider, credentials) {
+    await verifyCarrierAccess(carrierDot);
+
+    // 1. Validate provider
+    const validProviders = ['motive', 'samsara', 'omnitracs', 'gps_trackit'];
+    if (!validProviders.includes(provider)) {
+        throw new Error('Unsupported ELD provider');
+    }
+
+    // 2. Check if already connected
+    const existing = await queryRecords('eldConnections', {
+        filters: { carrier_dot: carrierDot, provider: provider }
+    });
+
+    const connectionData = {
+        carrier_dot: carrierDot,
+        provider,
+        api_key: credentials.apiKey, // In production, this should be encrypted
+        account_id: credentials.accountId,
+        is_active: true,
+        last_sync: null,
+        _updatedDate: new Date()
+    };
+
+    if (existing.success && existing.items.length > 0) {
+        return await updateRecord('eldConnections', {
+            ...existing.items[0],
+            ...connectionData
+        });
+    }
+
+    return await insertRecord('eldConnections', {
+        ...connectionData,
+        _createdDate: new Date()
+    });
+}
+
+/**
+ * Disconnect ELD provider
+ * @param {number} carrierDot - Carrier DOT number
+ * @param {string} provider - Provider name
+ */
+export async function disconnectELDProvider(carrierDot, provider) {
+    await verifyCarrierAccess(carrierDot);
+
+    const existing = await queryRecords('eldConnections', {
+        filters: { carrier_dot: carrierDot, provider: provider }
+    });
+
+    if (existing.success && existing.items.length > 0) {
+        await deleteRecord('eldConnections', existing.items[0]._id);
+    }
+
+    return { success: true };
+}
+
+// ============================================
+// DATA SYNCHRONIZATION
+// ============================================
+
+/**
+ * Sync driver locations from ELD (Scheduled Job logic)
+ * @param {number} carrierDot - Carrier DOT number
+ */
+export async function syncDriverLocations(carrierDot) {
+    // 1. Get connection
+    const connections = await queryRecords('eldConnections', {
+        filters: { carrier_dot: carrierDot, is_active: true }
+    });
+
+    if (!connections.success || connections.items.length === 0) return;
+
+    for (const conn of connections.items) {
+        // 2. Fetch data from provider API (Placeholder for actual API calls)
+        // const rawData = await fetchFromProvider(conn);
+        
+        // 3. Mock data for demonstration
+        const drivers = await queryRecords('fleetDrivers', { filters: { carrier_dot: carrierDot } });
+        
+        const locations = drivers.items.map(d => ({
+            carrier_dot: carrierDot,
+            driver_id: d._id,
+            latitude: 33.7490 + (Math.random() - 0.5),
+            longitude: -84.3880 + (Math.random() - 0.5),
+            heading: Math.floor(Math.random() * 360),
+            speed_mph: 60 + Math.floor(Math.random() * 15),
+            location_city: 'Atlanta',
+            location_state: 'GA',
+            timestamp: new Date(),
+            source: conn.provider,
+            hos_status: 'driving',
+            hos_remaining: 360 + Math.floor(Math.random() * 100),
+            _createdDate: new Date()
+        }));
+
+        // 4. Update DriverLocations (keep only latest per driver)
+        for (const loc of locations) {
+            // Find existing latest location for this driver
+            const latest = await findByField('driverLocations', 'driver_id', loc.driver_id);
+            if (latest) {
+                await updateRecord('driverLocations', { ...latest, ...loc });
+            } else {
+                await insertRecord('driverLocations', loc);
+            }
+        }
+
+        // 5. Update connection last_sync
+        await updateRecord('eldConnections', { ...conn, last_sync: new Date() });
+    }
+}
+
+// ============================================
+// FRONTEND API
+// ============================================
+
+/**
+ * Get all driver locations for map
+ * @param {number} carrierDot - Carrier DOT number
+ * @returns {Promise<Array>} Current locations
+ */
+export async function getFleetLocations(carrierDot) {
+    await verifyCarrierAccess(carrierDot);
+
+    const result = await queryRecords('driverLocations', {
+        filters: { carrier_dot: carrierDot }
+    });
+
+    return result.success ? result.items : [];
+}
+
+/**
+ * Get HOS status for all drivers
+ * @param {number} carrierDot - Carrier DOT number
+ * @returns {Promise<Array>} HOS records
+ */
+export async function getFleetHOSStatus(carrierDot) {
+    await verifyCarrierAccess(carrierDot);
+
+    const result = await queryRecords('driverLocations', {
+        filters: { carrier_dot: carrierDot }
+    });
+
+    if (!result.success) return [];
+
+    return result.items.map(l => ({
+        driver_id: l.driver_id,
+        status: l.hos_status,
+        remaining_minutes: l.hos_remaining
+    }));
+}
