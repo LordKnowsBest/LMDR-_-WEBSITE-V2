@@ -136,7 +136,7 @@
         let editingSequenceId = null;
         let steps = [];
 
-        const VALID_ACTIONS = ['init','sequencesLoaded','sequenceLoaded','throttleStatus','sequenceSaved','stepSaved','actionSuccess','actionError'];
+        const VALID_ACTIONS = ['init','sequencesLoaded','sequenceLoaded','throttleStatus','sequenceSaved','stepSaved','actionSuccess','actionError','emailContentGenerated','smsContentGenerated','callScriptGenerated','draftSaved','draftApproved','draftsLoaded'];
         function isValidMessage(d){return d&&typeof d==='object'&&typeof d.action==='string'&&VALID_ACTIONS.includes(d.action)}
         function sendToVelo(msg){window.parent.postMessage(msg,'*')}
 
@@ -148,6 +148,12 @@
                 case 'sequenceLoaded':openBuilder(d.payload);break;
                 case 'throttleStatus':renderThrottle(d.payload);break;
                 case 'sequenceSaved':showToast('Sequence saved','success');closeBuilder();refreshOutreach();break;
+                case 'emailContentGenerated':handleAIContent(d.payload,'email');break;
+                case 'smsContentGenerated':handleAIContent(d.payload,'sms');break;
+                case 'callScriptGenerated':handleAIContent(d.payload,'call');break;
+                case 'draftSaved':showToast('Draft saved for review','success');break;
+                case 'draftApproved':showToast('Draft approved','success');break;
+                case 'draftsLoaded':renderPendingDrafts(d.payload);break;
                 case 'actionSuccess':showToast(d.message||'Done','success');break;
                 case 'actionError':showToast(d.message||'Error','error');break;
             }
@@ -199,21 +205,87 @@
         function closeBuilder(){document.getElementById('sequenceBuilder').classList.add('hidden');editingSequenceId=null;steps=[];}
 
         function addStep(){
-            steps.push({step_type:'email',subject:'',template:'',delay_hours:24,step_order:steps.length+1});
+            steps.push({step_type:'email',subject:'',template:'',delay_hours:24,step_order:steps.length+1,ai_generated:false,purpose:'follow_up'});
             renderSteps();
+        }
+
+        // AI Content Generation
+        let currentAIStepIndex = null;
+        let aiPreviewContent = null;
+
+        function generateAIContent(stepIndex){
+            currentAIStepIndex = stepIndex;
+            const step = steps[stepIndex];
+            const accountId = currentAccountId || '';
+            const contactId = currentContactId || '';
+            if(!accountId){showToast('Select an account first','error');return;}
+            showToast('Generating AI content...','info');
+            switch(step.step_type){
+                case 'email':
+                    sendToVelo({action:'generateEmailContent',accountId,contactId,purpose:step.purpose||'follow_up',sequenceStepId:step._id||step.id||''});
+                    break;
+                case 'sms':
+                    sendToVelo({action:'generateSmsContent',accountId,contactId,purpose:step.purpose||'follow_up',sequenceStepId:step._id||step.id||''});
+                    break;
+                case 'call':
+                    sendToVelo({action:'generateCallScript',accountId,contactId,purpose:step.purpose||'intro',sequenceStepId:step._id||step.id||''});
+                    break;
+                default:
+                    showToast('AI generation not supported for this step type','error');
+            }
+        }
+
+        function handleAIContent(payload, channel){
+            if(currentAIStepIndex === null) return;
+            const content = payload.content;
+            aiPreviewContent = content;
+            if(channel === 'email'){
+                steps[currentAIStepIndex].subject = content.subject || '';
+                steps[currentAIStepIndex].template = content.body || '';
+            } else if(channel === 'sms'){
+                steps[currentAIStepIndex].template = content.message || '';
+            } else if(channel === 'call'){
+                const script = [content.opening||'', '', 'Value Props:', ...(content.valueProps||[]).map(v=>'• '+v), '', 'Questions:', ...(content.questions||[]).map(q=>'• '+q), '', 'Closing:', content.closing||''].join('\n');
+                steps[currentAIStepIndex].template = script;
+            }
+            steps[currentAIStepIndex].ai_generated = true;
+            renderSteps();
+            showToast(payload.cached ? 'AI content loaded (cached)' : 'AI content generated', 'success');
+            if(payload.fallback) showToast('Used fallback template (AI unavailable)','info');
+            currentAIStepIndex = null;
+        }
+
+        function toggleAIGenerated(stepIndex){
+            steps[stepIndex].ai_generated = !steps[stepIndex].ai_generated;
+            renderSteps();
+        }
+
+        function renderPendingDrafts(drafts){
+            // Could render a drafts panel - for now just log
+            console.log('Pending drafts:', drafts);
+        }
+
+        // Track current account/contact for AI generation context
+        let currentAccountId = null;
+        let currentContactId = null;
+
+        function setContextForAI(accountId, contactId){
+            currentAccountId = accountId;
+            currentContactId = contactId;
         }
 
         function renderSteps(){
             const c=document.getElementById('stepList');
             if(steps.length===0){c.innerHTML='<p class="text-xs text-slate-600 text-center py-4">No steps yet. Add a step to get started.</p>';return;}
             const typeIcons={email:'mail',sms:'sms',call:'call',wait:'hourglass_empty',task:'task_alt'};
+            const canGenerateAI = ['email','sms','call'];
             c.innerHTML=steps.map((s,i)=>`
                 <div class="bg-slate-800 rounded-lg p-3 flex items-start gap-3">
-                    <div class="flex-shrink-0 w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center">
-                        <span class="material-symbols-outlined text-[16px] text-slate-300">${typeIcons[s.step_type]||'circle'}</span>
+                    <div class="flex-shrink-0 w-8 h-8 rounded-full ${s.ai_generated?'bg-cyan-600/30':'bg-slate-700'} flex items-center justify-center">
+                        <span class="material-symbols-outlined text-[16px] ${s.ai_generated?'text-cyan-400':'text-slate-300'}">${s.ai_generated?'auto_awesome':typeIcons[s.step_type]||'circle'}</span>
                     </div>
                     <div class="flex-1 space-y-2">
-                        <div class="flex gap-2">
+                        <div class="flex flex-wrap gap-2 items-center">
                             <select onchange="steps[${i}].step_type=this.value;renderSteps()" class="bg-slate-700 border border-slate-600 rounded text-xs px-2 py-1 text-white">
                                 <option value="email" ${s.step_type==='email'?'selected':''}>Email</option>
                                 <option value="sms" ${s.step_type==='sms'?'selected':''}>SMS</option>
@@ -221,11 +293,28 @@
                                 <option value="wait" ${s.step_type==='wait'?'selected':''}>Wait</option>
                                 <option value="task" ${s.step_type==='task'?'selected':''}>Task</option>
                             </select>
-                            <input type="number" value="${s.delay_hours}" onchange="steps[${i}].delay_hours=parseInt(this.value)" class="w-20 bg-slate-700 border border-slate-600 rounded text-xs px-2 py-1 text-white" placeholder="Delay (hrs)" />
-                            <span class="text-xs text-slate-500 self-center">hrs delay</span>
+                            <select onchange="steps[${i}].purpose=this.value" class="bg-slate-700 border border-slate-600 rounded text-xs px-2 py-1 text-white">
+                                <option value="intro" ${s.purpose==='intro'?'selected':''}>Intro</option>
+                                <option value="follow_up" ${s.purpose==='follow_up'||!s.purpose?'selected':''}>Follow-up</option>
+                                <option value="proposal" ${s.purpose==='proposal'?'selected':''}>Proposal</option>
+                                <option value="check_in" ${s.purpose==='check_in'?'selected':''}>Check-in</option>
+                                <option value="discovery" ${s.purpose==='discovery'?'selected':''}>Discovery</option>
+                                <option value="close" ${s.purpose==='close'?'selected':''}>Close</option>
+                            </select>
+                            <input type="number" value="${s.delay_hours}" onchange="steps[${i}].delay_hours=parseInt(this.value)" class="w-16 bg-slate-700 border border-slate-600 rounded text-xs px-2 py-1 text-white" placeholder="Delay" />
+                            <span class="text-xs text-slate-500">hrs</span>
+                            ${canGenerateAI.includes(s.step_type)?`
+                                <button onclick="toggleAIGenerated(${i})" class="text-xs px-2 py-1 rounded ${s.ai_generated?'bg-cyan-600/20 text-cyan-400 border border-cyan-600/50':'bg-slate-700 text-slate-400 border border-slate-600'}" title="Toggle AI generation at send time">
+                                    <span class="material-symbols-outlined text-[12px] align-middle">auto_awesome</span> AI ${s.ai_generated?'On':'Off'}
+                                </button>
+                                <button onclick="generateAIContent(${i})" class="text-xs px-2 py-1 rounded bg-blue-600/20 text-blue-400 border border-blue-600/50 hover:bg-blue-600/30" title="Generate AI content now">
+                                    <span class="material-symbols-outlined text-[12px] align-middle">edit_note</span> Generate
+                                </button>
+                            `:''}
                         </div>
                         ${s.step_type==='email'?`<input type="text" value="${esc(s.subject||'')}" onchange="steps[${i}].subject=this.value" class="w-full bg-slate-700 border border-slate-600 rounded text-xs px-2 py-1 text-white" placeholder="Subject line..." />`:''}
-                        <textarea onchange="steps[${i}].template=this.value" class="w-full bg-slate-700 border border-slate-600 rounded text-xs px-2 py-1 text-white h-16 resize-none" placeholder="Message template (use {{variables}})...">${esc(s.template||'')}</textarea>
+                        <textarea onchange="steps[${i}].template=this.value" class="w-full bg-slate-700 border border-slate-600 rounded text-xs px-2 py-1 text-white h-20 resize-none scrollbar-thin" placeholder="${s.ai_generated?'AI will generate content at send time...':'Message template (use {{variables}})...'}">${esc(s.template||'')}</textarea>
+                        ${s.ai_generated?`<p class="text-[10px] text-cyan-500"><span class="material-symbols-outlined text-[10px] align-middle">info</span> AI-generated content will be personalized for each contact at send time</p>`:''}
                     </div>
                     <button onclick="steps.splice(${i},1);renderSteps()" class="text-slate-500 hover:text-red-400"><span class="material-symbols-outlined text-[18px]">close</span></button>
                 </div>

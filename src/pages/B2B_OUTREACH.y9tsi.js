@@ -1,162 +1,102 @@
-/**
- * B2B_OUTREACH Page Code
- * Bridges B2B_OUTREACH.html with b2bSequenceService.
- *
- * HTML sends (action key): getSequences, getSequence, getThrottleStatus, saveSequence
- * HTML expects: sequencesLoaded, sequenceLoaded, throttleStatus, sequenceSaved,
- *   actionSuccess, actionError
- */
+// ============================================================================
+// B2B OUTREACH PAGE - Sequence builder and outreach workspace
+//
+// Connects to B2B_OUTREACH.html iframe via PostMessage bridge.
+// Routes actions through b2bBridgeService for sequence management,
+// throttle checking, and AI content generation.
+// ============================================================================
 
-import {
-    listSequences,
-    getSequence,
-    createSequence,
-    updateSequence,
-    addStep,
-    checkThrottleLimits,
-    isQuietHours
-} from 'backend/b2bSequenceService';
+import { handleB2BAction } from 'backend/b2bBridgeService';
 
-const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
+// HTML component IDs to try
+const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#htmlEmbed1', '#b2bOutreach'];
 
-function safeSend(component, data) {
-    try {
-        component.postMessage(data);
-    } catch (err) {
-        console.error('B2B_OUTREACH: safeSend failed:', err);
-    }
-}
+// Message types this page handles
+const MESSAGE_REGISTRY = {
+  // Inbound from HTML
+  inbound: [
+    'getSequences', 'getSequence', 'saveSequence', 'addStep',
+    'getThrottleStatus',
+    'generateEmailContent', 'generateSmsContent', 'generateCallScript',
+    'saveDraft', 'approveDraft', 'getPendingDrafts'
+  ],
+  // Outbound to HTML
+  outbound: [
+    'init', 'sequencesLoaded', 'sequenceLoaded', 'sequenceSaved', 'stepAdded',
+    'throttleStatus', 'throttleLoaded',
+    'emailContentGenerated', 'smsContentGenerated', 'callScriptGenerated',
+    'draftSaved', 'draftApproved', 'draftsLoaded',
+    'actionSuccess', 'actionError'
+  ]
+};
+
+let htmlComponent = null;
 
 $w.onReady(function () {
-    const component = findHtmlComponent();
-    if (!component) {
-        console.warn('B2B_OUTREACH: No HTML component found');
-        return;
+  // Find the HTML component
+  for (const id of HTML_COMPONENT_IDS) {
+    try {
+      const el = $w(id);
+      if (el && typeof el.onMessage === 'function') {
+        htmlComponent = el;
+        break;
+      }
+    } catch (e) {
+      // Element doesn't exist on this page
     }
+  }
 
-    component.onMessage(async (event) => {
-        const msg = event && event.data;
-        if (!msg || !msg.action) return;
-        await routeMessage(component, msg);
-    });
+  if (!htmlComponent) {
+    console.warn('[B2B Outreach] No HTML component found');
+    return;
+  }
 
-    safeSend(component, { action: 'init' });
+  // Set up message listener
+  htmlComponent.onMessage(async (event) => {
+    const data = event?.data;
+    if (!data || !data.action) return;
+
+    await routeMessage(data);
+  });
+
+  // Send init signal
+  safeSend({ action: 'init' });
 });
 
-function findHtmlComponent() {
-    for (const id of HTML_COMPONENT_IDS) {
-        try {
-            const el = $w(id);
-            if (el && typeof el.onMessage === 'function') {
-                return el;
-            }
-        } catch (e) {
-            // Element not present
-        }
+/**
+ * Route incoming messages to the bridge service
+ */
+async function routeMessage(message) {
+  const { action, ...params } = message;
+
+  if (!MESSAGE_REGISTRY.inbound.includes(action)) {
+    console.warn(`[B2B Outreach] Unknown action: ${action}`);
+    return;
+  }
+
+  try {
+    const response = await handleB2BAction(action, params);
+    safeSend(response);
+
+    // Special handling for throttle status - rename action for HTML compatibility
+    if (action === 'getThrottleStatus' && response.action === 'throttleLoaded') {
+      safeSend({ action: 'throttleStatus', payload: response.payload });
     }
-    return null;
+  } catch (error) {
+    console.error(`[B2B Outreach] Error handling ${action}:`, error);
+    safeSend({ action: 'actionError', message: error.message || 'Action failed' });
+  }
 }
 
-async function routeMessage(component, msg) {
-    switch (msg.action) {
-        case 'getSequences':
-            await handleGetSequences(component, msg);
-            break;
-        case 'getSequence':
-            await handleGetSequence(component, msg);
-            break;
-        case 'getThrottleStatus':
-            await handleGetThrottleStatus(component);
-            break;
-        case 'saveSequence':
-            await handleSaveSequence(component, msg);
-            break;
-        default:
-            console.warn('B2B_OUTREACH: Unknown action:', msg.action);
+/**
+ * Safely send a message to the HTML component
+ */
+function safeSend(message) {
+  try {
+    if (htmlComponent && htmlComponent.postMessage) {
+      htmlComponent.postMessage(message);
     }
-}
-
-async function handleGetSequences(component, msg) {
-    try {
-        const filters = {};
-        if (msg.status) filters.status = msg.status;
-        const sequences = await listSequences(filters);
-        safeSend(component, { action: 'sequencesLoaded', payload: sequences });
-    } catch (error) {
-        console.error('B2B_OUTREACH: getSequences error:', error);
-        safeSend(component, { action: 'actionError', message: 'Failed to load sequences.' });
-    }
-}
-
-async function handleGetSequence(component, msg) {
-    try {
-        if (!msg.sequenceId) {
-            safeSend(component, { action: 'actionError', message: 'Sequence ID required.' });
-            return;
-        }
-        const result = await getSequence(msg.sequenceId);
-        safeSend(component, { action: 'sequenceLoaded', payload: result });
-    } catch (error) {
-        console.error('B2B_OUTREACH: getSequence error:', error);
-        safeSend(component, { action: 'actionError', message: 'Failed to load sequence.' });
-    }
-}
-
-async function handleGetThrottleStatus(component) {
-    try {
-        const [email, sms, call] = await Promise.all([
-            checkThrottleLimits('email'),
-            checkThrottleLimits('sms'),
-            checkThrottleLimits('call')
-        ]);
-        const quietHours = isQuietHours();
-
-        safeSend(component, {
-            action: 'throttleStatus',
-            payload: { email, sms, call, quietHours }
-        });
-    } catch (error) {
-        console.error('B2B_OUTREACH: getThrottleStatus error:', error);
-        // Non-critical, don't send error to HTML
-    }
-}
-
-async function handleSaveSequence(component, msg) {
-    try {
-        const { sequenceId, name, channels, steps } = msg;
-        if (!name) {
-            safeSend(component, { action: 'actionError', message: 'Sequence name required.' });
-            return;
-        }
-
-        const channelMix = (channels || []).join(',');
-        let savedId;
-
-        if (sequenceId) {
-            await updateSequence(sequenceId, { name, channel_mix: channelMix });
-            savedId = sequenceId;
-        } else {
-            const created = await createSequence({ name, channel_mix: channelMix });
-            savedId = created._id || created.id;
-        }
-
-        // Save steps
-        if (Array.isArray(steps)) {
-            for (const step of steps) {
-                await addStep({
-                    sequence_id: savedId,
-                    step_type: step.step_type || 'email',
-                    subject: step.subject || '',
-                    template: step.template || '',
-                    delay_hours: step.delay_hours || 24,
-                    step_order: step.step_order || 1
-                });
-            }
-        }
-
-        safeSend(component, { action: 'sequenceSaved' });
-    } catch (error) {
-        console.error('B2B_OUTREACH: saveSequence error:', error);
-        safeSend(component, { action: 'actionError', message: 'Failed to save sequence.' });
-    }
+  } catch (e) {
+    console.warn('[B2B Outreach] Failed to send message:', e);
+  }
 }

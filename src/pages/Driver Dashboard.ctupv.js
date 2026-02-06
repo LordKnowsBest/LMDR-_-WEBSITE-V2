@@ -48,6 +48,8 @@ const MESSAGE_REGISTRY = {
         'setDiscoverability',    // Phase 3: Privacy toggle
         'navigateToMyCareer',    // Career nav
         'navigateToProfile',     // Profile nav
+        'navigateToForums',      // Forums nav
+        'navigateToHealth',      // Health nav
         'ping'
     ],
     // Messages TO HTML that page code sends
@@ -242,6 +244,14 @@ async function handleHtmlMessage(msg) {
 
             case 'navigateToMyCareer':
                 wixLocation.to('/driver-my-career');
+                break;
+
+            case 'navigateToForums':
+                wixLocation.to('/driver-community');
+                break;
+
+            case 'navigateToHealth':
+                wixLocation.to('/health-wellness');
                 break;
 
             default:

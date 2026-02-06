@@ -1,6 +1,7 @@
 import * as dataAccess from 'backend/dataAccess';
 import { logEmail, logSms, logCall } from 'backend/b2bActivityService';
 import { validateConsent, checkQuietHours, isDoNotContact } from 'backend/b2bSecurityService';
+import { generateEmailContent, generateSmsContent, generateCallScript } from 'backend/b2bContentAIService';
 
 // Collection keys for dataAccess
 const COLLECTIONS = {
@@ -84,9 +85,150 @@ export async function updateStep(stepId, updates) {
 }
 
 // ============================================================================
-// OUTREACH TRACKING
+// TEMPLATE RENDERING WITH AI SUPPORT
 // ============================================================================
 
+/**
+ * Render a template with variable substitution
+ * Supports {{carrier_name}}, {{match_count}}, {{top_regions}}, {{contact_name}}, etc.
+ *
+ * @param {string} template - Template string with {{variable}} placeholders
+ * @param {Object} variables - Key-value pairs for substitution
+ * @returns {string} Rendered template
+ */
+export function renderTemplate(template, variables = {}) {
+  if (!template) return '';
+
+  let rendered = template;
+  Object.entries(variables).forEach(([key, value]) => {
+    const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
+    rendered = rendered.replace(regex, String(value || ''));
+  });
+
+  // Clean up any remaining unresolved variables
+  rendered = rendered.replace(/\{\{[^}]+\}\}/g, '');
+
+  return rendered;
+}
+
+/**
+ * Render a sequence step with AI generation support.
+ * If step has ai_generated=true, content is generated at render time using LLM.
+ * Falls back to static template rendering on AI failure.
+ *
+ * @param {Object} step - Sequence step with template, step_type, ai_generated flag
+ * @param {Object} context - Context for rendering (accountId, contactId, variables)
+ * @returns {Promise<{success: boolean, content?: Object, aiGenerated?: boolean, error?: string}>}
+ */
+export async function renderStepContent(step, context = {}) {
+  try {
+    const { accountId, contactId, variables = {} } = context;
+    const stepType = step.step_type || 'email';
+    const aiGenerated = step.ai_generated === true || step.ai_generated === 'true';
+
+    // If AI generation is enabled, call the content AI service
+    if (aiGenerated && accountId) {
+      const purpose = step.purpose || 'follow_up';
+      const sequenceStepId = step._id || step.id;
+
+      let result;
+      switch (stepType) {
+        case 'email':
+          result = await generateEmailContent({
+            accountId,
+            contactId,
+            purpose,
+            sequenceStepId
+          });
+          if (result.success) {
+            return {
+              success: true,
+              content: {
+                subject: result.content.subject,
+                body: result.content.body
+              },
+              aiGenerated: true,
+              cached: result.cached
+            };
+          }
+          break;
+
+        case 'sms':
+          result = await generateSmsContent({
+            accountId,
+            contactId,
+            purpose,
+            sequenceStepId
+          });
+          if (result.success) {
+            return {
+              success: true,
+              content: {
+                message: result.content.message,
+                charCount: result.content.charCount
+              },
+              aiGenerated: true,
+              cached: result.cached
+            };
+          }
+          break;
+
+        case 'call':
+          result = await generateCallScript({
+            accountId,
+            contactId,
+            purpose,
+            sequenceStepId
+          });
+          if (result.success) {
+            return {
+              success: true,
+              content: result.content,
+              aiGenerated: true,
+              cached: result.cached
+            };
+          }
+          break;
+      }
+
+      // AI generation failed, fall through to template rendering
+      console.warn(`AI content generation failed for step ${stepType}, falling back to template`);
+    }
+
+    // Static template rendering (fallback or non-AI steps)
+    const renderedTemplate = renderTemplate(step.template || '', variables);
+    const renderedSubject = renderTemplate(step.subject || '', variables);
+
+    return {
+      success: true,
+      content: {
+        subject: renderedSubject,
+        body: renderedTemplate,
+        message: renderedTemplate // For SMS
+      },
+      aiGenerated: false
+    };
+  } catch (error) {
+    console.error('Error rendering step content:', error);
+    return { success: false, error: error.message || 'Failed to render step content' };
+  }
+}
+
+// ============================================================================
+// OUTREACH TRACKING (EMAIL, SMS, CALLS)
+// ============================================================================
+
+/**
+ * Record an email send
+ *
+ * @param {Object} emailData
+ * @param {string} emailData.account_id
+ * @param {string} emailData.contact_id
+ * @param {string} emailData.subject
+ * @param {string} [emailData.sequence_id]
+ * @param {string} [emailData.step_id]
+ * @returns {Promise<{success: boolean, email?: Object, error?: string}>}
+ */
 export async function recordEmail(emailData) {
   try {
     if (!emailData.account_id || !emailData.contact_id) return { success: false, error: 'Missing fields' };
@@ -170,10 +312,4 @@ export async function checkThrottleLimits(channel) {
 export function isQuietHours() {
   const hour = new Date().getUTCHours();
   return hour >= 21 || hour < 8;
-}
-
-export function renderTemplate(template, variables = {}) {
-  let rendered = template || '';
-  Object.entries(variables).forEach(([k, v]) => { rendered = rendered.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v || '')); });
-  return rendered.replace(/\{\{[^}]+\}\}/g, '');
 }

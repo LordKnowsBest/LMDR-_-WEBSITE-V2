@@ -227,7 +227,7 @@ A curated content hub for driver wellness with community-contributed tips.
 - [x] Task: Create "Submit Tip" modal with category selector
 - [x] Task: Add character counter for tip text (500 max)
 - [x] Task: Show submission status badge (pending/approved)
-- [ ] Task: Display author reputation badges on tips
+- [x] Task: Display author reputation badges on tips
 
 ### 3.6 Content Management
 - [x] Task: Create `ADMIN_HEALTH_CONTENT.html` for content management
@@ -238,10 +238,10 @@ A curated content hub for driver wellness with community-contributed tips.
 - [ ] Task: Create content scheduling (publish date)
 
 ### 3.7 Wix Integration
-- [ ] Task: Create "Health & Wellness" page in Wix Editor
+- [x] Task: Create "Health & Wellness" page in Wix Editor
 - [x] Task: Add HTML component and connect to HEALTH_WELLNESS.html
 - [x] Task: Set up postMessage bridge for backend calls
-- [ ] Task: Add page to driver dashboard navigation
+- [x] Task: Add page to driver dashboard navigation
 - [x] Task: Award reputation points for approved tips
 - [x] Task: Track resource views in analytics
 
@@ -250,9 +250,9 @@ A curated content hub for driver wellness with community-contributed tips.
 - [x] Task: Test category filtering and pagination
 - [x] Task: Test tip submission and moderation flow
 - [x] Task: Test helpful count increment with duplicate prevention
-- [ ] Task: Manual test: browse all categories and view articles
-- [ ] Task: Manual test: submit and moderate community tip
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Health Resources'
+- [x] Task: Manual test: browse all categories and view articles
+- [x] Task: Manual test: submit and moderate community tip
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Health Resources'
 
 ---
 

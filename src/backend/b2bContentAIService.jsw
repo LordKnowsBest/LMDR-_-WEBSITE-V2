@@ -1,0 +1,1065 @@
+// ============================================================================
+// B2B CONTENT AI SERVICE - LLM-powered personalized outreach content
+//
+// Generates personalized email, SMS, and call script content using Claude API.
+// Replaces static {{variable}} templates with AI-generated content based on
+// match signals, research briefs, contact role, and account context.
+//
+// Features:
+// - generateEmailContent() - Personalized subject + body for emails
+// - generateSmsContent() - Concise SMS messages (under 160 chars)
+// - generateCallScript() - Call scripts with objection handling
+// - Content caching per contact+step to avoid regeneration
+// - Human-in-the-loop approval mode (draft → review → send)
+// - Automatic fallback to static templates on LLM failure
+//
+// DUAL-SOURCE SUPPORT: Routes through Airtable via config.jsw
+//
+// Used on: B2B Outreach Workspace, Account Detail, Sequence Execution
+// @see Conductor/tracks/b2b_business_development_suite_20260128/plan.md Phase 10
+// ============================================================================
+
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
+import * as airtable from 'backend/airtableClient';
+import { logAIOperation, startTrace, endTrace } from 'backend/observabilityService';
+import { getSignalByCarrier } from 'backend/b2bMatchSignalService';
+import { getBrief } from 'backend/b2bResearchAgentService';
+import { getAccount, getContactsByAccount } from 'backend/b2bAccountService';
+import { getAccountTimeline } from 'backend/b2bActivityService';
+
+// ============================================================================
+// COLLECTION KEYS
+// ============================================================================
+
+const COLLECTIONS = {
+  contentCache: 'b2bContentCache',
+  contentDrafts: 'b2bContentDrafts'
+};
+
+// ============================================================================
+// LLM CONFIG
+// ============================================================================
+
+const LLM_CONFIG = {
+  claudeModel: 'claude-sonnet-4-20250514',
+  claudeSecret: 'CLAUDE_API_KEY',
+  claudeEndpoint: 'https://api.anthropic.com/v1/messages',
+  timeoutMs: 25000,
+  maxTokens: {
+    email: 800,
+    sms: 100,
+    callScript: 1200
+  }
+};
+
+// ============================================================================
+// CONTENT CACHE TTL (hours)
+// ============================================================================
+
+const CACHE_TTL_HOURS = 24;
+
+// ============================================================================
+// BRAND VOICE GUIDELINES
+// ============================================================================
+
+const BRAND_VOICE = {
+  core: `You write for VelocityMatch (B2B brand of LMDR). Voice: professional, direct, value-focused. No fluff. No false claims. Be helpful and human.`,
+  compliance: `RULES:
+1. Never make guarantees about driver quality, hiring speed, or outcomes.
+2. Email must include opt-out language: "Reply STOP to unsubscribe."
+3. SMS must be under 160 characters including any required opt-out.
+4. No mention of competitors by name.
+5. No exaggerated claims (e.g., "best drivers", "guaranteed results").`,
+  segmentTone: {
+    enterprise: 'Executive, ROI-focused. Data and metrics first. Respect their time.',
+    mid_market: 'Professional, efficiency-focused. Emphasize scalability and support.',
+    regional: 'Relationship-focused, practical. Emphasize local knowledge and responsiveness.',
+    owner_operator: 'Direct, simple, action-oriented. Speed and ease matter most.'
+  }
+};
+
+// ============================================================================
+// DUAL-SOURCE HELPERS
+// ============================================================================
+
+async function queryData(collectionKey, options = {}) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.queryRecords(tableName, {
+      filterByFormula: options.filter || '',
+      sort: options.sort,
+      maxRecords: options.limit || 100
+    });
+    return { items: result.records || [], totalCount: result.records?.length || 0 };
+  }
+  let query = wixData.query(collectionKey);
+  if (options.limit) query = query.limit(options.limit);
+  return await query.find();
+}
+
+async function insertData(collectionKey, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.createRecord(tableName, record);
+    return result.record || record;
+  }
+  return await wixData.insert(collectionKey, record);
+}
+
+async function updateData(collectionKey, recordId, record) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    const result = await airtable.updateRecord(tableName, recordId, record);
+    return result.record || record;
+  }
+  return await wixData.update(collectionKey, { _id: recordId, ...record });
+}
+
+async function findByField(collectionKey, fieldName, value) {
+  if (usesAirtable(collectionKey)) {
+    const tableName = await getAirtableTableName(collectionKey);
+    return await airtable.findByField(tableName, fieldName, value);
+  }
+  const result = await wixData.query(collectionKey).eq(fieldName, value).find();
+  return result.items || [];
+}
+
+// ============================================================================
+// CONTEXT ASSEMBLY
+// ============================================================================
+
+/**
+ * Gather all context needed for content generation.
+ * @param {string} accountId
+ * @param {string} contactId
+ * @param {Object} [extraContext] - Additional context (sequence step, etc.)
+ * @returns {Promise<Object>}
+ */
+async function assembleContext(accountId, contactId, extraContext = {}) {
+  try {
+    // Fetch all context in parallel
+    const [
+      accountResult,
+      contactsResult,
+      timelineResult
+    ] = await Promise.all([
+      getAccount(accountId).catch(() => ({ success: false })),
+      getContactsByAccount(accountId).catch(() => ({ success: false, contacts: [] })),
+      getAccountTimeline(accountId, { limit: 10 }).catch(() => ({ success: false, activities: [] }))
+    ]);
+
+    const account = accountResult.success ? accountResult.account : null;
+    const contacts = contactsResult.success ? contactsResult.contacts : [];
+    const activities = timelineResult.success ? timelineResult.activities : [];
+
+    // Find the specific contact
+    const contact = contacts.find(c => (c._id || c.id) === contactId) || contacts[0] || null;
+
+    // Get signal and brief (may not exist)
+    let signal = null;
+    let brief = null;
+    if (account?.carrier_dot) {
+      const [signalResult, briefResult] = await Promise.all([
+        getSignalByCarrier(account.carrier_dot).catch(() => ({ success: false })),
+        getBrief(accountId).catch(() => ({ success: false }))
+      ]);
+      signal = signalResult.success ? signalResult.signal : null;
+      brief = briefResult.success ? briefResult.brief : null;
+    }
+
+    // Build timeline summary (last 5 activities)
+    const timelineSummary = activities.slice(0, 5).map(a => {
+      const date = a.created_at ? new Date(a.created_at).toLocaleDateString() : '';
+      return `${date}: ${a.type} - ${a.subject || a.outcome || ''}`;
+    }).join('\n');
+
+    return {
+      account: {
+        name: account?.carrier_name || 'Unknown Company',
+        dot: account?.carrier_dot || '',
+        segment: account?.segment || 'mid_market',
+        region: account?.region || '',
+        fleetSize: account?.fleet_size || 0,
+        status: account?.status || 'target'
+      },
+      contact: {
+        name: contact?.name || 'there',
+        firstName: contact?.name?.split(' ')[0] || 'there',
+        role: contact?.role || '',
+        email: contact?.email || '',
+        phone: contact?.phone || '',
+        preferredChannel: contact?.preferred_channel || 'email'
+      },
+      signal: signal ? {
+        score: signal.signal_score || 0,
+        driverCount: signal.driver_count_high_match || 0,
+        topRegions: signal.top_regions || '',
+        topEquipment: signal.top_equipment || ''
+      } : null,
+      brief: brief ? {
+        highlights: brief.highlights || [],
+        talkTrack: brief.talk_track || '',
+        nextSteps: brief.next_steps || []
+      } : null,
+      timelineSummary,
+      recentActivityCount: activities.length,
+      ...extraContext
+    };
+  } catch (err) {
+    console.warn('Context assembly failed:', err.message);
+    return {
+      account: { name: 'Unknown', segment: 'mid_market' },
+      contact: { name: 'there', firstName: 'there' },
+      signal: null,
+      brief: null,
+      timelineSummary: '',
+      ...extraContext
+    };
+  }
+}
+
+// ============================================================================
+// EMAIL CONTENT GENERATION
+// ============================================================================
+
+/**
+ * Generate personalized email content using LLM.
+ *
+ * @param {Object} params
+ * @param {string} params.accountId - Account ID
+ * @param {string} params.contactId - Contact ID
+ * @param {string} [params.purpose] - Email purpose (intro, follow_up, proposal, check_in)
+ * @param {string} [params.sequenceStepId] - If part of a sequence
+ * @param {Object} [params.extraContext] - Additional context
+ * @param {boolean} [params.skipCache=false] - Skip cache lookup
+ * @returns {Promise<{success: boolean, content?: {subject: string, body: string}, cached?: boolean, error?: string}>}
+ */
+export async function generateEmailContent(params) {
+  const trace = await startTrace('b2b-content-email', {
+    accountId: params.accountId,
+    contactId: params.contactId,
+    purpose: params.purpose,
+    tags: ['b2b', 'content-ai', 'email']
+  }).catch(() => ({ traceId: null }));
+  const traceId = trace.traceId;
+  const startTime = Date.now();
+
+  try {
+    const { accountId, contactId, purpose = 'intro', sequenceStepId, extraContext = {}, skipCache = false } = params;
+
+    if (!accountId) {
+      await endTrace(traceId, 'failed', { reason: 'missing_account_id' }).catch(() => {});
+      return { success: false, error: 'Account ID is required' };
+    }
+
+    // Check cache first
+    if (!skipCache) {
+      const cached = await getCachedContent(accountId, contactId, 'email', sequenceStepId);
+      if (cached) {
+        await endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime }).catch(() => {});
+        return { success: true, content: cached, cached: true };
+      }
+    }
+
+    // Assemble context
+    const context = await assembleContext(accountId, contactId, { purpose, sequenceStepId, ...extraContext });
+
+    // Build prompt
+    const segment = context.account.segment;
+    const tone = BRAND_VOICE.segmentTone[segment] || BRAND_VOICE.segmentTone.mid_market;
+
+    const systemPrompt = `${BRAND_VOICE.core}
+
+${BRAND_VOICE.compliance}
+
+Tone for this segment (${segment}): ${tone}
+
+You generate personalized B2B sales emails. Output ONLY valid JSON with "subject" and "body" keys. No markdown, no explanation.`;
+
+    const userPrompt = `Write a ${purpose.replace('_', ' ')} email for this carrier prospect.
+
+=== CARRIER INFO ===
+Company: ${context.account.name}
+DOT: ${context.account.dot || 'N/A'}
+Segment: ${segment}
+Region: ${context.account.region || 'N/A'}
+Fleet Size: ${context.account.fleetSize || 'Unknown'}
+
+=== CONTACT ===
+Name: ${context.contact.name}
+Role: ${context.contact.role || 'Unknown'}
+
+=== MATCH SIGNAL ===
+${context.signal ? `Match Score: ${context.signal.score}
+High-Match Drivers: ${context.signal.driverCount}
+Top Regions: ${context.signal.topRegions || 'N/A'}
+Equipment: ${context.signal.topEquipment || 'N/A'}` : 'No signal data available'}
+
+=== RESEARCH BRIEF ===
+${context.brief ? `Highlights: ${JSON.stringify(context.brief.highlights)}
+Talk Track: ${context.brief.talkTrack || 'N/A'}` : 'No research brief available'}
+
+=== RECENT ACTIVITY ===
+${context.timelineSummary || 'No recent activity'}
+
+=== EMAIL PURPOSE ===
+${purpose}
+
+=== OUTPUT FORMAT ===
+{
+  "subject": "Short, compelling subject line (under 60 chars)",
+  "body": "Professional email body. Use {{contact_name}} for personalization. End with clear CTA. Include: Reply STOP to unsubscribe."
+}`;
+
+    // Call LLM
+    const llmResult = await callClaudeLLM(systemPrompt, userPrompt, LLM_CONFIG.maxTokens.email, traceId);
+
+    if (!llmResult.success) {
+      // Fallback to static template
+      const fallback = buildFallbackEmail(context, purpose);
+      await endTrace(traceId, 'completed', { fallback: true, elapsed: Date.now() - startTime }).catch(() => {});
+      return { success: true, content: fallback, cached: false, fallback: true };
+    }
+
+    const content = parseEmailResponse(llmResult.text, context);
+
+    // Cache the result
+    await cacheContent(accountId, contactId, 'email', sequenceStepId, content);
+
+    await endTrace(traceId, 'completed', { fromCache: false, elapsed: Date.now() - startTime }).catch(() => {});
+    return { success: true, content, cached: false };
+  } catch (error) {
+    console.error('Error generating email content:', error);
+    await endTrace(traceId, 'failed', { error: error.message, elapsed: Date.now() - startTime }).catch(() => {});
+    return { success: false, error: error.message || 'Failed to generate email content' };
+  }
+}
+
+// ============================================================================
+// SMS CONTENT GENERATION
+// ============================================================================
+
+/**
+ * Generate personalized SMS content using LLM.
+ * SMS must be under 160 characters.
+ *
+ * @param {Object} params
+ * @param {string} params.accountId
+ * @param {string} params.contactId
+ * @param {string} [params.purpose] - SMS purpose (intro, follow_up, reminder)
+ * @param {string} [params.sequenceStepId]
+ * @param {boolean} [params.skipCache=false]
+ * @returns {Promise<{success: boolean, content?: {message: string, charCount: number}, cached?: boolean, error?: string}>}
+ */
+export async function generateSmsContent(params) {
+  const trace = await startTrace('b2b-content-sms', {
+    accountId: params.accountId,
+    contactId: params.contactId,
+    purpose: params.purpose,
+    tags: ['b2b', 'content-ai', 'sms']
+  }).catch(() => ({ traceId: null }));
+  const traceId = trace.traceId;
+  const startTime = Date.now();
+
+  try {
+    const { accountId, contactId, purpose = 'follow_up', sequenceStepId, skipCache = false } = params;
+
+    if (!accountId) {
+      await endTrace(traceId, 'failed', { reason: 'missing_account_id' }).catch(() => {});
+      return { success: false, error: 'Account ID is required' };
+    }
+
+    // Check cache
+    if (!skipCache) {
+      const cached = await getCachedContent(accountId, contactId, 'sms', sequenceStepId);
+      if (cached) {
+        await endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime }).catch(() => {});
+        return { success: true, content: cached, cached: true };
+      }
+    }
+
+    const context = await assembleContext(accountId, contactId, { purpose, sequenceStepId });
+
+    const systemPrompt = `${BRAND_VOICE.core}
+
+You write SMS messages for B2B sales. CRITICAL: Messages must be under 160 characters total.
+Output ONLY valid JSON with "message" key. No markdown.`;
+
+    const userPrompt = `Write a ${purpose.replace('_', ' ')} SMS for this prospect.
+
+Company: ${context.account.name}
+Contact: ${context.contact.firstName}
+${context.signal ? `Match: ${context.signal.driverCount} drivers available` : ''}
+
+Purpose: ${purpose}
+Character limit: 160 (including any opt-out text)
+
+=== OUTPUT FORMAT ===
+{
+  "message": "Short SMS text under 160 chars. Be direct. Include CTA."
+}`;
+
+    const llmResult = await callClaudeLLM(systemPrompt, userPrompt, LLM_CONFIG.maxTokens.sms, traceId);
+
+    if (!llmResult.success) {
+      const fallback = buildFallbackSms(context, purpose);
+      await endTrace(traceId, 'completed', { fallback: true, elapsed: Date.now() - startTime }).catch(() => {});
+      return { success: true, content: fallback, cached: false, fallback: true };
+    }
+
+    const content = parseSmsResponse(llmResult.text, context);
+
+    await cacheContent(accountId, contactId, 'sms', sequenceStepId, content);
+
+    await endTrace(traceId, 'completed', { fromCache: false, elapsed: Date.now() - startTime }).catch(() => {});
+    return { success: true, content, cached: false };
+  } catch (error) {
+    console.error('Error generating SMS content:', error);
+    await endTrace(traceId, 'failed', { error: error.message, elapsed: Date.now() - startTime }).catch(() => {});
+    return { success: false, error: error.message || 'Failed to generate SMS content' };
+  }
+}
+
+// ============================================================================
+// CALL SCRIPT GENERATION
+// ============================================================================
+
+/**
+ * Generate personalized call script with objection handling.
+ *
+ * @param {Object} params
+ * @param {string} params.accountId
+ * @param {string} params.contactId
+ * @param {string} [params.purpose] - Call purpose (intro, discovery, follow_up, close)
+ * @param {string} [params.sequenceStepId]
+ * @param {boolean} [params.skipCache=false]
+ * @returns {Promise<{success: boolean, content?: {opening: string, valueProps: string[], questions: string[], objections: Object[], closing: string}, cached?: boolean, error?: string}>}
+ */
+export async function generateCallScript(params) {
+  const trace = await startTrace('b2b-content-call', {
+    accountId: params.accountId,
+    contactId: params.contactId,
+    purpose: params.purpose,
+    tags: ['b2b', 'content-ai', 'call-script']
+  }).catch(() => ({ traceId: null }));
+  const traceId = trace.traceId;
+  const startTime = Date.now();
+
+  try {
+    const { accountId, contactId, purpose = 'intro', sequenceStepId, skipCache = false } = params;
+
+    if (!accountId) {
+      await endTrace(traceId, 'failed', { reason: 'missing_account_id' }).catch(() => {});
+      return { success: false, error: 'Account ID is required' };
+    }
+
+    // Check cache
+    if (!skipCache) {
+      const cached = await getCachedContent(accountId, contactId, 'call', sequenceStepId);
+      if (cached) {
+        await endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime }).catch(() => {});
+        return { success: true, content: cached, cached: true };
+      }
+    }
+
+    const context = await assembleContext(accountId, contactId, { purpose, sequenceStepId });
+    const segment = context.account.segment;
+    const tone = BRAND_VOICE.segmentTone[segment] || BRAND_VOICE.segmentTone.mid_market;
+
+    const systemPrompt = `${BRAND_VOICE.core}
+
+${BRAND_VOICE.compliance}
+
+Tone for this segment (${segment}): ${tone}
+
+You create call scripts for B2B sales calls. Include:
+1. Opening statement
+2. Value propositions (3-4 bullets)
+3. Discovery questions (2-3)
+4. Objection handling (2-3 common objections with responses)
+5. Closing/CTA
+
+Output ONLY valid JSON. No markdown.`;
+
+    const userPrompt = `Create a ${purpose.replace('_', ' ')} call script for this carrier prospect.
+
+=== CARRIER INFO ===
+Company: ${context.account.name}
+DOT: ${context.account.dot || 'N/A'}
+Segment: ${segment}
+Region: ${context.account.region || 'N/A'}
+Fleet Size: ${context.account.fleetSize || 'Unknown'}
+
+=== CONTACT ===
+Name: ${context.contact.name}
+Role: ${context.contact.role || 'Unknown'}
+
+=== MATCH SIGNAL ===
+${context.signal ? `Match Score: ${context.signal.score}
+High-Match Drivers: ${context.signal.driverCount}
+Top Regions: ${context.signal.topRegions || 'N/A'}
+Equipment: ${context.signal.topEquipment || 'N/A'}` : 'No signal data'}
+
+=== RESEARCH BRIEF ===
+${context.brief ? `Talk Track: ${context.brief.talkTrack || 'N/A'}` : 'No research brief'}
+
+=== RECENT ACTIVITY ===
+${context.timelineSummary || 'No prior contact'}
+
+=== CALL PURPOSE ===
+${purpose}
+
+=== OUTPUT FORMAT ===
+{
+  "opening": "Opening statement with name and reason for call",
+  "valueProps": ["Value prop 1", "Value prop 2", "Value prop 3"],
+  "questions": ["Discovery question 1", "Discovery question 2"],
+  "objections": [
+    {"objection": "I'm not hiring right now", "response": "Response..."},
+    {"objection": "We already have a recruiting partner", "response": "Response..."}
+  ],
+  "closing": "Clear next-step CTA"
+}`;
+
+    const llmResult = await callClaudeLLM(systemPrompt, userPrompt, LLM_CONFIG.maxTokens.callScript, traceId);
+
+    if (!llmResult.success) {
+      const fallback = buildFallbackCallScript(context, purpose);
+      await endTrace(traceId, 'completed', { fallback: true, elapsed: Date.now() - startTime }).catch(() => {});
+      return { success: true, content: fallback, cached: false, fallback: true };
+    }
+
+    const content = parseCallScriptResponse(llmResult.text, context);
+
+    await cacheContent(accountId, contactId, 'call', sequenceStepId, content);
+
+    await endTrace(traceId, 'completed', { fromCache: false, elapsed: Date.now() - startTime }).catch(() => {});
+    return { success: true, content, cached: false };
+  } catch (error) {
+    console.error('Error generating call script:', error);
+    await endTrace(traceId, 'failed', { error: error.message, elapsed: Date.now() - startTime }).catch(() => {});
+    return { success: false, error: error.message || 'Failed to generate call script' };
+  }
+}
+
+// ============================================================================
+// HUMAN-IN-THE-LOOP DRAFT MANAGEMENT
+// ============================================================================
+
+/**
+ * Save an AI draft for human review before sending.
+ *
+ * @param {Object} params
+ * @param {string} params.accountId
+ * @param {string} params.contactId
+ * @param {string} params.channel - email, sms, call
+ * @param {Object} params.aiDraft - The AI-generated content
+ * @param {string} [params.sequenceStepId]
+ * @returns {Promise<{success: boolean, draftId?: string, error?: string}>}
+ */
+export async function saveDraft(params) {
+  try {
+    const { accountId, contactId, channel, aiDraft, sequenceStepId } = params;
+
+    if (!accountId || !channel || !aiDraft) {
+      return { success: false, error: 'accountId, channel, and aiDraft are required' };
+    }
+
+    const draft = {
+      account_id: accountId,
+      contact_id: contactId || '',
+      channel,
+      sequence_step_id: sequenceStepId || '',
+      ai_draft: JSON.stringify(aiDraft),
+      final_content: '',
+      status: 'pending_review',
+      created_at: new Date().toISOString(),
+      reviewed_at: '',
+      sent_at: ''
+    };
+
+    const saved = await insertData(COLLECTIONS.contentDrafts, draft);
+    return { success: true, draftId: saved._id || saved.id };
+  } catch (error) {
+    console.error('Error saving draft:', error);
+    return { success: false, error: error.message || 'Failed to save draft' };
+  }
+}
+
+/**
+ * Approve a draft with optional edits.
+ *
+ * @param {string} draftId
+ * @param {Object} [finalContent] - Edited content (if null, uses AI draft as-is)
+ * @returns {Promise<{success: boolean, draft?: Object, error?: string}>}
+ */
+export async function approveDraft(draftId, finalContent = null) {
+  try {
+    if (!draftId) return { success: false, error: 'Draft ID is required' };
+
+    const drafts = await findByField(COLLECTIONS.contentDrafts, '_id', draftId);
+    if (!drafts || drafts.length === 0) {
+      return { success: false, error: 'Draft not found' };
+    }
+
+    const draft = drafts[0];
+    const aiDraft = JSON.parse(draft.ai_draft || '{}');
+    const final = finalContent || aiDraft;
+
+    const updates = {
+      final_content: JSON.stringify(final),
+      status: 'approved',
+      reviewed_at: new Date().toISOString()
+    };
+
+    const updated = await updateData(COLLECTIONS.contentDrafts, draftId, updates);
+
+    // Track edit distance for AI accuracy measurement
+    if (finalContent) {
+      const editDistance = calculateEditDistance(
+        JSON.stringify(aiDraft),
+        JSON.stringify(finalContent)
+      );
+      // Log for analytics (non-blocking)
+      logAIOperation({
+        source: 'b2b-content-ai',
+        operation: 'draft-approval',
+        functionId: 'approveDraft',
+        provider: 'anthropic',
+        metadata: { draftId, editDistance, wasEdited: editDistance > 0 }
+      }).catch(() => {});
+    }
+
+    return { success: true, draft: updated };
+  } catch (error) {
+    console.error('Error approving draft:', error);
+    return { success: false, error: error.message || 'Failed to approve draft' };
+  }
+}
+
+/**
+ * Get pending drafts for review.
+ *
+ * @param {Object} [filters]
+ * @param {string} [filters.accountId]
+ * @param {string} [filters.channel]
+ * @param {number} [filters.limit=20]
+ * @returns {Promise<{success: boolean, drafts?: Object[], error?: string}>}
+ */
+export async function getPendingDrafts(filters = {}) {
+  try {
+    const parts = ['{status} = "pending_review"'];
+    if (filters.accountId) parts.push(`{account_id} = "${filters.accountId}"`);
+    if (filters.channel) parts.push(`{channel} = "${filters.channel}"`);
+
+    const filter = parts.length === 1 ? parts[0] : `AND(${parts.join(', ')})`;
+
+    const result = await queryData(COLLECTIONS.contentDrafts, {
+      filter,
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: filters.limit || 20
+    });
+
+    const drafts = (result.items || []).map(d => ({
+      ...d,
+      ai_draft: JSON.parse(d.ai_draft || '{}'),
+      final_content: d.final_content ? JSON.parse(d.final_content) : null
+    }));
+
+    return { success: true, drafts };
+  } catch (error) {
+    console.error('Error fetching pending drafts:', error);
+    return { success: false, error: error.message || 'Failed to fetch drafts' };
+  }
+}
+
+// ============================================================================
+// LLM CALL HELPER
+// ============================================================================
+
+async function callClaudeLLM(systemPrompt, userPrompt, maxTokens, traceId) {
+  const startTime = Date.now();
+  let apiKey;
+
+  try {
+    apiKey = await getSecret(LLM_CONFIG.claudeSecret);
+  } catch (err) {
+    console.error('Failed to get Claude API key:', err);
+    return { success: false, error: 'API key unavailable' };
+  }
+
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Claude timeout')), LLM_CONFIG.timeoutMs);
+  });
+
+  const fetchPromise = fetch(LLM_CONFIG.claudeEndpoint, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: LLM_CONFIG.claudeModel,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
+    })
+  });
+
+  try {
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+    const latencyMs = Date.now() - startTime;
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => 'unknown');
+      throw new Error(`Claude API ${response.status}: ${errorBody}`);
+    }
+
+    const data = await response.json();
+    const text = extractClaudeText(data);
+    const usage = data.usage || {};
+
+    // Log AI operation
+    await logAIOperation({
+      source: 'b2b-content-ai',
+      operation: 'content-generation',
+      functionId: 'callClaudeLLM',
+      provider: 'anthropic',
+      model: LLM_CONFIG.claudeModel,
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      totalTokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
+      latencyMs,
+      traceId
+    }).catch(err => console.warn('AI log failed:', err.message));
+
+    return { success: true, text, usage };
+  } catch (error) {
+    const latencyMs = Date.now() - startTime;
+    await logAIOperation({
+      source: 'b2b-content-ai',
+      operation: 'content-generation',
+      functionId: 'callClaudeLLM',
+      provider: 'anthropic',
+      model: LLM_CONFIG.claudeModel,
+      latencyMs,
+      error: error.message,
+      traceId
+    }).catch(err => console.warn('AI error log failed:', err.message));
+
+    return { success: false, error: error.message };
+  }
+}
+
+function extractClaudeText(data) {
+  if (!data || !data.content || !Array.isArray(data.content)) return '';
+  return data.content
+    .filter(block => block.type === 'text')
+    .map(block => block.text)
+    .join('\n')
+    .trim();
+}
+
+// ============================================================================
+// RESPONSE PARSERS
+// ============================================================================
+
+function parseEmailResponse(text, context) {
+  try {
+    let cleaned = text.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No JSON found');
+
+    const parsed = JSON.parse(match[0]);
+    let subject = parsed.subject || 'Quick question about your driver needs';
+    let body = parsed.body || '';
+
+    // Inject contact name if placeholder exists
+    body = body.replace(/\{\{contact_name\}\}/g, context.contact.firstName || 'there');
+
+    // Ensure opt-out language
+    if (!body.toLowerCase().includes('stop') && !body.toLowerCase().includes('unsubscribe')) {
+      body += '\n\nReply STOP to unsubscribe.';
+    }
+
+    return { subject, body };
+  } catch (err) {
+    console.warn('Email response parse failed:', err.message);
+    return buildFallbackEmail(context, 'intro');
+  }
+}
+
+function parseSmsResponse(text, context) {
+  try {
+    let cleaned = text.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No JSON found');
+
+    const parsed = JSON.parse(match[0]);
+    let message = parsed.message || '';
+
+    // Truncate to 160 chars if needed
+    if (message.length > 160) {
+      message = message.substring(0, 157) + '...';
+    }
+
+    return { message, charCount: message.length };
+  } catch (err) {
+    console.warn('SMS response parse failed:', err.message);
+    return buildFallbackSms(context, 'follow_up');
+  }
+}
+
+function parseCallScriptResponse(text, context) {
+  try {
+    let cleaned = text.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No JSON found');
+
+    const parsed = JSON.parse(match[0]);
+
+    return {
+      opening: parsed.opening || `Hi ${context.contact.firstName}, this is [Rep Name] from VelocityMatch.`,
+      valueProps: Array.isArray(parsed.valueProps) ? parsed.valueProps : [],
+      questions: Array.isArray(parsed.questions) ? parsed.questions : [],
+      objections: Array.isArray(parsed.objections) ? parsed.objections : [],
+      closing: parsed.closing || 'Would a 15-minute call next week work for you?'
+    };
+  } catch (err) {
+    console.warn('Call script response parse failed:', err.message);
+    return buildFallbackCallScript(context, 'intro');
+  }
+}
+
+// ============================================================================
+// FALLBACK TEMPLATES
+// ============================================================================
+
+function buildFallbackEmail(context, purpose) {
+  const name = context.contact.firstName || 'there';
+  const company = context.account.name || 'your company';
+  const driverCount = context.signal?.driverCount || 'several';
+
+  const templates = {
+    intro: {
+      subject: `Drivers available for ${company}`,
+      body: `Hi ${name},
+
+I noticed ${company} and wanted to reach out. We have ${driverCount} qualified CDL drivers in your area who may be a fit.
+
+Would you have 10 minutes this week to discuss your current hiring needs?
+
+Best,
+[Your Name]
+VelocityMatch
+
+Reply STOP to unsubscribe.`
+    },
+    follow_up: {
+      subject: `Following up - ${company}`,
+      body: `Hi ${name},
+
+Just following up on my previous message. We still have drivers available that match your requirements.
+
+Let me know if you'd like to see some profiles.
+
+Best,
+[Your Name]
+
+Reply STOP to unsubscribe.`
+    },
+    proposal: {
+      subject: `Driver proposal for ${company}`,
+      body: `Hi ${name},
+
+Based on our conversation, I've put together a proposal for filling your open positions.
+
+When would be a good time to review?
+
+Best,
+[Your Name]
+
+Reply STOP to unsubscribe.`
+    },
+    check_in: {
+      subject: `Checking in - ${company}`,
+      body: `Hi ${name},
+
+Just checking in to see how things are going with your driver staffing.
+
+Any new needs I can help with?
+
+Best,
+[Your Name]
+
+Reply STOP to unsubscribe.`
+    }
+  };
+
+  return templates[purpose] || templates.intro;
+}
+
+function buildFallbackSms(context, purpose) {
+  const name = context.contact.firstName || 'there';
+  const driverCount = context.signal?.driverCount || 'drivers';
+
+  const templates = {
+    intro: `Hi ${name}, this is VelocityMatch. We have ${driverCount} CDL drivers available. Interested in a quick call?`,
+    follow_up: `Hi ${name}, following up on drivers for your fleet. Any interest in reviewing profiles?`,
+    reminder: `Hi ${name}, just a reminder - we have drivers ready for ${context.account.name}. Let me know!`
+  };
+
+  const message = templates[purpose] || templates.follow_up;
+  return { message: message.substring(0, 160), charCount: Math.min(message.length, 160) };
+}
+
+function buildFallbackCallScript(context, purpose) {
+  const name = context.contact.firstName || 'there';
+  const company = context.account.name || 'your company';
+  const driverCount = context.signal?.driverCount || 'several';
+
+  return {
+    opening: `Hi ${name}, this is [Rep Name] from VelocityMatch. I'm reaching out because we have ${driverCount} qualified drivers who match what ${company} is looking for.`,
+    valueProps: [
+      'Pre-screened CDL drivers ready to start',
+      'Match technology finds drivers who fit your lanes and equipment',
+      'No upfront fees - you only pay when you hire'
+    ],
+    questions: [
+      'What are your biggest challenges with driver recruitment right now?',
+      'How many drivers are you looking to add in the next quarter?'
+    ],
+    objections: [
+      {
+        objection: "We're not hiring right now",
+        response: "I understand. Even when you're not actively hiring, it helps to have a pipeline ready. Can I check back in a month?"
+      },
+      {
+        objection: "We already work with a recruiting company",
+        response: "That's great. Many of our clients use multiple sources. Would you be open to seeing how our match quality compares?"
+      }
+    ],
+    closing: 'Would a 15-minute call next week work to review some driver profiles?'
+  };
+}
+
+// ============================================================================
+// CACHING HELPERS
+// ============================================================================
+
+async function getCachedContent(accountId, contactId, channel, sequenceStepId) {
+  try {
+    const cacheKey = buildCacheKey(accountId, contactId, channel, sequenceStepId);
+    const results = await findByField(COLLECTIONS.contentCache, 'cache_key', cacheKey);
+
+    if (!results || results.length === 0) return null;
+
+    const cached = results[0];
+    const createdAt = new Date(cached.created_at);
+    const now = new Date();
+    const ageHours = (now - createdAt) / (1000 * 60 * 60);
+
+    if (ageHours > CACHE_TTL_HOURS) return null;
+
+    return JSON.parse(cached.content || '{}');
+  } catch (err) {
+    console.warn('Cache lookup failed:', err.message);
+    return null;
+  }
+}
+
+async function cacheContent(accountId, contactId, channel, sequenceStepId, content) {
+  try {
+    const cacheKey = buildCacheKey(accountId, contactId, channel, sequenceStepId);
+
+    // Check if exists
+    const existing = await findByField(COLLECTIONS.contentCache, 'cache_key', cacheKey);
+
+    const record = {
+      cache_key: cacheKey,
+      account_id: accountId,
+      contact_id: contactId || '',
+      channel,
+      sequence_step_id: sequenceStepId || '',
+      content: JSON.stringify(content),
+      created_at: new Date().toISOString()
+    };
+
+    if (existing && existing.length > 0) {
+      await updateData(COLLECTIONS.contentCache, existing[0]._id || existing[0].id, record);
+    } else {
+      await insertData(COLLECTIONS.contentCache, record);
+    }
+  } catch (err) {
+    console.warn('Cache write failed:', err.message);
+  }
+}
+
+function buildCacheKey(accountId, contactId, channel, sequenceStepId) {
+  return `${accountId}:${contactId || 'no-contact'}:${channel}:${sequenceStepId || 'no-step'}`;
+}
+
+// ============================================================================
+// UTILITY
+// ============================================================================
+
+/**
+ * Calculate simple edit distance (for tracking AI accuracy)
+ */
+function calculateEditDistance(str1, str2) {
+  const len1 = str1.length;
+  const len2 = str2.length;
+
+  // Use a simplified approach for large strings
+  if (len1 > 1000 || len2 > 1000) {
+    return Math.abs(len1 - len2) + (str1 === str2 ? 0 : Math.max(len1, len2) * 0.1);
+  }
+
+  const dp = Array(len1 + 1).fill(null).map(() => Array(len2 + 1).fill(0));
+
+  for (let i = 0; i <= len1; i++) dp[i][0] = i;
+  for (let j = 0; j <= len2; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= len1; i++) {
+    for (let j = 1; j <= len2; j++) {
+      const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+
+  return dp[len1][len2];
+}
+
+/**
+ * Clear expired cache entries (for maintenance job)
+ */
+export async function clearExpiredCache() {
+  try {
+    const cutoff = new Date();
+    cutoff.setHours(cutoff.getHours() - CACHE_TTL_HOURS);
+    const cutoffStr = cutoff.toISOString();
+
+    const filter = `IS_BEFORE({created_at}, "${cutoffStr}")`;
+    const result = await queryData(COLLECTIONS.contentCache, { filter, limit: 100 });
+
+    let deleted = 0;
+    for (const item of result.items || []) {
+      // Airtable doesn't have bulk delete, so we'd need to implement or skip
+      // For now, just count expired entries
+      deleted++;
+    }
+
+    return { success: true, expiredCount: deleted };
+  } catch (error) {
+    console.error('Error clearing expired cache:', error);
+    return { success: false, error: error.message };
+  }
+}
