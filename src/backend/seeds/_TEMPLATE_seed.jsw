@@ -1,0 +1,259 @@
+/**
+ * SEED DATA TEMPLATE
+ * ==================
+ * Copy this file and rename to: seed{YourDomain}.jsw
+ * Example: seedDriverProfiles.jsw, seedB2BAccounts.jsw
+ *
+ * PURPOSE:
+ * Creates realistic test data that flows through the REAL dual-source pipeline
+ * (not inline HTML, not mock stubs). Data goes through:
+ *   Generator -> insertData() -> usesAirtable() check -> Airtable or Wix
+ *
+ * INSTRUCTIONS FOR JUNIORS:
+ * 1. Replace all {PLACEHOLDER} values with your domain-specific values
+ * 2. Define your collection keys (from backend/config.jsw)
+ * 3. Create generators that produce realistic data shapes
+ * 4. Export one seed function per collection
+ * 5. Export a seedAll{Domain}() orchestrator
+ * 6. Test by importing in a Wix page: import { seedAll } from 'backend/seeds/seedYourDomain';
+ *
+ * RULES:
+ * - NEVER call wixData directly. Always use insertData/queryData helpers below.
+ * - Each generator should create 5-15 records (enough to verify, not enough to spam)
+ * - Include edge cases in your test data (empty strings, nulls, boundary values)
+ * - Always check if data already exists before seeding (idempotent)
+ * - Use the chunked pattern for batch inserts (10 records per chunk)
+ *
+ * @module backend/seeds/seed{YourDomain}
+ */
+
+import wixData from 'wix-data';
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/configData';
+import * as airtable from 'backend/airtableClient';
+
+// =============================================================================
+// DUAL-SOURCE HELPERS (do not modify)
+// =============================================================================
+
+async function insertData(collectionKey, data) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        const { _id, ...airtableData } = data;
+        return await airtable.createRecord(tableName, airtableData);
+    }
+    const wixName = getWixCollectionName(collectionKey);
+    return await wixData.insert(wixName, data, { suppressAuth: true });
+}
+
+async function countData(collectionKey) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        const result = await airtable.queryRecords(tableName, { maxRecords: 1 });
+        return (result.records || []).length;
+    }
+    const wixName = getWixCollectionName(collectionKey);
+    return await wixData.query(wixName).limit(1).count({ suppressAuth: true });
+}
+
+async function queryData(collectionKey, options = {}) {
+    if (usesAirtable(collectionKey)) {
+        const tableName = getAirtableTableName(collectionKey);
+        return await airtable.queryRecords(tableName, options);
+    }
+    const wixName = getWixCollectionName(collectionKey);
+    let query = wixData.query(wixName);
+    if (options.maxRecords) query = query.limit(options.maxRecords);
+    const result = await query.find({ suppressAuth: true });
+    return { records: result.items };
+}
+
+// =============================================================================
+// COLLECTION KEYS
+// Define every collection your domain uses. Must match backend/config.jsw keys.
+// =============================================================================
+
+const COLLECTIONS = {
+    // {REPLACE}: Add your collection keys here
+    // Example:
+    // PRIMARY: 'driverProfiles',
+    // SECONDARY: 'driverCarrierInterests',
+};
+
+// =============================================================================
+// DATA GENERATORS
+// Each generator returns an array of records matching the Airtable field schema.
+// Use snake_case field names (the dual-source layer transforms to Title Case).
+// =============================================================================
+
+/**
+ * {REPLACE}: Generate mock records for your primary collection
+ * @param {Object} options - Generation options
+ * @returns {Array} Array of record objects
+ */
+function generatePrimaryRecords(options = {}) {
+    const records = [];
+    const count = options.count || 10;
+
+    for (let i = 0; i < count; i++) {
+        records.push({
+            // {REPLACE}: Define your fields here
+            // Use realistic data that exercises the full schema
+            // Include at least:
+            //   - 1 record with edge case data (empty optional fields)
+            //   - 1 record with max-length strings
+            //   - 1 record representing an error/warning state
+            //
+            // Example:
+            // first_name: `TestDriver${i}`,
+            // last_name: `Seed${i}`,
+            // email: `driver${i}@test.lmdr.com`,
+            // status: i === 0 ? 'inactive' : 'active',
+            // created_at: new Date().toISOString(),
+        });
+    }
+
+    return records;
+}
+
+/**
+ * {REPLACE}: Generate mock records for your secondary collection (if applicable)
+ */
+function generateSecondaryRecords(primaryIds = []) {
+    const records = [];
+
+    for (const primaryId of primaryIds) {
+        records.push({
+            // {REPLACE}: Define relationship records
+            // Example:
+            // driver_id: primaryId,
+            // carrier_dot: 1234567,
+            // interest_level: 'high',
+            // created_at: new Date().toISOString(),
+        });
+    }
+
+    return records;
+}
+
+// =============================================================================
+// SEED FUNCTIONS
+// Each function seeds one collection. Returns { seeded, count, ids? }
+// =============================================================================
+
+/**
+ * Seed primary collection
+ * @returns {Promise<Object>} { seeded: boolean, count: number, ids: string[] }
+ */
+export async function seedPrimary() {
+    const key = COLLECTIONS.PRIMARY;
+    const existing = await countData(key);
+    if (existing > 0) {
+        console.log(`[Seed] ${key} already has data. Skipping.`);
+        return { seeded: false, count: existing };
+    }
+
+    const items = generatePrimaryRecords();
+    console.log(`[Seed] Seeding ${items.length} records into ${key}...`);
+
+    const ids = [];
+    const chunks = chunkArray(items, 10);
+
+    for (const chunk of chunks) {
+        const results = await Promise.all(
+            chunk.map(async (item) => {
+                try {
+                    const result = await insertData(key, item);
+                    return { success: true, id: result._id || result.id };
+                } catch (error) {
+                    console.error(`[Seed] Failed to insert into ${key}:`, error.message);
+                    return { success: false, error: error.message };
+                }
+            })
+        );
+        ids.push(...results.filter(r => r.success).map(r => r.id));
+        await new Promise(r => setTimeout(r, 200)); // Rate limit
+    }
+
+    return { seeded: true, count: ids.length, ids };
+}
+
+/**
+ * Seed secondary collection (depends on primary IDs)
+ */
+export async function seedSecondary(primaryIds) {
+    const key = COLLECTIONS.SECONDARY;
+    if (!primaryIds?.length) {
+        console.log(`[Seed] No primary IDs provided for ${key}. Skipping.`);
+        return { seeded: false, count: 0 };
+    }
+
+    const items = generateSecondaryRecords(primaryIds);
+    console.log(`[Seed] Seeding ${items.length} records into ${key}...`);
+
+    const ids = [];
+    const chunks = chunkArray(items, 10);
+
+    for (const chunk of chunks) {
+        const results = await Promise.all(
+            chunk.map(item => insertData(key, item)
+                .then(r => ({ success: true, id: r._id || r.id }))
+                .catch(e => ({ success: false, error: e.message }))
+            )
+        );
+        ids.push(...results.filter(r => r.success).map(r => r.id));
+        await new Promise(r => setTimeout(r, 200));
+    }
+
+    return { seeded: true, count: ids.length, ids };
+}
+
+// =============================================================================
+// ORCHESTRATOR
+// Seeds all collections in dependency order. Call this from a test page.
+// =============================================================================
+
+/**
+ * Seed all collections for this domain
+ *
+ * Usage from Wix page:
+ * ```javascript
+ * import { seedAll } from 'backend/seeds/seed{YourDomain}';
+ * const result = await seedAll();
+ * console.log('Seed result:', result);
+ * ```
+ *
+ * @returns {Promise<Object>} Results per collection
+ */
+export async function seedAll() {
+    console.log('='.repeat(50));
+    console.log('[Seed] Starting {YourDomain} seed...');
+    console.log('='.repeat(50));
+
+    const results = {};
+
+    // Step 1: Seed primary (no dependencies)
+    results.primary = await seedPrimary();
+
+    // Step 2: Seed secondary (depends on primary IDs)
+    if (results.primary.ids?.length) {
+        results.secondary = await seedSecondary(results.primary.ids);
+    }
+
+    console.log('='.repeat(50));
+    console.log('[Seed] Complete:', JSON.stringify(results, null, 2));
+    console.log('='.repeat(50));
+
+    return results;
+}
+
+// =============================================================================
+// UTILITIES
+// =============================================================================
+
+function chunkArray(arr, size) {
+    const chunks = [];
+    for (let i = 0; i < arr.length; i += size) {
+        chunks.push(arr.slice(i, i + size));
+    }
+    return chunks;
+}
