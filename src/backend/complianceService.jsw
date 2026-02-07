@@ -1,0 +1,205 @@
+import * as dataAccess from 'backend/dataAccess';
+import { getCarrierSafetyData } from 'backend/fmcsaService';
+import { getDQFileSummary } from 'backend/dqFileService';
+import { currentMember } from 'wix-members-backend';
+
+// ============================================
+// CONFIGURATION & CONSTANTS
+// ============================================
+
+const COLLECTION_KEYS = {
+    carriers: 'carriers',
+    safetyData: 'carrierSafetyData',
+    complianceAlerts: 'complianceAlerts',
+    dqFiles: 'qualificationFiles',
+    auditLog: 'auditLog'
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const memberRole = member.contactDetails?.customFields?.role || '';
+        return adminRoles.includes(memberRole.toLowerCase());
+    } catch (error) { return false; }
+}
+
+async function requireAdmin() {
+    if (!await isAdmin()) throw new Error('Unauthorized');
+}
+
+// ============================================
+// FMCSA ALERTS (Phase 7.1)
+// ============================================
+
+/**
+ * Get aggregated FMCSA alerts across all carriers
+ */
+export async function getFMCSAAlerts(options = {}) {
+    await requireAdmin();
+    const { limit = 50, status = 'active' } = options;
+
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.complianceAlerts, {
+            filters: { status },
+            sort: [{ field: '_createdDate', direction: 'desc' }],
+            limit,
+            suppressAuth: true
+        });
+
+        return {
+            success: true,
+            alerts: result.items || [],
+            totalCount: result.totalCount || 0
+        };
+    } catch (error) {
+        console.error('getFMCSAAlerts error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Scans carriers for rating changes or OOS anomalies
+ * (Usually called by a scheduled job)
+ */
+export async function scanForComplianceIssues() {
+    await requireAdmin();
+    
+    // Get top carriers to scan (in a real job this would be batched)
+    const carriersRes = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+        limit: 10, // Small batch for demonstration
+        suppressAuth: true
+    });
+
+    const results = { scanned: 0, newAlerts: 0 };
+
+    for (const carrier of (carriersRes.items || [])) {
+        if (!carrier.dot_number) continue;
+        
+        try {
+            const liveData = await getCarrierSafetyData(carrier.dot_number, true);
+            const alerts = await detectAnomalies(carrier.dot_number, liveData);
+            
+            for (const alert of alerts) {
+                await dataAccess.insertRecord(COLLECTION_KEYS.complianceAlerts, {
+                    ...alert,
+                    carrier_dot: String(carrier.dot_number),
+                    status: 'active',
+                    _createdDate: new Date()
+                }, { suppressAuth: true });
+                results.newAlerts++;
+            }
+            results.scanned++;
+        } catch (e) {
+            console.error(`Error scanning carrier ${carrier.dot_number}:`, e.message);
+        }
+    }
+
+    return results;
+}
+
+async function detectAnomalies(dotNumber, liveData) {
+    const alerts = [];
+    
+    // 1. Rating Change Detection
+    const prevRes = await dataAccess.queryRecords(COLLECTION_KEYS.safetyData, {
+        filters: { dot_number: String(dotNumber) },
+        sort: [{ field: 'fetched_date', direction: 'desc' }],
+        limit: 2, // Current + Previous
+        suppressAuth: true
+    });
+
+    const prevData = prevRes.items?.[1]; // The one before the current fetch
+    
+    if (prevData && prevData.safety_rating !== liveData.safety_rating) {
+        alerts.push({
+            alert_type: 'rating_change',
+            severity: liveData.safety_rating === 'SATISFACTORY' ? 'info' : 'critical',
+            title: 'Safety Rating Changed',
+            message: `Rating changed from ${prevData.safety_rating} to ${liveData.safety_rating}`,
+            details: { old: prevData.safety_rating, new: liveData.safety_rating }
+        });
+    }
+
+    // 2. OOS Rate Anomaly Detection
+    const nationalAvgDriver = 5.51;
+    const nationalAvgVehicle = 20.72;
+
+    if (liveData.inspections?.driver_oos_rate > nationalAvgDriver * 3) {
+        alerts.push({
+            alert_type: 'oos_anomaly',
+            severity: 'warning',
+            title: 'High Driver OOS Rate',
+            message: `Driver OOS rate is ${liveData.inspections.driver_oos_rate}%, which is >3x national average.`,
+            details: { rate: liveData.inspections.driver_oos_rate, avg: nationalAvgDriver }
+        });
+    }
+
+    if (liveData.inspections?.vehicle_oos_rate > nationalAvgVehicle * 2) {
+        alerts.push({
+            alert_type: 'oos_anomaly',
+            severity: 'warning',
+            title: 'High Vehicle OOS Rate',
+            message: `Vehicle OOS rate is ${liveData.inspections.vehicle_oos_rate}%, which is >2x national average.`,
+            details: { rate: liveData.inspections.vehicle_oos_rate, avg: nationalAvgVehicle }
+        });
+    }
+
+    return alerts;
+}
+
+// ============================================
+// DQF DASHBOARD (Phase 7.2)
+// ============================================
+
+/**
+ * Get global DQF status summary across the platform
+ */
+export async function getGlobalDQFStatus() {
+    await requireAdmin();
+
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.dqFiles, {
+            limit: 1000,
+            suppressAuth: true
+        });
+
+        const files = result.items || [];
+        const stats = {
+            total: files.length,
+            complete: files.filter(f => f.completeness_score === 100).length,
+            incomplete: files.filter(f => f.completeness_score < 100).length,
+            critical: files.filter(f => f.completeness_score < 50).length,
+            avgCompleteness: files.length > 0 ? Math.round(files.reduce((sum, f) => sum + (f.completeness_score || 0), 0) / files.length) : 0
+        };
+
+        return { success: true, stats };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get list of drivers with missing or expired docs
+ */
+export async function getComplianceActionRequired(limit = 20) {
+    await requireAdmin();
+
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.dqFiles, {
+            filters: { completeness_score: { lt: 100 } },
+            sort: [{ field: 'completeness_score', direction: 'asc' }],
+            limit,
+            suppressAuth: true
+        });
+
+        return { success: true, items: result.items || [] };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}

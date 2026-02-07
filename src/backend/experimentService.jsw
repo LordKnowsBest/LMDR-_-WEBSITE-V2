@@ -1,0 +1,168 @@
+import * as dataAccess from 'backend/dataAccess';
+import { evaluateConditions } from 'backend/utils/conditionEvaluator';
+import { hashString } from 'backend/utils/hashUtils';
+
+const TESTS_COLLECTION = 'abTests';
+const ASSIGNMENTS_COLLECTION = 'abTestAssignments';
+const EVENTS_COLLECTION = 'abTestEvents';
+
+/**
+ * Get all tests
+ */
+export async function getAllTests(status = null) {
+  const filters = status ? { status } : {};
+  const result = await dataAccess.queryRecords(TESTS_COLLECTION, {
+    filters,
+    sort: [{ field: 'key', direction: 'asc' }],
+    suppressAuth: true
+  });
+  return result.items || [];
+}
+
+/**
+ * Get a single test by key
+ */
+export async function getTest(testKey) {
+  return await dataAccess.findByField(TESTS_COLLECTION, 'key', testKey, { suppressAuth: true });
+}
+
+/**
+ * Assign a user to a test and return their variant
+ */
+export async function assignUserToTest(testKey, userId, userContext = {}) {
+  try {
+    // 1. Check existing assignment
+    const existing = await dataAccess.queryRecords(ASSIGNMENTS_COLLECTION, {
+      filters: { testKey, userId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (existing.success && existing.items.length > 0) {
+      return existing.items[0].variantId;
+    }
+
+    // 2. Get test definition
+    const test = await getTest(testKey);
+    if (!test || test.status !== 'running') return 'control';
+
+    // 3. Check targeting rules
+    if (!evaluateConditions(test.targetAudience?.conditions, userContext)) {
+      return 'control';
+    }
+
+    // 4. Traffic allocation check
+    const bucket = hashString(userId + testKey) % 100;
+    if (bucket >= (test.trafficAllocation || 100)) {
+      return 'control';
+    }
+
+    // 5. Variant assignment (deterministic hash-based)
+    const variantBucket = hashString(userId + testKey + '_variant') % 100;
+    let variantId = 'control';
+    let cumulative = 0;
+    
+    for (const variant of (test.variants || [])) {
+      cumulative += variant.allocation;
+      if (variantBucket < cumulative) {
+        variantId = variant.id;
+        break;
+      }
+    }
+
+    // 6. Persist assignment
+    await dataAccess.insertRecord(ASSIGNMENTS_COLLECTION, {
+      testKey,
+      userId,
+      variantId,
+      assignedAt: new Date(),
+      converted: false
+    }, { suppressAuth: true });
+
+    return variantId;
+  } catch (error) {
+    console.error(`[experimentService] assignUser error (${testKey}):`, error.message);
+    return 'control';
+  }
+}
+
+/**
+ * Record a conversion for a test
+ */
+export async function recordConversion(testKey, userId, metricName, value = 1) {
+  try {
+    // 1. Verify assignment
+    const assignment = await dataAccess.queryRecords(ASSIGNMENTS_COLLECTION, {
+      filters: { testKey, userId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (!assignment.success || !assignment.items.length) return { success: false, error: 'User not assigned to test' };
+    const userAssignment = assignment.items[0];
+
+    // 2. Log event
+    await dataAccess.insertRecord(EVENTS_COLLECTION, {
+      testKey,
+      userId,
+      variantId: userAssignment.variantId,
+      eventName: metricName,
+      value,
+      timestamp: new Date()
+    }, { suppressAuth: true });
+
+    // 3. Update assignment conversion state if it's the primary metric
+    const test = await getTest(testKey);
+    if (test && test.primaryMetric?.name === metricName) {
+      await dataAccess.updateRecord(ASSIGNMENTS_COLLECTION, {
+        _id: userAssignment._id,
+        converted: true
+      }, { suppressAuth: true });
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error(`[experimentService] recordConversion error (${testKey}):`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// ADMIN CRUD
+// ============================================================================
+
+export async function createTest(testData) {
+  return await dataAccess.insertRecord(TESTS_COLLECTION, {
+    ...testData,
+    status: 'draft',
+    createdAt: new Date(),
+    updatedAt: new Date()
+  }, { suppressAuth: true });
+}
+
+export async function updateTest(testKey, updates) {
+  const existing = await getTest(testKey);
+  if (!existing) throw new Error(`Test '${testKey}' not found`);
+
+  return await dataAccess.updateRecord(TESTS_COLLECTION, {
+    _id: existing._id,
+    ...updates,
+    updatedAt: new Date()
+  }, { suppressAuth: true });
+}
+
+export async function startTest(testKey) {
+  return await updateTest(testKey, { status: 'running', startDate: new Date() });
+}
+
+export async function pauseTest(testKey) {
+  return await updateTest(testKey, { status: 'paused' });
+}
+
+export async function endTest(testKey, winnerId) {
+  return await updateTest(testKey, { 
+    status: 'completed', 
+    endDate: new Date(),
+    winnerId
+  });
+}

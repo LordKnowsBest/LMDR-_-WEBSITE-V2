@@ -1,0 +1,173 @@
+/**
+ * CONNECTION TEST: Recruiter Analytics
+ * ======================================
+ * Verifies Airtable pipeline for 13 recruiter analytics collections.
+ *
+ * @module backend/tests/recruiterAnalyticsConnectionTest
+ */
+
+import { testConnection, queryRecords, createRecord, updateRecord, deleteRecord, toWixFormat, toAirtableFormat } from 'backend/airtableClient';
+import { getAirtableTableName } from 'backend/configData';
+
+const DOMAIN_NAME = 'RecruiterAnalytics';
+
+const TEST_COLLECTIONS = {
+  'sourceAttribution': 'v2_Source Attribution',
+  'recruitingSpend': 'v2_Recruiting Spend',
+  'funnelEvents': 'v2_Funnel Events',
+  'competitorIntel': 'v2_Competitor Intel',
+  'hiringForecasts': 'v2_Hiring Forecasts',
+  'callOutcomes': 'v2_Call Outcomes',
+  'callFeedback': 'v2_Call Feedback',
+  'interventionTemplates': 'v2_Intervention Templates',
+  'interventionLog': 'v2_Intervention Log',
+  'pipelineAutomationRules': 'v2_Pipeline Automation Rules',
+  'automationLog': 'v2_Automation Log',
+  'savedSearches': 'v2_Saved Searches',
+  'savedSearchAlerts': 'v2_Saved Search Alerts'
+};
+
+const TEST_RECORD = {
+  'Driver ID': '__TEST_ANALYTICS_CONN__',
+  'Session ID': '__TEST_SESSION__',
+  'Carrier DOT': '__TEST_CONN__',
+  'UTM Source': 'test',
+  'UTM Medium': 'test',
+  'Landing Page': '/test',
+  'First Touch Source': 'test',
+  'Attribution Model': 'first_touch',
+  'Touchpoint Count': 1
+};
+
+const EXPECTED_AIRTABLE_FIELDS = {
+  'Driver ID': 'Driver ID',
+  'Carrier DOT': 'Carrier DOT',
+  'UTM Source': 'UTM Source'
+};
+
+const PRIMARY_COLLECTION = 'sourceAttribution';
+
+export async function runConnectionTest() {
+  const startTime = Date.now();
+  const results = { domain: DOMAIN_NAME, success: false, timestamp: new Date().toISOString(), tests: {}, summary: { passed: 0, failed: 0, total: 0 } };
+
+  console.log('='.repeat(60));
+  console.log(`${DOMAIN_NAME} CONNECTION TEST - Starting`);
+  console.log('='.repeat(60));
+
+  results.tests.connection = await testApiConnection();
+  tally(results.summary, results.tests.connection.passed);
+  if (!results.tests.connection.passed) { results.duration = Date.now() - startTime; return results; }
+
+  results.tests.tableMapping = await testTableMapping();
+  tally(results.summary, results.tests.tableMapping.passed);
+
+  results.tests.fieldTransform = await testFieldTransformation();
+  tally(results.summary, results.tests.fieldTransform.passed);
+
+  results.tests.crud = await testCRUDOperations();
+  tally(results.summary, results.tests.crud.passed);
+
+  results.success = results.summary.failed === 0;
+  results.duration = Date.now() - startTime;
+
+  console.log('\n' + '='.repeat(60));
+  console.log(`${DOMAIN_NAME} TEST: ${results.success ? 'PASSED' : 'FAILED'}`);
+  console.log(`Passed: ${results.summary.passed}/${results.summary.total} | ${results.duration}ms`);
+  console.log('='.repeat(60));
+  return results;
+}
+
+export async function quickCheck() {
+  try {
+    const conn = await testConnection();
+    if (!conn.success) return { healthy: false, error: conn.error };
+    const tableName = getAirtableTableName(PRIMARY_COLLECTION);
+    const query = await queryRecords(tableName, { maxRecords: 1 });
+    return { healthy: !query.error, collection: PRIMARY_COLLECTION, tableName, recordsAccessible: (query.records || []).length > 0 };
+  } catch (error) { return { healthy: false, error: error.message }; }
+}
+
+async function testApiConnection() {
+  console.log('\n--- Phase 1: API Connection ---');
+  const result = { name: 'API Connection', passed: false, details: {} };
+  try {
+    const conn = await testConnection();
+    result.details = { baseId: conn.baseId, tableCount: conn.tableCount };
+    if (conn.success) { result.passed = true; result.message = `Connected. Found ${conn.tableCount} tables.`; console.log(`  [PASS] ${result.message}`); }
+    else { result.message = conn.error || 'Connection failed'; console.log(`  [FAIL] ${result.message}`); }
+  } catch (error) { result.message = `Exception: ${error.message}`; console.log(`  [FAIL] ${result.message}`); }
+  return result;
+}
+
+async function testTableMapping() {
+  console.log('\n--- Phase 2: Table Mapping ---');
+  const result = { name: 'Table Mapping', passed: false, details: {} };
+  try {
+    const mismatches = [];
+    for (const [key, expected] of Object.entries(TEST_COLLECTIONS)) {
+      const actual = getAirtableTableName(key);
+      if (actual !== expected) mismatches.push({ collection: key, expected, actual });
+      else console.log(`  [OK] ${key} -> ${actual}`);
+    }
+    result.details.collectionsChecked = Object.keys(TEST_COLLECTIONS).length;
+    result.details.mismatches = mismatches;
+    if (mismatches.length === 0) { result.passed = true; result.message = `All ${result.details.collectionsChecked} table mappings correct.`; console.log(`  [PASS] ${result.message}`); }
+    else { result.message = `${mismatches.length} mismatch(es)`; console.log(`  [FAIL] ${result.message}`); }
+  } catch (error) { result.message = `Exception: ${error.message}`; console.log(`  [FAIL] ${result.message}`); }
+  return result;
+}
+
+async function testFieldTransformation() {
+  console.log('\n--- Phase 3: Field Transformation ---');
+  const result = { name: 'Field Transformation', passed: false, details: {} };
+  try {
+    const mapperName = 'SourceAttribution';
+    const airtableFormatted = toAirtableFormat(TEST_RECORD, mapperName);
+    const errors = [];
+    for (const [field, expectedField] of Object.entries(EXPECTED_AIRTABLE_FIELDS)) {
+      if (airtableFormatted[expectedField] !== TEST_RECORD[field]) errors.push(`${field}: expected "${TEST_RECORD[field]}", got "${airtableFormatted[expectedField]}"`);
+    }
+    if (errors.length === 0) { result.passed = true; result.message = 'Field transformations correct.'; console.log(`  [PASS] ${result.message}`); }
+    else { result.message = `${errors.length} error(s)`; result.details.errors = errors; console.log(`  [FAIL] ${result.message}`); }
+  } catch (error) { result.message = `Exception: ${error.message}`; console.log(`  [FAIL] ${result.message}`); }
+  return result;
+}
+
+async function testCRUDOperations() {
+  console.log('\n--- Phase 4: CRUD Operations ---');
+  const result = { name: 'CRUD Operations', passed: false, details: {} };
+  let createdId = null;
+  try {
+    const tableName = getAirtableTableName(PRIMARY_COLLECTION);
+    const created = await createRecord(tableName, TEST_RECORD);
+    createdId = created?.id || created?._id;
+    result.details.create = { success: !!createdId, id: createdId };
+    console.log(createdId ? `  [OK] Created: ${createdId}` : '  [FAIL] Create returned no ID');
+    if (!createdId) { result.message = 'Create failed'; return result; }
+
+    const queried = await queryRecords(tableName, { maxRecords: 1, filterByFormula: `RECORD_ID()='${createdId}'` });
+    const readSuccess = (queried.records || []).length > 0;
+    result.details.read = { success: readSuccess };
+    console.log(readSuccess ? '  [OK] Read back' : '  [FAIL] Could not read');
+
+    const updated = await updateRecord(tableName, createdId, { 'Attribution Model': 'last_touch' });
+    result.details.update = { success: !!updated };
+    console.log(updated ? '  [OK] Updated' : '  [FAIL] Update failed');
+
+    const deleted = await deleteRecord(tableName, createdId);
+    result.details.delete = { success: !!deleted };
+    console.log(deleted ? '  [OK] Deleted' : '  [WARN] Delete failed');
+    createdId = null;
+
+    result.passed = result.details.create.success && readSuccess && !!updated && !!deleted;
+    result.message = result.passed ? 'All CRUD operations succeeded.' : 'One or more failed.';
+    console.log(`  [${result.passed ? 'PASS' : 'FAIL'}] ${result.message}`);
+  } catch (error) {
+    result.message = `Exception: ${error.message}`; console.log(`  [FAIL] ${result.message}`);
+    if (createdId) { try { await deleteRecord(getAirtableTableName(PRIMARY_COLLECTION), createdId); } catch (e) {} }
+  }
+  return result;
+}
+
+function tally(summary, passed) { summary.total++; if (passed) summary.passed++; else summary.failed++; }

@@ -1,0 +1,103 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  products: 'apiProducts'
+};
+
+const PRODUCT_CACHE_TTL_MS = 5 * 60 * 1000;
+const productCache = {
+  loadedAt: 0,
+  products: []
+};
+
+export async function authorizeProductAccess(authContext, access) {
+  const tier = String(authContext?.tier || 'starter').toLowerCase();
+  const subscription = authContext?.subscription || {};
+  const productId = String(access?.productId || '').trim();
+  const method = String(access?.method || 'GET').toUpperCase();
+  const endpoint = String(access?.endpoint || '').trim();
+
+  if (!productId || !endpoint) {
+    return { allowed: false, reason: 'invalid_access_check' };
+  }
+
+  const product = await getActiveProduct(productId);
+  if (!product) {
+    return { allowed: true, reason: 'product_unconfigured' };
+  }
+
+  if (!isTierIncluded(product, tier)) {
+    return { allowed: false, reason: 'tier_not_included' };
+  }
+
+  if (!isSubscriptionProductAllowed(subscription, productId)) {
+    return { allowed: false, reason: 'subscription_product_not_enabled' };
+  }
+
+  if (!isEndpointDefined(product, endpoint, method)) {
+    return { allowed: false, reason: 'endpoint_not_enabled' };
+  }
+
+  return { allowed: true, product };
+}
+
+async function getActiveProduct(productId) {
+  await loadProductsIfStale();
+  return productCache.products.find((product) => product.product_id === productId) || null;
+}
+
+async function loadProductsIfStale() {
+  if (Date.now() - productCache.loadedAt < PRODUCT_CACHE_TTL_MS) return;
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.products, {
+    filters: { is_active: true },
+    limit: 200,
+    suppressAuth: true
+  });
+
+  productCache.products = result?.items || [];
+  productCache.loadedAt = Date.now();
+}
+
+function isTierIncluded(product, tier) {
+  const included = product?.pricing?.included_in_tiers;
+  const includedTiers = Array.isArray(included) ? included.map((t) => String(t).toLowerCase()) : [];
+  if (!includedTiers.length) return true;
+  if (includedTiers.includes(tier)) return true;
+  if (tier === 'custom') return true;
+  return false;
+}
+
+function isSubscriptionProductAllowed(subscription, productId) {
+  const allowedProducts = Array.isArray(subscription?.api_products) ? subscription.api_products : [];
+  if (!allowedProducts.length) return true;
+  return allowedProducts.includes(productId);
+}
+
+function isEndpointDefined(product, endpoint, method) {
+  const endpoints = Array.isArray(product?.endpoints) ? product.endpoints : [];
+  if (!endpoints.length) return true;
+
+  const normalizedEndpoint = normalizeEndpoint(endpoint);
+  return endpoints.some((entry) => {
+    const entryMethod = String(entry?.method || 'GET').toUpperCase();
+    if (entryMethod !== method) return false;
+    const matcher = endpointTemplateToRegex(entry?.path);
+    return matcher.test(normalizedEndpoint);
+  });
+}
+
+function normalizeEndpoint(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\/+/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
+function endpointTemplateToRegex(pathTemplate) {
+  const escaped = normalizeEndpoint(pathTemplate)
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\\\{[^}]+\\\}/g, '[^/]+');
+  return new RegExp(`^${escaped}$`, 'i');
+}

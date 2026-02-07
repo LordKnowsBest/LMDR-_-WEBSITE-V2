@@ -1,0 +1,174 @@
+import { getDriverProgression, getRecruiterProgression, awardDriverXP, awardRecruiterPoints } from 'backend/gamificationService';
+import { getStreakStatus } from 'backend/streakService';
+import { getAchievements, checkAndAwardAchievements } from 'backend/achievementService';
+import { getLeaderboard } from 'backend/leaderboardService';
+
+const webhookSubscriptions = new Map();
+const dailyAwardCounters = new Map();
+
+const MAX_DAILY_XP_AWARD = 1000;
+
+export async function getExternalUserProgress(userId, query = {}) {
+  const userType = String(query?.user_type || 'driver').toLowerCase();
+  const progression = userType === 'recruiter' ?
+    await getRecruiterProgression(userId) :
+    await getDriverProgression(userId);
+
+  const streak = userType === 'driver' ? await getStreakStatus(userId) : null;
+  const achievements = await getAchievements(userId, userType, { include_locked: false });
+
+  const recentAchievements = achievements
+    .filter((item) => item.earned)
+    .sort((a, b) => String(b.earnedAt || '').localeCompare(String(a.earnedAt || '')))
+    .slice(0, 5)
+    .map((item) => ({
+      id: item.achievementId,
+      name: item.name,
+      xp_earned: item.xpReward || 0
+    }));
+
+  return {
+    success: true,
+    data: {
+      user_id: userId,
+      user_type: userType,
+      progression: {
+        level: progression?.level || progression?.rank || 1,
+        level_title: progression?.levelTitle || progression?.rankTitle || null,
+        current_xp: progression?.currentXP ?? progression?.currentPoints ?? 0,
+        xp_to_next_level: progression?.xpToNextLevel ?? progression?.pointsToNextRank ?? 0,
+        total_xp: progression?.currentXP ?? progression?.currentPoints ?? 0
+      },
+      streak: streak ? {
+        current_days: streak.streak_days || 0,
+        longest_streak: streak.longest_streak || 0,
+        streak_multiplier: streak.multiplier || 1.0
+      } : null,
+      badges: [],
+      recent_achievements: recentAchievements
+    }
+  };
+}
+
+export async function awardExternalXP(body = {}) {
+  const userId = String(body?.user_id || '').trim();
+  const action = String(body?.action || '').trim();
+  const amount = Number(body?.xp_amount);
+  const userType = String(body?.user_type || 'driver').toLowerCase();
+
+  if (!userId || !action || !Number.isFinite(amount) || amount <= 0) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'user_id, action, and positive xp_amount are required'
+    };
+  }
+
+  const key = `${userId}:${new Date().toISOString().slice(0, 10)}`;
+  const used = Number(dailyAwardCounters.get(key) || 0);
+  if (used + amount > MAX_DAILY_XP_AWARD) {
+    return {
+      success: false,
+      errorCode: 'rate_limit_exceeded',
+      message: 'Daily award cap exceeded'
+    };
+  }
+
+  dailyAwardCounters.set(key, used + amount);
+
+  let awardResult;
+  if (userType === 'recruiter') {
+    awardResult = await awardRecruiterPoints(userId, action, body.metadata || {});
+  } else {
+    awardResult = await awardDriverXP(userId, action, body.metadata || {});
+  }
+
+  if (!awardResult?.success) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: awardResult?.reason || 'Award failed'
+    };
+  }
+
+  return {
+    success: true,
+    data: {
+      user_id: userId,
+      action,
+      awarded: awardResult
+    }
+  };
+}
+
+export async function checkExternalAchievements(body = {}) {
+  const userId = String(body?.user_id || '').trim();
+  const userType = String(body?.user_type || 'driver').toLowerCase();
+  if (!userId) {
+    return { success: false, errorCode: 'invalid_request', message: 'user_id is required' };
+  }
+
+  const earned = await checkAndAwardAchievements(userId, userType, body?.context || {});
+  return {
+    success: true,
+    data: {
+      user_id: userId,
+      newly_earned: earned.map((item) => ({
+        id: item.achievementId,
+        name: item.name
+      }))
+    }
+  };
+}
+
+export async function getExternalLeaderboard(query = {}) {
+  const type = String(query?.type || 'overall');
+  const period = String(query?.period || 'monthly');
+  const limit = Math.min(100, Math.max(1, Number(query?.limit) || 25));
+  const offset = Math.max(0, Number(query?.offset) || 0);
+
+  const board = await getLeaderboard(type, period, { limit, offset });
+  if (board?.error) {
+    return { success: false, errorCode: 'invalid_request', message: board.error };
+  }
+
+  return {
+    success: true,
+    data: {
+      type,
+      period,
+      total: board.total || 0,
+      rankings: board.rankings || []
+    }
+  };
+}
+
+export async function subscribeExternalEngagementWebhook(partnerId, body = {}) {
+  const webhookUrl = String(body?.webhook_url || '').trim();
+  const eventTypes = Array.isArray(body?.event_types) ? body.event_types : [];
+  if (!partnerId || !webhookUrl) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'webhook_url is required'
+    };
+  }
+
+  const subscriptionId = `wh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  webhookSubscriptions.set(subscriptionId, {
+    subscription_id: subscriptionId,
+    partner_id: partnerId,
+    webhook_url: webhookUrl,
+    event_types: eventTypes,
+    created_at: new Date().toISOString()
+  });
+
+  return {
+    success: true,
+    data: {
+      subscription_id: subscriptionId,
+      webhook_url: webhookUrl,
+      event_types: eventTypes
+    }
+  };
+}

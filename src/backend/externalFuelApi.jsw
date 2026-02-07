@@ -1,0 +1,262 @@
+import { searchFuelPrices, getFuelAlongRoute, getFuelPriceTrends } from 'backend/fuelService';
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  fuelPrices: 'fuelPrices'
+};
+
+const SUPPORTED_FUEL_CARDS = ['comdata', 'efs', 'tcheck', 'fleetone', 'wex'];
+
+function toNumber(value, fallback = null) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+export async function searchExternalFuelPrices(params = {}) {
+  const lat = toNumber(params.lat);
+  const lng = toNumber(params.lng);
+  const radius = Math.min(50, Math.max(1, toNumber(params.radius, 25)));
+
+  if (lat === null || lng === null) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'lat and lng are required'
+    };
+  }
+
+  const fuelCards = normalizeArray(params.fuel_cards);
+  const result = await searchFuelPrices(lat, lng, radius, { cardType: fuelCards[0] || null });
+  if (!result?.success) {
+    return { success: false, errorCode: 'internal_error', message: result?.error || 'Fuel service unavailable' };
+  }
+
+  const items = (result.items || []).map((item) => ({
+    id: item._id || item.id || null,
+    name: item.station_name || item.name || 'Fuel Station',
+    location: {
+      lat: toNumber(item.location?.lat),
+      lng: toNumber(item.location?.lng)
+    },
+    address: item.address || null,
+    distance_miles: toNumber(item.distance_miles, 0),
+    pricing: {
+      retail_diesel: toNumber(item.retail_price || item.diesel_price),
+      effective_diesel: toNumber(item.effective_price),
+      discount_per_gallon: toNumber(item.discount_applied, 0),
+      def_price: toNumber(item.def_price, null)
+    },
+    fuel_cards: fuelCards,
+    amenities: Array.isArray(item.amenities) ? item.amenities : []
+  }));
+  const regionalAverages = computeRegionalAverages(items);
+
+  return {
+    success: true,
+    data: {
+      query: {
+        center: { lat, lng },
+        radius_miles: radius,
+        fuel_cards: fuelCards
+      },
+      results: items,
+      regional_averages: regionalAverages
+    }
+  };
+}
+
+export async function planExternalRouteFuel(body = {}) {
+  const routePoints = Array.isArray(body.route_points) ? body.route_points : [];
+  if (routePoints.length < 2) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'route_points must contain at least 2 coordinates'
+    };
+  }
+
+  const fuelCards = normalizeArray(body.fuel_cards);
+  const result = await getFuelAlongRoute(routePoints, {
+    cardType: fuelCards[0] || null,
+    maxStops: 5
+  });
+  if (!result?.success) {
+    return { success: false, errorCode: 'internal_error', message: result?.error || 'Route planning unavailable' };
+  }
+
+  const tankCapacity = Math.max(1, toNumber(body.tank_capacity_gallons, 200));
+  const currentFuel = Math.max(0, toNumber(body.current_fuel_gallons, 0));
+  const mpg = Math.max(1, toNumber(body.mpg, 6.5));
+  const totalDistance = Math.max(1, toNumber(body.total_distance_miles, 250));
+  const estimatedFuelNeeded = Number((totalDistance / mpg).toFixed(2));
+  const additionalFuel = Math.max(0, estimatedFuelNeeded - currentFuel);
+  const bestStops = chooseOptimalRouteStops(result.items || [], {
+    totalDistance,
+    tankCapacity,
+    mpg,
+    currentFuel
+  });
+  const weightedPrice = estimateWeightedEffectivePrice(bestStops, additionalFuel);
+
+  return {
+    success: true,
+    data: {
+      route_summary: {
+        total_distance_miles: totalDistance,
+        estimated_fuel_needed_gallons: estimatedFuelNeeded,
+        stops_recommended: bestStops.length
+      },
+      recommended_stops: bestStops.map((stop, index) => ({
+        location: stop.location || null,
+        name: stop.station_name || stop.name || 'Fuel Stop',
+        mile_marker: Math.round(resolveStopMile(stop, index, bestStops.length, totalDistance)),
+        effective_price: toNumber(stop.effective_price || stop.diesel_price, null),
+        estimated_savings: toNumber(stop.savings_per_fill, 0),
+        discount_per_gallon: toNumber(stop.discount_applied, 0),
+        reason: 'Optimized stop selected by segment price and reachable range'
+      })),
+      total_fuel_cost_estimate: Number((weightedPrice * additionalFuel).toFixed(2)),
+      total_savings_with_card: Number((bestStops.reduce((acc, stop) => acc + toNumber(stop.savings_per_fill, 0), 0)).toFixed(2)),
+      tank_capacity_gallons: tankCapacity
+    }
+  };
+}
+
+export async function getExternalFuelStation(stationId) {
+  if (!stationId) {
+    return { success: false, errorCode: 'invalid_request', message: 'station id is required' };
+  }
+  const station = await lookupFuelStation(stationId);
+  if (!station) {
+    return { success: false, errorCode: 'resource_not_found', message: 'station not found' };
+  }
+
+  const state = String(station.address?.state || station.state || '').toUpperCase();
+  const trendResult = state ? await getFuelPriceTrends(state, 7).catch(() => ({ success: false })) : { success: false };
+  const trendValues = trendResult?.success ?
+    (trendResult.trends || []).map((item) => Number(item.avg_diesel || item.price || item.diesel_price)).filter(Number.isFinite) :
+    [];
+  const stateAverage = trendValues.length ? Number((trendValues.reduce((a, b) => a + b, 0) / trendValues.length).toFixed(3)) : null;
+
+  const retail = toNumber(station.diesel_price || station.retail_price, null);
+  const cardDiscounts = normalizeCardDiscounts(station.card_discounts || {});
+  const pricingByCard = Object.keys(cardDiscounts).map((card) => ({
+    card_type: card,
+    discount_per_gallon: cardDiscounts[card],
+    effective_diesel: retail !== null ? Number((retail - cardDiscounts[card]).toFixed(3)) : null
+  }));
+
+  return {
+    success: true,
+    data: {
+      id: station._id || station.id || stationId,
+      name: station.station_name || station.name || 'Fuel Station',
+      location: station.location || null,
+      address: station.address || null,
+      pricing: {
+        retail_diesel: retail,
+        def_price: toNumber(station.def_price, null),
+        regional_state_avg_diesel: stateAverage
+      },
+      fuel_card_discounts: pricingByCard,
+      amenities: Array.isArray(station.amenities) ? station.amenities : [],
+      details_available: true
+    }
+  };
+}
+
+function normalizeArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  return String(value)
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function chooseOptimalRouteStops(items, params) {
+  if (!Array.isArray(items) || !items.length) return [];
+  const totalDistance = Number(params.totalDistance || 0);
+  const mpg = Math.max(1, Number(params.mpg || 6.5));
+  const tankCapacity = Math.max(1, Number(params.tankCapacity || 200));
+  const currentFuel = Math.max(0, Number(params.currentFuel || 0));
+  const maxLegDistance = tankCapacity * mpg * 0.85;
+  const initialRange = currentFuel * mpg;
+  const neededStops = Math.max(1, Math.min(5, Math.ceil(Math.max(0, totalDistance - initialRange) / maxLegDistance)));
+
+  const sortedByMile = [...items].sort((a, b) => resolveStopMile(a, 0, 1, totalDistance) - resolveStopMile(b, 0, 1, totalDistance));
+  const chosen = [];
+
+  for (let i = 0; i < neededStops; i += 1) {
+    const segmentStart = (i * totalDistance) / neededStops;
+    const segmentEnd = ((i + 1) * totalDistance) / neededStops;
+    const candidates = sortedByMile.filter((stop) => {
+      const mile = resolveStopMile(stop, i, neededStops, totalDistance);
+      return mile >= segmentStart && mile <= segmentEnd;
+    });
+    const best = (candidates.length ? candidates : sortedByMile)
+      .slice()
+      .sort((a, b) => toNumber(a.effective_price, 99) - toNumber(b.effective_price, 99))[0];
+    if (best && !chosen.find((item) => (item._id || item.id) === (best._id || best.id))) {
+      chosen.push(best);
+    }
+  }
+
+  return chosen.slice(0, 5);
+}
+
+function resolveStopMile(stop, index, totalStops, totalDistance) {
+  const routeMile = toNumber(stop.route_mile);
+  if (routeMile !== null) return routeMile;
+  return ((index + 1) * totalDistance) / (Math.max(1, totalStops) + 1);
+}
+
+function estimateWeightedEffectivePrice(stops, gallons) {
+  if (!Array.isArray(stops) || !stops.length || gallons <= 0) return 3.5;
+  const usableStops = stops.filter((stop) => Number.isFinite(toNumber(stop.effective_price)));
+  if (!usableStops.length) return 3.5;
+  const equalGallons = gallons / usableStops.length;
+  const totalCost = usableStops.reduce((sum, stop) => sum + (toNumber(stop.effective_price, 3.5) * equalGallons), 0);
+  return Number((totalCost / gallons).toFixed(3));
+}
+
+async function lookupFuelStation(stationId) {
+  const direct = await dataAccess.getRecord(COLLECTIONS.fuelPrices, stationId, { suppressAuth: true }).catch(() => null);
+  if (direct?._id || direct?.id) return direct;
+
+  const list = await dataAccess.queryRecords(COLLECTIONS.fuelPrices, {
+    limit: 1000,
+    suppressAuth: true
+  });
+  return (list?.items || []).find((item) => String(item._id || item.id) === String(stationId)) || null;
+}
+
+function computeRegionalAverages(items) {
+  const prices = items.map((item) => Number(item.pricing?.effective_diesel)).filter(Number.isFinite);
+  const avgEffective = prices.length ? Number((prices.reduce((a, b) => a + b, 0) / prices.length).toFixed(3)) : null;
+  const byState = {};
+  items.forEach((item) => {
+    const state = String(item.address?.state || '').toUpperCase();
+    if (!state) return;
+    const value = Number(item.pricing?.effective_diesel);
+    if (!Number.isFinite(value)) return;
+    byState[state] = byState[state] || [];
+    byState[state].push(value);
+  });
+  const stateAverages = Object.keys(byState).map((state) => ({
+    state,
+    avg_effective_diesel: Number((byState[state].reduce((a, b) => a + b, 0) / byState[state].length).toFixed(3))
+  }));
+  return {
+    avg_effective_diesel: avgEffective,
+    by_state: stateAverages
+  };
+}
+
+function normalizeCardDiscounts(raw) {
+  const normalized = {};
+  SUPPORTED_FUEL_CARDS.forEach((card) => {
+    normalized[card] = Number(raw[card] || 0);
+  });
+  return normalized;
+}

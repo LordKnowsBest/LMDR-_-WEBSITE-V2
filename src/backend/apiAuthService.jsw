@@ -8,6 +8,12 @@ const COLLECTIONS = {
 
 const KEY_PREFIX = 'lmdr_live_';
 const TEST_KEY_PREFIX = 'lmdr_test_';
+const PARTNER_QUERY_LIMIT = 1000;
+const KEY_CACHE_TTL_MS = 5 * 60 * 1000;
+const KEY_TOUCH_THROTTLE_MS = 5 * 60 * 1000;
+
+const keyLookupCache = new Map();
+const keyLastTouched = new Map();
 
 /**
  * Parse bearer token from an Authorization header.
@@ -58,26 +64,16 @@ export async function validateApiKey({ authorizationHeader, ipAddress = null }) 
   }
 
   const keyHash = await hashApiKey(rawKey);
-  const partnerResult = await dataAccess.queryRecords(COLLECTIONS.partners, {
-    filters: { status: 'active' },
-    limit: 200,
-    suppressAuth: true
-  });
-
-  if (!partnerResult.success) {
-    return { success: false, errorCode: 'internal_error', message: 'Partner lookup failed' };
-  }
-
-  const partner = (partnerResult.items || []).find((item) => hasMatchingKey(item, keyHash));
-  if (!partner) {
+  const resolved = await resolvePartnerByKeyHash(keyHash);
+  if (!resolved?.partner) {
     return { success: false, errorCode: 'invalid_api_key', message: 'Invalid API key' };
   }
+  const { partner, keyMeta } = resolved;
 
   if (!isIpAllowed(partner, ipAddress)) {
     return { success: false, errorCode: 'forbidden_ip', message: 'IP address not allowed' };
   }
 
-  const keyMeta = (partner.api_keys || []).find((k) => k.key_hash === keyHash);
   await touchApiKey(partner, keyMeta);
 
   const subscription = await getActiveSubscription(partner.partner_id);
@@ -161,6 +157,8 @@ function isIpAllowed(partner, ipAddress) {
 
 async function touchApiKey(partner, keyMeta) {
   if (!partner?._id || !keyMeta?.key_id) return;
+  if (!shouldTouchKeyUsage(keyMeta.key_id)) return;
+
   const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
   const updatedKeys = keys.map((key) => key.key_id === keyMeta.key_id ?
     { ...key, last_used_at: new Date() } : key
@@ -170,6 +168,54 @@ async function touchApiKey(partner, keyMeta) {
     api_keys: updatedKeys,
     updated_at: new Date()
   }, { suppressAuth: true });
+}
+
+async function resolvePartnerByKeyHash(keyHash) {
+  const cached = keyLookupCache.get(keyHash);
+  if (cached && cached.expiresAt > Date.now()) {
+    return {
+      partner: cached.partner,
+      keyMeta: cached.keyMeta
+    };
+  }
+
+  const partnerResult = await dataAccess.queryRecords(COLLECTIONS.partners, {
+    filters: { status: 'active' },
+    limit: PARTNER_QUERY_LIMIT,
+    suppressAuth: true
+  });
+
+  if (!partnerResult.success) {
+    return null;
+  }
+
+  const partner = (partnerResult.items || []).find((item) => hasMatchingKey(item, keyHash));
+  if (!partner) {
+    keyLookupCache.delete(keyHash);
+    return null;
+  }
+
+  const keyMeta = (partner.api_keys || []).find((k) =>
+    k.is_active !== false && k.key_hash === keyHash
+  ) || null;
+
+  keyLookupCache.set(keyHash, {
+    partner,
+    keyMeta,
+    expiresAt: Date.now() + KEY_CACHE_TTL_MS
+  });
+
+  return { partner, keyMeta };
+}
+
+function shouldTouchKeyUsage(keyId) {
+  const now = Date.now();
+  const last = Number(keyLastTouched.get(keyId) || 0);
+  if (now - last < KEY_TOUCH_THROTTLE_MS) {
+    return false;
+  }
+  keyLastTouched.set(keyId, now);
+  return true;
 }
 
 async function randomHex(byteLength) {

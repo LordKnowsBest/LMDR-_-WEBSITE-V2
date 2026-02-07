@@ -1,0 +1,262 @@
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+
+// ============================================
+// CONFIGURATION & CONSTANTS
+// ============================================
+
+const COLLECTION_KEY = 'platformSettings';
+
+/**
+ * Default Matching Weights for Carriers (Driver-facing)
+ */
+const DEFAULT_CARRIER_WEIGHTS = {
+    location: 25,
+    pay: 20,
+    operationType: 15,
+    turnover: 12,
+    safety: 10,
+    truckAge: 8,
+    fleetSize: 5,
+    qualityScore: 5
+};
+
+/**
+ * Default Matching Weights for Drivers (Carrier-facing)
+ */
+const DEFAULT_DRIVER_WEIGHTS = {
+    qualifications: 30,
+    experience: 20,
+    location: 20,
+    availability: 15,
+    salaryFit: 10,
+    engagement: 5
+};
+
+/**
+ * Default System Settings (Cache, Batch, etc)
+ */
+const DEFAULT_SYSTEM_SETTINGS = {
+    cache_ttl_minutes: 60,
+    enrichment_batch_size: 3,
+    email_batch_size: 5,
+    fmcsa_refresh_days: 30,
+    api_rate_limit_per_second: 5,
+    maintenance_mode: false
+};
+
+/**
+ * Default Tier Limits
+ */
+const DEFAULT_TIER_LIMITS = {
+    free: { match_results: 2, profile_views: 0 },
+    pro: { match_results: 10, profile_views: 25 },
+    enterprise: { match_results: 50, profile_views: -1 } // -1 for unlimited
+};
+
+/**
+ * Default UI Settings (Banners, etc)
+ */
+const DEFAULT_UI_SETTINGS = {
+    announcement_banner: {
+        enabled: false,
+        text: 'Welcome to the new LMDR platform!',
+        type: 'info', // info, warning, success
+        link: ''
+    }
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const memberRole = member.contactDetails?.customFields?.role || '';
+
+        return adminRoles.includes(memberRole.toLowerCase());
+    } catch (error) {
+        return false;
+    }
+}
+
+async function requireAdmin() {
+    const authorized = await isAdmin();
+    if (!authorized) {
+        throw new Error('Unauthorized: Admin access required');
+    }
+}
+
+// ============================================
+// SETTINGS OPERATIONS
+// ============================================
+
+/**
+ * Generic getter for settings by key
+ */
+async function getSettings(key, defaults) {
+    try {
+        const record = await dataAccess.findByField(COLLECTION_KEY, 'settingKey', key, { suppressAuth: true });
+        if (record && record.value) {
+            return typeof record.value === 'string' ? JSON.parse(record.value) : record.value;
+        }
+        return defaults;
+    } catch (error) {
+        console.error(`Error fetching settings for ${key}:`, error);
+        return defaults;
+    }
+}
+
+/**
+ * Generic setter for settings by key
+ */
+async function saveSettings(key, value) {
+    await requireAdmin();
+    try {
+        const member = await currentMember.getMember();
+        const data = {
+            settingKey: key,
+            value: typeof value === 'object' ? JSON.stringify(value) : value,
+            updatedBy: member?.loginEmail || 'admin',
+            updatedAt: new Date()
+        };
+
+        const result = await dataAccess.upsertRecord(COLLECTION_KEY, 'settingKey', key, data, { suppressAuth: true });
+        
+        await log({
+            level: 'INFO',
+            source: 'admin-config',
+            message: `Updated platform settings: ${key}`,
+            details: { updatedBy: data.updatedBy }
+        });
+
+        return result;
+    } catch (error) {
+        console.error(`Error saving settings for ${key}:`, error);
+        throw new Error(`Failed to save settings for ${key}`);
+    }
+}
+
+// ============================================
+// MATCHING WEIGHTS
+// ============================================
+
+/**
+ * Get carrier matching weights
+ */
+export async function getCarrierMatchingWeights() {
+    return await getSettings('carrier_matching_weights', DEFAULT_CARRIER_WEIGHTS);
+}
+
+/**
+ * Update carrier matching weights
+ */
+export async function updateCarrierMatchingWeights(weights) {
+    // Validate weights sum (should ideally be 100 but the scoring module handles normalization)
+    return await saveSettings('carrier_matching_weights', weights);
+}
+
+/**
+ * Get driver matching weights
+ */
+export async function getDriverMatchingWeights() {
+    return await getSettings('driver_matching_weights', DEFAULT_DRIVER_WEIGHTS);
+}
+
+/**
+ * Update driver matching weights
+ */
+export async function updateDriverMatchingWeights(weights) {
+    return await saveSettings('driver_matching_weights', weights);
+}
+
+// ============================================
+// SYSTEM SETTINGS (Cache, Batch, etc)
+// ============================================
+
+/**
+ * Get system settings (cache, batch sizes, etc)
+ */
+export async function getSystemSettings() {
+    return await getSettings('system_settings', DEFAULT_SYSTEM_SETTINGS);
+}
+
+/**
+ * Update system settings
+ */
+export async function updateSystemSettings(settings) {
+    return await saveSettings('system_settings', settings);
+}
+
+/**
+ * Helper to get a single system setting
+ */
+export async function getSystemSetting(settingName) {
+    const settings = await getSystemSettings();
+    return settings[settingName] || DEFAULT_SYSTEM_SETTINGS[settingName];
+}
+
+/**
+ * Get tier limits configuration
+ */
+export async function getTierLimits() {
+    return await getSettings('tier_limits', DEFAULT_TIER_LIMITS);
+}
+
+/**
+ * Update tier limits
+ */
+export async function updateTierLimits(limits) {
+    return await saveSettings('tier_limits', limits);
+}
+
+/**
+ * Get UI settings (banners, etc)
+ */
+export async function getUISettings() {
+    return await getSettings('ui_settings', DEFAULT_UI_SETTINGS);
+}
+
+/**
+ * Update UI settings
+ */
+export async function updateUISettings(settings) {
+    return await saveSettings('ui_settings', settings);
+}
+
+/**
+ * Toggle maintenance mode
+ */
+export async function toggleMaintenanceMode(enabled) {
+    const settings = await getSystemSettings();
+    settings.maintenance_mode = enabled;
+    return await updateSystemSettings(settings);
+}
+
+// ============================================
+// RESET TO DEFAULTS
+// ============================================
+
+/**
+ * Reset specific settings to defaults
+ */
+export async function resetSettings(key) {
+    await requireAdmin();
+    
+    let defaults;
+    switch (key) {
+        case 'carrier_matching_weights': defaults = DEFAULT_CARRIER_WEIGHTS; break;
+        case 'driver_matching_weights': defaults = DEFAULT_DRIVER_WEIGHTS; break;
+        case 'system_settings': defaults = DEFAULT_SYSTEM_SETTINGS; break;
+        case 'tier_limits': defaults = DEFAULT_TIER_LIMITS; break;
+        case 'ui_settings': defaults = DEFAULT_UI_SETTINGS; break;
+        default: throw new Error('Invalid settings key');
+    }
+
+    return await saveSettings(key, defaults);
+}

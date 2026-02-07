@@ -1,0 +1,198 @@
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+import { evaluateConditions } from 'backend/utils/conditionEvaluator';
+import { hashString } from 'backend/utils/hashUtils';
+
+const COLLECTION_KEY = 'featureFlags';
+const LOG_COLLECTION_KEY = 'flagEvaluationLogs';
+
+// In-memory cache for flags
+const flagCache = new Map();
+const CACHE_TTL = 60 * 1000; // 1 minute
+
+/**
+ * Get flag with in-memory caching
+ */
+async function getFlagWithCache(flagKey) {
+  const cached = flagCache.get(flagKey);
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+    return cached.data;
+  }
+
+  const flag = await dataAccess.findByField(COLLECTION_KEY, 'key', flagKey, { suppressAuth: true });
+  if (flag) {
+    flagCache.set(flagKey, {
+      data: flag,
+      timestamp: Date.now()
+    });
+  }
+  return flag;
+}
+
+/**
+ * Evaluate a feature flag for a user
+ * 
+ * @param {string} flagKey - Unique flag identifier
+ * @param {string} userId - User ID for bucketing
+ * @param {Object} [userContext] - Additional attributes for targeting rules
+ * @returns {Promise<boolean>}
+ */
+export async function evaluateFlag(flagKey, userId, userContext = {}) {
+  try {
+    // 1. Get flag definition
+    const flag = await getFlagWithCache(flagKey);
+    if (!flag) {
+      return false;
+    }
+
+    // 2. Master switch
+    if (!flag.enabled) {
+      return flag.defaultValue ?? false;
+    }
+
+    // 3. Evaluate target rules (in priority order)
+    if (flag.targetRules && Array.isArray(flag.targetRules)) {
+      for (const rule of flag.targetRules) {
+        if (!rule.enabled) continue;
+        
+        if (evaluateConditions(rule.conditions, userContext)) {
+          // User matches rule, check rule-specific rollout
+          const isSelected = checkRollout(userId, flagKey, rule.percentage);
+          await logEvaluation(flagKey, userId, isSelected, rule.id || rule.name);
+          return isSelected;
+        }
+      }
+    }
+
+    // 4. Global rollout
+    const isSelected = checkRollout(userId, flagKey, flag.rolloutPercentage);
+    await logEvaluation(flagKey, userId, isSelected, 'global');
+    return isSelected;
+  } catch (error) {
+    console.error(`[flagService] evaluateFlag error (${flagKey}):`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Evaluate all active flags for a user environment
+ */
+export async function evaluateAllFlags(userId, userContext = {}, environment = 'production') {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTION_KEY, {
+      filters: { environment, enabled: true },
+      suppressAuth: true
+    });
+
+    const evaluations = {};
+    if (result.success && result.items) {
+      for (const flag of result.items) {
+        evaluations[flag.key] = await evaluateFlag(flag.key, userId, userContext);
+      }
+    }
+    return evaluations;
+  } catch (error) {
+    console.error('[flagService] evaluateAllFlags error:', error.message);
+    return {};
+  }
+}
+
+/**
+ * Deterministically check if a user is in a rollout percentage
+ */
+function checkRollout(userId, flagKey, percentage) {
+  if (percentage >= 100) return true;
+  if (percentage <= 0) return false;
+  
+  const bucket = hashString(userId + flagKey) % 100;
+  return bucket < percentage;
+}
+
+/**
+ * Log flag evaluation for analytics
+ */
+async function logEvaluation(flagKey, userId, result, ruleId) {
+  try {
+    // We don't await this to keep evaluation fast, but it's important for analytics
+    dataAccess.insertRecord(LOG_COLLECTION_KEY, {
+      flagKey,
+      userId,
+      result,
+      ruleId,
+      evaluatedAt: new Date()
+    }, { suppressAuth: true }).catch(err => console.error('[flagService] logEvaluation fail:', err.message));
+  } catch (e) {
+    // Silent fail
+  }
+}
+
+// ============================================================================
+// ADMIN CRUD OPERATIONS
+// ============================================================================
+
+export async function getAllFlags(environment = 'production') {
+  const result = await dataAccess.queryRecords(COLLECTION_KEY, {
+    filters: environment ? { environment } : {},
+    sort: [{ field: 'key', direction: 'asc' }],
+    suppressAuth: true
+  });
+  return result.items || [];
+}
+
+export async function getFlag(flagKey) {
+  return await dataAccess.findByField(COLLECTION_KEY, 'key', flagKey, { suppressAuth: true });
+}
+
+export async function createFlag(flagData) {
+  // Validate unique key
+  const existing = await getFlag(flagData.key);
+  if (existing) {
+    throw new Error(`Flag with key '${flagData.key}' already exists`);
+  }
+
+  const result = await dataAccess.insertRecord(COLLECTION_KEY, {
+    ...flagData,
+    createdAt: new Date(),
+    updatedAt: new Date()
+  }, { suppressAuth: true });
+
+  if (result.success) {
+    flagCache.delete(flagData.key);
+  }
+  return result;
+}
+
+export async function updateFlag(flagKey, updates) {
+  const existing = await getFlag(flagKey);
+  if (!existing) {
+    throw new Error(`Flag '${flagKey}' not found`);
+  }
+
+  const result = await dataAccess.updateRecord(COLLECTION_KEY, {
+    ...existing,
+    ...updates,
+    updatedAt: new Date()
+  }, { suppressAuth: true });
+
+  if (result.success) {
+    flagCache.delete(flagKey);
+  }
+  return result;
+}
+
+export async function deleteFlag(flagKey) {
+  const existing = await getFlag(flagKey);
+  if (!existing) {
+    throw new Error(`Flag '${flagKey}' not found`);
+  }
+
+  const result = await dataAccess.deleteRecord(COLLECTION_KEY, existing._id, { suppressAuth: true });
+  if (result.success) {
+    flagCache.delete(flagKey);
+  }
+  return result;
+}
+
+export async function toggleFlag(flagKey, enabled) {
+  return await updateFlag(flagKey, { enabled });
+}

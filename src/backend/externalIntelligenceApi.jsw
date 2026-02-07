@@ -2,12 +2,15 @@ import * as dataAccess from 'backend/dataAccess';
 import { getCarrierSafetyData } from 'backend/fmcsaService';
 import { scanSocialMedia } from 'backend/socialScanner';
 import { validateDotNumber } from 'backend/externalFmcsaApi';
+import { enrichCarrier } from 'backend/aiEnrichment';
 
 const COLLECTIONS = {
   enrichments: 'carrierEnrichments'
 };
 
 const CACHE_TTL_DAYS = 14;
+const MARKET_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const marketCache = new Map();
 
 export async function getExternalCarrierIntelligence(dotNumber, options = {}) {
   const validation = validateDotNumber(dotNumber);
@@ -17,7 +20,7 @@ export async function getExternalCarrierIntelligence(dotNumber, options = {}) {
 
   const dot = String(validation.value);
   const [enrichment, safety] = await Promise.all([
-    getLatestEnrichment(dot),
+    getOrBuildEnrichment(dot),
     getCarrierSafetyData(dot).catch(() => ({}))
   ]);
 
@@ -95,11 +98,13 @@ export async function getExternalSentiment(dotNumber) {
     .filter((line) => line && !line.startsWith('#'))
     .slice(0, 3)
     .map((line) => ({
-      platform: 'social',
+      platform: inferPlatform(line),
       date: new Date().toISOString().slice(0, 10),
       sentiment: 'mixed',
       snippet: line.slice(0, 180)
     }));
+  const platformStats = toPlatformBreakdown(snippets);
+  const themes = extractThemes(snippets.map((item) => item.snippet));
 
   return {
     success: true,
@@ -112,12 +117,8 @@ export async function getExternalSentiment(dotNumber) {
         confidence: 'medium',
         sample_size: snippets.length
       },
-      by_platform: {
-        reddit: { score: 6.5, posts_analyzed: snippets.length, subreddits: [] },
-        truckersreport: { score: 6.5, threads_analyzed: 0 },
-        twitter: { score: 6.5, tweets_analyzed: 0 }
-      },
-      key_themes: [],
+      by_platform: platformStats,
+      key_themes: themes,
       recent_mentions: snippets,
       warnings: [],
       scanned_at: new Date().toISOString()
@@ -126,36 +127,44 @@ export async function getExternalSentiment(dotNumber) {
 }
 
 export async function getExternalMarketIntelligence(filters = {}) {
+  const cacheKey = buildMarketCacheKey(filters);
+  const cached = marketCache.get(cacheKey);
+  if (cached && (Date.now() - cached.cachedAt) < MARKET_CACHE_TTL_MS) {
+    return { success: true, data: cached.payload };
+  }
+
   const result = await dataAccess.queryRecords(COLLECTIONS.enrichments, {
     limit: 250,
     suppressAuth: true
   });
 
-  const items = result?.items || [];
+  const items = applyMarketFilters(result?.items || [], filters);
   if (!items.length) {
+    const emptyPayload = {
+      query: {
+        region: filters.region || null,
+        freight_type: filters.freight_type || null,
+        operation_type: filters.operation_type || null
+      },
+      market_data: {
+        avg_cpm: null,
+        cpm_range: { p25: null, p50: null, p75: null },
+        avg_sign_on_bonus: null,
+        demand_index: null,
+        demand_trend: 'stable',
+        driver_shortage_severity: 'unknown'
+      },
+      top_hiring_carriers: [],
+      regional_insights: {
+        hot_lanes: [],
+        seasonal_factors: null
+      },
+      data_date: new Date().toISOString().slice(0, 10)
+    };
+    marketCache.set(cacheKey, { payload: emptyPayload, cachedAt: Date.now() });
     return {
       success: true,
-      data: {
-        query: {
-          region: filters.region || null,
-          freight_type: filters.freight_type || null,
-          operation_type: filters.operation_type || null
-        },
-        market_data: {
-          avg_cpm: null,
-          cpm_range: { p25: null, p50: null, p75: null },
-          avg_sign_on_bonus: null,
-          demand_index: null,
-          demand_trend: 'stable',
-          driver_shortage_severity: 'unknown'
-        },
-        top_hiring_carriers: [],
-        regional_insights: {
-          hot_lanes: [],
-          seasonal_factors: null
-        },
-        data_date: new Date().toISOString().slice(0, 10)
-      }
+      data: emptyPayload
     };
   }
 
@@ -166,33 +175,36 @@ export async function getExternalMarketIntelligence(filters = {}) {
 
   cpmValues.sort((a, b) => a - b);
 
+  const payload = {
+    query: {
+      region: filters.region || null,
+      freight_type: filters.freight_type || null,
+      operation_type: filters.operation_type || null
+    },
+    market_data: {
+      avg_cpm: average(cpmValues),
+      cpm_range: {
+        p25: percentile(cpmValues, 0.25),
+        p50: percentile(cpmValues, 0.5),
+        p75: percentile(cpmValues, 0.75)
+      },
+      avg_sign_on_bonus: averageSignOnBonus(items),
+      demand_index: 7.0,
+      demand_trend: 'stable',
+      driver_shortage_severity: 'medium'
+    },
+    top_hiring_carriers: buildTopHiringCarriers(items),
+    regional_insights: {
+      hot_lanes: [],
+      seasonal_factors: null
+    },
+    data_date: new Date().toISOString().slice(0, 10)
+  };
+  marketCache.set(cacheKey, { payload, cachedAt: Date.now() });
+
   return {
     success: true,
-    data: {
-      query: {
-        region: filters.region || null,
-        freight_type: filters.freight_type || null,
-        operation_type: filters.operation_type || null
-      },
-      market_data: {
-        avg_cpm: average(cpmValues),
-        cpm_range: {
-          p25: percentile(cpmValues, 0.25),
-          p50: percentile(cpmValues, 0.5),
-          p75: percentile(cpmValues, 0.75)
-        },
-        avg_sign_on_bonus: null,
-        demand_index: 7.0,
-        demand_trend: 'stable',
-        driver_shortage_severity: 'medium'
-      },
-      top_hiring_carriers: [],
-      regional_insights: {
-        hot_lanes: [],
-        seasonal_factors: null
-      },
-      data_date: new Date().toISOString().slice(0, 10)
-    }
+    data: payload
   };
 }
 
@@ -211,6 +223,26 @@ export async function searchExternalCarriers(filters = {}, options = {}) {
     const target = normalizeSentiment(filters.sentiment);
     items = items.filter((item) => normalizeSentiment(item.driver_sentiment) === target);
   }
+  if (filters.fleet_size_min) {
+    const min = Number(filters.fleet_size_min);
+    if (Number.isFinite(min)) {
+      items = items.filter((item) => Number(item.total_power_units || 0) >= min);
+    }
+  }
+  if (filters.fleet_size_max) {
+    const max = Number(filters.fleet_size_max);
+    if (Number.isFinite(max)) {
+      items = items.filter((item) => Number(item.total_power_units || 0) <= max);
+    }
+  }
+  if (filters.safety_rating) {
+    const targetRating = String(filters.safety_rating).toLowerCase();
+    items = items.filter((item) => String(item.safety_rating || '').toLowerCase() === targetRating);
+  }
+
+  const sortBy = String(options.sort_by || 'match_score').toLowerCase();
+  const sortDirection = String(options.sort_direction || 'desc').toLowerCase() === 'asc' ? 1 : -1;
+  items = items.sort((a, b) => compareCarrierSort(a, b, sortBy) * sortDirection);
 
   const total = items.length;
   const page = items.slice(offset, offset + limit).map((item) => ({
@@ -254,6 +286,17 @@ async function getLatestEnrichment(dotNumber) {
     return item;
   }
   return item;
+}
+
+async function getOrBuildEnrichment(dotNumber) {
+  const latest = await getLatestEnrichment(dotNumber);
+  if (latest) return latest;
+
+  const enriched = await enrichCarrier(String(dotNumber), {}, {}, null).catch(() => null);
+  if (enriched && !enriched.error) {
+    return enriched;
+  }
+  return null;
 }
 
 function parseCpmRange(value) {
@@ -318,6 +361,127 @@ function estimateMatchScore(item) {
   if (confidence === 'high') return 85;
   if (confidence === 'medium') return 72;
   return 60;
+}
+
+function buildTopHiringCarriers(items) {
+  return items
+    .filter((item) => String(item.hiring_status || '').toLowerCase().includes('active'))
+    .slice(0, 10)
+    .map((item) => ({
+      dot_number: Number(item.dot_number),
+      carrier_name: item.legal_name || item.carrier_name || null,
+      hiring_status: item.hiring_status || 'unknown',
+      confidence: String(item.data_confidence || 'low').toLowerCase()
+    }));
+}
+
+function applyMarketFilters(items, filters) {
+  let filtered = Array.isArray(items) ? [...items] : [];
+  const region = String(filters.region || '').toLowerCase();
+  const freightType = String(filters.freight_type || '').toLowerCase();
+  const operationType = String(filters.operation_type || '').toLowerCase();
+
+  if (region) {
+    filtered = filtered.filter((item) => {
+      const hay = `${item.phy_state || ''} ${item.region || ''} ${item.primary_region || ''}`.toLowerCase();
+      return hay.includes(region);
+    });
+  }
+  if (freightType) {
+    filtered = filtered.filter((item) => String(item.freight_types || '').toLowerCase().includes(freightType));
+  }
+  if (operationType) {
+    filtered = filtered.filter((item) => String(item.route_types || '').toLowerCase().includes(operationType));
+  }
+  return filtered;
+}
+
+function buildMarketCacheKey(filters) {
+  const region = String(filters.region || '').toLowerCase();
+  const freightType = String(filters.freight_type || '').toLowerCase();
+  const operationType = String(filters.operation_type || '').toLowerCase();
+  const day = new Date().toISOString().slice(0, 10);
+  return `${day}|${region}|${freightType}|${operationType}`;
+}
+
+function averageSignOnBonus(items) {
+  const values = items
+    .map((item) => parseBonus(item.sign_on_bonus).amount)
+    .filter((value) => Number.isFinite(value));
+  return average(values);
+}
+
+function compareCarrierSort(a, b, sortBy) {
+  if (sortBy === 'sentiment') {
+    return scoreSentiment(a.driver_sentiment) - scoreSentiment(b.driver_sentiment);
+  }
+  if (sortBy === 'confidence') {
+    return scoreConfidence(a.data_confidence) - scoreConfidence(b.data_confidence);
+  }
+  const scoreA = estimateMatchScore(a);
+  const scoreB = estimateMatchScore(b);
+  return scoreA - scoreB;
+}
+
+function scoreSentiment(value) {
+  const sentiment = normalizeSentiment(value);
+  if (sentiment === 'positive') return 3;
+  if (sentiment === 'mixed') return 2;
+  return 1;
+}
+
+function scoreConfidence(value) {
+  const confidence = String(value || '').toLowerCase();
+  if (confidence === 'high') return 3;
+  if (confidence === 'medium') return 2;
+  return 1;
+}
+
+function inferPlatform(snippet) {
+  const text = String(snippet || '').toLowerCase();
+  if (text.includes('reddit')) return 'reddit';
+  if (text.includes('truckersreport') || text.includes('forum')) return 'truckersreport';
+  if (text.includes('twitter') || text.includes('x.com') || text.includes('@')) return 'twitter';
+  return 'social';
+}
+
+function toPlatformBreakdown(snippets) {
+  const base = {
+    reddit: { score: 6.5, posts_analyzed: 0, subreddits: [] },
+    truckersreport: { score: 6.5, threads_analyzed: 0 },
+    twitter: { score: 6.5, tweets_analyzed: 0 }
+  };
+
+  snippets.forEach((item) => {
+    if (item.platform === 'reddit') base.reddit.posts_analyzed += 1;
+    if (item.platform === 'truckersreport') base.truckersreport.threads_analyzed += 1;
+    if (item.platform === 'twitter') base.twitter.tweets_analyzed += 1;
+  });
+  return base;
+}
+
+function extractThemes(lines) {
+  const buckets = {
+    pay: ['pay', 'cpm', 'bonus'],
+    home_time: ['home time', 'hometime', 'weekend'],
+    equipment: ['truck', 'equipment', 'maintenance'],
+    management: ['dispatch', 'manager', 'management']
+  };
+
+  const scores = Object.keys(buckets).map((key) => {
+    const words = buckets[key];
+    const count = lines.reduce((acc, line) => {
+      const hay = String(line || '').toLowerCase();
+      const matches = words.some((word) => hay.includes(word));
+      return acc + (matches ? 1 : 0);
+    }, 0);
+    return { theme: key, mentions: count };
+  });
+
+  return scores
+    .filter((item) => item.mentions > 0)
+    .sort((a, b) => b.mentions - a.mentions)
+    .slice(0, 5);
 }
 
 function average(values) {

@@ -17,6 +17,7 @@ import {
 } from 'backend/abandonmentEmailService';
 import * as dataAccess from 'backend/dataAccess';
 import { log } from 'backend/observabilityService';
+import { getSystemSetting } from 'backend/admin_config_service';
 
 // ============================================================================
 // CONFIGURATION
@@ -60,6 +61,15 @@ export async function runEnrichmentBatch() {
   let socialScansRun = 0;
 
   try {
+    // Fetch dynamic configuration
+    const [batchSize, staleThresholdDays, apiRateLimit] = await Promise.all([
+        getSystemSetting('enrichment_batch_size'),
+        getSystemSetting('fmcsa_refresh_days'),
+        getSystemSetting('api_rate_limit_per_second')
+    ]);
+
+    const delayMs = Math.max(200, 1000 / apiRateLimit);
+
     const carrierResult = await dataAccess.queryRecords(CONFIG.carriersKey, {
       sort: [{ field: 'combined_score', direction: 'desc' }],
       limit: 60,
@@ -70,13 +80,13 @@ export async function runEnrichmentBatch() {
       return { status: 'empty' };
     }
 
-    const candidates = await filterForUnenriched(carrierResult.items);
+    const candidates = await filterForUnenriched(carrierResult.items, staleThresholdDays);
     
     if (candidates.length === 0) {
       return { success: true, processed: 0, message: "All fresh" };
     }
     
-    const batch = candidates.slice(0, CONFIG.batchSize);
+    const batch = candidates.slice(0, batchSize);
     
     for (const carrier of batch) {
       const dot = String(carrier.dot_number || carrier.DOT_NUMBER).trim();
@@ -104,7 +114,7 @@ export async function runEnrichmentBatch() {
         processedCount++;
         
         if (processedCount < batch.length) {
-            await sleep(CONFIG.delayBetweenCallsMs);
+            await sleep(delayMs);
         }
       } catch (err) {
         console.error(`❌ FAILED DOT ${dot}:`, err.message);
@@ -143,6 +153,14 @@ export async function processAbandonmentFollowUps() {
   let errorCount = 0;
 
   try {
+    // Fetch dynamic configuration
+    const [maxPerRun, apiRateLimit] = await Promise.all([
+        getSystemSetting('email_batch_size'),
+        getSystemSetting('api_rate_limit_per_second')
+    ]);
+
+    const delayMs = Math.max(500, 1000 / apiRateLimit);
+
     const now = new Date();
     const threeDaysAgo = new Date(now.getTime() - (ABANDONMENT_CONFIG.email2DelayDays * 24 * 60 * 60 * 1000));
     const sevenDaysAgo = new Date(now.getTime() - (ABANDONMENT_CONFIG.email3DelayDays * 24 * 60 * 60 * 1000));
@@ -159,7 +177,7 @@ export async function processAbandonmentFollowUps() {
 
     let processedCount = 0;
     for (const record of result.items) {
-      if (processedCount >= ABANDONMENT_CONFIG.maxPerRun) break;
+      if (processedCount >= maxPerRun) break;
       if (record.recovered) continue;
 
       const abandonedAt = new Date(record.abandoned_at || record.abandonedAt);
@@ -180,7 +198,7 @@ export async function processAbandonmentFollowUps() {
           } else {
             errorCount++;
           }
-          await sleep(ABANDONMENT_CONFIG.delayBetweenEmailsMs);
+          await sleep(delayMs);
           continue;
         }
 
@@ -193,7 +211,7 @@ export async function processAbandonmentFollowUps() {
           } else {
             errorCount++;
           }
-          await sleep(ABANDONMENT_CONFIG.delayBetweenEmailsMs);
+          await sleep(delayMs);
         }
       } catch (err) {
         console.error(`❌ Error processing abandonment ${record._id}:`, err.message);
@@ -309,7 +327,7 @@ export async function markAbandonmentRecovered(email, sessionId = null) {
 // HELPERS
 // ============================================================================
 
-async function filterForUnenriched(carriers) {
+async function filterForUnenriched(carriers, staleThresholdDays = 30) {
   const dotNumbers = carriers.map(c => String(c.dot_number || c.DOT_NUMBER)).filter(d => d);
   if (dotNumbers.length === 0) return [];
 
@@ -330,7 +348,7 @@ async function filterForUnenriched(carriers) {
         
         const enrichedDate = existing.enriched_date ? new Date(existing.enriched_date) : new Date(0);
         const ageInDays = (Date.now() - enrichedDate.getTime()) / (1000 * 60 * 60 * 24);
-        return ageInDays > CONFIG.staleThresholdDays;
+        return ageInDays > staleThresholdDays;
     });
   } catch (err) {
       console.error("Filter logic error:", err.message);

@@ -1,0 +1,186 @@
+import { findMatchingDrivers, getDriverProfile } from 'backend/driverMatching';
+import { findMatchingCarriers } from 'backend/carrierMatching';
+
+export async function searchExternalDrivers(body = {}, authContext = {}) {
+  const carrierDot = String(body?.carrier_dot || '').trim();
+  if (!carrierDot) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'carrier_dot is required'
+    };
+  }
+
+  const filters = body?.filters || {};
+  const mappedFilters = {
+    cdl_types: normalizeArray(filters.cdl_class),
+    endorsements: normalizeArray(filters.endorsements_required),
+    min_experience: toNumber(filters.min_experience_years, 0),
+    availability: Array.isArray(filters.availability) ? filters.availability[0] : filters.availability
+  };
+
+  const options = {
+    limit: Math.min(100, Math.max(1, toNumber(body?.limit, 25))),
+    page: 0,
+    pageSize: Math.min(100, Math.max(1, toNumber(body?.limit, 25))),
+    includeMutualMatches: true
+  };
+
+  const result = await findMatchingDrivers(carrierDot, mappedFilters, options);
+  if (!result?.success) {
+    return {
+      success: false,
+      errorCode: 'internal_error',
+      message: result?.error || 'Driver search failed'
+    };
+  }
+
+  return {
+    success: true,
+    usageMetric: 'driver_searches',
+    data: {
+      total_matches: toNumber(result?.pagination?.totalCount, result.matches?.length || 0),
+      results: (result.matches || []).map((match) => ({
+        driver_id: match?.driver?._id || match?.driver?.id || null,
+        match_score: toNumber(match.score, 0),
+        score_breakdown: match.driver_match_scores || {},
+        profile: {
+          cdl_class: match?.driver?.cdl_class || null,
+          endorsements: normalizeArray(match?.driver?.endorsements),
+          years_experience: toNumber(match?.driver?.years_experience, null),
+          location: {
+            city: match?.driver?.city || null,
+            state: match?.driver?.state || null
+          },
+          distance_miles: toNumber(match?.driver?.distance_miles, null),
+          availability: match?.driver?.availability || null
+        },
+        contact_available: String(authContext?.tier || '').toLowerCase() === 'enterprise'
+      })),
+      search_id: `srch_${Date.now()}`,
+      credits_used: 1
+    }
+  };
+}
+
+export async function getExternalDriverProfile(driverId, query = {}) {
+  if (!driverId) {
+    return { success: false, errorCode: 'invalid_request', message: 'driver id is required' };
+  }
+
+  const carrierDot = String(query?.carrier_dot || '').trim();
+  if (!carrierDot) {
+    return { success: false, errorCode: 'invalid_request', message: 'carrier_dot is required' };
+  }
+
+  const result = await getDriverProfile(carrierDot, driverId, {});
+  if (!result?.success) {
+    return { success: false, errorCode: 'resource_not_found', message: result?.error || 'Driver not found' };
+  }
+
+  return {
+    success: true,
+    data: {
+      driver_id: driverId,
+      profile: result.driver || {},
+      pii_masked: true
+    }
+  };
+}
+
+export async function matchExternalCarriers(body = {}) {
+  const profile = body?.driver_profile || {};
+  const input = {
+    operationType: normalizeFirst(profile?.preferences?.operation_type) || 'Any',
+    minCPM: toNumber(profile?.preferences?.min_cpm, 0),
+    endorsements: normalizeArray(profile.endorsements),
+    experienceYears: toNumber(profile.years_experience, 0)
+  };
+
+  const result = await findMatchingCarriers(input, true);
+  if (!result?.success) {
+    return { success: false, errorCode: 'internal_error', message: result?.error || 'Carrier matching failed' };
+  }
+
+  const limit = Math.min(50, Math.max(1, toNumber(body.limit, 10)));
+  const includeEnrichment = Boolean(body.include_enrichment);
+
+  return {
+    success: true,
+    data: {
+      total_matches: result.totalMatches || 0,
+      results: (result.matches || []).slice(0, limit).map((entry) => ({
+        carrier: {
+          dot_number: toNumber(entry?.carrier?.DOT_NUMBER, null),
+          name: entry?.carrier?.LEGAL_NAME || entry?.carrier?.legal_name || null,
+          location: [entry?.carrier?.PHY_CITY, entry?.carrier?.PHY_STATE].filter(Boolean).join(', ')
+        },
+        match_score: toNumber(entry.overallScore || entry.score, 0),
+        score_breakdown: entry.scores || {},
+        enrichment: includeEnrichment ? mapEnrichment(entry.enrichment) : undefined,
+        safety_summary: {
+          rating: entry?.carrier?.safety_rating || null,
+          alerts: 0
+        }
+      }))
+    }
+  };
+}
+
+export async function checkExternalQualification(body = {}) {
+  const driver = body?.driver || {};
+  const carrier = body?.carrier_requirements || {};
+  const missing = [];
+
+  const requiredClass = String(carrier.cdl_class || '').trim();
+  if (requiredClass && String(driver.cdl_class || '').trim() !== requiredClass) {
+    missing.push(`cdl_class:${requiredClass}`);
+  }
+
+  const requiredEndorsements = normalizeArray(carrier.endorsements_required);
+  const driverEndorsements = new Set(normalizeArray(driver.endorsements));
+  requiredEndorsements.forEach((endorsement) => {
+    if (!driverEndorsements.has(endorsement)) {
+      missing.push(`endorsement:${endorsement}`);
+    }
+  });
+
+  const minExp = toNumber(carrier.min_experience_years, 0);
+  const driverExp = toNumber(driver.years_experience, 0);
+  if (driverExp < minExp) {
+    missing.push(`experience:${minExp}`);
+  }
+
+  return {
+    success: true,
+    data: {
+      qualified: missing.length === 0,
+      missing_qualifications: missing
+    }
+  };
+}
+
+function mapEnrichment(value) {
+  if (!value) return null;
+  return {
+    cpm_range: value?.pay_cpm_range || null,
+    sentiment: value?.driver_sentiment || null,
+    hiring_status: value?.hiring_status || null
+  };
+}
+
+function normalizeArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  return [String(value).trim()].filter(Boolean);
+}
+
+function normalizeFirst(value) {
+  if (Array.isArray(value)) return value[0] || null;
+  return value || null;
+}
+
+function toNumber(value, fallback = null) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}

@@ -259,31 +259,3 @@ async function loadPlatformStats() {
   }
 }
 
-/**
- * Load platform stats for credibility
- */
-async function loadPlatformStats() {
-  try {
-    const stats = await getCarrierPlatformStats();
-
-    const statElements = {
-      '#statQualifiedDrivers': stats.qualifiedDrivers.toLocaleString(),
-      '#statAvgTimeToHire': `${stats.avgDaysToHire} days`,
-      '#statRetentionRate': `${stats.retentionRate}%`
-    };
-
-    Object.entries(statElements).forEach(([selector, value]) => {
-      try {
-        const element = $w(selector);
-        if (element && element.text !== undefined) {
-          element.text = value;
-        }
-      } catch (e) {
-        // Element may not exist
-      }
-    });
-
-  } catch (err) {
-    console.error('Failed to load platform stats:', err);
-  }
-}

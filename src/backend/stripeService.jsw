@@ -8,6 +8,9 @@ import * as dataAccess from 'backend/dataAccess';
 const CONFIG = {
   // Collection keys for dataAccess routing
   subscriptionsKey: 'carrierSubscriptions',
+  apiSubscriptionsKey: 'apiSubscriptions',
+  apiUsageKey: 'apiUsage',
+  apiPartnersKey: 'apiPartners',
   stripeEventsKey: 'stripeEvents',
   billingHistoryKey: 'billingHistory',
   carrierPaymentsKey: 'carrierPayments',
@@ -19,6 +22,38 @@ const CONFIG = {
   plans: {
     pro: { name: 'LMDR Pro', monthlyQuota: 25, features: ['driver_search', 'profile_view', 'messaging'] },
     enterprise: { name: 'LMDR Enterprise', monthlyQuota: -1, features: ['driver_search', 'profile_view', 'messaging', 'api_access', 'priority_support'] }
+  },
+  apiPlans: {
+    starter: {
+      monthlyPrice: 99,
+      annualPrice: 990,
+      requestsPerMinute: 10,
+      requestsPerMonth: 5000,
+      driverSearchesMonthly: 0,
+      documentExtractionsMonthly: 0,
+      overagePricePerCall: 0.005,
+      apiProducts: ['safety_suite']
+    },
+    growth: {
+      monthlyPrice: 499,
+      annualPrice: 4990,
+      requestsPerMinute: 60,
+      requestsPerMonth: 50000,
+      driverSearchesMonthly: 100,
+      documentExtractionsMonthly: 50,
+      overagePricePerCall: 0.005,
+      apiProducts: ['safety_suite', 'intelligence_suite', 'operations_suite', 'document_suite']
+    },
+    enterprise: {
+      monthlyPrice: 999,
+      annualPrice: 9990,
+      requestsPerMinute: 300,
+      requestsPerMonth: Number.MAX_SAFE_INTEGER,
+      driverSearchesMonthly: Number.MAX_SAFE_INTEGER,
+      documentExtractionsMonthly: 500,
+      overagePricePerCall: 0.003,
+      apiProducts: ['safety_suite', 'intelligence_suite', 'operations_suite', 'matching_suite', 'document_suite', 'engagement_suite']
+    }
   }
 };
 
@@ -31,13 +66,51 @@ let cachedSecrets = null;
 async function getStripeSecrets() {
   if (cachedSecrets) return cachedSecrets;
   try {
-    const [secretKey, publishableKey, pricePro, priceEnterprise, pricePlacementDeposit, webhookSecret, priceProMonthly, pricePro6Month, priceEnterprise6Month] = await Promise.all([
+    const [
+      secretKey,
+      publishableKey,
+      pricePro,
+      priceEnterprise,
+      pricePlacementDeposit,
+      webhookSecret,
+      priceProMonthly,
+      pricePro6Month,
+      priceEnterprise6Month,
+      priceApiStarterMonthly,
+      priceApiStarterAnnual,
+      priceApiGrowthMonthly,
+      priceApiGrowthAnnual,
+      priceApiEnterpriseMonthly,
+      priceApiEnterpriseAnnual
+    ] = await Promise.all([
       getSecret('SECRET_KEY_STRIPE'), getSecret('PUBLISHABLE_STRIPE'), getSecret('STRIPE_PRICE_PRO').catch(() => null),
       getSecret('STRIPE_PRICE_ENTERPRISE').catch(() => null), getSecret('STRIPE_PRICE_PLACEMENT_DEPOSIT').catch(() => null),
       getSecret('STRIPE_WEBHOOK_SECRET').catch(() => null), getSecret('STRIPE_PRICE_PRO_MONTHLY').catch(() => null),
-      getSecret('STRIPE_PRICE_PRO_6MONTH').catch(() => null), getSecret('STRIPE_PRICE_ENTERPRISE_6MONTH').catch(() => null)
+      getSecret('STRIPE_PRICE_PRO_6MONTH').catch(() => null), getSecret('STRIPE_PRICE_ENTERPRISE_6MONTH').catch(() => null),
+      getSecret('STRIPE_PRICE_API_STARTER_MONTHLY').catch(() => null),
+      getSecret('STRIPE_PRICE_API_STARTER_ANNUAL').catch(() => null),
+      getSecret('STRIPE_PRICE_API_GROWTH_MONTHLY').catch(() => null),
+      getSecret('STRIPE_PRICE_API_GROWTH_ANNUAL').catch(() => null),
+      getSecret('STRIPE_PRICE_API_ENTERPRISE_MONTHLY').catch(() => null),
+      getSecret('STRIPE_PRICE_API_ENTERPRISE_ANNUAL').catch(() => null)
     ]);
-    cachedSecrets = { secretKey, publishableKey, pricePro, priceEnterprise, pricePlacementDeposit, webhookSecret, priceProMonthly, pricePro6Month, priceEnterprise6Month };
+    cachedSecrets = {
+      secretKey,
+      publishableKey,
+      pricePro,
+      priceEnterprise,
+      pricePlacementDeposit,
+      webhookSecret,
+      priceProMonthly,
+      pricePro6Month,
+      priceEnterprise6Month,
+      priceApiStarterMonthly,
+      priceApiStarterAnnual,
+      priceApiGrowthMonthly,
+      priceApiGrowthAnnual,
+      priceApiEnterpriseMonthly,
+      priceApiEnterpriseAnnual
+    };
     return cachedSecrets;
   } catch (error) {
     throw new Error('Stripe configuration error');
@@ -255,4 +328,233 @@ export async function updatePaymentStatus(sessionId, status, paymentData = {}) {
     await dataAccess.updateRecord(CONFIG.carrierPaymentsKey, { ...result.items[0], status, completed_at: new Date() }, { suppressAuth: true });
     return { success: true };
   } catch (error) { return { success: false, error: error.message }; }
+}
+
+// ============================================================================
+// API PLATFORM BILLING
+// ============================================================================
+
+export async function createApiCheckoutSession(
+  partnerId,
+  tier = 'starter',
+  planType = 'monthly',
+  successUrl = null,
+  cancelUrl = null
+) {
+  try {
+    const normalizedTier = String(tier || 'starter').toLowerCase();
+    const normalizedPlan = String(planType || 'monthly').toLowerCase();
+    const partner = await getApiPartner(partnerId);
+    if (!partner) return { success: false, error: 'Partner not found' };
+
+    const priceId = await getApiPriceId(normalizedTier, normalizedPlan);
+    if (!priceId) return { success: false, error: 'API tier price is not configured' };
+
+    const sessionData = await stripeRequest('/checkout/sessions', 'POST', {
+      'mode': 'subscription',
+      'payment_method_types[0]': 'card',
+      'line_items[0][price]': priceId,
+      'line_items[0][quantity]': '1',
+      'customer_email': partner.contact_email,
+      'success_url': successUrl || 'https://www.lastmiledr.app/api-portal?billing=success&session_id={CHECKOUT_SESSION_ID}',
+      'cancel_url': cancelUrl || 'https://www.lastmiledr.app/api-portal?billing=canceled',
+      'metadata[partner_id]': partnerId,
+      'metadata[api_tier]': normalizedTier,
+      'metadata[product]': 'external_api_platform',
+      'subscription_data[metadata][partner_id]': partnerId,
+      'subscription_data[metadata][api_tier]': normalizedTier,
+      'subscription_data[metadata][product]': 'external_api_platform'
+    });
+
+    return { success: true, checkoutUrl: sessionData.url, sessionId: sessionData.id };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function upsertApiSubscriptionFromStripe(stripeSubscription, customerId) {
+  try {
+    const partnerId = stripeSubscription?.metadata?.partner_id;
+    if (!partnerId) return { success: false, error: 'Missing partner_id metadata' };
+
+    const tier = await resolveApiTierFromSubscription(stripeSubscription);
+    const tierConfig = CONFIG.apiPlans[tier] || CONFIG.apiPlans.starter;
+
+    const existing = await getApiSubscriptionByPartner(partnerId);
+    const payload = {
+      partner_id: partnerId,
+      tier,
+      plan_type: stripeSubscription?.metadata?.billing_cycle || 'monthly',
+      price_monthly: tierConfig.monthlyPrice,
+      api_products: tierConfig.apiProducts,
+      rate_limits: {
+        requests_per_minute: tierConfig.requestsPerMinute,
+        requests_per_month: tierConfig.requestsPerMonth
+      },
+      quotas: {
+        driver_searches_monthly: tierConfig.driverSearchesMonthly,
+        document_extractions_monthly: tierConfig.documentExtractionsMonthly
+      },
+      stripe_subscription_id: stripeSubscription.id,
+      stripe_customer_id: customerId || existing?.stripe_customer_id || null,
+      current_period_start: new Date(stripeSubscription.current_period_start * 1000),
+      current_period_end: new Date(stripeSubscription.current_period_end * 1000),
+      status: stripeSubscription.status === 'active' ? 'active' : stripeSubscription.status
+    };
+
+    if (existing?._id) {
+      const updated = await dataAccess.updateRecord(CONFIG.apiSubscriptionsKey, {
+        ...existing,
+        ...payload
+      }, { suppressAuth: true });
+      return { success: true, record: updated?.record || updated };
+    }
+
+    const inserted = await dataAccess.insertRecord(CONFIG.apiSubscriptionsKey, payload, { suppressAuth: true });
+    return { success: true, record: inserted?.record || inserted };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function updateApiSubscriptionStatus(stripeSubscriptionId, status) {
+  try {
+    const result = await dataAccess.queryRecords(CONFIG.apiSubscriptionsKey, {
+      filters: { stripe_subscription_id: stripeSubscriptionId },
+      limit: 1,
+      suppressAuth: true
+    });
+    if (!result?.items?.length) return { success: false, error: 'Not found' };
+
+    await dataAccess.updateRecord(CONFIG.apiSubscriptionsKey, {
+      ...result.items[0],
+      status
+    }, { suppressAuth: true });
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function createApiPortalSession(partnerId, returnUrl = null) {
+  try {
+    const subscription = await getApiSubscriptionByPartner(partnerId);
+    if (!subscription?.stripe_customer_id) {
+      return { success: false, error: 'No Stripe customer found for partner' };
+    }
+
+    const portalData = await stripeRequest('/billing_portal/sessions', 'POST', {
+      'customer': subscription.stripe_customer_id,
+      'return_url': returnUrl || 'https://www.lastmiledr.app/api-portal'
+    });
+
+    return { success: true, portalUrl: portalData.url };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function getApiBillingSummary(partnerId, periodKey = null) {
+  try {
+    const subscription = await getApiSubscriptionByPartner(partnerId);
+    if (!subscription) {
+      return { success: false, error: 'No active API subscription found' };
+    }
+
+    const targetPeriod = periodKey || new Date().toISOString().slice(0, 7);
+    const usageResult = await dataAccess.queryRecords(CONFIG.apiUsageKey, {
+      filters: { partner_id: partnerId, period_key: targetPeriod },
+      limit: 1,
+      suppressAuth: true
+    });
+    const usageRecord = usageResult?.items?.[0] || null;
+
+    const used = Number(usageRecord?.usage?.total_requests || 0);
+    const included = Number(subscription?.rate_limits?.requests_per_month || 0);
+    const unlimited = included === Number.MAX_SAFE_INTEGER || included < 0;
+    const overageRequests = unlimited ? 0 : Math.max(0, used - included);
+    const tierConfig = CONFIG.apiPlans[String(subscription.tier || 'starter').toLowerCase()] || CONFIG.apiPlans.starter;
+    const overageRate = Number(subscription?.overage_price_per_call || tierConfig.overagePricePerCall || 0.005);
+    const overageAmount = Number((overageRequests * overageRate).toFixed(2));
+    const baseAmount = Number(subscription?.price_monthly || tierConfig.monthlyPrice || 0);
+
+    return {
+      success: true,
+      period_key: targetPeriod,
+      tier: subscription.tier,
+      base_amount: baseAmount,
+      usage: {
+        total_requests: used,
+        included_requests: unlimited ? 'unlimited' : included,
+        overage_requests: overageRequests
+      },
+      overage_price_per_call: overageRate,
+      overage_amount: overageAmount,
+      estimated_total: Number((baseAmount + overageAmount).toFixed(2))
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+async function getApiPriceId(tier, planType) {
+  const secrets = await getStripeSecrets();
+  const keyMap = {
+    starter: {
+      monthly: 'priceApiStarterMonthly',
+      annual: 'priceApiStarterAnnual'
+    },
+    growth: {
+      monthly: 'priceApiGrowthMonthly',
+      annual: 'priceApiGrowthAnnual'
+    },
+    enterprise: {
+      monthly: 'priceApiEnterpriseMonthly',
+      annual: 'priceApiEnterpriseAnnual'
+    }
+  };
+
+  const tierMap = keyMap[String(tier || 'starter').toLowerCase()] || keyMap.starter;
+  const planKey = String(planType || 'monthly').toLowerCase() === 'annual' ? 'annual' : 'monthly';
+  const secretKeyName = tierMap[planKey];
+  return secrets?.[secretKeyName] || null;
+}
+
+async function resolveApiTierFromSubscription(stripeSubscription) {
+  const explicit = String(stripeSubscription?.metadata?.api_tier || '').toLowerCase();
+  if (explicit && CONFIG.apiPlans[explicit]) return explicit;
+
+  const secrets = await getStripeSecrets();
+  const priceId = stripeSubscription?.items?.data?.[0]?.price?.id;
+  if (!priceId) return 'starter';
+
+  const byPrice = new Map([
+    [secrets.priceApiStarterMonthly, 'starter'],
+    [secrets.priceApiStarterAnnual, 'starter'],
+    [secrets.priceApiGrowthMonthly, 'growth'],
+    [secrets.priceApiGrowthAnnual, 'growth'],
+    [secrets.priceApiEnterpriseMonthly, 'enterprise'],
+    [secrets.priceApiEnterpriseAnnual, 'enterprise']
+  ]);
+  return byPrice.get(priceId) || 'starter';
+}
+
+async function getApiPartner(partnerId) {
+  const result = await dataAccess.queryRecords(CONFIG.apiPartnersKey, {
+    filters: { partner_id: String(partnerId) },
+    limit: 1,
+    suppressAuth: true
+  });
+  return result?.items?.[0] || null;
+}
+
+async function getApiSubscriptionByPartner(partnerId) {
+  const result = await dataAccess.queryRecords(CONFIG.apiSubscriptionsKey, {
+    filters: { partner_id: String(partnerId) },
+    sort: [{ field: 'current_period_end', direction: 'desc' }],
+    limit: 1,
+    suppressAuth: true
+  });
+  return result?.items?.[0] || null;
 }

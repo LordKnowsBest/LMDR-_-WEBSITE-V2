@@ -5,49 +5,49 @@
 Establish the core API gateway, authentication, and request handling infrastructure.
 
 ### 1.1 Gateway Setup
-- [ ] Task: Design API gateway architecture (evaluate Wix HTTP functions vs external gateway)
-- [ ] Task: Create `apiGateway.js` HTTP functions entry point in `src/backend/`
-- [ ] Task: Implement request routing layer for `/v1/` endpoints
-- [ ] Task: Create request validation middleware (schema validation)
-- [ ] Task: Implement response formatting standardization (JSON structure)
-- [ ] Task: Create error handling middleware with standard error codes
-- [ ] Task: Implement request logging to `ApiRequestLog` collection
-- [ ] Task: Set up CORS configuration for API access
+- [x] Task: Design API gateway architecture (evaluate Wix HTTP functions vs external gateway)
+- [x] Task: Create `apiGateway.js` HTTP functions entry point in `src/backend/`
+- [x] Task: Implement request routing layer for `/v1/` endpoints
+- [x] Task: Create request validation middleware (schema validation)
+- [x] Task: Implement response formatting standardization (JSON structure)
+- [x] Task: Create error handling middleware with standard error codes
+- [x] Task: Implement request logging to `ApiRequestLog` collection
+- [x] Task: Set up CORS configuration for API access
 
 ### 1.2 Authentication System
-- [ ] Task: Create `ApiPartners` collection with schema from spec
-- [ ] Task: Create `apiAuthService.jsw` for authentication logic
-- [ ] Task: Implement API key generation (64-char secure random)
-- [ ] Task: Implement API key hashing (bcrypt) for secure storage
-- [ ] Task: Implement `validateApiKey(key)` authentication function
-- [ ] Task: Implement API key lookup with partner tier resolution
-- [ ] Task: Add `Authorization: Bearer` header parsing
-- [ ] Task: Create API key rotation functionality
-- [ ] Task: Implement IP whitelist validation (optional per partner)
-- [ ] Task: Add authentication middleware to gateway
+- [x] Task: Create `ApiPartners` collection with schema from spec
+- [x] Task: Create `apiAuthService.jsw` for authentication logic
+- [x] Task: Implement API key generation (64-char secure random)
+- [x] Task: Implement API key hashing (bcrypt) for secure storage
+- [x] Task: Implement `validateApiKey(key)` authentication function
+- [x] Task: Implement API key lookup with partner tier resolution
+- [x] Task: Add `Authorization: Bearer` header parsing
+- [x] Task: Create API key rotation functionality
+- [x] Task: Implement IP whitelist validation (optional per partner)
+- [x] Task: Add authentication middleware to gateway
 
 ### 1.3 Rate Limiting
-- [ ] Task: Design rate limiting strategy (sliding window)
-- [ ] Task: Create `rateLimitService.jsw` for rate limit logic
-- [ ] Task: Implement per-minute rate limiting with counter
-- [ ] Task: Implement per-month quota tracking in `ApiUsage`
-- [ ] Task: Implement per-endpoint rate limit overrides
-- [ ] Task: Add rate limit headers to responses (`X-RateLimit-*`)
-- [ ] Task: Implement 429 response with `Retry-After` header
-- [ ] Task: Create rate limit bypass for internal testing
+- [x] Task: Design rate limiting strategy (sliding window)
+- [x] Task: Create `rateLimitService.jsw` for rate limit logic
+- [x] Task: Implement per-minute rate limiting with counter
+- [x] Task: Implement per-month quota tracking in `ApiUsage`
+- [x] Task: Implement per-endpoint rate limit overrides
+- [x] Task: Add rate limit headers to responses (`X-RateLimit-*`)
+- [x] Task: Implement 429 response with `Retry-After` header
+- [x] Task: Create rate limit bypass for internal testing
 
 ### 1.4 Collections Setup
-- [ ] Task: Create `ApiSubscriptions` collection with schema from spec
-- [ ] Task: Create `ApiUsage` collection with schema from spec
-- [ ] Task: Create `ApiRequestLog` collection with indexes (partner_id, created_at)
-- [ ] Task: Create `ApiProducts` collection for product configuration
-- [ ] Task: Seed `ApiProducts` with initial product definitions
+- [x] Task: Create `ApiSubscriptions` collection with schema from spec
+- [x] Task: Create `ApiUsage` collection with schema from spec
+- [x] Task: Create `ApiRequestLog` collection with indexes (partner_id, created_at)
+- [x] Task: Create `ApiProducts` collection for product configuration
+- [x] Task: Seed `ApiProducts` with initial product definitions
 - [ ] Task: Create indexes for efficient query patterns
 
 ### 1.5 Testing - Phase 1
-- [ ] Task: Write unit tests for API key validation
-- [ ] Task: Write unit tests for rate limiting logic
-- [ ] Task: Write unit tests for request routing
+- [x] Task: Write unit tests for API key validation
+- [x] Task: Write unit tests for rate limiting logic
+- [x] Task: Write unit tests for request routing
 - [ ] Task: Test authentication flow end-to-end
 - [ ] Task: Test rate limiting with burst traffic
 - [ ] Task: Test error response formatting
@@ -61,47 +61,47 @@ Establish the core API gateway, authentication, and request handling infrastruct
 Expose FMCSA and CSA monitoring capabilities as external APIs.
 
 ### 2.1 FMCSA Carrier Lookup API
-- [ ] Task: Create `/v1/safety/carrier/{dot_number}` endpoint
-- [ ] Task: Create `externalFmcsaApi.jsw` wrapper service
-- [ ] Task: Implement request validation (DOT number format)
-- [ ] Task: Integrate with existing `fmcsaService.jsw`
-- [ ] Task: Format response to external API schema
-- [ ] Task: Implement caching layer (7-day TTL)
-- [ ] Task: Add usage metering for billing
+- [x] Task: Create `/v1/safety/carrier/{dot_number}` endpoint
+- [x] Task: Create `externalFmcsaApi.jsw` wrapper service
+- [x] Task: Implement request validation (DOT number format)
+- [x] Task: Integrate with existing `fmcsaService.jsw`
+- [x] Task: Format response to external API schema
+- [x] Task: Implement caching layer (7-day TTL)
+- [x] Task: Add usage metering for billing
 - [ ] Task: Document endpoint in OpenAPI spec
 
 ### 2.2 FMCSA Batch Lookup API
-- [ ] Task: Create `POST /v1/safety/carriers/batch` endpoint
-- [ ] Task: Implement batch processing (max 100 DOT numbers)
-- [ ] Task: Implement parallel fetching with rate limiting
-- [ ] Task: Return partial results on partial failures
+- [x] Task: Create `POST /v1/safety/carriers/batch` endpoint
+- [x] Task: Implement batch processing (max 100 DOT numbers)
+- [x] Task: Implement parallel fetching with rate limiting
+- [x] Task: Return partial results on partial failures
 - [ ] Task: Add batch-specific rate limits
 - [ ] Task: Document batch endpoint
 
 ### 2.3 CSA Score Monitor API
-- [ ] Task: Create `/v1/safety/csa/{dot_number}/history` endpoint
-- [ ] Task: Create `externalCsaApi.jsw` wrapper service
-- [ ] Task: Integrate with existing `csaMonitorService.jsw`
-- [ ] Task: Implement historical data retrieval (6 months)
-- [ ] Task: Calculate and include trend analysis
-- [ ] Task: Format response with recommendations
+- [x] Task: Create `/v1/safety/csa/{dot_number}/history` endpoint
+- [x] Task: Create `externalCsaApi.jsw` wrapper service
+- [x] Task: Integrate with existing `csaMonitorService.jsw`
+- [x] Task: Implement historical data retrieval (6 months)
+- [x] Task: Calculate and include trend analysis
+- [x] Task: Format response with recommendations
 - [ ] Task: Document endpoint
 
 ### 2.4 CSA Current Scores API
-- [ ] Task: Create `/v1/safety/csa/{dot_number}` endpoint (current only)
-- [ ] Task: Implement lightweight response for current scores
-- [ ] Task: Add alert status indicators
+- [x] Task: Create `/v1/safety/csa/{dot_number}` endpoint (current only)
+- [x] Task: Implement lightweight response for current scores
+- [x] Task: Add alert status indicators
 - [ ] Task: Document endpoint
 
 ### 2.5 Compliance Alerts API
-- [ ] Task: Create `POST /v1/safety/alerts/subscribe` endpoint
-- [ ] Task: Create `ApiAlertSubscriptions` collection
-- [ ] Task: Implement webhook subscription management
-- [ ] Task: Create `GET /v1/safety/alerts/subscriptions` to list
-- [ ] Task: Create `DELETE /v1/safety/alerts/{subscription_id}`
-- [ ] Task: Implement webhook delivery service
-- [ ] Task: Implement webhook retry logic (3 attempts, exponential backoff)
-- [ ] Task: Create webhook signature generation (HMAC-SHA256)
+- [x] Task: Create `POST /v1/safety/alerts/subscribe` endpoint
+- [x] Task: Create `ApiAlertSubscriptions` collection
+- [x] Task: Implement webhook subscription management
+- [x] Task: Create `GET /v1/safety/alerts/subscriptions` to list
+- [x] Task: Create `DELETE /v1/safety/alerts/{subscription_id}`
+- [x] Task: Implement webhook delivery service
+- [x] Task: Implement webhook retry logic (3 attempts, exponential backoff)
+- [x] Task: Create webhook signature generation (HMAC-SHA256)
 - [ ] Task: Document webhook payload formats
 
 ### 2.6 Safety API Documentation
@@ -114,7 +114,7 @@ Expose FMCSA and CSA monitoring capabilities as external APIs.
 - [ ] Task: Write unit tests for FMCSA API endpoint
 - [ ] Task: Write unit tests for CSA API endpoints
 - [ ] Task: Write unit tests for alert subscription
-- [ ] Task: Write unit tests for webhook delivery
+- [x] Task: Write unit tests for webhook delivery
 - [ ] Task: Test batch API with edge cases
 - [ ] Task: Test webhook retry logic
 - [ ] Task: Manual test: Full safety API flow
@@ -127,44 +127,44 @@ Expose FMCSA and CSA monitoring capabilities as external APIs.
 Expose AI-enriched carrier intelligence and sentiment analysis.
 
 ### 3.1 Carrier Intelligence API
-- [ ] Task: Create `/v1/intelligence/carrier/{dot_number}` endpoint
-- [ ] Task: Create `externalIntelligenceApi.jsw` wrapper service
-- [ ] Task: Integrate with existing `aiEnrichment.jsw`
-- [ ] Task: Format enrichment data for external schema
-- [ ] Task: Implement confidence level mapping
-- [ ] Task: Add source attribution in response
-- [ ] Task: Implement caching (14-day TTL matching internal)
-- [ ] Task: Add tier-based access (Basic vs Full enrichment)
+- [x] Task: Create `/v1/intelligence/carrier/{dot_number}` endpoint
+- [x] Task: Create `externalIntelligenceApi.jsw` wrapper service
+- [x] Task: Integrate with existing `aiEnrichment.jsw`
+- [x] Task: Format enrichment data for external schema
+- [x] Task: Implement confidence level mapping
+- [x] Task: Add source attribution in response
+- [x] Task: Implement caching (14-day TTL matching internal)
+- [x] Task: Add tier-based access (Basic vs Full enrichment)
 - [ ] Task: Document endpoint
 
 ### 3.2 Social Sentiment API
-- [ ] Task: Create `/v1/intelligence/sentiment/{dot_number}` endpoint
-- [ ] Task: Integrate with existing `socialScanner.jsw`
-- [ ] Task: Format sentiment analysis for external schema
-- [ ] Task: Include platform breakdown (Reddit, TruckersReport, Twitter)
-- [ ] Task: Add key themes extraction
-- [ ] Task: Include recent mention snippets (sanitized)
-- [ ] Task: Implement rate limiting for expensive social scans
+- [x] Task: Create `/v1/intelligence/sentiment/{dot_number}` endpoint
+- [x] Task: Integrate with existing `socialScanner.jsw`
+- [x] Task: Format sentiment analysis for external schema
+- [x] Task: Include platform breakdown (Reddit, TruckersReport, Twitter)
+- [x] Task: Add key themes extraction
+- [x] Task: Include recent mention snippets (sanitized)
+- [x] Task: Implement rate limiting for expensive social scans
 - [ ] Task: Document endpoint
 
 ### 3.3 Market Intelligence API
-- [ ] Task: Create `/v1/intelligence/market` endpoint
+- [x] Task: Create `/v1/intelligence/market` endpoint
 - [ ] Task: Create `marketIntelligenceService.jsw` aggregation service
-- [ ] Task: Implement regional filtering (state, region codes)
-- [ ] Task: Implement freight type filtering
-- [ ] Task: Implement operation type filtering
-- [ ] Task: Aggregate CPM benchmarks from enrichment data
-- [ ] Task: Calculate demand index from hiring signals
-- [ ] Task: Identify top hiring carriers by region
-- [ ] Task: Cache aggregated market data (daily refresh)
+- [x] Task: Implement regional filtering (state, region codes)
+- [x] Task: Implement freight type filtering
+- [x] Task: Implement operation type filtering
+- [x] Task: Aggregate CPM benchmarks from enrichment data
+- [x] Task: Calculate demand index from hiring signals
+- [x] Task: Identify top hiring carriers by region
+- [x] Task: Cache aggregated market data (daily refresh)
 - [ ] Task: Document endpoint
 
 ### 3.4 Carrier Search API
-- [ ] Task: Create `POST /v1/intelligence/carriers/search` endpoint
-- [ ] Task: Implement multi-criteria carrier search
-- [ ] Task: Filter by safety rating, fleet size, sentiment
-- [ ] Task: Sort by match score or individual criteria
-- [ ] Task: Implement pagination
+- [x] Task: Create `POST /v1/intelligence/carriers/search` endpoint
+- [x] Task: Implement multi-criteria carrier search
+- [x] Task: Filter by safety rating, fleet size, sentiment
+- [x] Task: Sort by match score or individual criteria
+- [x] Task: Implement pagination
 - [ ] Task: Document endpoint
 
 ### 3.5 Intelligence API Documentation
@@ -174,9 +174,9 @@ Expose AI-enriched carrier intelligence and sentiment analysis.
 - [ ] Task: Create Postman collection
 
 ### 3.6 Testing - Phase 3
-- [ ] Task: Write unit tests for Carrier Intelligence API
-- [ ] Task: Write unit tests for Sentiment API
-- [ ] Task: Write unit tests for Market Intelligence API
+- [x] Task: Write unit tests for Carrier Intelligence API
+- [x] Task: Write unit tests for Sentiment API
+- [x] Task: Write unit tests for Market Intelligence API
 - [ ] Task: Test tier-based access restrictions
 - [ ] Task: Test caching behavior
 - [ ] Task: Manual test: Full intelligence API flow
@@ -189,48 +189,48 @@ Expose AI-enriched carrier intelligence and sentiment analysis.
 Expose truck parking, fuel pricing, and route planning capabilities.
 
 ### 4.1 Truck Parking Search API
-- [ ] Task: Create `/v1/parking/search` endpoint
-- [ ] Task: Create `externalParkingApi.jsw` wrapper service
-- [ ] Task: Integrate with existing `parkingService.jsw`
-- [ ] Task: Implement geo-search with radius parameter
-- [ ] Task: Implement amenity filtering
+- [x] Task: Create `/v1/parking/search` endpoint
+- [x] Task: Create `externalParkingApi.jsw` wrapper service
+- [x] Task: Integrate with existing `parkingService.jsw`
+- [x] Task: Implement geo-search with radius parameter
+- [x] Task: Implement amenity filtering
 - [ ] Task: Include data source attribution (TPIMS, community)
-- [ ] Task: Include confidence levels for availability
-- [ ] Task: Format response for external schema
-- [ ] Task: Implement short-term caching (5 minutes)
+- [x] Task: Include confidence levels for availability
+- [x] Task: Format response for external schema
+- [x] Task: Implement short-term caching (5 minutes)
 - [ ] Task: Document endpoint
 
 ### 4.2 Parking Location Details API
-- [ ] Task: Create `/v1/parking/location/{id}` endpoint
-- [ ] Task: Return detailed location information
+- [x] Task: Create `/v1/parking/location/{id}` endpoint
+- [x] Task: Return detailed location information
 - [ ] Task: Include historical availability patterns
 - [ ] Task: Include all amenities and reviews
 - [ ] Task: Document endpoint
 
 ### 4.3 Fuel Pricing Search API
-- [ ] Task: Create `/v1/fuel/prices` endpoint
-- [ ] Task: Create `externalFuelApi.jsw` wrapper service
-- [ ] Task: Integrate with existing `fuelService.jsw`
-- [ ] Task: Implement geo-search with radius
-- [ ] Task: Implement fuel card discount calculations
-- [ ] Task: Include DEF availability and pricing
-- [ ] Task: Include regional/state averages
+- [x] Task: Create `/v1/fuel/prices` endpoint
+- [x] Task: Create `externalFuelApi.jsw` wrapper service
+- [x] Task: Integrate with existing `fuelService.jsw`
+- [x] Task: Implement geo-search with radius
+- [x] Task: Implement fuel card discount calculations
+- [x] Task: Include DEF availability and pricing
+- [x] Task: Include regional/state averages
 - [ ] Task: Document endpoint
 
 ### 4.4 Route Fuel Planner API
-- [ ] Task: Create `POST /v1/fuel/plan` endpoint
-- [ ] Task: Implement route sampling for fuel stops
-- [ ] Task: Calculate optimal stop locations
-- [ ] Task: Apply fuel card discounts to recommendations
-- [ ] Task: Calculate total trip fuel cost estimate
-- [ ] Task: Calculate savings with recommended stops
+- [x] Task: Create `POST /v1/fuel/plan` endpoint
+- [x] Task: Implement route sampling for fuel stops
+- [x] Task: Calculate optimal stop locations
+- [x] Task: Apply fuel card discounts to recommendations
+- [x] Task: Calculate total trip fuel cost estimate
+- [x] Task: Calculate savings with recommended stops
 - [ ] Task: Document endpoint
 
 ### 4.5 Fuel Station Details API
-- [ ] Task: Create `/v1/fuel/station/{id}` endpoint
-- [ ] Task: Return detailed station information
-- [ ] Task: Include all fuel card discounts
-- [ ] Task: Include amenity list
+- [x] Task: Create `/v1/fuel/station/{id}` endpoint
+- [x] Task: Return detailed station information
+- [x] Task: Include all fuel card discounts
+- [x] Task: Include amenity list
 - [ ] Task: Document endpoint
 
 ### 4.6 Operational API Documentation
@@ -241,8 +241,8 @@ Expose truck parking, fuel pricing, and route planning capabilities.
 
 ### 4.7 Testing - Phase 4
 - [ ] Task: Write unit tests for Parking Search API
-- [ ] Task: Write unit tests for Fuel Pricing API
-- [ ] Task: Write unit tests for Route Planner API
+- [x] Task: Write unit tests for Fuel Pricing API
+- [x] Task: Write unit tests for Route Planner API
 - [ ] Task: Test geo-search accuracy
 - [ ] Task: Test fuel card discount calculations
 - [ ] Task: Test route planning algorithm
@@ -256,41 +256,41 @@ Expose truck parking, fuel pricing, and route planning capabilities.
 Expose driver search and carrier matching capabilities.
 
 ### 5.1 Driver Search API (Enterprise Only)
-- [ ] Task: Create `POST /v1/matching/drivers/search` endpoint
-- [ ] Task: Create `externalMatchingApi.jsw` wrapper service
-- [ ] Task: Integrate with existing `driverMatching.jsw`
+- [x] Task: Create `POST /v1/matching/drivers/search` endpoint
+- [x] Task: Create `externalMatchingApi.jsw` wrapper service
+- [x] Task: Integrate with existing `driverMatching.jsw`
 - [ ] Task: Implement CDL class filtering
 - [ ] Task: Implement endorsement filtering (must have all)
 - [ ] Task: Implement experience filtering
 - [ ] Task: Implement location/distance filtering
-- [ ] Task: Implement availability filtering
-- [ ] Task: Calculate and include match scores
-- [ ] Task: Implement PII masking for non-authorized access
-- [ ] Task: Implement credit-based usage tracking
-- [ ] Task: Enforce Enterprise tier requirement
+- [x] Task: Implement availability filtering
+- [x] Task: Calculate and include match scores
+- [x] Task: Implement PII masking for non-authorized access
+- [x] Task: Implement credit-based usage tracking
+- [x] Task: Enforce Enterprise tier requirement
 - [ ] Task: Document endpoint
 
 ### 5.2 Driver Profile API
-- [ ] Task: Create `/v1/matching/driver/{driver_id}` endpoint
-- [ ] Task: Return driver profile (with PII controls)
+- [x] Task: Create `/v1/matching/driver/{driver_id}` endpoint
+- [x] Task: Return driver profile (with PII controls)
 - [ ] Task: Include qualification summary
 - [ ] Task: Implement authorization check (credit consumed)
 - [ ] Task: Document endpoint
 
 ### 5.3 Carrier Match API
-- [ ] Task: Create `POST /v1/matching/carriers` endpoint
-- [ ] Task: Integrate with existing `carrierMatching.jsw`
-- [ ] Task: Accept driver profile as input
-- [ ] Task: Return ranked carrier recommendations
-- [ ] Task: Include match score breakdown
+- [x] Task: Create `POST /v1/matching/carriers` endpoint
+- [x] Task: Integrate with existing `carrierMatching.jsw`
+- [x] Task: Accept driver profile as input
+- [x] Task: Return ranked carrier recommendations
+- [x] Task: Include match score breakdown
 - [ ] Task: Optionally include enrichment data
 - [ ] Task: Document endpoint
 
 ### 5.4 Qualification Check API
-- [ ] Task: Create `POST /v1/matching/qualify` endpoint
-- [ ] Task: Accept driver qualifications and carrier requirements
-- [ ] Task: Return qualification match result
-- [ ] Task: Identify missing qualifications
+- [x] Task: Create `POST /v1/matching/qualify` endpoint
+- [x] Task: Accept driver qualifications and carrier requirements
+- [x] Task: Return qualification match result
+- [x] Task: Identify missing qualifications
 - [ ] Task: Document endpoint
 
 ### 5.5 Matching API Documentation
@@ -315,38 +315,38 @@ Expose driver search and carrier matching capabilities.
 Expose CDL OCR extraction and document verification capabilities.
 
 ### 6.1 CDL Extraction API
-- [ ] Task: Create `POST /v1/documents/cdl/extract` endpoint
-- [ ] Task: Create `externalDocumentApi.jsw` wrapper service
-- [ ] Task: Integrate with existing `ocrService.jsw`
+- [x] Task: Create `POST /v1/documents/cdl/extract` endpoint
+- [x] Task: Create `externalDocumentApi.jsw` wrapper service
+- [x] Task: Integrate with existing `ocrService.jsw`
 - [ ] Task: Implement file upload handling (multipart/form-data)
-- [ ] Task: Accept base64 encoded images as alternative
-- [ ] Task: Implement file size limits (10MB max)
-- [ ] Task: Implement supported format validation (JPEG, PNG, PDF)
-- [ ] Task: Format extraction result for external schema
-- [ ] Task: Include verification status (format, state, expiration)
-- [ ] Task: Implement extraction credit tracking
+- [x] Task: Accept base64 encoded images as alternative
+- [x] Task: Implement file size limits (10MB max)
+- [x] Task: Implement supported format validation (JPEG, PNG, PDF)
+- [x] Task: Format extraction result for external schema
+- [x] Task: Include verification status (format, state, expiration)
+- [x] Task: Implement extraction credit tracking
 - [ ] Task: Document endpoint
 
 ### 6.2 Medical Certificate Extraction API
-- [ ] Task: Create `POST /v1/documents/medcert/extract` endpoint
+- [x] Task: Create `POST /v1/documents/medcert/extract` endpoint
 - [ ] Task: Implement medical certificate OCR
 - [ ] Task: Extract examiner registry number
 - [ ] Task: Validate certificate expiration
 - [ ] Task: Document endpoint
 
 ### 6.3 Document Verification API
-- [ ] Task: Create `POST /v1/documents/verify` endpoint
+- [x] Task: Create `POST /v1/documents/verify` endpoint
 - [ ] Task: Accept previously extracted document ID
 - [ ] Task: Perform additional verification checks
 - [ ] Task: Return verification result with confidence
 - [ ] Task: Document endpoint
 
 ### 6.4 Batch Document Processing API
-- [ ] Task: Create `POST /v1/documents/batch` endpoint
+- [x] Task: Create `POST /v1/documents/batch` endpoint
 - [ ] Task: Accept multiple documents for processing
 - [ ] Task: Implement async processing with webhook callback
-- [ ] Task: Return batch job ID for status checking
-- [ ] Task: Create `/v1/documents/batch/{job_id}` status endpoint
+- [x] Task: Return batch job ID for status checking
+- [x] Task: Create `/v1/documents/batch/{job_id}` status endpoint
 - [ ] Task: Document batch processing flow
 
 ### 6.5 Document API Documentation
@@ -356,11 +356,11 @@ Expose CDL OCR extraction and document verification capabilities.
 - [ ] Task: Create Postman collection
 
 ### 6.6 Testing - Phase 6
-- [ ] Task: Write unit tests for CDL extraction endpoint
+- [x] Task: Write unit tests for CDL extraction endpoint
 - [ ] Task: Write unit tests for medical cert extraction
 - [ ] Task: Test file upload handling
 - [ ] Task: Test extraction accuracy with sample documents
-- [ ] Task: Test batch processing flow
+- [x] Task: Test batch processing flow
 - [ ] Task: Manual test: Full document API flow
 - [ ] Task: Conductor - User Manual Verification 'Phase 6: Document APIs'
 
@@ -371,37 +371,37 @@ Expose CDL OCR extraction and document verification capabilities.
 Expose gamification system for partner integration.
 
 ### 7.1 User Progress API
-- [ ] Task: Create `/v1/engagement/user/{user_id}/progress` endpoint
-- [ ] Task: Create `externalEngagementApi.jsw` wrapper service
-- [ ] Task: Integrate with gamification services
-- [ ] Task: Return progression data (level, XP, streaks)
-- [ ] Task: Return earned badges and achievements
+- [x] Task: Create `/v1/engagement/user/{user_id}/progress` endpoint
+- [x] Task: Create `externalEngagementApi.jsw` wrapper service
+- [x] Task: Integrate with gamification services
+- [x] Task: Return progression data (level, XP, streaks)
+- [x] Task: Return earned badges and achievements
 - [ ] Task: Implement partner-scoped user mapping
 - [ ] Task: Document endpoint
 
 ### 7.2 XP Award API
-- [ ] Task: Create `POST /v1/engagement/xp/award` endpoint
-- [ ] Task: Allow partners to award XP for custom actions
-- [ ] Task: Validate action types and XP amounts
-- [ ] Task: Implement daily caps to prevent abuse
+- [x] Task: Create `POST /v1/engagement/xp/award` endpoint
+- [x] Task: Allow partners to award XP for custom actions
+- [x] Task: Validate action types and XP amounts
+- [x] Task: Implement daily caps to prevent abuse
 - [ ] Task: Trigger level-up checks
 - [ ] Task: Document endpoint
 
 ### 7.3 Achievement Check API
-- [ ] Task: Create `POST /v1/engagement/achievements/check` endpoint
-- [ ] Task: Allow partners to trigger achievement checks
-- [ ] Task: Return newly earned achievements
+- [x] Task: Create `POST /v1/engagement/achievements/check` endpoint
+- [x] Task: Allow partners to trigger achievement checks
+- [x] Task: Return newly earned achievements
 - [ ] Task: Document endpoint
 
 ### 7.4 Leaderboard API
-- [ ] Task: Create `/v1/engagement/leaderboard` endpoint
-- [ ] Task: Return leaderboard rankings
-- [ ] Task: Support filtering by period (weekly, monthly)
-- [ ] Task: Support filtering by type
+- [x] Task: Create `/v1/engagement/leaderboard` endpoint
+- [x] Task: Return leaderboard rankings
+- [x] Task: Support filtering by period (weekly, monthly)
+- [x] Task: Support filtering by type
 - [ ] Task: Document endpoint
 
 ### 7.5 Engagement Webhooks
-- [ ] Task: Create `POST /v1/engagement/webhooks/subscribe` endpoint
+- [x] Task: Create `POST /v1/engagement/webhooks/subscribe` endpoint
 - [ ] Task: Implement achievement event webhooks
 - [ ] Task: Implement level-up event webhooks
 - [ ] Task: Implement streak milestone webhooks
@@ -428,13 +428,13 @@ Expose gamification system for partner integration.
 Build self-service developer portal and partner management tools.
 
 ### 8.1 Developer Portal - Backend
-- [ ] Task: Create `apiPortalService.jsw` for portal operations
-- [ ] Task: Implement partner registration flow
-- [ ] Task: Implement API key management (create, rotate, revoke)
-- [ ] Task: Implement usage dashboard data aggregation
-- [ ] Task: Implement billing history retrieval
-- [ ] Task: Implement webhook testing endpoint
-- [ ] Task: Implement sandbox environment switching
+- [x] Task: Create `apiPortalService.jsw` for portal operations
+- [x] Task: Implement partner registration flow
+- [x] Task: Implement API key management (create, rotate, revoke)
+- [x] Task: Implement usage dashboard data aggregation
+- [x] Task: Implement billing history retrieval
+- [x] Task: Implement webhook testing endpoint
+- [x] Task: Implement sandbox environment switching
 
 ### 8.2 Developer Portal - Frontend
 - [ ] Task: Create `API_PORTAL_DASHBOARD.html` in `src/public/admin/`
@@ -456,12 +456,12 @@ Build self-service developer portal and partner management tools.
 
 ### 8.4 Billing Integration
 - [ ] Task: Create Stripe products for API tiers
-- [ ] Task: Implement subscription checkout flow
-- [ ] Task: Implement usage-based billing calculation
+- [x] Task: Implement subscription checkout flow
+- [x] Task: Implement usage-based billing calculation
 - [ ] Task: Implement overage invoice generation
-- [ ] Task: Create billing portal link for partners
+- [x] Task: Create billing portal link for partners
 - [ ] Task: Implement subscription upgrade/downgrade
-- [ ] Task: Create billing webhooks for subscription events
+- [x] Task: Create billing webhooks for subscription events
 
 ### 8.5 Admin Tools
 - [ ] Task: Create `ADMIN_API_PARTNERS.html` for partner management

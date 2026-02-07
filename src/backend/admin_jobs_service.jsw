@@ -1,0 +1,150 @@
+import * as dataAccess from 'backend/dataAccess';
+import { currentMember } from 'wix-members-backend';
+import { runEnrichmentBatch, processAbandonmentFollowUps } from 'backend/scheduler';
+import { calculateDailyStreaks, recalculateBadgesDaily, generateWeeklyLeaderboard } from 'backend/gamificationJobs';
+import { seedInitialFlags } from 'backend/flagJobs';
+import { seedEmailTemplates } from 'backend/emailTemplateJobs';
+import { seedInitialTests } from 'backend/experimentJobs';
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const COLLECTION_KEYS = {
+    systemLogs: 'systemLogs',
+    auditLog: 'auditLog'
+};
+
+const REGISTERED_JOBS = [
+    { id: 'enrichment_batch', name: 'Carrier Enrichment Batch', service: 'scheduler', function: 'runEnrichmentBatch' },
+    { id: 'abandonment_emails', name: 'Checkout Abandonment Recovery', service: 'scheduler', function: 'processAbandonmentFollowUps' },
+    { id: 'daily_streaks', name: 'Daily Streak Processing', service: 'gamification', function: 'calculateDailyStreaks' },
+    { id: 'badge_recalc', name: 'Recalculate Badges', service: 'gamification', function: 'recalculateBadgesDaily' },
+    { id: 'leaderboard_gen', name: 'Weekly Leaderboard Snapshot', service: 'gamification', function: 'generateWeeklyLeaderboard' },
+    { id: 'seed_platform_config', name: 'Seed Platform Configuration', service: 'admin', function: 'seedAllConfig' }
+];
+
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const memberRole = member.contactDetails?.customFields?.role || '';
+        return adminRoles.includes(memberRole.toLowerCase());
+    } catch (error) { return false; }
+}
+
+async function requireAdmin() {
+    if (!await isAdmin()) throw new Error('Unauthorized');
+}
+
+// ============================================
+// JOB MONITORING
+// ============================================
+
+/**
+ * Get list of all registered system jobs and their status
+ */
+export async function getJobsStatus() {
+    await requireAdmin();
+
+    const jobs = [];
+    for (const jobDef of REGISTERED_JOBS) {
+        // Query recent logs for this job
+        const logs = await dataAccess.queryRecords(COLLECTION_KEYS.systemLogs, {
+            filters: { source: jobDef.id },
+            sort: [{ field: 'timestamp', direction: 'desc' }],
+            limit: 1,
+            suppressAuth: true
+        });
+
+        const lastRun = logs.items?.[0];
+        
+        jobs.push({
+            ...jobDef,
+            lastRunAt: lastRun?.timestamp || null,
+            lastStatus: lastRun?.level === 'ERROR' ? 'failed' : (lastRun ? 'success' : 'never_run'),
+            lastMessage: lastRun?.message || 'No history found'
+        });
+    }
+
+    return jobs;
+}
+
+/**
+ * Manually trigger a system job
+ */
+export async function triggerJob(jobId) {
+    await requireAdmin();
+
+    const job = REGISTERED_JOBS.find(j => j.id === jobId);
+    if (!job) throw new Error('Unknown job ID');
+
+    try {
+        let result;
+        const startTime = Date.now();
+
+        // Log the manual trigger
+        await logJobAction('manual_trigger', jobId);
+
+        // Execute the job function
+        switch (jobId) {
+            case 'enrichment_batch': result = await runEnrichmentBatch(); break;
+            case 'abandonment_emails': result = await processAbandonmentFollowUps(); break;
+            case 'daily_streaks': result = await calculateDailyStreaks(); break;
+            case 'badge_recalc': result = await recalculateBadgesDaily(); break;
+            case 'leaderboard_gen': result = await generateWeeklyLeaderboard(); break;
+            case 'seed_platform_config': 
+                const [flags, templates, tests] = await Promise.all([
+                    seedInitialFlags(),
+                    seedEmailTemplates(),
+                    seedInitialTests()
+                ]);
+                result = { success: true, details: { flags, templates, tests } };
+                break;
+            default: throw new Error(`Trigger not implemented for ${jobId}`);
+        }
+
+        const duration = Date.now() - startTime;
+
+        // Log completion
+        await dataAccess.insertRecord(COLLECTION_KEYS.systemLogs, {
+            source: jobId,
+            level: result.success ? 'INFO' : 'ERROR',
+            message: `Manual run complete: ${result.success ? 'Success' : 'Failed'}`,
+            details: { ...result, durationMs: duration },
+            timestamp: new Date()
+        }, { suppressAuth: true });
+
+        return result;
+    } catch (error) {
+        console.error(`Error triggering job ${jobId}:`, error);
+        
+        await dataAccess.insertRecord(COLLECTION_KEYS.systemLogs, {
+            source: jobId,
+            level: 'ERROR',
+            message: `Manual run CRITICAL FAILURE: ${error.message}`,
+            timestamp: new Date()
+        }, { suppressAuth: true });
+
+        throw error;
+    }
+}
+
+async function logJobAction(action, jobId) {
+    try {
+        const member = await currentMember.getMember();
+        await dataAccess.insertRecord(COLLECTION_KEYS.auditLog, {
+            action,
+            targetType: 'system_job',
+            targetId: jobId,
+            adminEmail: member?.loginEmail || 'system',
+            timestamp: new Date()
+        }, { suppressAuth: true });
+    } catch (e) { }
+}

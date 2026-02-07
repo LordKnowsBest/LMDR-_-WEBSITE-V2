@@ -1,0 +1,206 @@
+import * as dataAccess from 'backend/dataAccess';
+import { fetch } from 'wix-fetch';
+
+const COLLECTIONS = {
+  alertSubscriptions: 'apiAlertSubscriptions',
+  webhookDeliveries: 'apiWebhookDeliveries'
+};
+
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAYS_MS = [60 * 1000, 5 * 60 * 1000, 15 * 60 * 1000];
+
+export async function dispatchSafetyAlertEvent(event = {}) {
+  const dotNumber = Number(event.dot_number || event.dotNumber);
+  if (!dotNumber) {
+    return { success: false, error: 'dot_number is required' };
+  }
+
+  const alertType = String(event.alert_type || event.alertType || 'compliance_alert').trim();
+  const payload = {
+    event_type: 'safety_alert',
+    alert_type: alertType,
+    dot_number: dotNumber,
+    partner_event_id: event.partner_event_id || null,
+    occurred_at: event.occurred_at || new Date().toISOString(),
+    details: event.details || {}
+  };
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.alertSubscriptions, {
+    filters: { is_active: true },
+    limit: 500,
+    suppressAuth: true
+  });
+
+  const candidates = (result?.items || []).filter((subscription) => {
+    const dots = Array.isArray(subscription.dot_numbers) ? subscription.dot_numbers.map((v) => Number(v)) : [];
+    if (!dots.includes(dotNumber)) return false;
+    const types = Array.isArray(subscription.alert_types) ? subscription.alert_types : [];
+    return !types.length || types.includes(alertType);
+  });
+
+  const deliveries = [];
+  for (const subscription of candidates) {
+    const queued = await enqueueWebhookDelivery({
+      subscriptionId: subscription._id,
+      partnerId: subscription.partner_id,
+      webhookUrl: subscription.webhook_url,
+      webhookSecret: subscription.webhook_secret || null,
+      eventType: payload.event_type,
+      payload
+    });
+    deliveries.push(queued);
+  }
+
+  return {
+    success: true,
+    matched_subscriptions: candidates.length,
+    deliveries
+  };
+}
+
+export async function enqueueWebhookDelivery({
+  subscriptionId = null,
+  partnerId,
+  webhookUrl,
+  webhookSecret = null,
+  eventType,
+  payload,
+  attempt = 1,
+  nextRetryAt = null
+}) {
+  const now = new Date();
+  const inserted = await dataAccess.insertRecord(COLLECTIONS.webhookDeliveries, {
+    subscription_id: subscriptionId,
+    partner_id: partnerId,
+    event_type: eventType,
+    payload,
+    webhook_url: webhookUrl,
+    webhook_secret: webhookSecret,
+    attempt,
+    status: 'queued',
+    next_retry_at: nextRetryAt || now,
+    created_at: now,
+    updated_at: now
+  }, { suppressAuth: true });
+
+  const record = inserted?.record || inserted || null;
+  if (!record?._id) return { success: false, error: 'failed_to_queue' };
+
+  return deliverWebhookDelivery(record);
+}
+
+export async function processPendingWebhookRetries(limit = 50) {
+  const now = new Date();
+  const result = await dataAccess.queryRecords(COLLECTIONS.webhookDeliveries, {
+    filters: { status: 'queued' },
+    limit: Math.max(1, Math.min(Number(limit) || 50, 200)),
+    suppressAuth: true
+  });
+
+  const items = (result?.items || []).filter((item) => {
+    const nextRetryAt = item?.next_retry_at ? new Date(item.next_retry_at) : now;
+    return nextRetryAt <= now;
+  });
+
+  const outcomes = [];
+  for (const item of items) {
+    outcomes.push(await deliverWebhookDelivery(item));
+  }
+  return {
+    success: true,
+    processed: outcomes.length,
+    outcomes
+  };
+}
+
+export async function deliverWebhookDelivery(delivery) {
+  if (!delivery?._id) return { success: false, error: 'missing_delivery' };
+  const webhookUrl = String(delivery.webhook_url || '').trim();
+  if (!webhookUrl) {
+    return markDeliveryFailed(delivery, null, 'Missing webhook_url');
+  }
+
+  const timestamp = new Date().toISOString();
+  const body = JSON.stringify(delivery.payload || {});
+  const signature = await createWebhookSignature(delivery.webhook_secret || '', timestamp, body);
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-LMDR-Event': String(delivery.event_type || 'webhook_event'),
+    'X-LMDR-Timestamp': timestamp
+  };
+  if (signature) headers['X-LMDR-Signature'] = signature;
+
+  try {
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers,
+      body
+    });
+    if (response.ok) {
+      await dataAccess.updateRecord(COLLECTIONS.webhookDeliveries, {
+        _id: delivery._id,
+        status: 'sent',
+        response_status: response.status,
+        updated_at: new Date(),
+        next_retry_at: null
+      }, { suppressAuth: true });
+      return { success: true, delivery_id: delivery._id, status: 'sent' };
+    }
+    return markDeliveryFailed(delivery, response.status, `HTTP ${response.status}`);
+  } catch (error) {
+    return markDeliveryFailed(delivery, null, error.message || 'Request failed');
+  }
+}
+
+export function generateWebhookSecret() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  const token = Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `whsec_${token}`;
+}
+
+async function markDeliveryFailed(delivery, statusCode, message) {
+  const attempt = Number(delivery.attempt || 1);
+  const hasMoreRetries = attempt < MAX_ATTEMPTS;
+  const nextAttempt = hasMoreRetries ? attempt + 1 : attempt;
+  const retryDelayMs = RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
+  const nextRetryAt = hasMoreRetries ? new Date(Date.now() + retryDelayMs) : null;
+
+  await dataAccess.updateRecord(COLLECTIONS.webhookDeliveries, {
+    _id: delivery._id,
+    attempt: nextAttempt,
+    status: hasMoreRetries ? 'queued' : 'failed',
+    response_status: statusCode,
+    response_body: String(message || '').slice(0, 1000),
+    next_retry_at: nextRetryAt,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  return {
+    success: false,
+    delivery_id: delivery._id,
+    status: hasMoreRetries ? 'retry_scheduled' : 'failed',
+    attempt: nextAttempt,
+    next_retry_at: nextRetryAt ? nextRetryAt.toISOString() : null
+  };
+}
+
+async function createWebhookSignature(secret, timestamp, body) {
+  if (!secret) return null;
+  try {
+    const payload = `${timestamp}.${body}`;
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+    return Array.from(new Uint8Array(signature))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch (_error) {
+    return null;
+  }
+}

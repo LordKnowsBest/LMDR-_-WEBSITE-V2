@@ -159,34 +159,3 @@ async function initROICalculator() {
   } catch (e) { }
 }
 
-/**
- * Initialize ROI Calculator HTML component
- * Element: #roiCalculatorHtml
- */
-async function initROICalculator() {
-  try {
-    const htmlCalc = $w('#roiCalculatorHtml');
-    if (!htmlCalc || !htmlCalc.postMessage) return;
-
-    // Send market data for calculations
-    const marketData = {
-      avgCostPerHireTraditional: 8500,  // Industry average
-      avgCostPerHireLMDR: 299,          // Platform fee
-      avgTimeToHireTraditional: 45,     // Industry average days
-      avgTimeToHireLMDR: 14,            // Platform average
-      avgTurnoverCost: 12000            // Cost of driver turnover
-    };
-
-    htmlCalc.postMessage({ type: 'marketData', data: marketData });
-
-    // Listen for navigation requests from calculator
-    htmlCalc.onMessage((event) => {
-      if (event.data.type === 'navigateToCarrierSignup') {
-        wixLocation.to('/carrier-welcome');
-      }
-    });
-
-  } catch (e) {
-    // ROI calculator HTML component may not exist
-  }
-}

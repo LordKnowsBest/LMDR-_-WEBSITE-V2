@@ -1,0 +1,183 @@
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+
+const COLLECTION_KEY = 'emailTemplates';
+const LOG_COLLECTION_KEY = 'emailSendLogs';
+
+/**
+ * Get all email templates
+ */
+export async function getAllTemplates(category = null) {
+  const filters = category ? { category } : {};
+  const result = await dataAccess.queryRecords(COLLECTION_KEY, {
+    filters,
+    sort: [{ field: 'name', direction: 'asc' }],
+    suppressAuth: true
+  });
+  return result.items || [];
+}
+
+/**
+ * Get a single template by key
+ */
+export async function getTemplate(templateKey) {
+  return await dataAccess.findByField(COLLECTION_KEY, 'templateKey', templateKey, { suppressAuth: true });
+}
+
+/**
+ * Create a new email template
+ */
+export async function createTemplate(templateData) {
+  // Validate unique key
+  const existing = await getTemplate(templateData.templateKey);
+  if (existing) {
+    throw new Error(`Template with key '${templateData.templateKey}' already exists`);
+  }
+
+  return await dataAccess.insertRecord(COLLECTION_KEY, {
+    ...templateData,
+    version: 1,
+    isActive: templateData.isActive ?? false,
+    createdAt: new Date(),
+    updatedAt: new Date()
+  }, { suppressAuth: true });
+}
+
+/**
+ * Update an existing template and handle versioning
+ */
+export async function updateTemplate(templateKey, updates) {
+  const existing = await getTemplate(templateKey);
+  if (!existing) {
+    throw new Error(`Template '${templateKey}' not found`);
+  }
+
+  // Handle versioning if content changed
+  let newVersion = existing.version || 1;
+  const previousVersions = existing.previousVersions || [];
+  
+  const hasContentChange = updates.htmlContent !== existing.htmlContent || 
+                           updates.subject !== existing.subject;
+
+  if (hasContentChange) {
+    newVersion++;
+    // Archive current version
+    previousVersions.push({
+      version: existing.version,
+      htmlContent: existing.htmlContent,
+      subject: existing.subject,
+      updatedAt: existing.updatedAt,
+      updatedBy: existing.updatedBy
+    });
+    
+    // Keep only last 5 versions
+    if (previousVersions.length > 5) {
+      previousVersions.shift();
+    }
+  }
+
+  return await dataAccess.updateRecord(COLLECTION_KEY, {
+    ...existing,
+    ...updates,
+    version: newVersion,
+    previousVersions,
+    updatedAt: new Date()
+  }, { suppressAuth: true });
+}
+
+/**
+ * Activate a template
+ */
+export async function activateTemplate(templateKey) {
+  return await updateTemplate(templateKey, { isActive: true });
+}
+
+/**
+ * Revert to a previous version
+ */
+export async function revertToVersion(templateKey, version) {
+  const template = await getTemplate(templateKey);
+  if (!template) throw new Error(`Template '${templateKey}' not found`);
+
+  const prev = (template.previousVersions || []).find(v => v.version === version);
+  if (!prev) throw new Error(`Version ${version} not found for template '${templateKey}'`);
+
+  return await updateTemplate(templateKey, {
+    htmlContent: prev.htmlContent,
+    subject: prev.subject,
+    isActive: true
+  });
+}
+
+/**
+ * Render a template with variables
+ */
+export async function renderEmail(templateKey, variables) {
+  const template = await getTemplate(templateKey);
+  if (!template) throw new Error(`Template '${templateKey}' not found`);
+
+  let html = template.htmlContent || '';
+  let subject = template.subject || '';
+  let preheader = template.preheader || '';
+
+  // Standard substitutions
+  const allVars = {
+    ...variables,
+    'platform.url': 'https://www.lastmiledr.app',
+    'date.today': new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+  };
+
+  for (const [key, value] of Object.entries(allVars)) {
+    // Basic {{key}} or {{nested.key}} replacement
+    // Note: variables should be flattened or accessed via dot notation in caller
+    const regex = new RegExp(`{{${key.replace(/\./g, '\.')}}}`, 'g');
+    const displayValue = value === null || value === undefined ? '' : String(value);
+    
+    html = html.replace(regex, displayValue);
+    subject = subject.replace(regex, displayValue);
+    preheader = preheader.replace(regex, displayValue);
+  }
+
+  return {
+    subject,
+    preheader,
+    htmlContent: html,
+    plainText: stripHtml(html)
+  };
+}
+
+/**
+ * Send a test email to an admin
+ */
+export async function sendTestEmail(templateKey, recipientEmail, sampleData = {}) {
+  const rendered = await renderEmail(templateKey, sampleData);
+  
+  // LOG the attempt
+  await log({
+    level: 'INFO',
+    source: 'email-template-service',
+    message: `Sending test email: ${templateKey} to ${recipientEmail}`,
+    details: { templateKey, recipientEmail }
+  });
+
+  // For now, we'll use a placeholder or integrate with emailService.jsw
+  // Actually, let's call a generic send function we'll add to emailService
+  return { 
+    success: true, 
+    message: 'Test email rendered and simulated (Integration pending)',
+    rendered 
+  };
+}
+
+/**
+ * Basic HTML stripping for plain text fallback
+ */
+function stripHtml(html) {
+  if (!html) return '';
+  return html
+    .replace(/<style([\s\S]*?)<\/style>/gi, '')
+    .replace(/<script([\s\S]*?)<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}

@@ -1381,7 +1381,8 @@ export async function runFullSetup() {
     roadUtilities: null,
     fuelUtilities: null,
     carrierPayments: null,
-    externalApiPlatform: null
+    externalApiPlatform: null,
+    externalApiProductSeed: null
   };
 
   results.carrierSubscriptions = await setupCarrierSubscriptions();
@@ -1394,6 +1395,7 @@ export async function runFullSetup() {
   results.carrierPayments = await setupCarrierPayments();
   results.fleetDashboard = await setupFleetDashboardCollections();
   results.externalApiPlatform = await setupExternalApiPlatformCollections();
+  results.externalApiProductSeed = await seedExternalApiProducts();
 
   console.log('[SETUP] Full setup complete:', results);
   return results;
@@ -1741,6 +1743,140 @@ const API_ALERT_SUBSCRIPTIONS_SCHEMA = {
   permissions: { read: 'Admin', create: 'Admin', update: 'Admin', delete: 'Admin' }
 };
 
+const API_WEBHOOK_DELIVERIES_SCHEMA = {
+  collectionName: 'ApiWebhookDeliveries',
+  displayName: 'API Webhook Deliveries',
+  fields: [
+    { name: 'subscription_id', type: 'text', description: 'Reference to webhook subscription' },
+    { name: 'partner_id', type: 'text', description: 'Reference to ApiPartners.partner_id' },
+    { name: 'webhook_url', type: 'text', description: 'Destination webhook endpoint URL' },
+    { name: 'webhook_secret', type: 'text', description: 'Signing secret used for HMAC signature' },
+    { name: 'event_type', type: 'text', description: 'Webhook event type' },
+    { name: 'payload', type: 'object', description: 'Payload snapshot' },
+    { name: 'attempt', type: 'number', description: 'Attempt number (1-3)' },
+    { name: 'status', type: 'text', description: 'queued, sent, failed' },
+    { name: 'response_status', type: 'number', description: 'Partner endpoint status code' },
+    { name: 'response_body', type: 'text', description: 'Truncated response text' },
+    { name: 'next_retry_at', type: 'date', description: 'Next retry time' },
+    { name: 'created_at', type: 'date', description: 'Created timestamp' },
+    { name: 'updated_at', type: 'date', description: 'Updated timestamp' }
+  ],
+  permissions: { read: 'Admin', create: 'Admin', update: 'Admin', delete: 'Admin' }
+};
+
+const DEFAULT_API_PRODUCTS = [
+  {
+    product_id: 'safety_suite',
+    name: 'Safety Suite',
+    description: 'FMCSA/CSA safety and compliance endpoints',
+    category: 'safety',
+    base_endpoint: '/v1/safety',
+    endpoints: [
+      { path: '/v1/safety/carrier/{dot_number}', method: 'GET', description: 'Carrier safety lookup', rate_limit_override: 60 },
+      { path: '/v1/safety/carriers/batch', method: 'POST', description: 'Batch safety lookup', rate_limit_override: 20 },
+      { path: '/v1/safety/csa/{dot_number}', method: 'GET', description: 'Current CSA score', rate_limit_override: 60 },
+      { path: '/v1/safety/csa/{dot_number}/history', method: 'GET', description: 'CSA history', rate_limit_override: 40 }
+    ],
+    pricing: {
+      included_in_tiers: ['starter', 'growth', 'enterprise'],
+      overage_price_per_call: 0.005
+    },
+    is_active: true,
+    documentation_url: 'https://api.lmdr.com/docs/safety'
+  },
+  {
+    product_id: 'intelligence_suite',
+    name: 'Intelligence Suite',
+    description: 'Carrier intelligence, market and sentiment endpoints',
+    category: 'intelligence',
+    base_endpoint: '/v1/intelligence',
+    endpoints: [
+      { path: '/v1/intelligence/carrier/{dot_number}', method: 'GET', description: 'Carrier intelligence', rate_limit_override: 40 },
+      { path: '/v1/intelligence/sentiment/{dot_number}', method: 'GET', description: 'Social sentiment', rate_limit_override: 15 },
+      { path: '/v1/intelligence/market', method: 'GET', description: 'Market intelligence', rate_limit_override: 30 },
+      { path: '/v1/intelligence/carriers/search', method: 'POST', description: 'Carrier search', rate_limit_override: 20 }
+    ],
+    pricing: {
+      included_in_tiers: ['growth', 'enterprise'],
+      overage_price_per_call: 0.007
+    },
+    is_active: true,
+    documentation_url: 'https://api.lmdr.com/docs/intelligence'
+  },
+  {
+    product_id: 'operations_suite',
+    name: 'Operations Suite',
+    description: 'Parking and fuel endpoints',
+    category: 'operational',
+    base_endpoint: '/v1',
+    endpoints: [
+      { path: '/v1/parking/search', method: 'GET', description: 'Parking search', rate_limit_override: 60 },
+      { path: '/v1/fuel/prices', method: 'GET', description: 'Fuel price search', rate_limit_override: 60 },
+      { path: '/v1/fuel/plan', method: 'POST', description: 'Fuel planning', rate_limit_override: 25 }
+    ],
+    pricing: {
+      included_in_tiers: ['growth', 'enterprise'],
+      overage_price_per_call: 0.006
+    },
+    is_active: true,
+    documentation_url: 'https://api.lmdr.com/docs/operations'
+  },
+  {
+    product_id: 'matching_suite',
+    name: 'Matching Suite',
+    description: 'Driver and carrier matching endpoints',
+    category: 'matching',
+    base_endpoint: '/v1/matching',
+    endpoints: [
+      { path: '/v1/matching/drivers/search', method: 'POST', description: 'Driver search', rate_limit_override: 10 },
+      { path: '/v1/matching/driver/{driver_id}', method: 'GET', description: 'Driver profile', rate_limit_override: 20 },
+      { path: '/v1/matching/carriers', method: 'POST', description: 'Carrier match', rate_limit_override: 20 }
+    ],
+    pricing: {
+      included_in_tiers: ['enterprise'],
+      overage_price_per_call: 2.0
+    },
+    is_active: true,
+    documentation_url: 'https://api.lmdr.com/docs/matching'
+  },
+  {
+    product_id: 'document_suite',
+    name: 'Document Suite',
+    description: 'OCR extraction and verification endpoints',
+    category: 'documents',
+    base_endpoint: '/v1/documents',
+    endpoints: [
+      { path: '/v1/documents/cdl/extract', method: 'POST', description: 'CDL extraction', rate_limit_override: 15 },
+      { path: '/v1/documents/medcert/extract', method: 'POST', description: 'Medical certificate extraction', rate_limit_override: 15 },
+      { path: '/v1/documents/batch', method: 'POST', description: 'Batch extraction', rate_limit_override: 5 }
+    ],
+    pricing: {
+      included_in_tiers: ['growth', 'enterprise'],
+      overage_price_per_call: 0.5
+    },
+    is_active: true,
+    documentation_url: 'https://api.lmdr.com/docs/documents'
+  },
+  {
+    product_id: 'engagement_suite',
+    name: 'Engagement Suite',
+    description: 'Gamification white-label endpoints',
+    category: 'engagement',
+    base_endpoint: '/v1/engagement',
+    endpoints: [
+      { path: '/v1/engagement/user/{user_id}/progress', method: 'GET', description: 'User progress', rate_limit_override: 30 },
+      { path: '/v1/engagement/xp/award', method: 'POST', description: 'Award XP', rate_limit_override: 30 },
+      { path: '/v1/engagement/leaderboard', method: 'GET', description: 'Leaderboard', rate_limit_override: 30 }
+    ],
+    pricing: {
+      included_in_tiers: ['enterprise'],
+      overage_price_per_call: 0.01
+    },
+    is_active: true,
+    documentation_url: 'https://api.lmdr.com/docs/engagement'
+  }
+];
+
 export async function setupExternalApiPlatformCollections() {
   console.log('[SETUP] Setting up External API Platform collections...');
 
@@ -1750,7 +1886,8 @@ export async function setupExternalApiPlatformCollections() {
     API_USAGE_SCHEMA,
     API_REQUEST_LOG_SCHEMA,
     API_PRODUCTS_SCHEMA,
-    API_ALERT_SUBSCRIPTIONS_SCHEMA
+    API_ALERT_SUBSCRIPTIONS_SCHEMA,
+    API_WEBHOOK_DELIVERIES_SCHEMA
   ];
 
   const results = {
@@ -1779,6 +1916,12 @@ export async function setupExternalApiPlatformCollections() {
         indexRecommendations.push('Create index on: partner_id');
         indexRecommendations.push('Create index on: created_at');
       }
+      if (schema.collectionName === 'ApiWebhookDeliveries') {
+        indexRecommendations.push('Create index on: partner_id');
+        indexRecommendations.push('Create index on: subscription_id');
+        indexRecommendations.push('Create index on: status');
+        indexRecommendations.push('Create index on: next_retry_at');
+      }
       results.missing.push({
         name: schema.collectionName,
         instructions: generateCollectionInstructions(schema),
@@ -1788,4 +1931,49 @@ export async function setupExternalApiPlatformCollections() {
   }
 
   return results;
+}
+
+export async function seedExternalApiProducts(force = false) {
+  console.log('[SETUP] Seeding default API products...');
+  try {
+    const existing = await wixData.query('ApiProducts')
+      .limit(100)
+      .find({ suppressAuth: true });
+
+    if (!force && (existing.items || []).length > 0) {
+      return {
+        success: true,
+        skipped: true,
+        message: 'ApiProducts already seeded',
+        existingCount: existing.items.length
+      };
+    }
+
+    const results = [];
+    for (const product of DEFAULT_API_PRODUCTS) {
+      const match = (existing.items || []).find((item) => item.product_id === product.product_id);
+      if (match?._id) {
+        const updated = await wixData.update('ApiProducts', {
+          ...match,
+          ...product
+        }, { suppressAuth: true });
+        results.push({ action: 'updated', product_id: product.product_id, id: updated._id });
+      } else {
+        const inserted = await wixData.insert('ApiProducts', product, { suppressAuth: true });
+        results.push({ action: 'inserted', product_id: product.product_id, id: inserted._id });
+      }
+    }
+
+    return {
+      success: true,
+      skipped: false,
+      seededCount: results.length,
+      results
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
 }

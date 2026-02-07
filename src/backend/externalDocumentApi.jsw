@@ -1,0 +1,218 @@
+import { protectedOCRExtraction } from 'backend/ocrService';
+
+const SUPPORTED_MIME = new Set([
+  'image/jpeg',
+  'image/png',
+  'application/pdf'
+]);
+
+const batchJobs = new Map();
+
+export async function extractExternalCDL(body = {}) {
+  const parsed = parseDocumentBody(body);
+  if (!parsed.success) return parsed;
+
+  const ocr = await protectedOCRExtraction(parsed.dataUrl, 'CDL_FRONT', 'api_partner');
+  if (!ocr?.success) {
+    return {
+      success: false,
+      errorCode: 'internal_error',
+      message: ocr?.message || ocr?.error || 'CDL extraction failed'
+    };
+  }
+
+  return {
+    success: true,
+    usageMetric: 'document_extractions',
+    data: {
+      extraction_id: `ext_${Date.now()}`,
+      status: 'complete',
+      confidence: mapConfidence(ocr.confidence),
+      extracted_data: {
+        full_name: ocr?.extracted?.fullName || null,
+        license_number: ocr?.extracted?.licenseNumber || null,
+        state: ocr?.extracted?.state || null,
+        cdl_class: ocr?.extracted?.cdlClass || null,
+        endorsements: ocr?.extracted?.endorsements || [],
+        restrictions: ocr?.extracted?.restrictions || [],
+        date_of_birth: ocr?.extracted?.dob || null,
+        expiration_date: ocr?.extracted?.expirationDate || null,
+        address: {
+          street: ocr?.extracted?.address || null,
+          city: ocr?.extracted?.city || null,
+          state: ocr?.extracted?.state || null,
+          zip: ocr?.extracted?.zip || null
+        }
+      },
+      verification: {
+        format_valid: Boolean(ocr?.extracted?.licenseNumber),
+        state_format_match: Boolean(ocr?.extracted?.state),
+        expiration_valid: isDateFuture(ocr?.extracted?.expirationDate),
+        dual_pass_consensus: false
+      },
+      warnings: []
+    }
+  };
+}
+
+export async function extractExternalMedCert(body = {}) {
+  const parsed = parseDocumentBody(body);
+  if (!parsed.success) return parsed;
+
+  const ocr = await protectedOCRExtraction(parsed.dataUrl, 'MED_CARD', 'api_partner');
+  if (!ocr?.success) {
+    return {
+      success: false,
+      errorCode: 'internal_error',
+      message: ocr?.message || ocr?.error || 'Medical certificate extraction failed'
+    };
+  }
+
+  return {
+    success: true,
+    usageMetric: 'document_extractions',
+    data: {
+      extraction_id: `ext_${Date.now()}`,
+      status: 'complete',
+      extracted_data: {
+        driver_name: ocr?.extracted?.fullName || null,
+        examiner_name: ocr?.extracted?.examinerName || null,
+        examiner_registry_number: ocr?.extracted?.registryNumber || null,
+        examination_date: null,
+        expiration_date: ocr?.extracted?.certificateExpirationDate || null,
+        certification_type: null,
+        restrictions: []
+      },
+      verification: {
+        registry_valid: Boolean(ocr?.extracted?.registryNumber),
+        expiration_valid: isDateFuture(ocr?.extracted?.certificateExpirationDate)
+      }
+    }
+  };
+}
+
+export async function verifyExternalDocument(body = {}) {
+  const extracted = body?.extracted_data || {};
+  const expirationDate = extracted.expiration_date || extracted.certificateExpirationDate || null;
+
+  return {
+    success: true,
+    data: {
+      verification_id: `ver_${Date.now()}`,
+      status: 'complete',
+      verification: {
+        expiration_valid: isDateFuture(expirationDate),
+        confidence: expirationDate ? 'medium' : 'low'
+      }
+    }
+  };
+}
+
+export async function processExternalDocumentBatch(body = {}) {
+  const documents = Array.isArray(body?.documents) ? body.documents : [];
+  if (!documents.length) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'documents array is required'
+    };
+  }
+
+  const batchId = `batch_${Date.now()}`;
+  batchJobs.set(batchId, {
+    job_id: batchId,
+    status: 'processing',
+    total: documents.length,
+    completed: 0,
+    created_at: new Date().toISOString(),
+    results: []
+  });
+
+  const results = [];
+  for (const doc of documents.slice(0, 25)) {
+    const type = String(doc?.type || 'cdl').toLowerCase();
+    if (type === 'medcert') {
+      results.push(await extractExternalMedCert(doc));
+    } else {
+      results.push(await extractExternalCDL(doc));
+    }
+  }
+
+  const record = batchJobs.get(batchId);
+  if (record) {
+    record.status = 'complete';
+    record.completed = results.length;
+    record.results = results;
+    record.completed_at = new Date().toISOString();
+    batchJobs.set(batchId, record);
+  }
+
+  return {
+    success: true,
+    data: {
+      batch_job_id: batchId,
+      status: 'processing'
+    }
+  };
+}
+
+export async function getExternalBatchStatus(jobId) {
+  const record = batchJobs.get(jobId);
+  if (!record) {
+    return { success: false, errorCode: 'resource_not_found', message: 'Batch job not found' };
+  }
+
+  return {
+    success: true,
+    data: record
+  };
+}
+
+function parseDocumentBody(body = {}) {
+  const base64Data = String(body?.base64_data || '').trim();
+  const mimeType = String(body?.mime_type || '').trim().toLowerCase();
+
+  if (!base64Data || !mimeType) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'base64_data and mime_type are required'
+    };
+  }
+
+  if (!SUPPORTED_MIME.has(mimeType)) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'Unsupported mime_type'
+    };
+  }
+
+  const estimatedBytes = Math.floor((base64Data.length * 3) / 4);
+  if (estimatedBytes > 10 * 1024 * 1024) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'File exceeds 10MB limit'
+    };
+  }
+
+  return {
+    success: true,
+    dataUrl: `data:${mimeType};base64,${base64Data}`
+  };
+}
+
+function mapConfidence(value) {
+  const normalized = String(value || '').toLowerCase();
+  if (normalized.includes('high')) return 'high';
+  if (normalized.includes('low')) return 'low';
+  return 'medium';
+}
+
+function isDateFuture(value) {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  return date.getTime() >= Date.now();
+}

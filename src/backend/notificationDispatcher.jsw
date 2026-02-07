@@ -1,0 +1,221 @@
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+import { evaluateConditions } from 'backend/utils/conditionEvaluator';
+import { renderEmail } from 'backend/emailTemplateService.jsw';
+
+const RULES_COLLECTION = 'notificationRules';
+const QUEUE_COLLECTION = 'notificationQueue';
+const LOG_COLLECTION = 'notificationLogs';
+const THROTTLE_COLLECTION = 'userThrottleState';
+
+/**
+ * Dispatch a notification event
+ * 
+ * @param {string} event - Trigger event name (e.g. 'match.new')
+ * @param {Object} data - Event data (must include userId)
+ */
+export async function dispatchNotification(event, data) {
+  if (!data.userId) {
+    console.warn(`[notificationDispatcher] Event '${event}' missing userId`);
+    return;
+  }
+
+  try {
+    // 1. Find matching active rules
+    const rules = await dataAccess.queryRecords(RULES_COLLECTION, {
+      filters: { triggerEvent: event, isActive: true },
+      suppressAuth: true
+    });
+
+    if (!rules.success || !rules.items.length) return;
+
+    for (const rule of rules.items) {
+      // 2. Evaluate conditions
+      if (!evaluateConditions(rule.conditions, data)) continue;
+
+      // 3. Check throttling
+      if (await isThrottled(rule, data.userId)) {
+        await logDispatch(rule._id, data.userId, 'throttled');
+        continue;
+      }
+
+      // 4. Check scheduling (simplified for now - immediate or next day if quiet hours)
+      const scheduledFor = calculateScheduledTime(rule, data.userId);
+
+      // 5. Queue for each channel
+      const channels = rule.channels || [];
+      for (const channel of channels) {
+        if (!channel.enabled) continue;
+
+        await queueNotification({
+          ruleId: rule._id,
+          userId: data.userId,
+          channel: channel.type,
+          scheduledFor,
+          priority: rule.priority || 'medium',
+          status: 'pending',
+          eventData: JSON.stringify(data),
+          channelConfig: JSON.stringify(channel)
+        });
+      }
+    }
+  } catch (error) {
+    console.error(`[notificationDispatcher] dispatch error (${event}):`, error.message);
+  }
+}
+
+/**
+ * Process the notification queue (to be called by cron)
+ */
+export async function processNotificationQueue() {
+  try {
+    const now = new Date();
+    const result = await dataAccess.queryRecords(QUEUE_COLLECTION, {
+      filters: { 
+        status: 'pending',
+        scheduledFor: { le: now } 
+      },
+      sort: [{ field: 'priority', direction: 'desc' }, { field: 'scheduledFor', direction: 'asc' }],
+      limit: 50,
+      suppressAuth: true
+    });
+
+    if (!result.success || !result.items.length) return { processed: 0 };
+
+    let processed = 0;
+    for (const item of result.items) {
+      const success = await deliverNotification(item);
+      
+      await dataAccess.updateRecord(QUEUE_COLLECTION, {
+        _id: item._id,
+        status: success ? 'sent' : 'failed',
+        sentAt: success ? new Date() : null,
+        error: success ? null : 'Delivery failed'
+      }, { suppressAuth: true });
+      
+      processed++;
+    }
+
+    return { processed };
+  } catch (error) {
+    console.error('[notificationDispatcher] processQueue error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Internal: Deliver a specific notification item
+ */
+async function deliverNotification(item) {
+  try {
+    const eventData = JSON.parse(item.eventData || '{}');
+    const channelConfig = JSON.parse(item.channelConfig || '{}');
+
+    switch (item.channel) {
+      case 'email':
+        return await deliverEmail(item.userId, channelConfig, eventData);
+      case 'in_app':
+        return await deliverInApp(item.userId, channelConfig, eventData);
+      case 'push':
+        return await deliverPush(item.userId, channelConfig, eventData);
+      case 'sms':
+        return await deliverSms(item.userId, channelConfig, eventData);
+      default:
+        return false;
+    }
+  } catch (e) {
+    return false;
+  }
+}
+
+async function deliverEmail(userId, config, data) {
+  if (!config.templateKey) return false;
+  
+  try {
+    // 1. Get user email
+    const user = await dataAccess.getRecord('driverProfiles', userId, { suppressAuth: true });
+    if (!user || !user.email) return false;
+
+    // 2. Render and Send (Placeholder for actual sending)
+    const rendered = await renderEmail(config.templateKey, data);
+    console.log(`[notificationDispatcher] Simulated Email to ${user.email}: ${rendered.subject}`);
+    
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function deliverInApp(userId, config, data) {
+  try {
+    // Basic variable replacement for simple message strings
+    let message = config.template || '';
+    Object.entries(data).forEach(([key, val]) => {
+      message = message.replace(`{{${key}}}`, val);
+    });
+
+    await dataAccess.insertRecord('memberNotifications', {
+      userId,
+      message,
+      read: false,
+      timestamp: new Date()
+    }, { suppressAuth: true });
+    
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function deliverPush(userId, config, data) {
+  // Placeholder
+  return true;
+}
+
+async function deliverSms(userId, config, data) {
+  // Placeholder
+  return true;
+}
+
+/**
+ * Throttling logic
+ */
+async function isThrottled(rule, userId) {
+  const throttle = rule.throttling;
+  if (!throttle || !throttle.enabled) return false;
+
+  const state = await dataAccess.findByField(THROTTLE_COLLECTION, 'userId_ruleId', `${userId}_${rule._id}`, { suppressAuth: true });
+  if (!state) return false;
+
+  const now = Date.now();
+  const lastSent = new Date(state.lastSent).getTime();
+
+  // Cooldown check
+  if (throttle.cooldownMinutes && (now - lastSent < throttle.cooldownMinutes * 60000)) {
+    return true;
+  }
+
+  // Hourly limit
+  if (throttle.maxPerHour && state.countThisHour >= throttle.maxPerHour) {
+    // Check if hour has passed
+    const hourAgo = now - 3600000;
+    if (lastSent > hourAgo) return true;
+  }
+
+  return false;
+}
+
+function calculateScheduledTime(rule, userId) {
+  // Simple: Immediate unless quiet hours (not implemented yet)
+  return new Date();
+}
+
+async function queueNotification(item) {
+  return await dataAccess.insertRecord(QUEUE_COLLECTION, item, { suppressAuth: true });
+}
+
+async function logDispatch(ruleId, userId, status) {
+  await dataAccess.insertRecord(LOG_COLLECTION, {
+    ruleId, userId, status, timestamp: new Date()
+  }, { suppressAuth: true });
+}

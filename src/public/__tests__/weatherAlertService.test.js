@@ -150,4 +150,3 @@ describe('Weather Alert Service Tests', () => {
 
 });
 
-});

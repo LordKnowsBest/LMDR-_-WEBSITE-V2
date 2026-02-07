@@ -1,0 +1,343 @@
+import * as dataAccess from 'backend/dataAccess';
+import { generateApiKey, hashApiKey, rotateApiKey } from 'backend/apiAuthService';
+import { createApiCheckoutSession, createApiPortalSession, getApiBillingSummary } from 'backend/stripeService';
+import { fetch } from 'wix-fetch';
+
+const COLLECTIONS = {
+  partners: 'apiPartners',
+  usage: 'apiUsage',
+  subscriptions: 'apiSubscriptions',
+  billingHistory: 'billingHistory',
+  webhookDeliveries: 'apiWebhookDeliveries'
+};
+
+export async function registerApiPartner(input = {}) {
+  const companyName = String(input.company_name || '').trim();
+  const contactEmail = String(input.contact_email || '').trim();
+  if (!companyName || !contactEmail) {
+    return { success: false, error: 'company_name and contact_email are required' };
+  }
+
+  const partnerId = `ptn_${Date.now()}`;
+  const apiKey = await generateApiKey('live');
+  const keyHash = await hashApiKey(apiKey);
+
+  const result = await dataAccess.insertRecord(COLLECTIONS.partners, {
+    partner_id: partnerId,
+    company_name: companyName,
+    contact_email: contactEmail,
+    contact_name: input.contact_name || null,
+    tier: input.tier || 'starter',
+    status: 'active',
+    api_keys: [{
+      key_id: `key_${Date.now()}`,
+      key_hash: keyHash,
+      name: 'Default Key',
+      created_at: new Date(),
+      last_used_at: null,
+      is_active: true
+    }],
+    ip_whitelist: Array.isArray(input.ip_whitelist) ? input.ip_whitelist : [],
+    webhook_url: input.webhook_url || null,
+    webhook_secret: input.webhook_secret || null,
+    created_at: new Date(),
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  if (!result?.success) {
+    return { success: false, error: result?.error || 'Failed to create partner' };
+  }
+
+  return {
+    success: true,
+    partner: {
+      partner_id: partnerId,
+      company_name: companyName,
+      tier: input.tier || 'starter'
+    },
+    api_key: apiKey
+  };
+}
+
+export async function rotatePartnerApiKey(partnerId, keyId, options = {}) {
+  return rotateApiKey(partnerId, keyId, options);
+}
+
+export async function getPartnerUsageDashboard(partnerId, periodKey = null) {
+  const filters = periodKey ? { partner_id: partnerId, period_key: periodKey } : { partner_id: partnerId };
+  const usage = await dataAccess.queryRecords(COLLECTIONS.usage, {
+    filters,
+    sort: [{ field: 'period_key', direction: 'desc' }],
+    limit: 12,
+    suppressAuth: true
+  });
+
+  const subscription = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+    filters: { partner_id: partnerId },
+    sort: [{ field: 'current_period_end', direction: 'desc' }],
+    limit: 1,
+    suppressAuth: true
+  });
+
+  return {
+    success: true,
+    usage: usage?.items || [],
+    subscription: subscription?.items?.[0] || null
+  };
+}
+
+export async function listPartnerApiKeys(partnerId) {
+  const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
+    suppressAuth: true
+  });
+  if (!partner) return { success: false, error: 'Partner not found' };
+
+  const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
+  return {
+    success: true,
+    keys: keys.map((key) => ({
+      key_id: key.key_id,
+      name: key.name || null,
+      environment: inferKeyEnvironment(key),
+      is_active: key.is_active !== false,
+      created_at: key.created_at || null,
+      last_used_at: key.last_used_at || null
+    }))
+  };
+}
+
+export async function createPartnerApiKey(partnerId, options = {}) {
+  const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
+    suppressAuth: true
+  });
+  if (!partner) return { success: false, error: 'Partner not found' };
+
+  const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
+  const activeKeys = keys.filter((key) => key.is_active !== false);
+  if (activeKeys.length >= 5) {
+    return { success: false, error: 'Maximum 5 active keys allowed' };
+  }
+
+  const requestedEnvironment = String(options.environment || '').toLowerCase();
+  const env = requestedEnvironment === 'sandbox' ? 'test' : 'live';
+  const environment = env === 'test' ? 'sandbox' : 'production';
+  const keyValue = await generateApiKey(env);
+  const keyHash = await hashApiKey(keyValue);
+  const keyId = `key_${Date.now()}`;
+
+  const nextKeys = [...keys, {
+    key_id: keyId,
+      key_hash: keyHash,
+      name: options.name || `API Key ${activeKeys.length + 1}`,
+      environment,
+      created_at: new Date(),
+      last_used_at: null,
+      is_active: true
+  }];
+
+  const updated = await dataAccess.updateRecord(COLLECTIONS.partners, {
+    _id: partner._id,
+    api_keys: nextKeys,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  if (!updated?.success) {
+    return { success: false, error: updated?.error || 'Failed to create key' };
+  }
+
+  return {
+    success: true,
+    key_id: keyId,
+    environment,
+    api_key: keyValue
+  };
+}
+
+export async function revokePartnerApiKey(partnerId, keyId) {
+  const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
+    suppressAuth: true
+  });
+  if (!partner) return { success: false, error: 'Partner not found' };
+
+  const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
+  const updatedKeys = keys.map((key) => key.key_id === keyId ? { ...key, is_active: false } : key);
+
+  const updated = await dataAccess.updateRecord(COLLECTIONS.partners, {
+    _id: partner._id,
+    api_keys: updatedKeys,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  return {
+    success: Boolean(updated?.success),
+    error: updated?.success ? null : (updated?.error || 'Failed to revoke key')
+  };
+}
+
+export async function getPartnerBillingHistory(partnerId, limit = 50) {
+  const billing = await dataAccess.queryRecords(COLLECTIONS.billingHistory, {
+    filters: {
+      carrier_dot: partnerId
+    },
+    sort: [{ field: 'timestamp', direction: 'desc' }],
+    limit: Math.min(200, Math.max(1, Number(limit) || 50)),
+    suppressAuth: true
+  });
+
+  const summary = await getApiBillingSummary(partnerId).catch(() => null);
+  return {
+    success: true,
+    items: billing?.items || [],
+    summary
+  };
+}
+
+export async function getPartnerApiEnvironment(partnerId) {
+  const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
+    suppressAuth: true
+  });
+  if (!partner) return { success: false, error: 'Partner not found' };
+
+  const activeEnvironment = String(partner.default_environment || 'production').toLowerCase();
+  return {
+    success: true,
+    environment: activeEnvironment === 'sandbox' ? 'sandbox' : 'production',
+    sandbox_enabled: Boolean(partner.sandbox_enabled)
+  };
+}
+
+export async function setPartnerApiEnvironment(partnerId, environment = 'production') {
+  const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
+    suppressAuth: true
+  });
+  if (!partner) return { success: false, error: 'Partner not found' };
+
+  const normalized = String(environment || '').toLowerCase();
+  if (!['sandbox', 'production'].includes(normalized)) {
+    return { success: false, error: 'environment must be sandbox or production' };
+  }
+
+  const updated = await dataAccess.updateRecord(COLLECTIONS.partners, {
+    _id: partner._id,
+    default_environment: normalized,
+    sandbox_enabled: normalized === 'sandbox' ? true : Boolean(partner.sandbox_enabled),
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  if (!updated?.success) {
+    return { success: false, error: updated?.error || 'Failed to set environment' };
+  }
+
+  return {
+    success: true,
+    environment: normalized
+  };
+}
+
+export async function createPartnerApiCheckout(partnerId, tier = 'starter', planType = 'monthly') {
+  return createApiCheckoutSession(partnerId, tier, planType);
+}
+
+export async function createPartnerBillingPortal(partnerId) {
+  return createApiPortalSession(partnerId);
+}
+
+export async function sendPartnerWebhookTest(partnerId, webhookUrl = null) {
+  const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
+    suppressAuth: true
+  });
+  if (!partner) return { success: false, error: 'Partner not found' };
+
+  const targetUrl = String(webhookUrl || partner.webhook_url || '').trim();
+  if (!targetUrl) return { success: false, error: 'No webhook_url configured' };
+
+  const payload = {
+    event_type: 'webhook_test',
+    event_id: `evt_test_${Date.now()}`,
+    partner_id: partnerId,
+    timestamp: new Date().toISOString(),
+    data: { status: 'ok' }
+  };
+  const signature = await computeWebhookSignature(partner.webhook_secret || '', payload);
+  const requestHeaders = {
+    'Content-Type': 'application/json',
+    'X-LMDR-Event': payload.event_type,
+    'X-LMDR-Timestamp': payload.timestamp
+  };
+  if (signature) {
+    requestHeaders['X-LMDR-Signature'] = signature;
+  }
+
+  try {
+    const now = new Date();
+    const response = await fetch(targetUrl, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: JSON.stringify(payload)
+    });
+
+    await dataAccess.insertRecord(COLLECTIONS.webhookDeliveries, {
+      subscription_id: null,
+      partner_id: partnerId,
+      event_type: payload.event_type,
+      payload,
+      attempt: 1,
+      status: response.ok ? 'sent' : 'failed',
+      response_status: response.status,
+      created_at: now,
+      updated_at: now
+    }, { suppressAuth: true }).catch(() => null);
+
+    return {
+      success: response.ok,
+      status: response.status
+    };
+  } catch (error) {
+    const now = new Date();
+    await dataAccess.insertRecord(COLLECTIONS.webhookDeliveries, {
+      subscription_id: null,
+      partner_id: partnerId,
+      event_type: payload.event_type,
+      payload,
+      attempt: 1,
+      status: 'failed',
+      response_status: null,
+      response_body: String(error.message || '').slice(0, 1000),
+      created_at: now,
+      updated_at: now
+    }, { suppressAuth: true }).catch(() => null);
+    return { success: false, error: error.message };
+  }
+}
+
+function inferKeyEnvironment(key) {
+  const explicit = String(key?.environment || '').toLowerCase();
+  if (explicit === 'sandbox' || explicit === 'production') return explicit;
+  const name = String(key?.name || '').toLowerCase();
+  if (name.includes('sandbox')) return 'sandbox';
+  return 'production';
+}
+
+async function computeWebhookSignature(secret, payload) {
+  if (!secret) return null;
+  try {
+    const body = JSON.stringify(payload);
+    const key = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(secret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    const digest = await crypto.subtle.sign(
+      'HMAC',
+      key,
+      new TextEncoder().encode(body)
+    );
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch (error) {
+    return null;
+  }
+}

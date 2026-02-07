@@ -6,6 +6,43 @@ import {
   batchExternalCarrierSafety
 } from 'backend/externalFmcsaApi';
 import { getExternalCurrentCSA, getExternalCSAHistory } from 'backend/externalCsaApi';
+import {
+  getExternalCarrierIntelligence,
+  getExternalSentiment,
+  getExternalMarketIntelligence,
+  searchExternalCarriers
+} from 'backend/externalIntelligenceApi';
+import {
+  searchExternalParking,
+  getExternalParkingLocation
+} from 'backend/externalParkingApi';
+import {
+  searchExternalFuelPrices,
+  planExternalRouteFuel,
+  getExternalFuelStation
+} from 'backend/externalFuelApi';
+import {
+  searchExternalDrivers,
+  getExternalDriverProfile,
+  matchExternalCarriers,
+  checkExternalQualification
+} from 'backend/externalMatchingApi';
+import {
+  extractExternalCDL,
+  extractExternalMedCert,
+  verifyExternalDocument,
+  processExternalDocumentBatch,
+  getExternalBatchStatus
+} from 'backend/externalDocumentApi';
+import {
+  getExternalUserProgress,
+  awardExternalXP,
+  checkExternalAchievements,
+  getExternalLeaderboard,
+  subscribeExternalEngagementWebhook
+} from 'backend/externalEngagementApi';
+import { authorizeProductAccess } from 'backend/apiProductAccessService';
+import { generateWebhookSecret } from 'backend/apiWebhookService';
 
 const COLLECTIONS = {
   requestLog: 'apiRequestLog',
@@ -96,10 +133,10 @@ export async function handleGatewayRequest(request) {
     payload = routed.payload || {};
     responseHeaders = { ...responseHeaders, ...(routed.headers || {}) };
   } catch (error) {
-    statusCode = 500;
+    statusCode = statusForErrorCode(error?.code || 'internal_error');
     payload = {
       error: {
-        code: 'internal_error',
+        code: error?.code || 'internal_error',
         message: error.message || 'Unexpected API error'
       },
       request_id: requestId
@@ -139,40 +176,37 @@ export async function handleGatewayRequest(request) {
 }
 
 async function routeRequest({ request, method, routePath, authContext }) {
+  const tier = String(authContext?.tier || 'starter').toLowerCase();
+  const productId = getProductIdForRoute(method, routePath);
+  if (productId) {
+    const access = await authorizeProductAccess(authContext, {
+      productId,
+      endpoint: routePath,
+      method
+    });
+    if (!access.allowed) {
+      const err = new Error('API product access denied');
+      err.code = 'forbidden_product';
+      throw err;
+    }
+  }
+
   if (method === 'GET' && /^\/v1\/safety\/carrier\/\d+$/.test(routePath)) {
     const dotNumber = routePath.split('/').pop();
     const result = await getExternalCarrierSafety(dotNumber);
-    if (!result.success) {
-      return {
-        status: result.errorCode === 'resource_not_found' ? 404 : 400,
-        payload: { error: { code: result.errorCode, message: result.message } }
-      };
-    }
-    return { status: 200, payload: result.data };
+    return mapServiceResult(result);
   }
 
   if (method === 'POST' && routePath === '/v1/safety/carriers/batch') {
     const body = await parseBody(request);
     const result = await batchExternalCarrierSafety(body?.dot_numbers || []);
-    if (!result.success) {
-      return {
-        status: 400,
-        payload: { error: { code: result.errorCode, message: result.message } }
-      };
-    }
-    return { status: 200, payload: result.data };
+    return mapServiceResult(result);
   }
 
   if (method === 'GET' && /^\/v1\/safety\/csa\/\d+$/.test(routePath)) {
     const dotNumber = routePath.split('/').pop();
     const result = await getExternalCurrentCSA(dotNumber);
-    if (!result.success) {
-      return {
-        status: 400,
-        payload: { error: { code: result.errorCode, message: result.message } }
-      };
-    }
-    return { status: 200, payload: result.data };
+    return mapServiceResult(result);
   }
 
   if (method === 'GET' && /^\/v1\/safety\/csa\/\d+\/history$/.test(routePath)) {
@@ -180,13 +214,7 @@ async function routeRequest({ request, method, routePath, authContext }) {
     const dotNumber = parts[4];
     const months = Number(request?.query?.months || 6);
     const result = await getExternalCSAHistory(dotNumber, months);
-    if (!result.success) {
-      return {
-        status: 400,
-        payload: { error: { code: result.errorCode, message: result.message } }
-      };
-    }
-    return { status: 200, payload: result.data };
+    return mapServiceResult(result);
   }
 
   if (method === 'POST' && routePath === '/v1/safety/alerts/subscribe') {
@@ -218,10 +246,219 @@ async function routeRequest({ request, method, routePath, authContext }) {
     return { status: 200, payload: { success: true } };
   }
 
+  if (method === 'GET' && /^\/v1\/intelligence\/carrier\/\d+$/.test(routePath)) {
+    const dotNumber = routePath.split('/').pop();
+    const accessLevel = tier === 'starter' ? 'basic' : 'full';
+    const result = await getExternalCarrierIntelligence(dotNumber, { accessLevel });
+    return mapServiceResult(result);
+  }
+
+  if (method === 'GET' && /^\/v1\/intelligence\/sentiment\/\d+$/.test(routePath)) {
+    assertTier(tier, 'growth');
+    const dotNumber = routePath.split('/').pop();
+    const result = await getExternalSentiment(dotNumber);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'GET' && routePath === '/v1/intelligence/market') {
+    const result = await getExternalMarketIntelligence({
+      region: request?.query?.region,
+      freight_type: request?.query?.freight_type,
+      operation_type: request?.query?.operation_type
+    });
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/intelligence/carriers/search') {
+    const body = await parseBody(request);
+    const result = await searchExternalCarriers(body?.filters || {}, {
+      limit: body?.limit,
+      offset: body?.offset
+    });
+    return mapServiceResult(result);
+  }
+
+  if (method === 'GET' && routePath === '/v1/parking/search') {
+    const result = await searchExternalParking(request?.query || {});
+    return mapServiceResult(result);
+  }
+
+  if (method === 'GET' && /^\/v1\/parking\/location\/[^/]+$/.test(routePath)) {
+    const locationId = routePath.split('/').pop();
+    const result = await getExternalParkingLocation(locationId);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'GET' && routePath === '/v1/fuel/prices') {
+    assertTier(tier, 'growth');
+    const result = await searchExternalFuelPrices(request?.query || {});
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/fuel/plan') {
+    assertTier(tier, 'growth');
+    const body = await parseBody(request);
+    const result = await planExternalRouteFuel(body);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'GET' && /^\/v1\/fuel\/station\/[^/]+$/.test(routePath)) {
+    assertTier(tier, 'growth');
+    const stationId = routePath.split('/').pop();
+    const result = await getExternalFuelStation(stationId);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/matching/drivers/search') {
+    assertTier(tier, 'enterprise');
+    const body = await parseBody(request);
+    const result = await searchExternalDrivers(body, authContext);
+    const mapped = mapServiceResult(result, 200);
+    await trackQuotaUsage(authContext.partner?.partner_id, result?.usageMetric, 1);
+    return mapped;
+  }
+
+  if (method === 'GET' && /^\/v1\/matching\/driver\/[^/]+$/.test(routePath)) {
+    assertTier(tier, 'enterprise');
+    const driverId = routePath.split('/').pop();
+    const result = await getExternalDriverProfile(driverId, request?.query || {});
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/matching/carriers') {
+    const body = await parseBody(request);
+    const result = await matchExternalCarriers(body);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/matching/qualify') {
+    const body = await parseBody(request);
+    const result = await checkExternalQualification(body);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/documents/cdl/extract') {
+    assertTier(tier, 'growth');
+    const body = await parseBody(request);
+    const result = await extractExternalCDL(body);
+    const mapped = mapServiceResult(result, 200);
+    await trackQuotaUsage(authContext.partner?.partner_id, result?.usageMetric, 1);
+    return mapped;
+  }
+
+  if (method === 'POST' && routePath === '/v1/documents/medcert/extract') {
+    assertTier(tier, 'growth');
+    const body = await parseBody(request);
+    const result = await extractExternalMedCert(body);
+    const mapped = mapServiceResult(result, 200);
+    await trackQuotaUsage(authContext.partner?.partner_id, result?.usageMetric, 1);
+    return mapped;
+  }
+
+  if (method === 'POST' && routePath === '/v1/documents/verify') {
+    assertTier(tier, 'growth');
+    const body = await parseBody(request);
+    const result = await verifyExternalDocument(body);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/documents/batch') {
+    assertTier(tier, 'growth');
+    const body = await parseBody(request);
+    const result = await processExternalDocumentBatch(body);
+    return mapServiceResult(result, 202);
+  }
+
+  if (method === 'GET' && /^\/v1\/documents\/batch\/[^/]+$/.test(routePath)) {
+    assertTier(tier, 'growth');
+    const jobId = routePath.split('/').pop();
+    const result = await getExternalBatchStatus(jobId);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'GET' && /^\/v1\/engagement\/user\/[^/]+\/progress$/.test(routePath)) {
+    assertTier(tier, 'enterprise');
+    const parts = routePath.split('/');
+    const userId = parts[4];
+    const result = await getExternalUserProgress(userId, request?.query || {});
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/engagement/xp/award') {
+    assertTier(tier, 'enterprise');
+    const body = await parseBody(request);
+    const result = await awardExternalXP(body);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/engagement/achievements/check') {
+    assertTier(tier, 'enterprise');
+    const body = await parseBody(request);
+    const result = await checkExternalAchievements(body);
+    return mapServiceResult(result);
+  }
+
+  if (method === 'GET' && routePath === '/v1/engagement/leaderboard') {
+    assertTier(tier, 'enterprise');
+    const result = await getExternalLeaderboard(request?.query || {});
+    return mapServiceResult(result);
+  }
+
+  if (method === 'POST' && routePath === '/v1/engagement/webhooks/subscribe') {
+    assertTier(tier, 'enterprise');
+    const body = await parseBody(request);
+    const result = await subscribeExternalEngagementWebhook(authContext.partner?.partner_id, body);
+    return mapServiceResult(result, 201);
+  }
+
   return {
     status: 404,
     payload: { error: { code: 'resource_not_found', message: 'Endpoint not found' } }
   };
+}
+
+function mapServiceResult(result, successStatus = 200) {
+  if (!result?.success) {
+    const code = result?.errorCode || 'invalid_request';
+    return {
+      status: statusForErrorCode(code),
+      payload: {
+        error: {
+          code,
+          message: result?.message || 'Request failed'
+        }
+      }
+    };
+  }
+
+  return {
+    status: successStatus,
+    payload: result.data || {}
+  };
+}
+
+function statusForErrorCode(code) {
+  if (code === 'invalid_api_key') return 401;
+  if (code === 'subscription_inactive') return 403;
+  if (code === 'forbidden_ip') return 403;
+  if (code === 'resource_not_found') return 404;
+  if (code === 'rate_limit_exceeded') return 429;
+  if (code === 'quota_exceeded') return 429;
+  if (code === 'forbidden_tier') return 403;
+  if (code === 'forbidden_product') return 403;
+  if (code === 'internal_error') return 500;
+  return 400;
+}
+
+function assertTier(actualTier, requiredTier) {
+  const order = { starter: 1, growth: 2, enterprise: 3, custom: 4 };
+  const actual = order[String(actualTier || 'starter').toLowerCase()] || 1;
+  const required = order[String(requiredTier || 'starter').toLowerCase()] || 1;
+  if (actual < required) {
+    const err = new Error(`Tier ${requiredTier} required`);
+    err.code = 'forbidden_tier';
+    throw err;
+  }
 }
 
 function successResponse(status, requestId, data, extraHeaders = {}) {
@@ -318,6 +555,50 @@ async function parseBody(request) {
   return {};
 }
 
+function getProductIdForRoute(method, routePath) {
+  const m = String(method || 'GET').toUpperCase();
+  const path = String(routePath || '');
+
+  if (path.startsWith('/v1/safety/')) return 'safety_suite';
+  if (path.startsWith('/v1/intelligence/')) return 'intelligence_suite';
+  if (path.startsWith('/v1/parking/') || path.startsWith('/v1/fuel/')) return 'operations_suite';
+  if (path.startsWith('/v1/matching/')) return 'matching_suite';
+  if (path.startsWith('/v1/documents/')) return 'document_suite';
+  if (path.startsWith('/v1/engagement/')) return 'engagement_suite';
+
+  // Explicitly return null for unmatched routes to preserve 404 handling.
+  if (!m || !path) return null;
+  return null;
+}
+
+async function trackQuotaUsage(partnerId, metricKey, amount = 1) {
+  if (!partnerId || !metricKey) return;
+
+  try {
+    const periodKey = new Date().toISOString().slice(0, 7);
+    const result = await dataAccess.queryRecords('apiUsage', {
+      filters: {
+        partner_id: partnerId,
+        period_key: periodKey
+      },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    const record = result?.items?.[0];
+    if (!record?._id) return;
+
+    const quotas = { ...(record.quotas_used || {}) };
+    quotas[metricKey] = Number(quotas[metricKey] || 0) + amount;
+
+    await dataAccess.updateRecord('apiUsage', {
+      _id: record._id,
+      quotas_used: quotas,
+      updated_at: new Date()
+    }, { suppressAuth: true });
+  } catch (_e) { }
+}
+
 async function logRequest({
   requestId,
   partnerId,
@@ -352,7 +633,7 @@ async function createAlertSubscription(partnerId, body) {
   const dotNumbers = Array.isArray(body?.dot_numbers) ? body.dot_numbers : [];
   const alertTypes = Array.isArray(body?.alert_types) ? body.alert_types : [];
   const webhookUrl = String(body?.webhook_url || '').trim();
-  const webhookSecret = String(body?.webhook_secret || '').trim();
+  const webhookSecret = String(body?.webhook_secret || '').trim() || generateWebhookSecret();
 
   if (!dotNumbers.length || !webhookUrl) {
     return {
@@ -383,7 +664,8 @@ async function createAlertSubscription(partnerId, body) {
       subscription_id: created._id,
       dot_numbers: created.dot_numbers || [],
       alert_types: created.alert_types || [],
-      webhook_url: created.webhook_url
+      webhook_url: created.webhook_url,
+      webhook_secret: created.webhook_secret || webhookSecret
     }
   };
 }

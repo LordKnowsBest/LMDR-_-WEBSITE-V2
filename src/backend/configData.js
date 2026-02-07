@@ -109,6 +109,9 @@ export const DATA_SOURCE = {
   jobPostings: 'airtable',
   teamMembers: 'airtable',
   companyMilestones: 'airtable',
+  platformSettings: 'airtable',
+  complianceReports: 'airtable',
+  scheduledReports: 'airtable',
 
   // -------------------------------------------------------------------------
   // Additional Tables (Extended from original plan)
@@ -151,6 +154,7 @@ export const DATA_SOURCE = {
   apiRequestLog: 'airtable',
   apiProducts: 'airtable',
   apiAlertSubscriptions: 'airtable',
+  apiWebhookDeliveries: 'airtable',
 
   // -------------------------------------------------------------------------
   // Gamification System (Airtable-only, no Wix fallback)
@@ -201,6 +205,15 @@ export const DATA_SOURCE = {
   automationLog: 'airtable',
 
   // -------------------------------------------------------------------------
+  // Recruiter Analytics
+  // -------------------------------------------------------------------------
+  sourceAttribution: 'airtable',
+  recruitingSpend: 'airtable',
+  funnelEvents: 'airtable',
+  competitorIntel: 'airtable',
+  hiringForecasts: 'airtable',
+
+  // -------------------------------------------------------------------------
   // Driver Community & Forums
   // -------------------------------------------------------------------------
   forumCategories: 'airtable',
@@ -244,7 +257,22 @@ export const DATA_SOURCE = {
   driverScores: 'airtable',
   capacityPlans: 'airtable',
   eldConnections: 'airtable',
-  driverLocations: 'airtable'
+  driverLocations: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Admin Platform Configuration
+  // -------------------------------------------------------------------------
+  featureFlags: 'airtable',
+  flagEvaluationLogs: 'airtable',
+  emailTemplates: 'airtable',
+  emailSendLogs: 'airtable',
+  notificationRules: 'airtable',
+  notificationQueue: 'airtable',
+  notificationLogs: 'airtable',
+  userThrottleState: 'airtable',
+  abTests: 'airtable',
+  abTestAssignments: 'airtable',
+  abTestEvents: 'airtable'
 };
 
 // =============================================================================
@@ -381,6 +409,9 @@ export const WIX_COLLECTION_NAMES = {
   jobPostings: 'JobPostings',
   teamMembers: 'TeamMembers',
   companyMilestones: 'CompanyMilestones',
+  platformSettings: 'PlatformSettings',
+  complianceReports: 'ComplianceReports',
+  scheduledReports: 'ScheduledReports',
 
   // Additional Tables
   interviews: 'Interviews',
@@ -421,6 +452,14 @@ export const WIX_COLLECTION_NAMES = {
   apiRequestLog: 'ApiRequestLog',
   apiProducts: 'ApiProducts',
   apiAlertSubscriptions: 'ApiAlertSubscriptions',
+  apiWebhookDeliveries: 'ApiWebhookDeliveries',
+
+  // Recruiter Analytics
+  sourceAttribution: 'SourceAttribution',
+  recruitingSpend: 'RecruitingSpend',
+  funnelEvents: 'FunnelEvents',
+  competitorIntel: 'CompetitorIntel',
+  hiringForecasts: 'HiringForecasts',
 
   // Recruiter Utility Expansion
   savedSearches: 'SavedSearches',
@@ -470,7 +509,20 @@ export const WIX_COLLECTION_NAMES = {
   driverScores: 'DriverScores',
   capacityPlans: 'CapacityPlans',
   eldConnections: 'ELDConnections',
-  driverLocations: 'DriverLocations'
+  driverLocations: 'DriverLocations',
+
+  // Admin Platform Configuration
+  featureFlags: 'FeatureFlags',
+  flagEvaluationLogs: 'FlagEvaluationLogs',
+  emailTemplates: 'EmailTemplates',
+  emailSendLogs: 'EmailSendLogs',
+  notificationRules: 'NotificationRules',
+  notificationQueue: 'NotificationQueue',
+  notificationLogs: 'NotificationLogs',
+  userThrottleState: 'UserThrottleState',
+  abTests: 'ABTests',
+  abTestAssignments: 'ABTestAssignments',
+  abTestEvents: 'ABTestEvents'
 };
 
 // =============================================================================
@@ -541,6 +593,9 @@ export const AIRTABLE_TABLE_NAMES = {
   jobPostings: 'v2_Job Postings',
   teamMembers: 'v2_Team Members',
   companyMilestones: 'v2_Company Milestones',
+  platformSettings: 'v2_Platform Settings',
+  complianceReports: 'v2_Compliance Reports',
+  scheduledReports: 'v2_Scheduled Reports',
 
   // Additional Tables
   interviews: 'v2_Interviews',
@@ -581,6 +636,7 @@ export const AIRTABLE_TABLE_NAMES = {
   apiRequestLog: 'v2_API Request Log',
   apiProducts: 'v2_API Products',
   apiAlertSubscriptions: 'v2_API Alert Subscriptions',
+  apiWebhookDeliveries: 'v2_API Webhook Deliveries',
 
   // Gamification System (Airtable-only)
   driverProgression: 'v2_Driver Progression',
@@ -613,6 +669,13 @@ export const AIRTABLE_TABLE_NAMES = {
 
   // Match Notifications (Airtable-only)
   matchNotificationLog: 'v2_Match Notification Log',
+
+  // Recruiter Analytics
+  sourceAttribution: 'v2_Source Attribution',
+  recruitingSpend: 'v2_Recruiting Spend',
+  funnelEvents: 'v2_Funnel Events',
+  competitorIntel: 'v2_Competitor Intel',
+  hiringForecasts: 'v2_Hiring Forecasts',
 
   // Recruiter Utility Expansion
   savedSearches: 'v2_Saved Searches',
@@ -662,7 +725,20 @@ export const AIRTABLE_TABLE_NAMES = {
   driverScores: 'v2_Driver Scores',
   capacityPlans: 'v2_Capacity Plans',
   eldConnections: 'v2_ELD Connections',
-  driverLocations: 'v2_Driver Locations'
+  driverLocations: 'v2_Driver Locations',
+
+  // Admin Platform Configuration
+  featureFlags: 'v2_Feature Flags',
+  flagEvaluationLogs: 'v2_Flag Evaluation Logs',
+  emailTemplates: 'v2_Email Templates',
+  emailSendLogs: 'v2_Email Send Logs',
+  notificationRules: 'v2_Notification Rules',
+  notificationQueue: 'v2_Notification Queue',
+  notificationLogs: 'v2_Notification Logs',
+  userThrottleState: 'v2_User Throttle State',
+  abTests: 'v2_AB Tests',
+  abTestAssignments: 'v2_AB Test Assignments',
+  abTestEvents: 'v2_AB Test Events'
 };
 
 // =============================================================================

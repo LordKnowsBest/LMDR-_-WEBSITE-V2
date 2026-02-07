@@ -7,8 +7,11 @@ import { ok, badRequest, serverError } from 'wix-http-functions';
 import { getSecret } from 'wix-secrets-backend';
 import {
   upsertSubscription,
+  upsertApiSubscriptionFromStripe,
   resetQuota,
+  getApiBillingSummary,
   updateSubscriptionStatus,
+  updateApiSubscriptionStatus,
   recordBillingEvent,
   isEventProcessed,
   logStripeEvent,
@@ -207,6 +210,20 @@ async function handleStripeEvent(event) {
  * Handle new subscription created
  */
 async function handleSubscriptionCreated(subscription) {
+  const partnerId = subscription.metadata?.partner_id;
+  if (partnerId) {
+    const result = await upsertApiSubscriptionFromStripe(subscription, subscription.customer);
+    if (result.success) {
+      await recordBillingEvent(partnerId, 'api_subscription_created', {
+        description: `API subscription ${subscription.id} created`
+      });
+    }
+    return {
+      status: result.success ? 'created' : 'error',
+      carrierDot: null
+    };
+  }
+
   const carrierDot = subscription.metadata?.carrier_dot;
   console.log(`[Webhook] Subscription created for carrier ${carrierDot}`);
 
@@ -228,6 +245,20 @@ async function handleSubscriptionCreated(subscription) {
  * Handle subscription updated (status changes, cancellations)
  */
 async function handleSubscriptionUpdated(subscription) {
+  const partnerId = subscription.metadata?.partner_id;
+  if (partnerId) {
+    const result = await upsertApiSubscriptionFromStripe(subscription, subscription.customer);
+    if (subscription.cancel_at_period_end) {
+      await recordBillingEvent(partnerId, 'api_subscription_cancel_scheduled', {
+        description: 'API subscription scheduled for cancellation at period end'
+      });
+    }
+    return {
+      status: result.success ? 'updated' : 'error',
+      carrierDot: null
+    };
+  }
+
   const carrierDot = subscription.metadata?.carrier_dot;
   console.log(`[Webhook] Subscription updated for carrier ${carrierDot}: status=${subscription.status}`);
 
@@ -251,6 +282,20 @@ async function handleSubscriptionUpdated(subscription) {
  * Handle subscription deleted (ended)
  */
 async function handleSubscriptionDeleted(subscription) {
+  const partnerId = subscription.metadata?.partner_id;
+  if (partnerId) {
+    const result = await updateApiSubscriptionStatus(subscription.id, 'cancelled');
+    if (result.success) {
+      await recordBillingEvent(partnerId, 'api_subscription_canceled', {
+        description: 'API subscription has been canceled'
+      });
+    }
+    return {
+      status: result.success ? 'deleted' : 'error',
+      carrierDot: null
+    };
+  }
+
   const carrierDot = subscription.metadata?.carrier_dot;
   console.log(`[Webhook] Subscription deleted for carrier ${carrierDot}`);
 
@@ -275,6 +320,23 @@ async function handleInvoicePaid(invoice) {
   // Only process subscription invoices
   if (!invoice.subscription) {
     return { status: 'skipped', carrierDot: null };
+  }
+  const partnerId = invoice.subscription_details?.metadata?.partner_id ||
+    invoice.lines?.data[0]?.metadata?.partner_id;
+
+  if (partnerId) {
+    const summary = await getApiBillingSummary(partnerId).catch(() => null);
+    await recordBillingEvent(partnerId, 'api_payment_succeeded', {
+      amount: invoice.amount_paid,
+      currency: invoice.currency,
+      invoiceId: invoice.id,
+      overageAmount: summary?.overage_amount || 0,
+      description: `API payment for ${invoice.lines?.data[0]?.description || 'API subscription'}`
+    });
+    return {
+      status: 'paid',
+      carrierDot: null
+    };
   }
 
   const carrierDot = invoice.subscription_details?.metadata?.carrier_dot ||
@@ -313,6 +375,22 @@ async function handleInvoicePaid(invoice) {
 async function handlePaymentFailed(invoice) {
   if (!invoice.subscription) {
     return { status: 'skipped', carrierDot: null };
+  }
+  const partnerId = invoice.subscription_details?.metadata?.partner_id ||
+    invoice.lines?.data[0]?.metadata?.partner_id;
+
+  if (partnerId) {
+    await updateApiSubscriptionStatus(invoice.subscription, 'past_due');
+    await recordBillingEvent(partnerId, 'api_payment_failed', {
+      amount: invoice.amount_due,
+      currency: invoice.currency,
+      invoiceId: invoice.id,
+      description: `API payment failed: ${invoice.last_finalization_error?.message || 'Unknown error'}`
+    });
+    return {
+      status: 'payment_failed',
+      carrierDot: null
+    };
   }
 
   const carrierDot = invoice.subscription_details?.metadata?.carrier_dot ||

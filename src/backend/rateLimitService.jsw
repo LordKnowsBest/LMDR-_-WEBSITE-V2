@@ -1,7 +1,8 @@
 import * as dataAccess from 'backend/dataAccess';
 
 const COLLECTIONS = {
-  usage: 'apiUsage'
+  usage: 'apiUsage',
+  products: 'apiProducts'
 };
 
 const TIER_LIMITS = {
@@ -12,6 +13,11 @@ const TIER_LIMITS = {
 };
 
 const minuteBuckets = new Map();
+const ENDPOINT_OVERRIDE_CACHE_TTL_MS = 5 * 60 * 1000;
+const endpointOverrideCache = {
+  loadedAt: 0,
+  entries: []
+};
 
 export function getTierLimits(tier) {
   return TIER_LIMITS[String(tier || 'starter').toLowerCase()] || TIER_LIMITS.starter;
@@ -38,9 +44,10 @@ export async function checkAndTrackUsage({
   statusCode = 200,
   latencyMs = 0
 }) {
-  const limits = resolveLimits({
+  const limits = await resolveLimits({
     tier,
     subscription,
+    endpoint,
     requestsPerMinuteOverride,
     requestsPerMonthOverride
   });
@@ -237,13 +244,32 @@ function getNextMonthIsoDate(now = new Date()) {
 function resolveLimits({
   tier,
   subscription,
+  endpoint,
+  requestsPerMinuteOverride,
+  requestsPerMonthOverride
+}) {
+  return resolveLimitsInternal({
+    tier,
+    subscription,
+    endpoint,
+    requestsPerMinuteOverride,
+    requestsPerMonthOverride
+  });
+}
+
+async function resolveLimitsInternal({
+  tier,
+  subscription,
+  endpoint,
   requestsPerMinuteOverride,
   requestsPerMonthOverride
 }) {
   const tierLimits = getTierLimits(tier);
   const subscriptionLimits = subscription?.rate_limits || {};
+  const endpointOverride = await getEndpointRateLimitOverride(endpoint);
 
   const requestsPerMinute = Number(requestsPerMinuteOverride) ||
+    Number(endpointOverride) ||
     Number(subscriptionLimits.requests_per_minute) ||
     tierLimits.requestsPerMinute;
 
@@ -256,4 +282,61 @@ function resolveLimits({
     requestsPerMinute,
     requestsPerMonth
   };
+}
+
+async function getEndpointRateLimitOverride(endpoint) {
+  if (!endpoint) return null;
+  await loadEndpointOverridesIfStale();
+  const normalized = normalizeEndpoint(endpoint);
+  const match = endpointOverrideCache.entries.find((entry) =>
+    entry.matcher.test(normalized)
+  );
+  return match?.override || null;
+}
+
+async function loadEndpointOverridesIfStale() {
+  if (Date.now() - endpointOverrideCache.loadedAt < ENDPOINT_OVERRIDE_CACHE_TTL_MS) {
+    return;
+  }
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.products, {
+    filters: { is_active: true },
+    limit: 200,
+    suppressAuth: true
+  });
+
+  const entries = [];
+  (result?.items || []).forEach((product) => {
+    const endpoints = Array.isArray(product.endpoints) ? product.endpoints : [];
+    endpoints.forEach((endpoint) => {
+      const override = Number(endpoint?.rate_limit_override);
+      const path = endpoint?.path;
+      if (!path || !Number.isFinite(override) || override <= 0) return;
+      entries.push({
+        normalizedPath: normalizeEndpoint(path),
+        matcher: buildEndpointRegex(path),
+        override
+      });
+    });
+  });
+
+  entries.sort((a, b) => b.normalizedPath.length - a.normalizedPath.length);
+  endpointOverrideCache.entries = entries;
+  endpointOverrideCache.loadedAt = Date.now();
+}
+
+function normalizeEndpoint(value) {
+  const raw = String(value || '').trim();
+  return raw
+    .replace(/\/+$/, '')
+    .replace(/\/+/g, '/')
+    .toLowerCase();
+}
+
+function buildEndpointRegex(pathTemplate) {
+  const normalized = normalizeEndpoint(pathTemplate)
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\/+$/, '')
+    .replace(/\\\{[^}]+\\\}/g, '[^/]+');
+  return new RegExp(`^${normalized}$`, 'i');
 }
