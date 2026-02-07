@@ -93,9 +93,8 @@ async function verifyStripeSignature(payload, signature) {
 
     const webhookSecret = await getSecret('STRIPE_WEBHOOK_SECRET');
     if (!webhookSecret) {
-      console.warn('[Webhook] No webhook secret configured, skipping verification');
-      // In development, allow unsigned requests
-      return { success: true, warning: 'No secret configured' };
+      console.error('[Webhook] STRIPE_WEBHOOK_SECRET is missing');
+      return { success: false, error: 'Webhook secret not configured' };
     }
 
     // Parse signature header
@@ -120,7 +119,7 @@ async function verifyStripeSignature(payload, signature) {
     const expectedSignature = await computeHmacSignature(signedPayload, webhookSecret);
 
     // Compare signatures (timing-safe comparison)
-    if (expectedSignature !== signatureHash) {
+    if (!secureCompare(expectedSignature, signatureHash)) {
       return { success: false, error: 'Signature mismatch' };
     }
 
@@ -129,6 +128,20 @@ async function verifyStripeSignature(payload, signature) {
     console.error('[Webhook] Signature verification error:', error);
     return { success: false, error: error.message };
   }
+}
+
+/**
+ * Timing-safe string comparison
+ */
+function secureCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
 }
 
 /**
