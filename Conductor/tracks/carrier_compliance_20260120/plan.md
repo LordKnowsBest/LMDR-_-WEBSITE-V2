@@ -1,6 +1,6 @@
 # Track Plan: Carrier Compliance - DOT Compliance Management
 
-> **STATUS: IMPLEMENTATION COMPLETE - PAGE CODE BRIDGES + MANUAL QA PENDING**
+> **STATUS: IMPLEMENTATION COMPLETE - PAGE CODE BRIDGES + MANUAL QA PENDING - AUDIT FLAG: MISSING AUTOMATED TESTS**
 >
 > **Created**: 2026-01-20
 >
@@ -129,11 +129,11 @@ Phase 5: Incident Reporting
 
 ### 1.5 Testing - Phase 1
 
-- [x] Task: Create `src/public/__tests__/complianceCalendarService.test.js`
-  - [x] Test CRUD operations
-  - [x] Test recurring event logic
-  - [x] Test status transitions
-  - [x] Test reminder processing
+- [ ] Task: Create `src/public/__tests__/complianceCalendarService.test.js` (Missing in codebase)
+  - [ ] Test CRUD operations
+  - [ ] Test recurring event logic
+  - [ ] Test status transitions
+  - [ ] Test reminder processing
 
 - [ ] Task: Manual integration testing
   - [ ] Create test events for various types
@@ -218,11 +218,11 @@ Phase 5: Incident Reporting
 
 ### 2.7 Testing - Phase 2
 
-- [x] Task: Create `src/public/__tests__/documentVaultService.test.js`
-  - [x] Test upload/download
-  - [x] Test version history
-  - [x] Test expiration tracking
-  - [x] Test verification workflow
+- [ ] Task: Create `src/public/__tests__/documentVaultService.test.js` (Missing in codebase)
+  - [ ] Test upload/download
+  - [ ] Test version history
+  - [ ] Test expiration tracking
+  - [ ] Test verification workflow
 
 - [ ] Task: Manual integration testing
   - [ ] Upload various document types
@@ -307,10 +307,10 @@ Phase 5: Incident Reporting
 
 ### 3.6 Testing - Phase 3
 
-- [x] Task: Create `src/public/__tests__/dqFileService.test.js`
-  - [x] Test completeness calculation
-  - [x] Test document linking
-  - [x] Test audit report generation
+- [ ] Task: Create `src/public/__tests__/dqFileService.test.js` (Missing in codebase)
+  - [ ] Test completeness calculation
+  - [ ] Test document linking
+  - [ ] Test audit report generation
 
 - [ ] Task: Manual integration testing
   - [ ] Create drivers and verify DQ files created
@@ -399,10 +399,10 @@ Phase 5: Incident Reporting
 
 ### 4.6 Testing - Phase 4
 
-- [x] Task: Create `src/public/__tests__/csaMonitorService.test.js`
-  - [x] Test snapshot creation
-  - [x] Test trend calculation
-  - [x] Test alert generation
+- [ ] Task: Create `src/public/__tests__/csaMonitorService.test.js` (Missing in codebase)
+  - [ ] Test snapshot creation
+  - [ ] Test trend calculation
+  - [ ] Test alert generation
 
 - [ ] Task: Manual integration testing
   - [ ] Verify FMCSA data fetch
@@ -517,11 +517,11 @@ Phase 5: Incident Reporting
 
 ### 5.8 Testing - Phase 5
 
-- [x] Task: Create `src/public/__tests__/incidentService.test.js`
-  - [x] Test incident creation
-  - [x] Test DOT reportability logic
-  - [x] Test investigation workflow
-  - [x] Test statistics calculation
+- [ ] Task: Create `src/public/__tests__/incidentService.test.js` (Missing in codebase)
+  - [ ] Test incident creation
+  - [ ] Test DOT reportability logic
+  - [ ] Test investigation workflow
+  - [ ] Test statistics calculation
 
 - [ ] Task: Manual integration testing
   - [ ] Create incidents of various types
@@ -535,7 +535,7 @@ Phase 5: Incident Reporting
 
 Before marking any phase complete:
 
-- [ ] All backend functions implemented and tested
+- [ ] All backend functions implemented and tested (Tests missing)
 - [ ] All UI components functional
 - [ ] PostMessage bridge working
 - [ ] No console errors in browser
