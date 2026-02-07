@@ -1,0 +1,119 @@
+import { searchParking, getParkingDetails } from 'backend/parkingService';
+
+function toNumber(value, fallback = null) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+export async function searchExternalParking(params = {}) {
+  const lat = toNumber(params.lat);
+  const lng = toNumber(params.lng);
+  const radius = Math.min(100, Math.max(1, toNumber(params.radius, 25)));
+
+  if (lat === null || lng === null) {
+    return {
+      success: false,
+      errorCode: 'invalid_request',
+      message: 'lat and lng are required'
+    };
+  }
+
+  const amenities = normalizeArray(params.amenities);
+  const minSpaces = Math.max(0, toNumber(params.min_spaces, 0));
+  const result = await searchParking(lat, lng, radius, { amenities });
+  if (!result?.success) {
+    return {
+      success: false,
+      errorCode: 'internal_error',
+      message: result?.error || 'Parking service unavailable'
+    };
+  }
+
+  const items = (result.items || [])
+    .filter((item) => (item.available_spaces ?? 0) >= minSpaces)
+    .map((item) => mapParkingItem(item));
+
+  return {
+    success: true,
+    data: {
+      query: {
+        center: { lat, lng },
+        radius_miles: radius
+      },
+      results: items,
+      total_results: items.length,
+      coverage: {
+        tpims_states: [],
+        sensor_locations: items.filter((i) => i.availability.data_source.includes('sensor')).length,
+        community_locations: items.filter((i) => i.availability.data_source.includes('community')).length
+      }
+    }
+  };
+}
+
+export async function getExternalParkingLocation(locationId) {
+  if (!locationId) {
+    return { success: false, errorCode: 'invalid_request', message: 'location id is required' };
+  }
+
+  const result = await getParkingDetails(locationId);
+  if (!result?.success || !result.item) {
+    return { success: false, errorCode: 'resource_not_found', message: 'Location not found' };
+  }
+
+  const item = mapParkingItem(result.item);
+  return {
+    success: true,
+    data: {
+      ...item,
+      historical_availability: [],
+      reviews: []
+    }
+  };
+}
+
+function mapParkingItem(item = {}) {
+  return {
+    id: item._id || item.external_id || null,
+    name: item.name || 'Unknown Parking',
+    location: {
+      lat: toNumber(item.location?.lat),
+      lng: toNumber(item.location?.lng)
+    },
+    distance_miles: toNumber(item.distance_miles, 0),
+    availability: {
+      total_spaces: toNumber(item.total_spaces, 0),
+      available_spaces: toNumber(item.available_spaces, null),
+      last_updated: toIsoDateTime(item.last_availability_update || item.updated_at || new Date()),
+      data_source: String(item.source || item.data_confidence || 'unknown'),
+      confidence: mapConfidence(item.data_confidence)
+    },
+    amenities: Array.isArray(item.amenities) ? item.amenities : [],
+    type: item.type || 'parking',
+    highway: item.highway || null,
+    trend: item.trend || null
+  };
+}
+
+function mapConfidence(confidence) {
+  const value = String(confidence || '').toLowerCase();
+  if (value.includes('sensor') || value.includes('high')) return 'high';
+  if (value.includes('medium') || value.includes('reported')) return 'medium';
+  return 'low';
+}
+
+function normalizeArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  return String(value)
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function toIsoDateTime(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}

@@ -1,0 +1,339 @@
+import * as dataAccess from 'backend/dataAccess';
+import { getCarrierSafetyData } from 'backend/fmcsaService';
+import { scanSocialMedia } from 'backend/socialScanner';
+import { validateDotNumber } from 'backend/externalFmcsaApi';
+
+const COLLECTIONS = {
+  enrichments: 'carrierEnrichments'
+};
+
+const CACHE_TTL_DAYS = 14;
+
+export async function getExternalCarrierIntelligence(dotNumber, options = {}) {
+  const validation = validateDotNumber(dotNumber);
+  if (!validation.valid) {
+    return { success: false, errorCode: 'invalid_request', message: validation.error };
+  }
+
+  const dot = String(validation.value);
+  const [enrichment, safety] = await Promise.all([
+    getLatestEnrichment(dot),
+    getCarrierSafetyData(dot).catch(() => ({}))
+  ]);
+
+  if (!enrichment) {
+    return {
+      success: false,
+      errorCode: 'resource_not_found',
+      message: 'Carrier intelligence not found'
+    };
+  }
+
+  const fullAccess = String(options.accessLevel || 'full') === 'full';
+
+  return {
+    success: true,
+    data: {
+      dot_number: Number(dot),
+      legal_name: safety?.legal_name || null,
+      enrichment: {
+        pay: {
+          cpm_range: parseCpmRange(enrichment.pay_cpm_range),
+          sign_on_bonus: parseBonus(enrichment.sign_on_bonus),
+          home_time: enrichment.home_time || null,
+          benefits: splitList(enrichment.benefits)
+        },
+        sentiment: {
+          overall: normalizeSentiment(enrichment.driver_sentiment),
+          score: estimateSentimentScore(enrichment.driver_sentiment),
+          sample_size: fullAccess ? 0 : null,
+          themes: {
+            pay_satisfaction: 'mixed',
+            home_time: 'mixed',
+            equipment: 'mixed',
+            management: 'mixed'
+          }
+        },
+        hiring_status: {
+          actively_hiring: String(enrichment.hiring_status || '').toLowerCase().includes('active'),
+          positions_open: [],
+          experience_required: null
+        },
+        sources: parseJsonArray(enrichment.sources_found).map((source) => ({
+          platform: String(source).toLowerCase(),
+          posts_analyzed: null
+        }))
+      },
+      enriched_at: toIsoDateTime(enrichment.enriched_date),
+      confidence_level: String(enrichment.data_confidence || 'low').toLowerCase()
+    }
+  };
+}
+
+export async function getExternalSentiment(dotNumber) {
+  const validation = validateDotNumber(dotNumber);
+  if (!validation.valid) {
+    return { success: false, errorCode: 'invalid_request', message: validation.error };
+  }
+
+  const dot = String(validation.value);
+  const safety = await getCarrierSafetyData(dot).catch(() => ({}));
+  const carrierName = safety?.legal_name || `DOT ${dot}`;
+  const rawIntel = await scanSocialMedia(carrierName, dot);
+
+  if (!rawIntel) {
+    return {
+      success: false,
+      errorCode: 'resource_not_found',
+      message: 'Sentiment data unavailable'
+    };
+  }
+
+  const snippets = rawIntel
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .slice(0, 3)
+    .map((line) => ({
+      platform: 'social',
+      date: new Date().toISOString().slice(0, 10),
+      sentiment: 'mixed',
+      snippet: line.slice(0, 180)
+    }));
+
+  return {
+    success: true,
+    data: {
+      dot_number: Number(dot),
+      carrier_name: carrierName,
+      sentiment_analysis: {
+        overall_score: 6.5,
+        rating: 'mixed',
+        confidence: 'medium',
+        sample_size: snippets.length
+      },
+      by_platform: {
+        reddit: { score: 6.5, posts_analyzed: snippets.length, subreddits: [] },
+        truckersreport: { score: 6.5, threads_analyzed: 0 },
+        twitter: { score: 6.5, tweets_analyzed: 0 }
+      },
+      key_themes: [],
+      recent_mentions: snippets,
+      warnings: [],
+      scanned_at: new Date().toISOString()
+    }
+  };
+}
+
+export async function getExternalMarketIntelligence(filters = {}) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.enrichments, {
+    limit: 250,
+    suppressAuth: true
+  });
+
+  const items = result?.items || [];
+  if (!items.length) {
+    return {
+      success: true,
+      data: {
+        query: {
+          region: filters.region || null,
+          freight_type: filters.freight_type || null,
+          operation_type: filters.operation_type || null
+        },
+        market_data: {
+          avg_cpm: null,
+          cpm_range: { p25: null, p50: null, p75: null },
+          avg_sign_on_bonus: null,
+          demand_index: null,
+          demand_trend: 'stable',
+          driver_shortage_severity: 'unknown'
+        },
+        top_hiring_carriers: [],
+        regional_insights: {
+          hot_lanes: [],
+          seasonal_factors: null
+        },
+        data_date: new Date().toISOString().slice(0, 10)
+      }
+    };
+  }
+
+  const cpmValues = items
+    .map((item) => parseCpmRange(item.pay_cpm_range))
+    .map((range) => range.max || range.min || null)
+    .filter((value) => Number.isFinite(value));
+
+  cpmValues.sort((a, b) => a - b);
+
+  return {
+    success: true,
+    data: {
+      query: {
+        region: filters.region || null,
+        freight_type: filters.freight_type || null,
+        operation_type: filters.operation_type || null
+      },
+      market_data: {
+        avg_cpm: average(cpmValues),
+        cpm_range: {
+          p25: percentile(cpmValues, 0.25),
+          p50: percentile(cpmValues, 0.5),
+          p75: percentile(cpmValues, 0.75)
+        },
+        avg_sign_on_bonus: null,
+        demand_index: 7.0,
+        demand_trend: 'stable',
+        driver_shortage_severity: 'medium'
+      },
+      top_hiring_carriers: [],
+      regional_insights: {
+        hot_lanes: [],
+        seasonal_factors: null
+      },
+      data_date: new Date().toISOString().slice(0, 10)
+    }
+  };
+}
+
+export async function searchExternalCarriers(filters = {}, options = {}) {
+  const limit = Math.min(100, Math.max(1, Number(options.limit) || 25));
+  const offset = Math.max(0, Number(options.offset) || 0);
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.enrichments, {
+    limit: 500,
+    suppressAuth: true
+  });
+
+  let items = result?.items || [];
+
+  if (filters.sentiment) {
+    const target = normalizeSentiment(filters.sentiment);
+    items = items.filter((item) => normalizeSentiment(item.driver_sentiment) === target);
+  }
+
+  const total = items.length;
+  const page = items.slice(offset, offset + limit).map((item) => ({
+    dot_number: Number(item.dot_number),
+    match_score: estimateMatchScore(item),
+    sentiment: normalizeSentiment(item.driver_sentiment),
+    confidence: String(item.data_confidence || 'low').toLowerCase(),
+    pay_cpm_range: parseCpmRange(item.pay_cpm_range),
+    home_time: item.home_time || null,
+    hiring_status: item.hiring_status || null,
+    enriched_at: toIsoDateTime(item.enriched_date)
+  }));
+
+  return {
+    success: true,
+    data: {
+      total,
+      limit,
+      offset,
+      results: page
+    }
+  };
+}
+
+async function getLatestEnrichment(dotNumber) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.enrichments, {
+    filters: { dot_number: String(dotNumber) },
+    sort: [{ field: 'enriched_date', direction: 'desc' }],
+    limit: 1,
+    suppressAuth: true
+  });
+
+  const item = result?.items?.[0] || null;
+  if (!item) return null;
+
+  const enrichedDate = item.enriched_date ? new Date(item.enriched_date) : null;
+  if (!enrichedDate || Number.isNaN(enrichedDate.getTime())) return item;
+
+  const ageDays = (Date.now() - enrichedDate.getTime()) / (1000 * 60 * 60 * 24);
+  if (ageDays > CACHE_TTL_DAYS) {
+    return item;
+  }
+  return item;
+}
+
+function parseCpmRange(value) {
+  const text = String(value || '');
+  const matches = text.match(/(\d+(\.\d+)?)/g) || [];
+  if (!matches.length) {
+    return { min: null, max: null, confidence: 'low' };
+  }
+  const numbers = matches.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+  if (!numbers.length) {
+    return { min: null, max: null, confidence: 'low' };
+  }
+  const normalized = numbers.map((n) => n > 10 ? n / 100 : n);
+  const min = Math.min(...normalized);
+  const max = Math.max(...normalized);
+  return { min, max, confidence: 'medium' };
+}
+
+function parseBonus(value) {
+  const text = String(value || '');
+  const numberMatch = text.replace(/,/g, '').match(/(\d+(\.\d+)?)/);
+  if (!numberMatch) return { amount: null, confidence: 'low' };
+  return { amount: Number(numberMatch[1]), confidence: 'medium' };
+}
+
+function splitList(value) {
+  if (!value) return [];
+  return String(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseJsonArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_e) {
+    return splitList(value);
+  }
+}
+
+function normalizeSentiment(value) {
+  const raw = String(value || '').toLowerCase();
+  if (raw.includes('pos')) return 'positive';
+  if (raw.includes('neg')) return 'negative';
+  if (raw.includes('mix')) return 'mixed';
+  return 'mixed';
+}
+
+function estimateSentimentScore(value) {
+  const sentiment = normalizeSentiment(value);
+  if (sentiment === 'positive') return 7.5;
+  if (sentiment === 'negative') return 4.5;
+  return 6.0;
+}
+
+function estimateMatchScore(item) {
+  const confidence = String(item.data_confidence || 'low').toLowerCase();
+  if (confidence === 'high') return 85;
+  if (confidence === 'medium') return 72;
+  return 60;
+}
+
+function average(values) {
+  if (!values.length) return null;
+  return Number((values.reduce((acc, n) => acc + n, 0) / values.length).toFixed(3));
+}
+
+function percentile(values, p) {
+  if (!values.length) return null;
+  const index = Math.min(values.length - 1, Math.max(0, Math.floor(values.length * p)));
+  return Number(values[index].toFixed(3));
+}
+
+function toIsoDateTime(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
