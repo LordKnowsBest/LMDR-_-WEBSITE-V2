@@ -2,20 +2,23 @@ import { getDriverProgression, getRecruiterProgression, awardDriverXP, awardRecr
 import { getStreakStatus } from 'backend/streakService';
 import { getAchievements, checkAndAwardAchievements } from 'backend/achievementService';
 import { getLeaderboard } from 'backend/leaderboardService';
+import { enqueueWebhookDelivery, generateWebhookSecret } from 'backend/apiWebhookService';
 
 const webhookSubscriptions = new Map();
 const dailyAwardCounters = new Map();
 
 const MAX_DAILY_XP_AWARD = 1000;
+const STREAK_MILESTONES = new Set([7, 30, 60, 90]);
 
-export async function getExternalUserProgress(userId, query = {}) {
+export async function getExternalUserProgress(userId, query = {}, authContext = {}) {
   const userType = String(query?.user_type || 'driver').toLowerCase();
+  const mappedUserId = mapPartnerScopedUserId(authContext?.partner?.partner_id, userId, userType);
   const progression = userType === 'recruiter' ?
-    await getRecruiterProgression(userId) :
-    await getDriverProgression(userId);
+    await getRecruiterProgression(mappedUserId) :
+    await getDriverProgression(mappedUserId);
 
-  const streak = userType === 'driver' ? await getStreakStatus(userId) : null;
-  const achievements = await getAchievements(userId, userType, { include_locked: false });
+  const streak = userType === 'driver' ? await getStreakStatus(mappedUserId) : null;
+  const achievements = await getAchievements(mappedUserId, userType, { include_locked: false });
 
   const recentAchievements = achievements
     .filter((item) => item.earned)
@@ -31,6 +34,7 @@ export async function getExternalUserProgress(userId, query = {}) {
     success: true,
     data: {
       user_id: userId,
+      partner_user_id: mappedUserId,
       user_type: userType,
       progression: {
         level: progression?.level || progression?.rank || 1,
@@ -55,6 +59,7 @@ export async function awardExternalXP(body = {}) {
   const action = String(body?.action || '').trim();
   const amount = Number(body?.xp_amount);
   const userType = String(body?.user_type || 'driver').toLowerCase();
+  const partnerId = String(body?.partner_id || '').trim() || null;
 
   if (!userId || !action || !Number.isFinite(amount) || amount <= 0) {
     return {
@@ -76,11 +81,12 @@ export async function awardExternalXP(body = {}) {
 
   dailyAwardCounters.set(key, used + amount);
 
+  const mappedUserId = mapPartnerScopedUserId(partnerId, userId, userType);
   let awardResult;
   if (userType === 'recruiter') {
-    awardResult = await awardRecruiterPoints(userId, action, body.metadata || {});
+    awardResult = await awardRecruiterPoints(mappedUserId, action, body.metadata || {});
   } else {
-    awardResult = await awardDriverXP(userId, action, body.metadata || {});
+    awardResult = await awardDriverXP(mappedUserId, action, body.metadata || {});
   }
 
   if (!awardResult?.success) {
@@ -89,6 +95,27 @@ export async function awardExternalXP(body = {}) {
       errorCode: 'invalid_request',
       message: awardResult?.reason || 'Award failed'
     };
+  }
+
+  if (partnerId && awardResult?.success && (awardResult?.level_up || awardResult?.rank_up)) {
+    await emitEngagementWebhook(partnerId, 'engagement.level_up', {
+      user_id: userId,
+      partner_user_id: mappedUserId,
+      user_type: userType,
+      level: awardResult.level || awardResult.rank || null,
+      action
+    });
+  }
+
+  if (partnerId && userType === 'driver') {
+    const streak = await getStreakStatus(mappedUserId).catch(() => null);
+    if (streak && STREAK_MILESTONES.has(Number(streak.streak_days || 0))) {
+      await emitEngagementWebhook(partnerId, 'engagement.streak_milestone', {
+        user_id: userId,
+        partner_user_id: mappedUserId,
+        milestone_days: Number(streak.streak_days || 0)
+      });
+    }
   }
 
   return {
@@ -104,11 +131,25 @@ export async function awardExternalXP(body = {}) {
 export async function checkExternalAchievements(body = {}) {
   const userId = String(body?.user_id || '').trim();
   const userType = String(body?.user_type || 'driver').toLowerCase();
+  const partnerId = String(body?.partner_id || '').trim() || null;
   if (!userId) {
     return { success: false, errorCode: 'invalid_request', message: 'user_id is required' };
   }
 
-  const earned = await checkAndAwardAchievements(userId, userType, body?.context || {});
+  const mappedUserId = mapPartnerScopedUserId(partnerId, userId, userType);
+  const earned = await checkAndAwardAchievements(mappedUserId, userType, body?.context || {});
+
+  if (partnerId && earned.length) {
+    for (const item of earned) {
+      await emitEngagementWebhook(partnerId, 'engagement.achievement_earned', {
+        user_id: userId,
+        partner_user_id: mappedUserId,
+        achievement_id: item.achievementId,
+        achievement_name: item.name
+      });
+    }
+  }
+
   return {
     success: true,
     data: {
@@ -146,6 +187,7 @@ export async function getExternalLeaderboard(query = {}) {
 export async function subscribeExternalEngagementWebhook(partnerId, body = {}) {
   const webhookUrl = String(body?.webhook_url || '').trim();
   const eventTypes = Array.isArray(body?.event_types) ? body.event_types : [];
+  const webhookSecret = String(body?.webhook_secret || '').trim() || generateWebhookSecret();
   if (!partnerId || !webhookUrl) {
     return {
       success: false,
@@ -159,6 +201,7 @@ export async function subscribeExternalEngagementWebhook(partnerId, body = {}) {
     subscription_id: subscriptionId,
     partner_id: partnerId,
     webhook_url: webhookUrl,
+    webhook_secret: webhookSecret,
     event_types: eventTypes,
     created_at: new Date().toISOString()
   });
@@ -168,7 +211,43 @@ export async function subscribeExternalEngagementWebhook(partnerId, body = {}) {
     data: {
       subscription_id: subscriptionId,
       webhook_url: webhookUrl,
+      webhook_secret: webhookSecret,
       event_types: eventTypes
     }
   };
+}
+
+function mapPartnerScopedUserId(partnerId, externalUserId, userType) {
+  const external = String(externalUserId || '').trim();
+  const partner = String(partnerId || '').trim();
+  if (!external) return '';
+  if (!partner) return external;
+  return `partner:${partner}:${userType}:${external}`;
+}
+
+async function emitEngagementWebhook(partnerId, eventType, data) {
+  const subscriptions = Array.from(webhookSubscriptions.values())
+    .filter((subscription) => subscription.partner_id === partnerId)
+    .filter((subscription) => {
+      const events = Array.isArray(subscription.event_types) ? subscription.event_types : [];
+      return !events.length || events.includes(eventType);
+    });
+
+  if (!subscriptions.length) return;
+
+  for (const subscription of subscriptions) {
+    await enqueueWebhookDelivery({
+      subscriptionId: subscription.subscription_id,
+      partnerId,
+      webhookUrl: subscription.webhook_url,
+      webhookSecret: subscription.webhook_secret || null,
+      eventType,
+      payload: {
+        event_type: eventType,
+        partner_id: partnerId,
+        occurred_at: new Date().toISOString(),
+        data
+      }
+    }).catch(() => null);
+  }
 }

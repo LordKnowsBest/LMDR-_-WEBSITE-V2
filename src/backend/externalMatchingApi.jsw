@@ -1,5 +1,10 @@
 import { findMatchingDrivers, getDriverProfile } from 'backend/driverMatching';
 import { findMatchingCarriers } from 'backend/carrierMatching';
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  usage: 'apiUsage'
+};
 
 export async function searchExternalDrivers(body = {}, authContext = {}) {
   const carrierDot = String(body?.carrier_dot || '').trim();
@@ -35,12 +40,14 @@ export async function searchExternalDrivers(body = {}, authContext = {}) {
     };
   }
 
+  const filteredMatches = applyExternalDriverFilters(result.matches || [], filters);
+
   return {
     success: true,
     usageMetric: 'driver_searches',
     data: {
-      total_matches: toNumber(result?.pagination?.totalCount, result.matches?.length || 0),
-      results: (result.matches || []).map((match) => ({
+      total_matches: toNumber(result?.pagination?.totalCount, filteredMatches.length || 0),
+      results: filteredMatches.map((match) => ({
         driver_id: match?.driver?._id || match?.driver?.id || null,
         match_score: toNumber(match.score, 0),
         score_breakdown: match.driver_match_scores || {},
@@ -63,7 +70,7 @@ export async function searchExternalDrivers(body = {}, authContext = {}) {
   };
 }
 
-export async function getExternalDriverProfile(driverId, query = {}) {
+export async function getExternalDriverProfile(driverId, query = {}, authContext = {}) {
   if (!driverId) {
     return { success: false, errorCode: 'invalid_request', message: 'driver id is required' };
   }
@@ -78,12 +85,28 @@ export async function getExternalDriverProfile(driverId, query = {}) {
     return { success: false, errorCode: 'resource_not_found', message: result?.error || 'Driver not found' };
   }
 
+  const profile = sanitizeDriverProfile(result.driver || {});
+  const canUnmask = String(authContext?.tier || '').toLowerCase() === 'enterprise' &&
+    String(query?.unmask_pii || '').toLowerCase() === 'true';
+  if (canUnmask) {
+    const creditCheck = await consumeProfileViewCredit(authContext?.partner?.partner_id || null);
+    if (!creditCheck.success) {
+      return {
+        success: false,
+        errorCode: 'quota_exceeded',
+        message: creditCheck.message || 'Profile view quota exceeded'
+      };
+    }
+  }
+
+  const profileResponse = canUnmask ? profile : maskDriverContact(profile);
+
   return {
     success: true,
     data: {
       driver_id: driverId,
-      profile: result.driver || {},
-      pii_masked: true
+      profile: profileResponse,
+      pii_masked: !canUnmask
     }
   };
 }
@@ -183,4 +206,80 @@ function normalizeFirst(value) {
 function toNumber(value, fallback = null) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function applyExternalDriverFilters(matches, filters = {}) {
+  let items = Array.isArray(matches) ? [...matches] : [];
+
+  const requiredClasses = normalizeArray(filters.cdl_class);
+  if (requiredClasses.length) {
+    const classSet = new Set(requiredClasses.map((value) => String(value).toUpperCase()));
+    items = items.filter((match) => classSet.has(String(match?.driver?.cdl_class || '').toUpperCase()));
+  }
+
+  const requiredEndorsements = normalizeArray(filters.endorsements_required);
+  if (requiredEndorsements.length) {
+    items = items.filter((match) => {
+      const driverEndorsements = new Set(normalizeArray(match?.driver?.endorsements).map((value) => String(value).toUpperCase()));
+      return requiredEndorsements.every((code) => driverEndorsements.has(String(code).toUpperCase()));
+    });
+  }
+
+  const minExperience = toNumber(filters.min_experience_years, null);
+  if (minExperience !== null) {
+    items = items.filter((match) => toNumber(match?.driver?.years_experience, 0) >= minExperience);
+  }
+
+  const maxDistance = toNumber(filters.max_distance_miles ?? filters.distance_miles, null);
+  if (maxDistance !== null) {
+    items = items.filter((match) => {
+      const miles = toNumber(match?.driver?.distance_miles, null);
+      if (miles === null) return true;
+      return miles <= maxDistance;
+    });
+  }
+
+  return items;
+}
+
+function sanitizeDriverProfile(profile) {
+  const clone = { ...profile };
+  delete clone.ssn;
+  delete clone.password;
+  return clone;
+}
+
+function maskDriverContact(profile) {
+  return {
+    ...profile,
+    email: profile?.email ? '***masked***' : null,
+    phone: profile?.phone ? '***masked***' : null
+  };
+}
+
+async function consumeProfileViewCredit(partnerId) {
+  if (!partnerId) {
+    return { success: false, message: 'Missing partner context' };
+  }
+
+  const periodKey = new Date().toISOString().slice(0, 7);
+  const usageResult = await dataAccess.queryRecords(COLLECTIONS.usage, {
+    filters: { partner_id: partnerId, period_key: periodKey },
+    limit: 1,
+    suppressAuth: true
+  });
+  const usage = usageResult?.items?.[0];
+  if (!usage?._id) {
+    return { success: true };
+  }
+
+  const nextQuotas = { ...(usage.quotas_used || {}) };
+  nextQuotas.driver_profile_views = Number(nextQuotas.driver_profile_views || 0) + 1;
+  await dataAccess.updateRecord(COLLECTIONS.usage, {
+    _id: usage._id,
+    quotas_used: nextQuotas,
+    updated_at: new Date()
+  }, { suppressAuth: true });
+
+  return { success: true };
 }

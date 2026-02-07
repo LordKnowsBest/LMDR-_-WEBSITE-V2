@@ -1,4 +1,5 @@
 import { protectedOCRExtraction } from 'backend/ocrService';
+import { enqueueWebhookDelivery } from 'backend/apiWebhookService';
 
 const SUPPORTED_MIME = new Set([
   'image/jpeg',
@@ -7,6 +8,7 @@ const SUPPORTED_MIME = new Set([
 ]);
 
 const batchJobs = new Map();
+const extractionStore = new Map();
 
 export async function extractExternalCDL(body = {}) {
   const parsed = parseDocumentBody(body);
@@ -21,37 +23,46 @@ export async function extractExternalCDL(body = {}) {
     };
   }
 
+  const extractionId = `ext_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const payload = {
+    extraction_id: extractionId,
+    status: 'complete',
+    confidence: mapConfidence(ocr.confidence),
+    extracted_data: {
+      full_name: ocr?.extracted?.fullName || null,
+      license_number: ocr?.extracted?.licenseNumber || null,
+      state: ocr?.extracted?.state || null,
+      cdl_class: ocr?.extracted?.cdlClass || null,
+      endorsements: ocr?.extracted?.endorsements || [],
+      restrictions: ocr?.extracted?.restrictions || [],
+      date_of_birth: ocr?.extracted?.dob || null,
+      expiration_date: ocr?.extracted?.expirationDate || null,
+      address: {
+        street: ocr?.extracted?.address || null,
+        city: ocr?.extracted?.city || null,
+        state: ocr?.extracted?.state || null,
+        zip: ocr?.extracted?.zip || null
+      }
+    },
+    verification: {
+      format_valid: Boolean(ocr?.extracted?.licenseNumber),
+      state_format_match: Boolean(ocr?.extracted?.state),
+      expiration_valid: isDateFuture(ocr?.extracted?.expirationDate),
+      dual_pass_consensus: false
+    },
+    warnings: []
+  };
+  extractionStore.set(extractionId, {
+    extraction_id: extractionId,
+    type: 'cdl',
+    extracted_data: payload.extracted_data,
+    created_at: new Date().toISOString()
+  });
+
   return {
     success: true,
     usageMetric: 'document_extractions',
-    data: {
-      extraction_id: `ext_${Date.now()}`,
-      status: 'complete',
-      confidence: mapConfidence(ocr.confidence),
-      extracted_data: {
-        full_name: ocr?.extracted?.fullName || null,
-        license_number: ocr?.extracted?.licenseNumber || null,
-        state: ocr?.extracted?.state || null,
-        cdl_class: ocr?.extracted?.cdlClass || null,
-        endorsements: ocr?.extracted?.endorsements || [],
-        restrictions: ocr?.extracted?.restrictions || [],
-        date_of_birth: ocr?.extracted?.dob || null,
-        expiration_date: ocr?.extracted?.expirationDate || null,
-        address: {
-          street: ocr?.extracted?.address || null,
-          city: ocr?.extracted?.city || null,
-          state: ocr?.extracted?.state || null,
-          zip: ocr?.extracted?.zip || null
-        }
-      },
-      verification: {
-        format_valid: Boolean(ocr?.extracted?.licenseNumber),
-        state_format_match: Boolean(ocr?.extracted?.state),
-        expiration_valid: isDateFuture(ocr?.extracted?.expirationDate),
-        dual_pass_consensus: false
-      },
-      warnings: []
-    }
+    data: payload
   };
 }
 
@@ -68,47 +79,72 @@ export async function extractExternalMedCert(body = {}) {
     };
   }
 
+  const extractionId = `ext_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const payload = {
+    extraction_id: extractionId,
+    status: 'complete',
+    extracted_data: {
+      driver_name: ocr?.extracted?.fullName || null,
+      examiner_name: ocr?.extracted?.examinerName || null,
+      examiner_registry_number: ocr?.extracted?.registryNumber || null,
+      examination_date: null,
+      expiration_date: ocr?.extracted?.certificateExpirationDate || null,
+      certification_type: null,
+      restrictions: []
+    },
+    verification: {
+      registry_valid: Boolean(ocr?.extracted?.registryNumber),
+      expiration_valid: isDateFuture(ocr?.extracted?.certificateExpirationDate)
+    }
+  };
+  extractionStore.set(extractionId, {
+    extraction_id: extractionId,
+    type: 'medcert',
+    extracted_data: payload.extracted_data,
+    created_at: new Date().toISOString()
+  });
+
   return {
     success: true,
     usageMetric: 'document_extractions',
-    data: {
-      extraction_id: `ext_${Date.now()}`,
-      status: 'complete',
-      extracted_data: {
-        driver_name: ocr?.extracted?.fullName || null,
-        examiner_name: ocr?.extracted?.examinerName || null,
-        examiner_registry_number: ocr?.extracted?.registryNumber || null,
-        examination_date: null,
-        expiration_date: ocr?.extracted?.certificateExpirationDate || null,
-        certification_type: null,
-        restrictions: []
-      },
-      verification: {
-        registry_valid: Boolean(ocr?.extracted?.registryNumber),
-        expiration_valid: isDateFuture(ocr?.extracted?.certificateExpirationDate)
-      }
-    }
+    data: payload
   };
 }
 
 export async function verifyExternalDocument(body = {}) {
-  const extracted = body?.extracted_data || {};
+  const extractionId = String(body?.extracted_document_id || '').trim();
+  const stored = extractionId ? extractionStore.get(extractionId) : null;
+  const extracted = stored?.extracted_data || body?.extracted_data || {};
   const expirationDate = extracted.expiration_date || extracted.certificateExpirationDate || null;
+  const hasRegistry = Boolean(extracted.examiner_registry_number || extracted.registryNumber);
+  const hasLicense = Boolean(extracted.license_number || extracted.licenseNumber);
+  const hasState = Boolean(extracted.state);
+
+  const verificationChecks = {
+    expiration_valid: isDateFuture(expirationDate),
+    has_required_identifier: hasRegistry || hasLicense,
+    state_present: hasState || !hasLicense
+  };
+  const passCount = Object.values(verificationChecks).filter(Boolean).length;
+  const confidenceScore = passCount / Object.keys(verificationChecks).length;
+  const confidence = confidenceScore >= 0.8 ? 'high' : confidenceScore >= 0.5 ? 'medium' : 'low';
 
   return {
     success: true,
     data: {
       verification_id: `ver_${Date.now()}`,
       status: 'complete',
+      extracted_document_id: extractionId || null,
       verification: {
-        expiration_valid: isDateFuture(expirationDate),
-        confidence: expirationDate ? 'medium' : 'low'
-      }
+        ...verificationChecks,
+        confidence
+      },
+      checks_performed: Object.keys(verificationChecks)
     }
   };
 }
 
-export async function processExternalDocumentBatch(body = {}) {
+export async function processExternalDocumentBatch(body = {}, options = {}) {
   const documents = Array.isArray(body?.documents) ? body.documents : [];
   if (!documents.length) {
     return {
@@ -118,9 +154,13 @@ export async function processExternalDocumentBatch(body = {}) {
     };
   }
 
-  const batchId = `batch_${Date.now()}`;
+  const callbackUrl = String(body?.webhook_callback_url || body?.callback_url || '').trim();
+  const callbackSecret = String(body?.webhook_secret || '').trim() || null;
+  const partnerId = String(options?.partnerId || body?.partner_id || 'unknown_partner');
+  const batchId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   batchJobs.set(batchId, {
     job_id: batchId,
+    callback_url: callbackUrl || null,
     status: 'processing',
     total: documents.length,
     completed: 0,
@@ -128,24 +168,12 @@ export async function processExternalDocumentBatch(body = {}) {
     results: []
   });
 
-  const results = [];
-  for (const doc of documents.slice(0, 25)) {
-    const type = String(doc?.type || 'cdl').toLowerCase();
-    if (type === 'medcert') {
-      results.push(await extractExternalMedCert(doc));
-    } else {
-      results.push(await extractExternalCDL(doc));
-    }
-  }
-
-  const record = batchJobs.get(batchId);
-  if (record) {
-    record.status = 'complete';
-    record.completed = results.length;
-    record.results = results;
-    record.completed_at = new Date().toISOString();
-    batchJobs.set(batchId, record);
-  }
+  // Fire-and-forget processing to support async job behavior.
+  void processBatchJob(batchId, documents.slice(0, 25), {
+    partnerId,
+    callbackUrl,
+    callbackSecret
+  });
 
   return {
     success: true,
@@ -169,17 +197,43 @@ export async function getExternalBatchStatus(jobId) {
 }
 
 function parseDocumentBody(body = {}) {
-  const base64Data = String(body?.base64_data || '').trim();
-  const mimeType = String(body?.mime_type || '').trim().toLowerCase();
+  const dataUrl = String(body?.data_url || body?.file_data_url || '').trim();
+  if (dataUrl.startsWith('data:') && dataUrl.includes(';base64,')) {
+    const parts = dataUrl.match(/^data:(.+);base64,(.+)$/i);
+    if (parts?.[1] && parts?.[2]) {
+      const mimeType = String(parts[1]).trim().toLowerCase();
+      const base64Data = String(parts[2]).trim();
+      return validateBase64Document(base64Data, mimeType);
+    }
+  }
+
+  const fileObj = body?.file || body?.document || body?.multipart?.file || null;
+  const base64Data = String(
+    body?.base64_data ||
+    body?.file_base64 ||
+    fileObj?.base64_data ||
+    fileObj?.base64 ||
+    ''
+  ).trim();
+  const mimeType = String(
+    body?.mime_type ||
+    body?.content_type ||
+    fileObj?.mime_type ||
+    fileObj?.contentType ||
+    ''
+  ).trim().toLowerCase();
 
   if (!base64Data || !mimeType) {
     return {
       success: false,
       errorCode: 'invalid_request',
-      message: 'base64_data and mime_type are required'
+      message: 'base64_data and mime_type are required (or data_url)'
     };
   }
+  return validateBase64Document(base64Data, mimeType);
+}
 
+function validateBase64Document(base64Data, mimeType) {
   if (!SUPPORTED_MIME.has(mimeType)) {
     return {
       success: false,
@@ -201,6 +255,45 @@ function parseDocumentBody(body = {}) {
     success: true,
     dataUrl: `data:${mimeType};base64,${base64Data}`
   };
+}
+
+async function processBatchJob(batchId, documents, callback = {}) {
+  const results = [];
+
+  for (const doc of documents) {
+    const type = String(doc?.type || 'cdl').toLowerCase();
+    if (type === 'medcert') {
+      results.push(await extractExternalMedCert(doc));
+    } else {
+      results.push(await extractExternalCDL(doc));
+    }
+  }
+
+  const record = batchJobs.get(batchId);
+  if (!record) return;
+
+  record.status = 'complete';
+  record.completed = results.length;
+  record.results = results;
+  record.completed_at = new Date().toISOString();
+  batchJobs.set(batchId, record);
+
+  if (callback.callbackUrl) {
+    await enqueueWebhookDelivery({
+      subscriptionId: null,
+      partnerId: callback.partnerId || 'unknown_partner',
+      webhookUrl: callback.callbackUrl,
+      webhookSecret: callback.callbackSecret || null,
+      eventType: 'documents.batch.completed',
+      payload: {
+        batch_job_id: batchId,
+        status: 'complete',
+        total: record.total,
+        completed: record.completed,
+        completed_at: record.completed_at
+      }
+    }).catch(() => null);
+  }
 }
 
 function mapConfidence(value) {

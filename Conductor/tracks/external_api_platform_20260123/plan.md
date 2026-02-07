@@ -259,10 +259,10 @@ Expose driver search and carrier matching capabilities.
 - [x] Task: Create `POST /v1/matching/drivers/search` endpoint
 - [x] Task: Create `externalMatchingApi.jsw` wrapper service
 - [x] Task: Integrate with existing `driverMatching.jsw`
-- [ ] Task: Implement CDL class filtering
-- [ ] Task: Implement endorsement filtering (must have all)
-- [ ] Task: Implement experience filtering
-- [ ] Task: Implement location/distance filtering
+- [x] Task: Implement CDL class filtering
+- [x] Task: Implement endorsement filtering (must have all)
+- [x] Task: Implement experience filtering
+- [x] Task: Implement location/distance filtering
 - [x] Task: Implement availability filtering
 - [x] Task: Calculate and include match scores
 - [x] Task: Implement PII masking for non-authorized access
@@ -274,7 +274,7 @@ Expose driver search and carrier matching capabilities.
 - [x] Task: Create `/v1/matching/driver/{driver_id}` endpoint
 - [x] Task: Return driver profile (with PII controls)
 - [ ] Task: Include qualification summary
-- [ ] Task: Implement authorization check (credit consumed)
+- [x] Task: Implement authorization check (credit consumed)
 - [ ] Task: Document endpoint
 
 ### 5.3 Carrier Match API
@@ -300,10 +300,10 @@ Expose driver search and carrier matching capabilities.
 - [ ] Task: Create Postman collection
 
 ### 5.6 Testing - Phase 5
-- [ ] Task: Write unit tests for Driver Search API
-- [ ] Task: Write unit tests for Carrier Match API
+- [x] Task: Write unit tests for Driver Search API
+- [x] Task: Write unit tests for Carrier Match API
 - [ ] Task: Test tier enforcement (Enterprise only)
-- [ ] Task: Test PII masking
+- [x] Task: Test PII masking
 - [ ] Task: Test credit tracking
 - [ ] Task: Manual test: Full matching API flow
 - [ ] Task: Conductor - User Manual Verification 'Phase 5: Matching APIs'
@@ -318,7 +318,7 @@ Expose CDL OCR extraction and document verification capabilities.
 - [x] Task: Create `POST /v1/documents/cdl/extract` endpoint
 - [x] Task: Create `externalDocumentApi.jsw` wrapper service
 - [x] Task: Integrate with existing `ocrService.jsw`
-- [ ] Task: Implement file upload handling (multipart/form-data)
+- [x] Task: Implement file upload handling (multipart/form-data)
 - [x] Task: Accept base64 encoded images as alternative
 - [x] Task: Implement file size limits (10MB max)
 - [x] Task: Implement supported format validation (JPEG, PNG, PDF)
@@ -336,15 +336,15 @@ Expose CDL OCR extraction and document verification capabilities.
 
 ### 6.3 Document Verification API
 - [x] Task: Create `POST /v1/documents/verify` endpoint
-- [ ] Task: Accept previously extracted document ID
-- [ ] Task: Perform additional verification checks
+- [x] Task: Accept previously extracted document ID
+- [x] Task: Perform additional verification checks
 - [ ] Task: Return verification result with confidence
 - [ ] Task: Document endpoint
 
 ### 6.4 Batch Document Processing API
 - [x] Task: Create `POST /v1/documents/batch` endpoint
 - [ ] Task: Accept multiple documents for processing
-- [ ] Task: Implement async processing with webhook callback
+- [x] Task: Implement async processing with webhook callback
 - [x] Task: Return batch job ID for status checking
 - [x] Task: Create `/v1/documents/batch/{job_id}` status endpoint
 - [ ] Task: Document batch processing flow
@@ -358,7 +358,7 @@ Expose CDL OCR extraction and document verification capabilities.
 ### 6.6 Testing - Phase 6
 - [x] Task: Write unit tests for CDL extraction endpoint
 - [ ] Task: Write unit tests for medical cert extraction
-- [ ] Task: Test file upload handling
+- [x] Task: Test file upload handling
 - [ ] Task: Test extraction accuracy with sample documents
 - [x] Task: Test batch processing flow
 - [ ] Task: Manual test: Full document API flow
@@ -376,7 +376,7 @@ Expose gamification system for partner integration.
 - [x] Task: Integrate with gamification services
 - [x] Task: Return progression data (level, XP, streaks)
 - [x] Task: Return earned badges and achievements
-- [ ] Task: Implement partner-scoped user mapping
+- [x] Task: Implement partner-scoped user mapping
 - [ ] Task: Document endpoint
 
 ### 7.2 XP Award API
@@ -384,7 +384,7 @@ Expose gamification system for partner integration.
 - [x] Task: Allow partners to award XP for custom actions
 - [x] Task: Validate action types and XP amounts
 - [x] Task: Implement daily caps to prevent abuse
-- [ ] Task: Trigger level-up checks
+- [x] Task: Trigger level-up checks
 - [ ] Task: Document endpoint
 
 ### 7.3 Achievement Check API
@@ -402,9 +402,9 @@ Expose gamification system for partner integration.
 
 ### 7.5 Engagement Webhooks
 - [x] Task: Create `POST /v1/engagement/webhooks/subscribe` endpoint
-- [ ] Task: Implement achievement event webhooks
-- [ ] Task: Implement level-up event webhooks
-- [ ] Task: Implement streak milestone webhooks
+- [x] Task: Implement achievement event webhooks
+- [x] Task: Implement level-up event webhooks
+- [x] Task: Implement streak milestone webhooks
 - [ ] Task: Document webhook payloads
 
 ### 7.6 Engagement API Documentation
@@ -414,8 +414,8 @@ Expose gamification system for partner integration.
 - [ ] Task: Create Postman collection
 
 ### 7.7 Testing - Phase 7
-- [ ] Task: Write unit tests for Progress API
-- [ ] Task: Write unit tests for XP Award API
+- [x] Task: Write unit tests for Progress API
+- [x] Task: Write unit tests for XP Award API
 - [ ] Task: Test achievement webhook delivery
 - [ ] Task: Test level-up triggers
 - [ ] Task: Manual test: Full engagement API flow
