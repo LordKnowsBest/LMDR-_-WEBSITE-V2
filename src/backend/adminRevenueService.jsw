@@ -1,0 +1,476 @@
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+// ============================================
+// CONFIGURATION & CONSTANTS
+// ============================================
+
+const COLLECTIONS = {
+    subscriptions: 'carrierSubscriptions',
+    billing: 'billingHistory',
+    metrics: 'revenueMetrics',
+    auditLog: 'auditLog'
+};
+
+const PLAN_PRICING = {
+    free: 0,
+    pro: 249,
+    enterprise: 749
+};
+
+// In-memory cache
+let revenueCache = null;
+let lastCacheTime = 0;
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+        const memberRole = member.contactDetails?.customFields?.role || '';
+        return adminRoles.includes(memberRole.toLowerCase());
+    } catch (error) { return false; }
+}
+
+async function requireAdmin() {
+    if (!await isAdmin()) throw new Error('Unauthorized');
+}
+
+// ============================================
+// SCHEDULED JOB: DAILY METRICS SNAPSHOT
+// ============================================
+
+export async function recordDailyMetrics() {
+    try {
+        const now = new Date();
+        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+        // Fetch all active subscriptions
+        const activeRes = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: { status: 'active' },
+            limit: 5000,
+            suppressAuth: true
+        });
+        const activeSubs = activeRes.items || [];
+
+        // Calculate MRR by tier
+        let mrr = 0;
+        const tierCounts = { free: 0, pro: 0, enterprise: 0 };
+        for (const sub of activeSubs) {
+            const tier = (sub.plan_type || 'free').toLowerCase();
+            const price = PLAN_PRICING[tier] || 0;
+            mrr += price;
+            tierCounts[tier] = (tierCounts[tier] || 0) + 1;
+        }
+
+        const arr = mrr * 12;
+        const totalActive = activeSubs.length;
+        const arpu = totalActive > 0 ? Math.round((mrr / totalActive) * 100) / 100 : 0;
+
+        // Churn: subscribers who cancelled in the last 30 days
+        const churnedRes = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: { status: 'cancelled', cancelled_date: { gte: thirtyDaysAgo } },
+            limit: 5000,
+            suppressAuth: true
+        });
+        const churnedCount = (churnedRes.items || []).length;
+
+        // Churn rate = churned / (active at start of period ~ active + churned)
+        const periodStart = totalActive + churnedCount;
+        const churnRate = periodStart > 0 ? Math.round((churnedCount / periodStart) * 10000) / 10000 : 0;
+
+        // Monthly churn rate for LTV
+        const monthlyChurnRate = churnRate > 0 ? churnRate : 0.01; // Floor at 1% to avoid division by zero
+        const ltv = Math.round((arpu / monthlyChurnRate) * 100) / 100;
+
+        const snapshot = {
+            snapshot_date: now.toISOString(),
+            mrr,
+            arr,
+            total_active: totalActive,
+            tier_free: tierCounts.free,
+            tier_pro: tierCounts.pro,
+            tier_enterprise: tierCounts.enterprise,
+            arpu,
+            ltv,
+            churn_rate: churnRate,
+            churned_count: churnedCount
+        };
+
+        await dataAccess.insertRecord(COLLECTIONS.metrics, snapshot, { suppressAuth: true });
+
+        return { success: true, data: snapshot };
+    } catch (error) {
+        console.error('recordDailyMetrics error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// REVENUE SNAPSHOT (LIVE)
+// ============================================
+
+export async function getRevenueSnapshot() {
+    await requireAdmin();
+
+    // Check cache
+    if (revenueCache && (Date.now() - lastCacheTime < CACHE_TTL)) {
+        return { success: true, data: { ...revenueCache, fromCache: true } };
+    }
+
+    try {
+        const now = new Date();
+        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+        // Live active subs
+        const activeRes = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: { status: 'active' },
+            limit: 5000,
+            suppressAuth: true
+        });
+        const activeSubs = activeRes.items || [];
+
+        let mrr = 0;
+        const tierCounts = { free: 0, pro: 0, enterprise: 0 };
+        for (const sub of activeSubs) {
+            const tier = (sub.plan_type || 'free').toLowerCase();
+            mrr += PLAN_PRICING[tier] || 0;
+            tierCounts[tier] = (tierCounts[tier] || 0) + 1;
+        }
+
+        const arr = mrr * 12;
+        const totalActive = activeSubs.length;
+        const arpu = totalActive > 0 ? Math.round((mrr / totalActive) * 100) / 100 : 0;
+
+        // Churn
+        const churnedRes = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: { status: 'cancelled', cancelled_date: { gte: thirtyDaysAgo } },
+            limit: 5000,
+            suppressAuth: true
+        });
+        const churnedCount = (churnedRes.items || []).length;
+        const periodStart = totalActive + churnedCount;
+        const churnRate = periodStart > 0 ? Math.round((churnedCount / periodStart) * 10000) / 10000 : 0;
+        const monthlyChurnRate = churnRate > 0 ? churnRate : 0.01;
+        const ltv = Math.round((arpu / monthlyChurnRate) * 100) / 100;
+
+        // Compare to 30 days ago snapshot
+        let mrrChange = 0;
+        let subscriberChange = 0;
+        try {
+            const prevRes = await dataAccess.queryRecords(COLLECTIONS.metrics, {
+                sort: [{ field: 'snapshot_date', direction: 'desc' }],
+                limit: 1,
+                suppressAuth: true
+            });
+            const prevSnapshot = (prevRes.items || [])[0];
+            if (prevSnapshot) {
+                const prevMrr = prevSnapshot.mrr || 0;
+                mrrChange = prevMrr > 0 ? Math.round(((mrr - prevMrr) / prevMrr) * 10000) / 100 : 0;
+                const prevActive = prevSnapshot.total_active || 0;
+                subscriberChange = prevActive > 0 ? Math.round(((totalActive - prevActive) / prevActive) * 10000) / 100 : 0;
+            }
+        } catch (_) { /* no previous snapshot available */ }
+
+        const data = {
+            mrr,
+            arr,
+            totalActive,
+            tierCounts,
+            arpu,
+            ltv,
+            churnRate,
+            churnedCount,
+            mrrChange,
+            subscriberChange,
+            generatedAt: now
+        };
+
+        revenueCache = data;
+        lastCacheTime = Date.now();
+
+        return { success: true, data };
+    } catch (error) {
+        console.error('getRevenueSnapshot error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// MRR TREND
+// ============================================
+
+export async function getMRRTrend(months = 12) {
+    await requireAdmin();
+
+    try {
+        const cutoff = new Date();
+        cutoff.setMonth(cutoff.getMonth() - months);
+
+        const res = await dataAccess.queryRecords(COLLECTIONS.metrics, {
+            filters: { snapshot_date: { gte: cutoff.toISOString() } },
+            sort: [{ field: 'snapshot_date', direction: 'asc' }],
+            limit: 365,
+            suppressAuth: true
+        });
+
+        const trend = (res.items || []).map(item => ({
+            date: item.snapshot_date,
+            mrr: item.mrr || 0,
+            arr: item.arr || 0
+        }));
+
+        return { success: true, data: trend };
+    } catch (error) {
+        console.error('getMRRTrend error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// REVENUE BY TIER
+// ============================================
+
+export async function getRevenueByTier() {
+    await requireAdmin();
+
+    try {
+        const activeRes = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: { status: 'active' },
+            limit: 5000,
+            suppressAuth: true
+        });
+        const subs = activeRes.items || [];
+
+        const tiers = {};
+        for (const sub of subs) {
+            const tier = (sub.plan_type || 'free').toLowerCase();
+            if (!tiers[tier]) tiers[tier] = { tier, count: 0, revenue: 0 };
+            tiers[tier].count++;
+            tiers[tier].revenue += PLAN_PRICING[tier] || 0;
+        }
+
+        const data = Object.values(tiers).sort((a, b) => b.revenue - a.revenue);
+
+        return { success: true, data };
+    } catch (error) {
+        console.error('getRevenueByTier error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// COHORT ANALYSIS
+// ============================================
+
+export async function getCohortAnalysis(months = 6) {
+    await requireAdmin();
+
+    try {
+        const cutoff = new Date();
+        cutoff.setMonth(cutoff.getMonth() - months);
+
+        // All subscriptions created in the period
+        const res = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: { _createdDate: { gte: cutoff } },
+            limit: 5000,
+            suppressAuth: true
+        });
+        const subs = res.items || [];
+
+        // Group by signup month
+        const cohorts = {};
+        const now = new Date();
+
+        for (const sub of subs) {
+            const created = new Date(sub._createdDate);
+            const cohortKey = `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, '0')}`;
+
+            if (!cohorts[cohortKey]) {
+                cohorts[cohortKey] = { cohort: cohortKey, total: 0, retained: [] };
+            }
+            cohorts[cohortKey].total++;
+
+            // Calculate months since signup
+            const monthsSince = (now.getFullYear() - created.getFullYear()) * 12 + (now.getMonth() - created.getMonth());
+
+            // Mark retention at each month
+            const isActive = sub.status === 'active';
+            const cancelledDate = sub.cancelled_date ? new Date(sub.cancelled_date) : null;
+
+            for (let m = 0; m <= monthsSince && m <= months; m++) {
+                if (!cohorts[cohortKey].retained[m]) cohorts[cohortKey].retained[m] = 0;
+
+                if (isActive) {
+                    cohorts[cohortKey].retained[m]++;
+                } else if (cancelledDate) {
+                    const cancelMonth = (cancelledDate.getFullYear() - created.getFullYear()) * 12 + (cancelledDate.getMonth() - created.getMonth());
+                    if (m < cancelMonth) {
+                        cohorts[cohortKey].retained[m]++;
+                    }
+                }
+            }
+        }
+
+        // Convert to retention percentages
+        const data = Object.values(cohorts)
+            .sort((a, b) => a.cohort.localeCompare(b.cohort))
+            .map(c => ({
+                cohort: c.cohort,
+                total: c.total,
+                retention: c.retained.map(r => c.total > 0 ? Math.round((r / c.total) * 100) : 0)
+            }));
+
+        return { success: true, data };
+    } catch (error) {
+        console.error('getCohortAnalysis error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// CHURN ANALYSIS
+// ============================================
+
+export async function getChurnAnalysis(days = 30) {
+    await requireAdmin();
+
+    try {
+        const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+        const churnedRes = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: { status: 'cancelled', cancelled_date: { gte: cutoff } },
+            limit: 5000,
+            suppressAuth: true
+        });
+        const churned = churnedRes.items || [];
+
+        // Get total active for rate calc
+        const activeCount = await dataAccess.countRecords(COLLECTIONS.subscriptions, { status: 'active' });
+        const periodStart = activeCount + churned.length;
+        const churnRate = periodStart > 0 ? Math.round((churned.length / periodStart) * 10000) / 10000 : 0;
+
+        // Group by reason
+        const reasons = {};
+        for (const sub of churned) {
+            const reason = sub.cancel_reason || 'Not specified';
+            if (!reasons[reason]) reasons[reason] = { reason, count: 0 };
+            reasons[reason].count++;
+        }
+
+        const data = {
+            totalChurned: churned.length,
+            churnRate,
+            periodDays: days,
+            reasons: Object.values(reasons).sort((a, b) => b.count - a.count)
+        };
+
+        return { success: true, data };
+    } catch (error) {
+        console.error('getChurnAnalysis error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// LTV BY TIER
+// ============================================
+
+export async function getLTVByTier() {
+    await requireAdmin();
+
+    try {
+        const now = new Date();
+        const allRes = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            limit: 5000,
+            suppressAuth: true
+        });
+        const subs = allRes.items || [];
+
+        const tierData = {};
+        for (const sub of subs) {
+            const tier = (sub.plan_type || 'free').toLowerCase();
+            if (!tierData[tier]) tierData[tier] = { tier, totalMonths: 0, count: 0, activeCount: 0, revenue: 0 };
+
+            const created = new Date(sub._createdDate);
+            const end = sub.status === 'active' ? now : (sub.cancelled_date ? new Date(sub.cancelled_date) : now);
+            const months = Math.max(1, Math.round((end - created) / (30 * 24 * 60 * 60 * 1000)));
+
+            tierData[tier].totalMonths += months;
+            tierData[tier].count++;
+            tierData[tier].revenue += months * (PLAN_PRICING[tier] || 0);
+            if (sub.status === 'active') tierData[tier].activeCount++;
+        }
+
+        const data = Object.values(tierData).map(t => ({
+            tier: t.tier,
+            avgLifetimeMonths: t.count > 0 ? Math.round((t.totalMonths / t.count) * 10) / 10 : 0,
+            avgLTV: t.count > 0 ? Math.round((t.revenue / t.count) * 100) / 100 : 0,
+            totalSubscribers: t.count,
+            activeSubscribers: t.activeCount,
+            monthlyPrice: PLAN_PRICING[t.tier] || 0
+        }));
+
+        return { success: true, data };
+    } catch (error) {
+        console.error('getLTVByTier error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// EXPORT CSV
+// ============================================
+
+export async function exportRevenueCSV(type) {
+    await requireAdmin();
+
+    try {
+        let csv = '';
+
+        if (type === 'snapshot') {
+            const result = await getRevenueSnapshot();
+            if (!result.success) throw new Error(result.error);
+            const d = result.data;
+            csv = 'Metric,Value\n';
+            csv += `MRR,$${d.mrr}\n`;
+            csv += `ARR,$${d.arr}\n`;
+            csv += `Active Subscribers,${d.totalActive}\n`;
+            csv += `ARPU,$${d.arpu}\n`;
+            csv += `LTV,$${d.ltv}\n`;
+            csv += `Churn Rate,${(d.churnRate * 100).toFixed(2)}%\n`;
+            csv += `Free Tier,${d.tierCounts.free}\n`;
+            csv += `Pro Tier,${d.tierCounts.pro}\n`;
+            csv += `Enterprise Tier,${d.tierCounts.enterprise}\n`;
+        } else if (type === 'trend') {
+            const result = await getMRRTrend(12);
+            if (!result.success) throw new Error(result.error);
+            csv = 'Date,MRR,ARR\n';
+            for (const item of result.data) {
+                csv += `${item.date},$${item.mrr},$${item.arr}\n`;
+            }
+        } else if (type === 'cohort') {
+            const result = await getCohortAnalysis(6);
+            if (!result.success) throw new Error(result.error);
+            const maxMonths = Math.max(...result.data.map(c => c.retention.length), 0);
+            const headers = ['Cohort', 'Total', ...Array.from({ length: maxMonths }, (_, i) => `Month ${i}`)];
+            csv = headers.join(',') + '\n';
+            for (const c of result.data) {
+                const row = [c.cohort, c.total, ...c.retention.map(r => `${r}%`)];
+                csv += row.join(',') + '\n';
+            }
+        } else {
+            throw new Error(`Unknown export type: ${type}`);
+        }
+
+        return { success: true, data: { csv, filename: `revenue_${type}_${new Date().toISOString().split('T')[0]}.csv` } };
+    } catch (error) {
+        console.error('exportRevenueCSV error:', error);
+        return { success: false, error: error.message };
+    }
+}

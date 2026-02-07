@@ -272,7 +272,17 @@ export const DATA_SOURCE = {
   userThrottleState: 'airtable',
   abTests: 'airtable',
   abTestAssignments: 'airtable',
-  abTestEvents: 'airtable'
+  abTestEvents: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Admin Business Operations (Revenue, Billing, Invoicing, Commissions)
+  // -------------------------------------------------------------------------
+  revenueMetrics: 'airtable',
+  billingAdjustments: 'airtable',
+  invoices: 'airtable',
+  commissions: 'airtable',
+  salesReps: 'airtable',
+  commissionRules: 'airtable'
 };
 
 // =============================================================================
@@ -522,7 +532,15 @@ export const WIX_COLLECTION_NAMES = {
   userThrottleState: 'UserThrottleState',
   abTests: 'ABTests',
   abTestAssignments: 'ABTestAssignments',
-  abTestEvents: 'ABTestEvents'
+  abTestEvents: 'ABTestEvents',
+
+  // Admin Business Operations
+  revenueMetrics: 'RevenueMetrics',
+  billingAdjustments: 'BillingAdjustments',
+  invoices: 'Invoices',
+  commissions: 'Commissions',
+  salesReps: 'SalesReps',
+  commissionRules: 'CommissionRules'
 };
 
 // =============================================================================
@@ -738,7 +756,15 @@ export const AIRTABLE_TABLE_NAMES = {
   userThrottleState: 'v2_User Throttle State',
   abTests: 'v2_AB Tests',
   abTestAssignments: 'v2_AB Test Assignments',
-  abTestEvents: 'v2_AB Test Events'
+  abTestEvents: 'v2_AB Test Events',
+
+  // Admin Business Operations
+  revenueMetrics: 'v2_Revenue Metrics',
+  billingAdjustments: 'v2_Billing Adjustments',
+  invoices: 'v2_Invoices',
+  commissions: 'v2_Commissions',
+  salesReps: 'v2_Sales Reps',
+  commissionRules: 'v2_Commission Rules'
 };
 
 // =============================================================================

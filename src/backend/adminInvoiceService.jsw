@@ -1,0 +1,472 @@
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+const COLLECTIONS = {
+    invoices: 'invoices',
+    carriers: 'carriers',
+    auditLog: 'auditLog'
+};
+
+// Valid status transitions
+const STATUS_TRANSITIONS = {
+    draft: ['sent', 'void'],
+    sent: ['paid', 'overdue', 'void'],
+    overdue: ['paid', 'void']
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+        return ['admin', 'super_admin', 'ops_admin'].includes(
+            (member.contactDetails?.customFields?.role || '').toLowerCase()
+        );
+    } catch {
+        return false;
+    }
+}
+
+async function requireAdmin() {
+    if (!await isAdmin()) throw new Error('Unauthorized: Admin access required');
+}
+
+// ============================================
+// INVOICE NUMBER HELPER
+// ============================================
+
+async function getNextInvoiceNumber() {
+    const year = new Date().getFullYear();
+    const result = await dataAccess.queryRecords(COLLECTIONS.invoices, {
+        filters: { invoice_number: { startsWith: `INV-${year}` } },
+        sort: [{ field: 'invoice_number', direction: 'desc' }],
+        limit: 1,
+        suppressAuth: true
+    });
+    if (result.items && result.items.length > 0) {
+        const lastNum = parseInt(result.items[0].invoice_number.split('-')[2], 10);
+        return `INV-${year}-${String(lastNum + 1).padStart(4, '0')}`;
+    }
+    return `INV-${year}-0001`;
+}
+
+// ============================================
+// CALCULATION HELPERS
+// ============================================
+
+function calculateTotals(lineItems, discountType, discountValue) {
+    const subtotal = lineItems.reduce((sum, item) => {
+        return sum + (Number(item.quantity) * Number(item.unit_price));
+    }, 0);
+
+    let discountAmount = 0;
+    if (discountType === 'percentage') {
+        discountAmount = subtotal * (Number(discountValue || 0) / 100);
+    } else {
+        discountAmount = Number(discountValue || 0);
+    }
+
+    const total = subtotal - discountAmount;
+    return { subtotal, discount_amount: discountAmount, total };
+}
+
+// ============================================
+// STATUS VALIDATION
+// ============================================
+
+function canTransition(currentStatus, newStatus) {
+    const allowed = STATUS_TRANSITIONS[currentStatus];
+    return allowed && allowed.includes(newStatus);
+}
+
+// ============================================
+// INVOICE CRUD
+// ============================================
+
+export async function createInvoice(invoiceData) {
+    try {
+        await requireAdmin();
+
+        if (!invoiceData.carrier_dot) {
+            return { success: false, error: 'Missing carrier_dot' };
+        }
+        if (!invoiceData.line_items || !Array.isArray(invoiceData.line_items) || invoiceData.line_items.length === 0) {
+            return { success: false, error: 'line_items must be a non-empty array' };
+        }
+
+        const invoiceNumber = await getNextInvoiceNumber();
+        const { subtotal, discount_amount, total } = calculateTotals(
+            invoiceData.line_items,
+            invoiceData.discount_type || 'fixed',
+            invoiceData.discount_value || 0
+        );
+
+        const now = new Date().toISOString();
+        const dueDate = invoiceData.due_date || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        const record = {
+            invoice_number: invoiceNumber,
+            carrier_dot: String(invoiceData.carrier_dot),
+            status: 'draft',
+            line_items: JSON.stringify(invoiceData.line_items),
+            subtotal,
+            discount_type: invoiceData.discount_type || 'fixed',
+            discount_value: Number(invoiceData.discount_value || 0),
+            discount_amount,
+            total,
+            notes: invoiceData.notes || '',
+            invoice_date: now,
+            due_date: dueDate,
+            created_date: now,
+            updated_date: now
+        };
+
+        const created = await dataAccess.insertRecord(COLLECTIONS.invoices, record, { suppressAuth: true });
+        return { success: true, invoice: { ...record, _id: created._id || created.id } };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function updateInvoice(invoiceId, updates) {
+    try {
+        await requireAdmin();
+
+        const existing = await dataAccess.getRecord(COLLECTIONS.invoices, invoiceId, { suppressAuth: true });
+        if (!existing) {
+            return { success: false, error: 'Invoice not found' };
+        }
+        if (existing.status !== 'draft') {
+            return { success: false, error: 'Only draft invoices can be updated' };
+        }
+
+        const updateData = { ...updates, updated_date: new Date().toISOString() };
+
+        if (updates.line_items) {
+            updateData.line_items = JSON.stringify(updates.line_items);
+            const { subtotal, discount_amount, total } = calculateTotals(
+                updates.line_items,
+                updates.discount_type || existing.discount_type || 'fixed',
+                updates.discount_value !== undefined ? updates.discount_value : (existing.discount_value || 0)
+            );
+            updateData.subtotal = subtotal;
+            updateData.discount_amount = discount_amount;
+            updateData.total = total;
+        }
+
+        await dataAccess.updateRecord(COLLECTIONS.invoices, invoiceId, updateData, { suppressAuth: true });
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function sendInvoice(invoiceId) {
+    try {
+        await requireAdmin();
+
+        const existing = await dataAccess.getRecord(COLLECTIONS.invoices, invoiceId, { suppressAuth: true });
+        if (!existing) {
+            return { success: false, error: 'Invoice not found' };
+        }
+        if (existing.status !== 'draft') {
+            return { success: false, error: 'Only draft invoices can be sent' };
+        }
+
+        await dataAccess.updateRecord(COLLECTIONS.invoices, invoiceId, {
+            status: 'sent',
+            sent_date: new Date().toISOString(),
+            updated_date: new Date().toISOString()
+        }, { suppressAuth: true });
+
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function generateInvoicePDF(invoiceId) {
+    try {
+        await requireAdmin();
+
+        const invoice = await dataAccess.getRecord(COLLECTIONS.invoices, invoiceId, { suppressAuth: true });
+        if (!invoice) {
+            return { success: false, error: 'Invoice not found' };
+        }
+
+        const lineItems = typeof invoice.line_items === 'string'
+            ? JSON.parse(invoice.line_items)
+            : invoice.line_items;
+
+        const lineItemsHtml = lineItems.map(item => `
+            <tr>
+                <td style="padding:8px;border-bottom:1px solid #e2e8f0">${item.description}</td>
+                <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:center">${item.quantity}</td>
+                <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">$${Number(item.unit_price).toFixed(2)}</td>
+                <td style="padding:8px;border-bottom:1px solid #e2e8f0;text-align:right">$${(Number(item.quantity) * Number(item.unit_price)).toFixed(2)}</td>
+            </tr>
+        `).join('');
+
+        const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Invoice ${invoice.invoice_number}</title></head>
+<body style="font-family:Inter,sans-serif;max-width:800px;margin:0 auto;padding:40px">
+    <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:40px">
+        <div>
+            <h1 style="font-size:24px;color:#2563eb;margin:0">VelocityMatch</h1>
+            <p style="color:#64748b;margin:4px 0">Last Mile Driver Recruiting</p>
+        </div>
+        <div style="text-align:right">
+            <h2 style="font-size:20px;margin:0">INVOICE</h2>
+            <p style="margin:4px 0"><strong>${invoice.invoice_number}</strong></p>
+            <p style="color:#64748b;margin:4px 0">Date: ${new Date(invoice.invoice_date).toLocaleDateString()}</p>
+            <p style="color:#64748b;margin:4px 0">Due: ${new Date(invoice.due_date).toLocaleDateString()}</p>
+        </div>
+    </div>
+    <div style="margin-bottom:30px">
+        <h3 style="color:#64748b;font-size:12px;text-transform:uppercase">Bill To</h3>
+        <p>Carrier DOT: ${invoice.carrier_dot}</p>
+    </div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:30px">
+        <thead>
+            <tr style="background:#f1f5f9">
+                <th style="padding:8px;text-align:left">Description</th>
+                <th style="padding:8px;text-align:center">Qty</th>
+                <th style="padding:8px;text-align:right">Unit Price</th>
+                <th style="padding:8px;text-align:right">Total</th>
+            </tr>
+        </thead>
+        <tbody>${lineItemsHtml}</tbody>
+    </table>
+    <div style="text-align:right;margin-bottom:30px">
+        <p>Subtotal: <strong>$${Number(invoice.subtotal).toFixed(2)}</strong></p>
+        <p>Discount: <strong>-$${Number(invoice.discount_amount || 0).toFixed(2)}</strong></p>
+        <p style="font-size:18px;margin-top:8px">Total: <strong>$${Number(invoice.total).toFixed(2)}</strong></p>
+    </div>
+    ${invoice.notes ? `<div style="margin-top:20px;padding:16px;background:#f8fafc;border-radius:8px"><p style="color:#64748b;font-size:12px;text-transform:uppercase;margin-bottom:4px">Notes</p><p>${invoice.notes}</p></div>` : ''}
+    <div style="margin-top:40px;padding-top:20px;border-top:1px solid #e2e8f0;color:#64748b;font-size:12px">
+        <p>Payment Instructions: Please remit payment within the specified terms.</p>
+        <p>For questions, contact billing@velocitymatch.com</p>
+    </div>
+</body>
+</html>`;
+
+        return { success: true, html };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function recordInvoicePayment(invoiceId, paymentDetails) {
+    try {
+        await requireAdmin();
+
+        const existing = await dataAccess.getRecord(COLLECTIONS.invoices, invoiceId, { suppressAuth: true });
+        if (!existing) {
+            return { success: false, error: 'Invoice not found' };
+        }
+        if (existing.status !== 'sent' && existing.status !== 'overdue') {
+            return { success: false, error: 'Only sent or overdue invoices can be marked as paid' };
+        }
+
+        const now = new Date().toISOString();
+        await dataAccess.updateRecord(COLLECTIONS.invoices, invoiceId, {
+            status: 'paid',
+            paid_date: paymentDetails.payment_date || now,
+            payment_method: paymentDetails.payment_method || 'other',
+            payment_reference: paymentDetails.payment_reference || '',
+            updated_date: now
+        }, { suppressAuth: true });
+
+        await dataAccess.insertRecord(COLLECTIONS.auditLog, {
+            action: 'invoice_payment_recorded',
+            entity_type: 'invoice',
+            entity_id: invoiceId,
+            details: JSON.stringify({
+                invoice_number: existing.invoice_number,
+                amount: existing.total,
+                payment_method: paymentDetails.payment_method,
+                payment_reference: paymentDetails.payment_reference
+            }),
+            created_date: now
+        }, { suppressAuth: true });
+
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function voidInvoice(invoiceId, reason) {
+    try {
+        await requireAdmin();
+
+        const existing = await dataAccess.getRecord(COLLECTIONS.invoices, invoiceId, { suppressAuth: true });
+        if (!existing) {
+            return { success: false, error: 'Invoice not found' };
+        }
+        if (!canTransition(existing.status, 'void')) {
+            return { success: false, error: `Cannot void invoice with status '${existing.status}'` };
+        }
+
+        const now = new Date().toISOString();
+        await dataAccess.updateRecord(COLLECTIONS.invoices, invoiceId, {
+            status: 'void',
+            void_reason: reason || '',
+            void_date: now,
+            updated_date: now
+        }, { suppressAuth: true });
+
+        await dataAccess.insertRecord(COLLECTIONS.auditLog, {
+            action: 'invoice_voided',
+            entity_type: 'invoice',
+            entity_id: invoiceId,
+            details: JSON.stringify({
+                invoice_number: existing.invoice_number,
+                reason: reason || '',
+                previous_status: existing.status
+            }),
+            created_date: now
+        }, { suppressAuth: true });
+
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// INVOICE QUERIES
+// ============================================
+
+export async function getInvoices(filters = {}) {
+    try {
+        await requireAdmin();
+
+        const queryFilters = {};
+        if (filters.status) queryFilters.status = filters.status;
+        if (filters.carrier_dot) queryFilters.carrier_dot = String(filters.carrier_dot);
+        if (filters.date_from) queryFilters.created_date = { gte: filters.date_from };
+        if (filters.date_to) {
+            queryFilters.created_date = {
+                ...(queryFilters.created_date || {}),
+                lte: filters.date_to
+            };
+        }
+
+        const page = Number(filters.page || 1);
+        const pageSize = Number(filters.pageSize || 20);
+
+        const result = await dataAccess.queryRecords(COLLECTIONS.invoices, {
+            filters: queryFilters,
+            sort: [{ field: 'created_date', direction: 'desc' }],
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            suppressAuth: true
+        });
+
+        return {
+            success: true,
+            invoices: result.items || [],
+            totalCount: result.totalCount || 0,
+            page,
+            pageSize
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function getInvoiceById(invoiceId) {
+    try {
+        await requireAdmin();
+
+        const invoice = await dataAccess.getRecord(COLLECTIONS.invoices, invoiceId, { suppressAuth: true });
+        if (!invoice) {
+            return { success: false, error: 'Invoice not found' };
+        }
+
+        if (typeof invoice.line_items === 'string') {
+            try { invoice.line_items = JSON.parse(invoice.line_items); } catch { /* keep as string */ }
+        }
+
+        return { success: true, invoice };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// SCHEDULED / BATCH
+// ============================================
+
+export async function markOverdueInvoices() {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        const result = await dataAccess.queryRecords(COLLECTIONS.invoices, {
+            filters: { status: 'sent', due_date: { lt: today } },
+            limit: 200,
+            suppressAuth: true
+        });
+
+        const items = result.items || [];
+        let markedCount = 0;
+
+        for (const invoice of items) {
+            try {
+                await dataAccess.updateRecord(COLLECTIONS.invoices, invoice._id, {
+                    status: 'overdue',
+                    updated_date: new Date().toISOString()
+                }, { suppressAuth: true });
+                markedCount++;
+            } catch (err) {
+                console.error(`Failed to mark invoice ${invoice.invoice_number} overdue:`, err);
+            }
+        }
+
+        return { success: true, markedCount };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// STATISTICS
+// ============================================
+
+export async function getInvoiceStats() {
+    try {
+        await requireAdmin();
+
+        const statuses = ['draft', 'sent', 'paid', 'overdue', 'void'];
+        const stats = {};
+        let totalOutstanding = 0;
+
+        for (const status of statuses) {
+            const result = await dataAccess.queryRecords(COLLECTIONS.invoices, {
+                filters: { status },
+                limit: 1000,
+                suppressAuth: true
+            });
+            const items = result.items || [];
+            const totalAmount = items.reduce((sum, inv) => sum + Number(inv.total || 0), 0);
+            stats[status] = { count: items.length, total: totalAmount };
+
+            if (status === 'sent' || status === 'overdue') {
+                totalOutstanding += totalAmount;
+            }
+        }
+
+        return { success: true, stats, totalOutstanding };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}

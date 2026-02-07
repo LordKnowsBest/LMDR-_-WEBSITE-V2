@@ -1,0 +1,536 @@
+/**
+ * Admin Commission Tracking Service
+ *
+ * Manages sales rep commissions, rules, approvals, and payouts.
+ * All data routes through dataAccess (dual-source pattern).
+ */
+
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+// Collection keys (must match configData.js entries)
+const COLLECTIONS = {
+    commissions: 'commissions',
+    salesReps: 'salesReps',
+    rules: 'commissionRules',
+    subscriptions: 'carrierSubscriptions',
+    auditLog: 'auditLog'
+};
+
+const HOLD_PERIOD_DAYS = 30;
+const COMMISSION_STATUSES = ['pending', 'approved', 'paid'];
+const EVENT_TYPES = ['new_subscription', 'upgrade', 'renewal', 'placement'];
+
+const DEFAULT_RATES = {
+    new_subscription: 0.10,
+    upgrade: 0.05,
+    renewal: 0.03,
+    placement: 0.15
+};
+
+// ============================================
+// AUTHORIZATION
+// ============================================
+
+async function isAdmin() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return false;
+        return ['admin', 'super_admin', 'ops_admin'].includes(
+            (member.contactDetails?.customFields?.role || '').toLowerCase()
+        );
+    } catch { return false; }
+}
+
+async function requireAdmin() {
+    if (!await isAdmin()) throw new Error('Unauthorized');
+}
+
+// ============================================
+// COMMISSION RULES
+// ============================================
+
+export async function getCommissionRules() {
+    await requireAdmin();
+    try {
+        const result = await dataAccess.queryRecords(COLLECTIONS.rules, {
+            sort: [{ field: 'priority', direction: 'asc' }],
+            limit: 200,
+            suppressAuth: true
+        });
+        return { success: true, rules: result.items || [] };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function saveCommissionRule(rule) {
+    await requireAdmin();
+    try {
+        if (!rule.rule_name || !rule.event_type || rule.base_rate === undefined) {
+            return { success: false, error: 'Rule must have rule_name, event_type, and base_rate' };
+        }
+        if (!EVENT_TYPES.includes(rule.event_type)) {
+            return { success: false, error: `Invalid event_type. Must be one of: ${EVENT_TYPES.join(', ')}` };
+        }
+
+        let saved;
+        if (rule._id) {
+            saved = await dataAccess.updateRecord(COLLECTIONS.rules, rule._id, rule, { suppressAuth: true });
+        } else {
+            rule.created_date = new Date().toISOString();
+            rule.status = rule.status || 'active';
+            saved = await dataAccess.insertRecord(COLLECTIONS.rules, rule, { suppressAuth: true });
+        }
+        return { success: true, rule: saved };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// SALES REP MANAGEMENT
+// ============================================
+
+export async function getSalesReps(activeOnly = true) {
+    await requireAdmin();
+    try {
+        const filters = activeOnly ? { status: 'active' } : {};
+        const result = await dataAccess.queryRecords(COLLECTIONS.salesReps, {
+            filters,
+            limit: 200,
+            suppressAuth: true
+        });
+
+        const reps = result.items || [];
+        const enriched = await Promise.all(reps.map(async (rep) => {
+            const commResult = await dataAccess.queryRecords(COLLECTIONS.commissions, {
+                filters: { sales_rep_id: rep._id },
+                limit: 1000,
+                suppressAuth: true
+            });
+            const comms = commResult.items || [];
+            return {
+                ...rep,
+                total_deals: comms.length,
+                total_revenue: comms.reduce((sum, c) => sum + (Number(c.deal_value) || 0), 0),
+                total_commission: comms.reduce((sum, c) => sum + (Number(c.commission_amount) || 0), 0)
+            };
+        }));
+
+        return { success: true, reps: enriched };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function saveSalesRep(rep) {
+    await requireAdmin();
+    try {
+        if (!rep.name || !rep.email) {
+            return { success: false, error: 'Sales rep must have name and email' };
+        }
+
+        let saved;
+        if (rep._id) {
+            saved = await dataAccess.updateRecord(COLLECTIONS.salesReps, rep._id, rep, { suppressAuth: true });
+        } else {
+            rep.created_date = new Date().toISOString();
+            rep.status = rep.status || 'active';
+            saved = await dataAccess.insertRecord(COLLECTIONS.salesReps, rep, { suppressAuth: true });
+        }
+        return { success: true, rep: saved };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// COMMISSION PROCESSING
+// ============================================
+
+export async function processAutoCommission(eventType, dealData) {
+    try {
+        if (!EVENT_TYPES.includes(eventType)) {
+            return { success: false, error: `Invalid event type: ${eventType}` };
+        }
+        if (!dealData || !dealData.deal_value) {
+            return { success: false, error: 'dealData must include deal_value' };
+        }
+
+        // Find matching rule by event_type, highest priority
+        const rulesResult = await dataAccess.queryRecords(COLLECTIONS.rules, {
+            filters: { event_type: eventType, status: 'active' },
+            sort: [{ field: 'priority', direction: 'asc' }],
+            limit: 1,
+            suppressAuth: true
+        });
+
+        const rule = (rulesResult.items || [])[0];
+        let rate = rule ? Number(rule.base_rate) : DEFAULT_RATES[eventType];
+
+        // Apply tier bonuses if rule has them
+        if (rule && rule.tier_bonuses) {
+            try {
+                const tiers = typeof rule.tier_bonuses === 'string'
+                    ? JSON.parse(rule.tier_bonuses)
+                    : rule.tier_bonuses;
+                const dealValue = Number(dealData.deal_value);
+                for (const tier of tiers) {
+                    if (dealValue >= Number(tier.min_value)) {
+                        rate = Number(tier.rate);
+                    }
+                }
+            } catch { /* ignore malformed tier_bonuses */ }
+        }
+
+        const commissionAmount = Number(dealData.deal_value) * rate;
+        const holdUntil = new Date();
+        holdUntil.setDate(holdUntil.getDate() + HOLD_PERIOD_DAYS);
+
+        const commission = {
+            sales_rep_id: dealData.sales_rep_id || '',
+            carrier_dot: dealData.carrier_dot || '',
+            carrier_name: dealData.carrier_name || '',
+            event_type: eventType,
+            deal_value: Number(dealData.deal_value),
+            commission_rate: rate,
+            commission_amount: commissionAmount,
+            rule_id: rule ? rule._id : null,
+            status: 'pending',
+            hold_until: holdUntil.toISOString(),
+            created_date: new Date().toISOString(),
+            notes: dealData.notes || ''
+        };
+
+        const saved = await dataAccess.insertRecord(COLLECTIONS.commissions, commission, { suppressAuth: true });
+        return { success: true, commission: saved };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function recordCommission(commissionData) {
+    await requireAdmin();
+    try {
+        if (!commissionData.sales_rep_id || !commissionData.deal_value || !commissionData.event_type) {
+            return { success: false, error: 'Commission must have sales_rep_id, deal_value, and event_type' };
+        }
+
+        const holdUntil = new Date();
+        holdUntil.setDate(holdUntil.getDate() + HOLD_PERIOD_DAYS);
+
+        const commission = {
+            ...commissionData,
+            deal_value: Number(commissionData.deal_value),
+            commission_amount: Number(commissionData.deal_value) * Number(commissionData.commission_rate || DEFAULT_RATES[commissionData.event_type] || 0.10),
+            status: 'pending',
+            hold_until: holdUntil.toISOString(),
+            created_date: new Date().toISOString()
+        };
+
+        const saved = await dataAccess.insertRecord(COLLECTIONS.commissions, commission, { suppressAuth: true });
+
+        await dataAccess.insertRecord(COLLECTIONS.auditLog, {
+            action: 'commission_recorded',
+            entity_type: 'commission',
+            entity_id: saved._id || '',
+            details: `Manual commission: ${commissionData.event_type} - $${commission.commission_amount.toFixed(2)}`,
+            timestamp: new Date().toISOString()
+        }, { suppressAuth: true });
+
+        return { success: true, commission: saved };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// COMMISSION QUERIES
+// ============================================
+
+function getPeriodStart(period) {
+    const now = new Date();
+    if (period === 'quarter') {
+        const quarter = Math.floor(now.getMonth() / 3);
+        return new Date(now.getFullYear(), quarter * 3, 1).toISOString();
+    }
+    if (period === 'year') {
+        return new Date(now.getFullYear(), 0, 1).toISOString();
+    }
+    // default: month
+    return new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+}
+
+export async function getCommissionSummary(period = 'month') {
+    await requireAdmin();
+    try {
+        const periodStart = getPeriodStart(period);
+        const result = await dataAccess.queryRecords(COLLECTIONS.commissions, {
+            filters: { created_date: { gte: periodStart } },
+            limit: 5000,
+            suppressAuth: true
+        });
+
+        const items = result.items || [];
+        const approved = items.filter(c => c.status === 'approved');
+        const pending = items.filter(c => c.status === 'pending');
+        const paid = items.filter(c => c.status === 'paid');
+
+        const sum = (arr) => arr.reduce((s, c) => s + (Number(c.commission_amount) || 0), 0);
+
+        return {
+            success: true,
+            summary: {
+                total_earned: sum(approved) + sum(paid),
+                total_pending: sum(pending),
+                total_paid: sum(paid),
+                count_approved: approved.length,
+                count_pending: pending.length,
+                count_paid: paid.length,
+                total_deals: items.length,
+                period
+            }
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function getSalesLeaderboard(period = 'month') {
+    await requireAdmin();
+    try {
+        const periodStart = getPeriodStart(period);
+        const commResult = await dataAccess.queryRecords(COLLECTIONS.commissions, {
+            filters: { created_date: { gte: periodStart } },
+            limit: 5000,
+            suppressAuth: true
+        });
+
+        const items = commResult.items || [];
+        const byRep = {};
+        for (const c of items) {
+            const repId = c.sales_rep_id;
+            if (!repId) continue;
+            if (!byRep[repId]) {
+                byRep[repId] = { sales_rep_id: repId, deals: 0, revenue: 0, commission: 0 };
+            }
+            byRep[repId].deals += 1;
+            byRep[repId].revenue += Number(c.deal_value) || 0;
+            byRep[repId].commission += Number(c.commission_amount) || 0;
+        }
+
+        const ranked = Object.values(byRep).sort((a, b) => b.commission - a.commission);
+
+        // Join with sales rep info
+        const repsResult = await dataAccess.queryRecords(COLLECTIONS.salesReps, {
+            limit: 200,
+            suppressAuth: true
+        });
+        const repsMap = {};
+        for (const rep of (repsResult.items || [])) {
+            repsMap[rep._id] = rep;
+        }
+
+        const leaderboard = ranked.map((entry, idx) => ({
+            rank: idx + 1,
+            ...entry,
+            name: repsMap[entry.sales_rep_id]?.name || 'Unknown',
+            email: repsMap[entry.sales_rep_id]?.email || '',
+            avg_deal_size: entry.deals > 0 ? entry.revenue / entry.deals : 0
+        }));
+
+        return { success: true, leaderboard, period };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function getRepCommissions(repId, filters = {}) {
+    await requireAdmin();
+    try {
+        if (!repId) return { success: false, error: 'repId is required' };
+
+        const queryFilters = { sales_rep_id: repId };
+        if (filters.status && filters.status !== 'all') queryFilters.status = filters.status;
+        if (filters.dateFrom) queryFilters.created_date = { gte: filters.dateFrom };
+        if (filters.dateTo) queryFilters.created_date = { ...queryFilters.created_date, lte: filters.dateTo };
+
+        const page = filters.page || 1;
+        const pageSize = filters.pageSize || 50;
+
+        const result = await dataAccess.queryRecords(COLLECTIONS.commissions, {
+            filters: queryFilters,
+            sort: [{ field: 'created_date', direction: 'desc' }],
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            suppressAuth: true
+        });
+
+        const items = result.items || [];
+        return {
+            success: true,
+            commissions: items,
+            totalCount: result.totalCount || items.length,
+            currentPage: page,
+            pageSize,
+            totalPages: Math.ceil((result.totalCount || items.length) / pageSize)
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// APPROVAL & PAYOUT
+// ============================================
+
+export async function approveCommission(commissionId, adminId) {
+    await requireAdmin();
+    try {
+        if (!commissionId) return { success: false, error: 'commissionId is required' };
+
+        const records = await dataAccess.queryRecords(COLLECTIONS.commissions, {
+            filters: { _id: commissionId },
+            limit: 1,
+            suppressAuth: true
+        });
+        const commission = (records.items || [])[0];
+        if (!commission) return { success: false, error: 'Commission not found' };
+        if (commission.status !== 'pending') {
+            return { success: false, error: `Cannot approve commission with status "${commission.status}"` };
+        }
+
+        const now = new Date();
+        const holdUntil = new Date(commission.hold_until);
+        if (now < holdUntil) {
+            const daysRemaining = Math.ceil((holdUntil - now) / (1000 * 60 * 60 * 24));
+            return { success: false, error: `Hold period has not expired. ${daysRemaining} days remaining.` };
+        }
+
+        await dataAccess.updateRecord(COLLECTIONS.commissions, commissionId, {
+            status: 'approved',
+            approved_by: adminId || '',
+            approved_date: now.toISOString()
+        }, { suppressAuth: true });
+
+        await dataAccess.insertRecord(COLLECTIONS.auditLog, {
+            action: 'commission_approved',
+            entity_type: 'commission',
+            entity_id: commissionId,
+            details: `Approved by ${adminId}`,
+            timestamp: now.toISOString()
+        }, { suppressAuth: true });
+
+        return { success: true, commissionId, status: 'approved' };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function bulkApproveCommissions(commissionIds, adminId) {
+    await requireAdmin();
+    try {
+        if (!commissionIds || !commissionIds.length) {
+            return { success: false, error: 'No commission IDs provided' };
+        }
+
+        const results = [];
+        for (const id of commissionIds) {
+            const result = await approveCommission(id, adminId);
+            results.push({ commissionId: id, ...result });
+        }
+
+        const approved = results.filter(r => r.success).length;
+        const failed = results.filter(r => !r.success).length;
+
+        return { success: true, results, approved, failed };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function generatePayoutReport(period) {
+    await requireAdmin();
+    try {
+        const result = await dataAccess.queryRecords(COLLECTIONS.commissions, {
+            filters: { status: 'approved' },
+            limit: 5000,
+            suppressAuth: true
+        });
+
+        const items = result.items || [];
+        const byRep = {};
+        for (const c of items) {
+            const repId = c.sales_rep_id;
+            if (!repId) continue;
+            if (!byRep[repId]) {
+                byRep[repId] = { sales_rep_id: repId, total_owed: 0, commissions: [] };
+            }
+            byRep[repId].total_owed += Number(c.commission_amount) || 0;
+            byRep[repId].commissions.push(c);
+        }
+
+        // Join with rep info
+        const repsResult = await dataAccess.queryRecords(COLLECTIONS.salesReps, {
+            limit: 200,
+            suppressAuth: true
+        });
+        const repsMap = {};
+        for (const rep of (repsResult.items || [])) {
+            repsMap[rep._id] = rep;
+        }
+
+        const report = Object.values(byRep).map(entry => ({
+            ...entry,
+            name: repsMap[entry.sales_rep_id]?.name || 'Unknown',
+            email: repsMap[entry.sales_rep_id]?.email || '',
+            payment_method: repsMap[entry.sales_rep_id]?.payment_method || 'N/A',
+            commission_count: entry.commissions.length
+        }));
+
+        return { success: true, report, period, total_payout: report.reduce((s, r) => s + r.total_owed, 0) };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function markCommissionsPaid(commissionIds, payoutReference) {
+    await requireAdmin();
+    try {
+        if (!commissionIds || !commissionIds.length) {
+            return { success: false, error: 'No commission IDs provided' };
+        }
+
+        const now = new Date().toISOString();
+        const results = [];
+
+        for (const id of commissionIds) {
+            try {
+                await dataAccess.updateRecord(COLLECTIONS.commissions, id, {
+                    status: 'paid',
+                    paid_date: now,
+                    payout_reference: payoutReference || ''
+                }, { suppressAuth: true });
+                results.push({ commissionId: id, success: true });
+            } catch (err) {
+                results.push({ commissionId: id, success: false, error: err.message });
+            }
+        }
+
+        await dataAccess.insertRecord(COLLECTIONS.auditLog, {
+            action: 'commissions_paid',
+            entity_type: 'commission',
+            entity_id: commissionIds.join(','),
+            details: `Marked ${commissionIds.length} commissions paid. Ref: ${payoutReference || 'N/A'}`,
+            timestamp: now
+        }, { suppressAuth: true });
+
+        const paid = results.filter(r => r.success).length;
+        const failed = results.filter(r => !r.success).length;
+
+        return { success: true, results, paid, failed };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}

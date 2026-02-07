@@ -1,6 +1,7 @@
 import * as dataAccess from 'backend/dataAccess';
-import { getDetailedCSAData } from './fmcsaService';
+import { getDetailedCSAData } from 'backend/fmcsaService';
 import { seedCSAScores } from 'backend/seeds/seedMockData';
+import { dispatchSafetyAlertEvent } from 'backend/apiWebhookService';
 
 // Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
@@ -81,9 +82,10 @@ export async function snapshotCSAScores(carrierDot, source = 'manual') {
   const prev = prevRes.items?.[0];
 
   const trend = {}, basics = liveData.basics || {};
+  const prevBasics = parseJsonObject(prev?.basics);
   Object.keys(basics).forEach(key => {
     const current = basics[key].percentile || 0;
-    const previous = prev?.basics?.[key]?.percentile ?? current;
+    const previous = prevBasics?.[key]?.percentile ?? current;
     trend[key] = current - previous;
   });
 
@@ -118,11 +120,23 @@ async function checkAndAlert(carrierDot, current, prev) {
     });
     
     for (const a of newAlerts) {
-        await dataAccess.insertRecord(COLLECTION_KEYS.complianceAlerts, {
+        const inserted = await dataAccess.insertRecord(COLLECTION_KEYS.complianceAlerts, {
             carrier_dot: carrierDot, alert_type: a.type, severity: a.severity,
             title: 'CSA Score Alert', message: a.message, status: 'active',
             related_entity_type: 'csa_score', related_entity_id: current._id, _createdDate: new Date()
         }, { suppressAuth: true });
+        const alertRecord = inserted?.record || inserted || {};
+        await dispatchSafetyAlertEvent({
+            dot_number: Number(carrierDot),
+            alert_type: a.type,
+            occurred_at: new Date().toISOString(),
+            partner_event_id: alertRecord._id || null,
+            details: {
+                severity: a.severity,
+                message: a.message,
+                related_entity_id: current._id || null
+            }
+        }).catch(() => null);
     }
 }
 
@@ -145,4 +159,14 @@ export async function getCSARecommendations(carrierDot) {
     if (basics.unsafe_driving?.percentile > 50) recs.push({ category: 'Unsafe Driving', action: 'Implement defensive driving course', priority: 'high' });
     if (basics.vehicle_maintenance?.percentile > 50) recs.push({ category: 'Vehicle Maintenance', action: 'Review pre-trip inspection logs', priority: 'medium' });
     return recs;
+}
+
+function parseJsonObject(value) {
+    if (!value) return {};
+    if (typeof value === 'object') return value;
+    try {
+        return JSON.parse(value);
+    } catch (_e) {
+        return {};
+    }
 }

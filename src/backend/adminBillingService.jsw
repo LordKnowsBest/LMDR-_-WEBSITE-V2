@@ -1,0 +1,616 @@
+import { currentMember } from 'wix-members-backend';
+import { getSecret } from 'wix-secrets-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const COLLECTIONS = {
+  subscriptions: 'carrierSubscriptions',
+  billing: 'billingHistory',
+  adjustments: 'billingAdjustments',
+  carriers: 'carriers',
+  auditLog: 'auditLog'
+};
+
+const CREDIT_AUTO_APPROVE_LIMIT = 100;
+
+// ============================================================================
+// STRIPE CLIENT HELPERS
+// ============================================================================
+
+let cachedStripeKey = null;
+
+async function getStripeKey() {
+  if (cachedStripeKey) return cachedStripeKey;
+  cachedStripeKey = await getSecret('SECRET_KEY_STRIPE');
+  return cachedStripeKey;
+}
+
+async function stripeRequest(endpoint, method = 'GET', body = null) {
+  const secretKey = await getStripeKey();
+  const options = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${secretKey}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    }
+  };
+  if (body) options.body = new URLSearchParams(body).toString();
+  const response = await fetch(`https://api.stripe.com/v1${endpoint}`, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error?.message || 'Stripe API error');
+  return data;
+}
+
+// ============================================================================
+// AUTHORIZATION
+// ============================================================================
+
+async function isAdmin() {
+  try {
+    const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+    if (!member) return false;
+    return ['admin', 'super_admin', 'ops_admin'].includes(
+      (member.contactDetails?.customFields?.role || '').toLowerCase()
+    );
+  } catch { return false; }
+}
+
+async function requireAdmin() {
+  if (!await isAdmin()) throw new Error('Unauthorized');
+}
+
+// ============================================================================
+// AUDIT LOG HELPER
+// ============================================================================
+
+async function logAudit(action, details, adminId) {
+  try {
+    await dataAccess.insertRecord(COLLECTIONS.auditLog, {
+      action,
+      details: JSON.stringify(details),
+      admin_id: adminId,
+      timestamp: new Date(),
+      category: 'billing'
+    }, { suppressAuth: true });
+  } catch (e) {
+    console.error('Audit log failed:', e);
+  }
+}
+
+// ============================================================================
+// CUSTOMER SEARCH
+// ============================================================================
+
+export async function searchBillingCustomer(query) {
+  await requireAdmin();
+  try {
+    if (!query || String(query).trim().length < 2) {
+      return { success: false, error: 'Search query too short' };
+    }
+    const searchTerm = String(query).trim();
+    const results = [];
+
+    // Search subscriptions by carrier_dot
+    const subResult = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+      filters: { carrier_dot: searchTerm },
+      limit: 10,
+      suppressAuth: true
+    });
+    const dotMatches = new Set();
+    if (subResult.items?.length) {
+      for (const sub of subResult.items) {
+        dotMatches.add(sub.carrier_dot);
+        results.push({
+          carrier_dot: sub.carrier_dot,
+          plan_type: sub.plan_type,
+          status: sub.status,
+          source: 'subscription'
+        });
+      }
+    }
+
+    // Search carriers by company_name or email
+    const carrierResult = await dataAccess.queryRecords(COLLECTIONS.carriers, {
+      filters: { company_name: { contains: searchTerm } },
+      limit: 10,
+      suppressAuth: true
+    });
+    if (carrierResult.items?.length) {
+      for (const carrier of carrierResult.items) {
+        if (!dotMatches.has(carrier.dot_number)) {
+          results.push({
+            carrier_dot: carrier.dot_number,
+            company_name: carrier.company_name,
+            email: carrier.email,
+            source: 'carrier'
+          });
+        } else {
+          const existing = results.find(r => r.carrier_dot === carrier.dot_number);
+          if (existing) {
+            existing.company_name = carrier.company_name;
+            existing.email = carrier.email;
+          }
+        }
+      }
+    }
+
+    return { success: true, results };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// BILLING DETAILS
+// ============================================================================
+
+export async function getBillingDetails(carrierDot) {
+  await requireAdmin();
+  try {
+    if (!carrierDot) return { success: false, error: 'Missing carrier DOT' };
+    const dot = String(carrierDot).trim();
+
+    const [subResult, historyResult, adjustResult, carrierResult] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+        filters: { carrier_dot: dot },
+        sort: [{ field: '_createdDate', direction: 'desc' }],
+        limit: 1,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.billing, {
+        filters: { carrier_dot: dot },
+        sort: [{ field: 'timestamp', direction: 'desc' }],
+        limit: 50,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.adjustments, {
+        filters: { carrier_dot: dot },
+        sort: [{ field: 'created_date', direction: 'desc' }],
+        limit: 50,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.carriers, {
+        filters: { dot_number: Number(dot) || dot },
+        limit: 1,
+        suppressAuth: true
+      })
+    ]);
+
+    return {
+      success: true,
+      subscription: subResult.items?.[0] || null,
+      billingHistory: historyResult.items || [],
+      adjustments: adjustResult.items || [],
+      carrier: carrierResult.items?.[0] || null
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// CREDIT APPLICATION
+// ============================================================================
+
+export async function applyCredit(carrierDot, amount, reason, adminId) {
+  await requireAdmin();
+  try {
+    if (!carrierDot || !amount || !reason) {
+      return { success: false, error: 'Missing required fields' };
+    }
+    const dot = String(carrierDot).trim();
+    const creditAmount = Number(amount);
+    if (isNaN(creditAmount) || creditAmount <= 0) {
+      return { success: false, error: 'Invalid credit amount' };
+    }
+
+    if (creditAmount > CREDIT_AUTO_APPROVE_LIMIT) {
+      // Requires approval
+      await dataAccess.insertRecord(COLLECTIONS.adjustments, {
+        carrier_dot: dot,
+        type: 'credit',
+        amount: creditAmount,
+        reason,
+        status: 'pending',
+        requested_by: adminId,
+        created_date: new Date()
+      }, { suppressAuth: true });
+
+      await logAudit('credit_requested', { carrier_dot: dot, amount: creditAmount, reason }, adminId);
+      return { success: true, requiresApproval: true, message: `Credit of $${creditAmount} requires approval (over $${CREDIT_AUTO_APPROVE_LIMIT})` };
+    }
+
+    // Auto-approve: apply via Stripe
+    const subResult = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+      filters: { carrier_dot: dot },
+      limit: 1,
+      suppressAuth: true
+    });
+    const subscription = subResult.items?.[0];
+    if (!subscription?.stripe_customer_id) {
+      return { success: false, error: 'No Stripe customer found for this carrier' };
+    }
+
+    await stripeRequest(`/customers/${subscription.stripe_customer_id}/balance_transactions`, 'POST', {
+      amount: String(-creditAmount * 100),
+      currency: 'usd',
+      description: reason
+    });
+
+    await dataAccess.insertRecord(COLLECTIONS.adjustments, {
+      carrier_dot: dot,
+      type: 'credit',
+      amount: creditAmount,
+      reason,
+      status: 'approved',
+      requested_by: adminId,
+      approved_by: adminId,
+      created_date: new Date()
+    }, { suppressAuth: true });
+
+    await logAudit('credit_applied', { carrier_dot: dot, amount: creditAmount, reason }, adminId);
+    return { success: true, requiresApproval: false, message: `Credit of $${creditAmount} applied successfully` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// REFUND PROCESSING
+// ============================================================================
+
+export async function processRefund(carrierDot, invoiceId, amount, reason, adminId) {
+  await requireAdmin();
+  try {
+    if (!carrierDot || !invoiceId || !amount || !reason) {
+      return { success: false, error: 'Missing required fields' };
+    }
+    const refundAmount = Number(amount);
+    if (isNaN(refundAmount) || refundAmount <= 0) {
+      return { success: false, error: 'Invalid refund amount' };
+    }
+
+    await dataAccess.insertRecord(COLLECTIONS.adjustments, {
+      carrier_dot: String(carrierDot).trim(),
+      type: 'refund',
+      amount: refundAmount,
+      invoice_id: invoiceId,
+      reason,
+      status: 'pending',
+      requested_by: adminId,
+      created_date: new Date()
+    }, { suppressAuth: true });
+
+    await logAudit('refund_requested', {
+      carrier_dot: carrierDot, invoice_id: invoiceId, amount: refundAmount, reason
+    }, adminId);
+
+    return { success: true, message: 'Refund request submitted for approval' };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// SUBSCRIPTION PLAN CHANGE
+// ============================================================================
+
+export async function changeSubscriptionPlan(carrierDot, newPlan, immediate) {
+  await requireAdmin();
+  try {
+    if (!carrierDot || !newPlan) {
+      return { success: false, error: 'Missing required fields' };
+    }
+    const dot = String(carrierDot).trim();
+
+    const subResult = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+      filters: { carrier_dot: dot },
+      limit: 1,
+      suppressAuth: true
+    });
+    const subscription = subResult.items?.[0];
+    if (!subscription?.stripe_subscription_id) {
+      return { success: false, error: 'No active subscription found' };
+    }
+
+    // Fetch current Stripe subscription to get item ID
+    const stripeSub = await stripeRequest(`/subscriptions/${subscription.stripe_subscription_id}`);
+    const itemId = stripeSub.items?.data?.[0]?.id;
+    if (!itemId) {
+      return { success: false, error: 'Cannot find subscription item' };
+    }
+
+    // Resolve new price ID from secrets
+    const newPriceId = await getSecret(`STRIPE_PRICE_${newPlan.toUpperCase()}`).catch(() => null);
+    if (!newPriceId) {
+      return { success: false, error: `Price not configured for plan: ${newPlan}` };
+    }
+
+    await stripeRequest(`/subscriptions/${subscription.stripe_subscription_id}`, 'POST', {
+      'items[0][id]': itemId,
+      'items[0][price]': newPriceId,
+      proration_behavior: immediate ? 'create_prorations' : 'none'
+    });
+
+    // Update local record
+    await dataAccess.updateRecord(COLLECTIONS.subscriptions, {
+      ...subscription,
+      plan_type: newPlan,
+      updated_at: new Date()
+    }, { suppressAuth: true });
+
+    await logAudit('plan_changed', {
+      carrier_dot: dot,
+      old_plan: subscription.plan_type,
+      new_plan: newPlan,
+      immediate
+    }, 'admin');
+
+    return { success: true, message: `Plan changed to ${newPlan}` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// PAUSE SUBSCRIPTION
+// ============================================================================
+
+export async function pauseSubscription(carrierDot, days, reason) {
+  await requireAdmin();
+  try {
+    if (!carrierDot || !days) {
+      return { success: false, error: 'Missing required fields' };
+    }
+    const dot = String(carrierDot).trim();
+    const pauseDays = Number(days);
+
+    const subResult = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+      filters: { carrier_dot: dot },
+      limit: 1,
+      suppressAuth: true
+    });
+    const subscription = subResult.items?.[0];
+    if (!subscription?.stripe_subscription_id) {
+      return { success: false, error: 'No active subscription found' };
+    }
+
+    const resumeDate = new Date();
+    resumeDate.setDate(resumeDate.getDate() + pauseDays);
+    const resumeTimestamp = Math.floor(resumeDate.getTime() / 1000);
+
+    await stripeRequest(`/subscriptions/${subscription.stripe_subscription_id}`, 'POST', {
+      'pause_collection[behavior]': 'void',
+      'pause_collection[resumes_at]': String(resumeTimestamp)
+    });
+
+    await dataAccess.updateRecord(COLLECTIONS.subscriptions, {
+      ...subscription,
+      status: 'paused',
+      pause_reason: reason || '',
+      pause_resume_date: resumeDate,
+      updated_at: new Date()
+    }, { suppressAuth: true });
+
+    await logAudit('subscription_paused', {
+      carrier_dot: dot, days: pauseDays, reason, resume_date: resumeDate.toISOString()
+    }, 'admin');
+
+    return { success: true, message: `Subscription paused for ${pauseDays} days` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// CANCEL SUBSCRIPTION
+// ============================================================================
+
+export async function cancelSubscription(carrierDot, immediate, reason) {
+  await requireAdmin();
+  try {
+    if (!carrierDot || !reason) {
+      return { success: false, error: 'Missing required fields' };
+    }
+    const dot = String(carrierDot).trim();
+
+    const subResult = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+      filters: { carrier_dot: dot },
+      limit: 1,
+      suppressAuth: true
+    });
+    const subscription = subResult.items?.[0];
+    if (!subscription?.stripe_subscription_id) {
+      return { success: false, error: 'No active subscription found' };
+    }
+
+    if (immediate) {
+      await stripeRequest(`/subscriptions/${subscription.stripe_subscription_id}`, 'DELETE');
+    } else {
+      await stripeRequest(`/subscriptions/${subscription.stripe_subscription_id}`, 'POST', {
+        cancel_at_period_end: 'true'
+      });
+    }
+
+    await dataAccess.updateRecord(COLLECTIONS.subscriptions, {
+      ...subscription,
+      status: immediate ? 'cancelled' : 'cancelling',
+      cancel_reason: reason,
+      cancel_at_period_end: !immediate,
+      updated_at: new Date()
+    }, { suppressAuth: true });
+
+    await logAudit('subscription_cancelled', {
+      carrier_dot: dot, immediate, reason
+    }, 'admin');
+
+    return {
+      success: true,
+      message: immediate
+        ? 'Subscription cancelled immediately'
+        : 'Subscription set to cancel at end of billing period'
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// BILLING ADJUSTMENTS
+// ============================================================================
+
+export async function getBillingAdjustments(carrierDot) {
+  await requireAdmin();
+  try {
+    if (!carrierDot) return { success: false, error: 'Missing carrier DOT' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.adjustments, {
+      filters: { carrier_dot: String(carrierDot).trim() },
+      sort: [{ field: 'created_date', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    return { success: true, adjustments: result.items || [] };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// PENDING APPROVALS
+// ============================================================================
+
+export async function getPendingApprovals() {
+  await requireAdmin();
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.adjustments, {
+      filters: { status: 'pending' },
+      sort: [{ field: 'created_date', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    return { success: true, pending: result.items || [] };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// APPROVE ADJUSTMENT
+// ============================================================================
+
+export async function approveAdjustment(adjustmentId, adminId) {
+  await requireAdmin();
+  try {
+    if (!adjustmentId) return { success: false, error: 'Missing adjustment ID' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.adjustments, {
+      filters: { _id: adjustmentId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const adjustment = result.items?.[0];
+    if (!adjustment) return { success: false, error: 'Adjustment not found' };
+    if (adjustment.status !== 'pending') {
+      return { success: false, error: `Adjustment already ${adjustment.status}` };
+    }
+
+    // Get carrier's Stripe customer ID
+    const subResult = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+      filters: { carrier_dot: adjustment.carrier_dot },
+      limit: 1,
+      suppressAuth: true
+    });
+    const subscription = subResult.items?.[0];
+
+    if (adjustment.type === 'credit') {
+      if (!subscription?.stripe_customer_id) {
+        return { success: false, error: 'No Stripe customer found' };
+      }
+      await stripeRequest(`/customers/${subscription.stripe_customer_id}/balance_transactions`, 'POST', {
+        amount: String(-adjustment.amount * 100),
+        currency: 'usd',
+        description: adjustment.reason || 'Admin credit'
+      });
+    } else if (adjustment.type === 'refund') {
+      if (!adjustment.invoice_id) {
+        return { success: false, error: 'No invoice/charge ID for refund' };
+      }
+      // Get charge from invoice
+      const invoice = await stripeRequest(`/invoices/${adjustment.invoice_id}`);
+      const chargeId = invoice.charge;
+      if (!chargeId) {
+        return { success: false, error: 'No charge found on invoice' };
+      }
+      await stripeRequest('/refunds', 'POST', {
+        charge: chargeId,
+        amount: String(adjustment.amount * 100)
+      });
+    }
+
+    await dataAccess.updateRecord(COLLECTIONS.adjustments, {
+      ...adjustment,
+      status: 'approved',
+      approved_by: adminId,
+      approved_date: new Date()
+    }, { suppressAuth: true });
+
+    await logAudit('adjustment_approved', {
+      adjustment_id: adjustmentId,
+      type: adjustment.type,
+      amount: adjustment.amount,
+      carrier_dot: adjustment.carrier_dot
+    }, adminId);
+
+    return { success: true, message: `${adjustment.type} of $${adjustment.amount} approved and processed` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// REJECT ADJUSTMENT
+// ============================================================================
+
+export async function rejectAdjustment(adjustmentId, adminId, notes) {
+  await requireAdmin();
+  try {
+    if (!adjustmentId) return { success: false, error: 'Missing adjustment ID' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.adjustments, {
+      filters: { _id: adjustmentId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const adjustment = result.items?.[0];
+    if (!adjustment) return { success: false, error: 'Adjustment not found' };
+    if (adjustment.status !== 'pending') {
+      return { success: false, error: `Adjustment already ${adjustment.status}` };
+    }
+
+    await dataAccess.updateRecord(COLLECTIONS.adjustments, {
+      ...adjustment,
+      status: 'rejected',
+      rejected_by: adminId,
+      rejection_notes: notes || '',
+      rejected_date: new Date()
+    }, { suppressAuth: true });
+
+    await logAudit('adjustment_rejected', {
+      adjustment_id: adjustmentId,
+      type: adjustment.type,
+      amount: adjustment.amount,
+      carrier_dot: adjustment.carrier_dot,
+      notes
+    }, adminId);
+
+    return { success: true, message: `${adjustment.type} of $${adjustment.amount} rejected` };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
