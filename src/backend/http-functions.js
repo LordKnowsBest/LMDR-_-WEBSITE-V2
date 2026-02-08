@@ -5,6 +5,7 @@
 
 import { ok, badRequest, serverError } from 'wix-http-functions';
 import { getSecret } from 'wix-secrets-backend';
+import crypto from 'crypto';
 import {
   upsertSubscription,
   upsertApiSubscriptionFromStripe,
@@ -93,9 +94,8 @@ async function verifyStripeSignature(payload, signature) {
 
     const webhookSecret = await getSecret('STRIPE_WEBHOOK_SECRET');
     if (!webhookSecret) {
-      console.warn('[Webhook] No webhook secret configured, skipping verification');
-      // In development, allow unsigned requests
-      return { success: true, warning: 'No secret configured' };
+      console.error('[Webhook] No webhook secret configured. FAILING CLOSED.');
+      return { success: false, error: 'Configuration error: No webhook secret' };
     }
 
     // Parse signature header
@@ -120,7 +120,11 @@ async function verifyStripeSignature(payload, signature) {
     const expectedSignature = await computeHmacSignature(signedPayload, webhookSecret);
 
     // Compare signatures (timing-safe comparison)
-    if (expectedSignature !== signatureHash) {
+    const expectedSignatureBuffer = Buffer.from(expectedSignature, 'hex');
+    const signatureHashBuffer = Buffer.from(signatureHash, 'hex');
+
+    if (expectedSignatureBuffer.length !== signatureHashBuffer.length ||
+        !crypto.timingSafeEqual(expectedSignatureBuffer, signatureHashBuffer)) {
       return { success: false, error: 'Signature mismatch' };
     }
 
