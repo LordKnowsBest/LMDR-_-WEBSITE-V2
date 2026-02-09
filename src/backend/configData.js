@@ -60,6 +60,8 @@ export const DATA_SOURCE = {
   announcementComments: 'airtable',
   carrierNotificationSettings: 'airtable',
   driverNotificationPreferences: 'airtable',
+  policyDocuments: 'airtable',
+  policyAcknowledgments: 'airtable',
 
   // -------------------------------------------------------------------------
   // Enrichment & Cache
@@ -384,6 +386,8 @@ export const WIX_COLLECTION_NAMES = {
   announcementComments: 'AnnouncementComments',
   carrierNotificationSettings: 'CarrierNotificationSettings',
   driverNotificationPreferences: 'DriverNotificationPreferences',
+  policyDocuments: 'PolicyDocuments',
+  policyAcknowledgments: 'PolicyAcknowledgments',
 
   // Enrichment & Cache
   carrierEnrichments: 'CarrierEnrichments',
@@ -578,6 +582,8 @@ export const AIRTABLE_TABLE_NAMES = {
   announcementComments: 'v2_Announcement Comments',
   carrierNotificationSettings: 'v2_Carrier Notification Settings',
   driverNotificationPreferences: 'v2_Driver Notification Preferences',
+  policyDocuments: 'v2_Policy Documents',
+  policyAcknowledgments: 'v2_Policy Acknowledgments',
 
   // Enrichment & Cache
   carrierEnrichments: 'v2_Carrier Enrichments',
