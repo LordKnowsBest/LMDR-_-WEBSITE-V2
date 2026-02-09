@@ -1,7 +1,7 @@
 import { updateDriverPreferences, logCarrierInterest } from 'backend/driverProfiles';
 import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
 import * as dataAccess from 'backend/dataAccess';
-import { seedCarriers } from 'backend/seeds/seedMockData';
+import { getRecruiterStats } from 'backend/recruiterStats';
 
 // ============================================================================
 // SHARED SCORING MODULE
@@ -78,7 +78,7 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
   console.log('🚀 ===== BACKEND: findMatchingCarriers =====');
   console.log('📋 Prefs received:', JSON.stringify(driverPrefs));
   console.log('👤 Premium user:', isPremiumUser);
-  await log({ level: 'INFO', source: 'carrier-matching', message: 'Starting carrier match', traceId, details: { isPremiumUser, operationType: driverPrefs.operationType } });
+  log({ level: 'INFO', source: 'carrier-matching', message: 'Starting carrier match', traceId, details: { isPremiumUser, operationType: driverPrefs.operationType } }).catch(() => {});
 
   const maxResults = isPremiumUser
     ? CONFIG.premiumUserMaxResults
@@ -86,48 +86,32 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
 
   console.log(`📊 Max results to return: ${maxResults}`);
   
-  // NEW: Update driver profile with search preferences
-  let driverProfile = null;
-  try {
-    const profileResult = await updateDriverPreferences(driverPrefs);
-    if (profileResult.success) {
-      driverProfile = profileResult.profile;
-      console.log(`👤 Updated driver profile: ${driverProfile._id}`);
-    }
-  } catch (profileError) {
-    console.log('⚠️ Profile system unavailable:', profileError.message);
-  }
+  // Fire off driver profile update (non-blocking — result only used in response payload)
+  const profilePromise = updateDriverPreferences(driverPrefs)
+    .then(r => r.success ? r.profile : null)
+    .catch(() => null);
   
   try {
     // STEP 1: Query the database
     console.log('📌 Step 1: Querying Carriers collection...');
     const queryStartTime = Date.now();
     
-    const result = await dataAccess.queryRecords('carriers', {
-      limit: 500
-    });
+    // Parallel fetch: carrier query + config weights (saves ~600ms)
+    const [result, fetchedWeights] = await Promise.all([
+      dataAccess.queryRecords('carriers', { limit: 500 }),
+      getCarrierMatchingWeights().catch(() => SCORING_CONFIG.weights)
+    ]);
 
     if (!result.success) throw new Error(result.error);
     let carrierItems = result.items || [];
 
     const queryLatency = Date.now() - queryStartTime;
-    await logDatabase({ operation: 'query', collection: 'Carriers', affectedRows: carrierItems.length, latencyMs: queryLatency, traceId });
-
-    // SEEDING LOGIC
-    if (carrierItems.length === 0) {
-      console.warn('⚠️ No carriers found in database. Seeding mock carriers...');
-      await log({ level: 'WARN', source: 'carrier-matching', message: 'No carriers in database, attempting seed', traceId });
-
-      const seedResult = await seedCarriers();
-      if (seedResult.seeded) {
-          const reQueryResult = await dataAccess.queryRecords('carriers', { limit: 500 });
-          carrierItems = reQueryResult.items || [];
-      }
-    }
+    logDatabase({ operation: 'query', collection: 'Carriers', affectedRows: carrierItems.length, latencyMs: queryLatency, traceId }).catch(() => {});
 
     console.log(`📊 Step 2: Query complete. Found ${carrierItems.length} carriers`);
 
     if (carrierItems.length === 0) {
+      log({ level: 'WARN', source: 'carrier-matching', message: 'No carriers in database', traceId }).catch(() => {});
       await endTrace(traceId, 'completed', { totalMatches: 0, elapsed: Date.now() - startTime });
       return {
         success: true,
@@ -135,20 +119,14 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
         totalScored: 0,
         message: 'No carriers in database',
         userTier: isPremiumUser ? 'premium' : 'free',
-        driverProfile: driverProfile ? { id: driverProfile._id, completeness: driverProfile.profile_completeness_score } : null
+        driverProfile: null
       };
     }
-    
+
     // STEP 2: Score all carriers
     console.log('🧮 Step 3: Scoring carriers...');
-    
-    // Fetch global weights from config service
-    let globalWeights = SCORING_CONFIG.weights;
-    try {
-        globalWeights = await getCarrierMatchingWeights();
-    } catch (e) {
-        console.warn('⚠️ Failed to fetch global weights, using defaults');
-    }
+
+    const globalWeights = fetchedWeights;
 
     const customWeights = driverPrefs.customWeights || globalWeights;
     const scoredCarriers = carrierItems.map(rawCarrier => 
@@ -173,23 +151,24 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     
     const topMatches = validCarriers.slice(0, maxResults);
     
-    // STEP 5: Check enrichment cache & responsiveness
+    // STEP 5: Check enrichment cache & responsiveness (parallel)
     console.log('📦 Step 6: Checking enrichment cache & responsiveness...');
     const dotNumbers = topMatches.map(m => m.carrier.DOT_NUMBER);
-    const { getRecruiterStats } = await import('backend/recruiterStats');
-    
+
     let cachedEnrichments = {};
     const responsivenessStats = {};
-    
+
     try {
-      cachedEnrichments = await getExistingEnrichments(dotNumbers);
-      
-      await Promise.all(dotNumbers.map(async (dot) => {
-        try {
-          const stats = await getRecruiterStats(dot);
-          responsivenessStats[dot] = stats;
-        } catch (e) { /* ignore */ }
-      }));
+      const [enrichments] = await Promise.all([
+        getExistingEnrichments(dotNumbers),
+        Promise.all(dotNumbers.map(async (dot) => {
+          try {
+            const stats = await getRecruiterStats(dot);
+            responsivenessStats[dot] = stats;
+          } catch (e) { /* ignore */ }
+        }))
+      ]);
+      cachedEnrichments = enrichments;
     } catch (cacheErr) {
       console.warn('⚠️ Cache/Stats lookup failed:', cacheErr.message);
     }
@@ -211,15 +190,13 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     const needsFreshCount = matchesWithStatus.filter(m => m.needsEnrichment).length;
     const elapsed = Date.now() - startTime;
 
-    await log({
-      level: 'INFO',
-      source: 'carrier-matching',
-      message: `Match complete: ${matchesWithStatus.length} results`,
-      traceId,
-      duration: elapsed,
-      details: { totalScored: scoredCarriers.length, totalMatches: validCarriers.length, returned: matchesWithStatus.length }
-    });
-    await endTrace(traceId, 'completed', { totalMatches: matchesWithStatus.length, totalScored: scoredCarriers.length, elapsed });
+    // Collect deferred profile (should be long resolved by now)
+    const driverProfile = await profilePromise;
+
+    await Promise.all([
+      log({ level: 'INFO', source: 'carrier-matching', message: `Match complete: ${matchesWithStatus.length} results`, traceId, duration: elapsed, details: { totalScored: scoredCarriers.length, totalMatches: validCarriers.length, returned: matchesWithStatus.length } }),
+      endTrace(traceId, 'completed', { totalMatches: matchesWithStatus.length, totalScored: scoredCarriers.length, elapsed })
+    ]);
 
     return {
       success: true,
@@ -244,8 +221,10 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     };
 
   } catch (error) {
-    await log({ level: 'ERROR', source: 'carrier-matching', message: `Match failed: ${error.message}`, traceId, details: { error: error.message } });
-    await endTrace(traceId, 'error', { error: error.message });
+    await Promise.all([
+      log({ level: 'ERROR', source: 'carrier-matching', message: `Match failed: ${error.message}`, traceId, details: { error: error.message } }),
+      endTrace(traceId, 'error', { error: error.message })
+    ]);
 
     return {
       success: false,
