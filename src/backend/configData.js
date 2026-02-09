@@ -220,6 +220,8 @@ export const DATA_SOURCE = {
   forumThreads: 'airtable',
   forumPosts: 'airtable',
   forumReports: 'airtable',
+  healthResources: 'airtable',
+  healthTips: 'airtable',
   petFriendlyLocations: 'airtable',
   petFriendlyReviews: 'airtable',
 
@@ -486,6 +488,8 @@ export const WIX_COLLECTION_NAMES = {
   forumThreads: 'ForumThreads',
   forumPosts: 'ForumPosts',
   forumReports: 'ForumReports',
+  healthResources: 'HealthResources',
+  healthTips: 'HealthTips',
   petFriendlyLocations: 'PetFriendlyLocations',
   petFriendlyReviews: 'PetFriendlyReviews',
 
@@ -710,6 +714,8 @@ export const AIRTABLE_TABLE_NAMES = {
   forumThreads: 'v2_Forum Threads',
   forumPosts: 'v2_Forum Posts',
   forumReports: 'v2_Forum Reports',
+  healthResources: 'v2_Health Resources',
+  healthTips: 'v2_Health Tips',
   petFriendlyLocations: 'v2_Pet Friendly Locations',
   petFriendlyReviews: 'v2_Pet Friendly Reviews',
 

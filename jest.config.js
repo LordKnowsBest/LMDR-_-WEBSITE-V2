@@ -9,9 +9,6 @@ module.exports = {
   // Test environment
   testEnvironment: 'node',
 
-  // Enable experimental ESM support
-  extensionsToTreatAsEsm: ['.jsw'],
-
   // Root directories for tests
   roots: ['<rootDir>/src/public/__tests__'],
 
