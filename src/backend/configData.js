@@ -47,7 +47,7 @@ export const DATA_SOURCE = {
   // Messaging & Notifications
   // -------------------------------------------------------------------------
   messages: 'airtable',
-  memberNotifications: 'wix', // KEEP IN WIX: Requires Wix auth context
+  memberNotifications: 'airtable',
   memberBadges: 'wix',        // KEEP IN WIX: Wix system collection
   memberPrivateData: 'wix',   // KEEP IN WIX: Wix system collection
   memberActivity: 'airtable',
@@ -300,7 +300,7 @@ export const DATA_SOURCE = {
  */
 export function getDataSource(collectionName) {
   // EXCEPTION LIST: Explicitly pinned to Wix
-  if (['adminUsers', 'memberNotifications'].includes(collectionName)) {
+  if (['adminUsers'].includes(collectionName)) {
     return 'wix';
   }
   
