@@ -5,6 +5,7 @@
 
 import { ok, badRequest, serverError } from 'wix-http-functions';
 import { getSecret } from 'wix-secrets-backend';
+import crypto from 'crypto'; // Node.js crypto for secure signature verification
 import {
   upsertSubscription,
   upsertApiSubscriptionFromStripe,
@@ -16,7 +17,7 @@ import {
   isEventProcessed,
   logStripeEvent,
   updatePaymentStatus
-} from 'backend/stripeService';
+} from 'backend/stripeCore';
 import { updateLeadStatus } from 'backend/carrierLeadsService';
 import { sendPaymentReceivedEmail } from 'backend/emailService';
 import {
@@ -46,7 +47,7 @@ export async function post_stripe_webhook(request) {
     // Verify signature
     const verificationResult = await verifyStripeSignature(body, signature);
     if (!verificationResult.success) {
-      console.error('[Webhook] Signature verification failed');
+      console.error('[Webhook] Signature verification failed:', verificationResult.error);
       return badRequest({ error: 'Invalid signature' });
     }
 
@@ -93,9 +94,8 @@ async function verifyStripeSignature(payload, signature) {
 
     const webhookSecret = await getSecret('STRIPE_WEBHOOK_SECRET');
     if (!webhookSecret) {
-      console.warn('[Webhook] No webhook secret configured, skipping verification');
-      // In development, allow unsigned requests
-      return { success: true, warning: 'No secret configured' };
+      console.error('[Webhook] No webhook secret configured');
+      return { success: false, error: 'Server configuration error' };
     }
 
     // Parse signature header
@@ -117,10 +117,13 @@ async function verifyStripeSignature(payload, signature) {
 
     // Compute expected signature
     const signedPayload = `${timestamp}.${payload}`;
-    const expectedSignature = await computeHmacSignature(signedPayload, webhookSecret);
+    const expectedSignature = computeHmacSignature(signedPayload, webhookSecret);
 
     // Compare signatures (timing-safe comparison)
-    if (expectedSignature !== signatureHash) {
+    const expectedBuffer = Buffer.from(expectedSignature);
+    const signatureBuffer = Buffer.from(signatureHash);
+
+    if (expectedBuffer.length !== signatureBuffer.length || !crypto.timingSafeEqual(expectedBuffer, signatureBuffer)) {
       return { success: false, error: 'Signature mismatch' };
     }
 
@@ -133,36 +136,12 @@ async function verifyStripeSignature(payload, signature) {
 
 /**
  * Compute HMAC-SHA256 signature
- * Wix Velo uses Web Crypto API
+ * Uses Node.js crypto module
  */
-async function computeHmacSignature(message, secret) {
-  try {
-    // Encode the key and message
-    const encoder = new TextEncoder();
-    const keyData = encoder.encode(secret);
-    const messageData = encoder.encode(message);
-
-    // Import key for HMAC
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign']
-    );
-
-    // Sign the message
-    const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageData);
-
-    // Convert to hex string
-    const hashArray = Array.from(new Uint8Array(signature));
-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-    return hashHex;
-  } catch (error) {
-    console.error('[Webhook] HMAC computation error:', error);
-    throw error;
-  }
+function computeHmacSignature(message, secret) {
+  return crypto.createHmac('sha256', secret)
+    .update(message)
+    .digest('hex');
 }
 
 // ============================================================================
