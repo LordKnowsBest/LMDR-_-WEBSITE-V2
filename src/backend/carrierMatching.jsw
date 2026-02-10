@@ -87,9 +87,10 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
   console.log(`📊 Max results to return: ${maxResults}`);
   
   // Fire off driver profile update (non-blocking — result only used in response payload)
-  const profilePromise = updateDriverPreferences(driverPrefs)
-    .then(r => r.success ? r.profile : null)
-    .catch(() => null);
+  let resolvedProfile = null;
+  updateDriverPreferences(driverPrefs)
+    .then(r => { resolvedProfile = r.success ? r.profile : null; })
+    .catch(() => {});
   
   try {
     // STEP 1: Query the database
@@ -112,7 +113,7 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
 
     if (carrierItems.length === 0) {
       log({ level: 'WARN', source: 'carrier-matching', message: 'No carriers in database', traceId }).catch(() => {});
-      await endTrace(traceId, 'completed', { totalMatches: 0, elapsed: Date.now() - startTime });
+      endTrace(traceId, 'completed', { totalMatches: 0, elapsed: Date.now() - startTime }).catch(() => {});
       return {
         success: true,
         matches: [],
@@ -186,13 +187,14 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     const needsFreshCount = matchesWithStatus.filter(m => m.needsEnrichment).length;
     const elapsed = Date.now() - startTime;
 
-    // Collect deferred profile (should be long resolved by now)
-    const driverProfile = await profilePromise;
-
-    await Promise.all([
+    // Fire-and-forget final observability (don't block the response)
+    Promise.all([
       log({ level: 'INFO', source: 'carrier-matching', message: `Match complete: ${matchesWithStatus.length} results`, traceId, duration: elapsed, details: { totalScored: scoredCarriers.length, totalMatches: validCarriers.length, returned: matchesWithStatus.length } }),
       endTrace(traceId, 'completed', { totalMatches: matchesWithStatus.length, totalScored: scoredCarriers.length, elapsed })
-    ]);
+    ]).catch(() => {});
+
+    // Use whatever profile data resolved during the work above (no extra wait)
+    const driverProfile = resolvedProfile;
 
     return {
       success: true,
@@ -217,10 +219,11 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     };
 
   } catch (error) {
-    await Promise.all([
+    // Fire-and-forget error logging (don't delay error response)
+    Promise.all([
       log({ level: 'ERROR', source: 'carrier-matching', message: `Match failed: ${error.message}`, traceId, details: { error: error.message } }),
       endTrace(traceId, 'error', { error: error.message })
-    ]);
+    ]).catch(() => {});
 
     return {
       success: false,
