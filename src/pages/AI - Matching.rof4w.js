@@ -743,15 +743,26 @@ async function handleRetryEnrichment(data) {
 async function handleLogInterest(data) {
   console.log('📝 Logging interest:', data.carrierName);
 
+  const INTEREST_TIMEOUT_MS = 10000;
+
   try {
-    const result = await logMatchEvent({
-      carrierDOT: data.carrierDOT,
-      carrierName: data.carrierName,
-      driverZip: data.driverZip,
-      driverName: data.driverName,
-      matchScore: data.matchScore,
-      action: 'interested'
-    });
+    const result = await Promise.race([
+      logMatchEvent({
+        carrierDOT: data.carrierDOT,
+        carrierName: data.carrierName,
+        driverZip: data.driverZip,
+        driverName: data.driverName,
+        matchScore: data.matchScore,
+        action: 'interested'
+      }),
+      new Promise(resolve =>
+        setTimeout(() => resolve({ success: true, method: 'optimistic', timedOut: true }), INTEREST_TIMEOUT_MS)
+      )
+    ]);
+
+    if (result.timedOut) {
+      console.log('⏱️ Interest save timed out — responding optimistically');
+    }
 
     if (result.success) {
       sendToHtml('interestLogged', {
@@ -761,7 +772,6 @@ async function handleLogInterest(data) {
         isNew: result.isNew
       });
     } else {
-      // Always respond even on failure so HTML doesn't hang
       console.log('⚠️ Interest logging failed:', result.error);
       sendToHtml('interestLogged', {
         success: false,
@@ -771,7 +781,6 @@ async function handleLogInterest(data) {
     }
   } catch (error) {
     console.error('Error logging interest:', error);
-    // Send error response so HTML doesn't hang on "SAVING..."
     sendToHtml('interestLogged', {
       success: false,
       carrierDOT: data.carrierDOT,
