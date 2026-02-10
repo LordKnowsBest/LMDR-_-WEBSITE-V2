@@ -72,18 +72,33 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
       return { ...cached, fmcsa: transformFMCSAForFrontend(null), fromCache: true };
     }
 
-    // NO CACHE: Return fallback immediately, run full pipeline in background
-    console.log(`[aiEnrichment] No cache for DOT ${dot} — returning fallback, enriching in background`);
+    // NO CACHE: Run full pipeline synchronously with timeout budget
+    // Fire-and-forget is unreliable in Wix serverless — runtime kills the promise after HTTP response
+    console.log(`[aiEnrichment] No cache for DOT ${dot} — running pipeline with 8s budget`);
 
-    // Fire-and-forget: full enrichment pipeline writes to cache for next request
-    _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialIntel, traceId).catch(err => {
-      console.error(`[aiEnrichment] Background enrichment failed for DOT ${dot}:`, err.message);
-    });
+    const ENRICHMENT_BUDGET_MS = 8000;
+    const pipelineResult = await Promise.race([
+      _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialIntel, traceId)
+        .then(result => ({ completed: true, ...result }))
+        .catch(err => {
+          console.error(`[aiEnrichment] Pipeline failed for DOT ${dot}:`, err.message);
+          return null;
+        }),
+      new Promise(resolve =>
+        setTimeout(() => resolve(null), ENRICHMENT_BUDGET_MS)
+      )
+    ]);
 
-    // Return immediately with fallback — user can click "Retry" to get cached result
+    if (pipelineResult?.completed) {
+      console.log(`[aiEnrichment] Pipeline completed for DOT ${dot} in ${Date.now() - startTime}ms`);
+      return { ...pipelineResult, fmcsa: transformFMCSAForFrontend(null), fromCache: false };
+    }
+
+    // Timed out or failed — return fallback
+    console.log(`[aiEnrichment] Pipeline timed out for DOT ${dot} (${Date.now() - startTime}ms)`);
     return {
-      ...generateFallbackEnrichment(dot, carrierData, driverPrefs, 'Building AI profile...', transformFMCSAForFrontend(null)),
-      building: true // Signal to frontend that enrichment is in progress
+      ...generateFallbackEnrichment(dot, carrierData, driverPrefs, 'AI profile unavailable', transformFMCSAForFrontend(null)),
+      building: false
     };
 
   } catch (error) {
@@ -136,6 +151,8 @@ async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialInt
   console.log(`[aiEnrichment] Background enrichment complete for DOT ${dot} in ${elapsed}ms`);
 
   endTrace(traceId, 'completed', { elapsed, dot }).catch(() => {});
+
+  return enrichedData;
 }
 
 // ============================================================================

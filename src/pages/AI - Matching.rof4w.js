@@ -39,6 +39,7 @@ const CONFIG = {
 let cachedUserStatus = null;
 let cachedDriverProfile = null;
 let cachedDriverInterests = [];
+let lastSearchResults = null;
 
 // ============================================================================
 // MESSAGE VALIDATION SYSTEM
@@ -373,13 +374,41 @@ async function handleGetMatchExplanation(payload) {
   try {
     const userStatus = await getUserStatus();
 
-    // We require login for personalization
+    // For anonymous users, build explanation from local match data
     if (!userStatus.loggedIn) {
-      sendToHtml('matchExplanation', {
-        success: false,
-        carrierDot: payload?.carrierDot,
-        error: 'Must be logged in to view detailed match info'
-      });
+      const matchData = lastSearchResults?.matches?.find(
+        m => String(m.carrier?.DOT_NUMBER) === String(payload?.carrierDot)
+      );
+
+      if (matchData) {
+        sendToHtml('matchExplanation', {
+          success: true,
+          carrierDot: payload.carrierDot,
+          overallScore: matchData.overallScore,
+          explanation: {
+            summary: matchData.overallScore >= 70
+              ? 'This carrier is a strong match for your preferences.'
+              : matchData.overallScore >= 50
+                ? 'This carrier partially matches your preferences.'
+                : 'This carrier has some differences from your preferences.',
+            categories: Object.entries(matchData.breakdown || {}).map(([key, val]) => ({
+              key,
+              label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
+              score: Math.round(val.score || 0),
+              weight: val.weight || 0,
+              text: val.reason || `Score: ${Math.round(val.score || 0)}%`,
+              status: (val.score || 0) >= 70 ? 'good' : (val.score || 0) >= 40 ? 'partial' : 'poor'
+            })),
+            tip: 'Sign up to see personalized match insights based on your full profile.'
+          }
+        });
+      } else {
+        sendToHtml('matchExplanation', {
+          success: false,
+          carrierDot: payload?.carrierDot,
+          error: 'Match data not available'
+        });
+      }
       return;
     }
 
@@ -561,6 +590,9 @@ async function handleFindMatches(driverPrefs, userStatus) {
         // Don't fail the search, just log and continue without mutual data
       }
     }
+
+    // Store results for later use (e.g., anonymous match explanations)
+    lastSearchResults = { ...result, matches: enrichedMatches };
 
     // Send results with tier info AND profile info
     sendToHtml('matchResults', {
