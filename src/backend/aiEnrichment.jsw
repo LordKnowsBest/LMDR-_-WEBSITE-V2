@@ -58,85 +58,84 @@ async function getCachedSecret(secretName) {
 
 export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialIntel = null) {
   const dot = String(dotNumber).trim();
-  const TOTAL_BUDGET_MS = 8000; // Hard ceiling — Wix gateway observed at ~10s, must return before that
-
-  // Race the entire pipeline against a total timeout
-  // If we exceed budget, return fallback instead of letting Wix 504 us
-  const timeoutFallback = new Promise(resolve => {
-    setTimeout(() => {
-      console.warn(`[aiEnrichment] Total budget exceeded for DOT ${dot} — returning fallback`);
-      resolve(generateFallbackEnrichment(dot, carrierData, driverPrefs, 'Enrichment timeout', transformFMCSAForFrontend(null)));
-    }, TOTAL_BUDGET_MS);
-  });
-
-  return Promise.race([
-    _enrichCarrierPipeline(dot, carrierData, driverPrefs, socialIntel),
-    timeoutFallback
-  ]);
-}
-
-async function _enrichCarrierPipeline(dot, carrierData, driverPrefs, socialIntel) {
   const startTime = Date.now();
-
-  // Generate traceId locally — fire-and-forget the trace start
-  const traceId = 'tr_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
-  startTrace('enrichCarrier', {
-    dotNumber: dot,
-    hasSocialIntel: !!socialIntel,
-    tags: ['ai-enrichment', 'pipeline'],
-    traceId
-  }).catch(() => {});
 
   console.log(`[aiEnrichment] Starting enrichment for DOT ${dot}`);
 
-  // PARALLEL PHASE: Run FMCSA + cache check + Perplexity concurrently
+  try {
+    // FAST PATH: Check cache first (single Airtable read, ~1-2s)
+    const traceId = 'tr_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    const cached = await getCachedSentiment(dot, traceId).catch(() => null);
+
+    if (cached && !isSentimentStale(cached.enriched_date)) {
+      console.log(`[aiEnrichment] Cache hit for DOT ${dot} (${cached.cache_age_days}d old, ${Date.now() - startTime}ms)`);
+      return { ...cached, fmcsa: transformFMCSAForFrontend(null), fromCache: true };
+    }
+
+    // NO CACHE: Return fallback immediately, run full pipeline in background
+    console.log(`[aiEnrichment] No cache for DOT ${dot} — returning fallback, enriching in background`);
+
+    // Fire-and-forget: full enrichment pipeline writes to cache for next request
+    _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialIntel, traceId).catch(err => {
+      console.error(`[aiEnrichment] Background enrichment failed for DOT ${dot}:`, err.message);
+    });
+
+    // Return immediately with fallback — user can click "Retry" to get cached result
+    return {
+      ...generateFallbackEnrichment(dot, carrierData, driverPrefs, 'Building AI profile...', transformFMCSAForFrontend(null)),
+      building: true // Signal to frontend that enrichment is in progress
+    };
+
+  } catch (error) {
+    console.error(`[aiEnrichment] enrichCarrier error for DOT ${dot}:`, error.message);
+    return generateFallbackEnrichment(dot, carrierData, driverPrefs, error.message, transformFMCSAForFrontend(null));
+  }
+}
+
+/**
+ * Background enrichment — runs after we've already returned to the caller.
+ * Writes result to cache so the next "Retry" request gets the real data.
+ */
+async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialIntel, traceId) {
+  const startTime = Date.now();
+
+  startTrace('enrichCarrier', {
+    dotNumber: dot,
+    hasSocialIntel: !!socialIntel,
+    tags: ['ai-enrichment', 'background'],
+    traceId
+  }).catch(() => {});
+
+  // PARALLEL PHASE: FMCSA + Perplexity (if enabled)
   const carrierName = carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
   const carrierLocation = `${carrierData.PHY_CITY || ''}, ${carrierData.PHY_STATE || ''}`;
 
-  const [fmcsaResult, cacheResult, researchResult] = await Promise.allSettled([
+  const [fmcsaResult, researchResult] = await Promise.allSettled([
     getCarrierSafetyData(dot).catch(err => {
-      console.error(`[aiEnrichment] FMCSA Service failed for ${dot}:`, err.message);
+      console.error(`[aiEnrichment] FMCSA failed for ${dot}:`, err.message);
       return { error: true, error_message: "FMCSA Service Unavailable" };
     }),
-    getCachedSentiment(dot, traceId),
     CONFIG.enablePerplexity
       ? fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId)
       : Promise.resolve('')
   ]);
 
-  const fmcsaData = fmcsaResult.status === 'fulfilled' ? fmcsaResult.value : { error: true, error_message: "FMCSA Service Unavailable" };
-  const cached = cacheResult.status === 'fulfilled' ? cacheResult.value : null;
+  const fmcsaData = fmcsaResult.status === 'fulfilled' ? fmcsaResult.value : { error: true };
   const rawResearch = researchResult.status === 'fulfilled' ? researchResult.value : '';
 
-  console.log(`[aiEnrichment] Parallel phase done for DOT ${dot} in ${Date.now() - startTime}ms`);
+  // SYNTHESIS: Claude
+  const { systemPrompt, userPrompt } = buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel);
+  const combinedResearch = (rawResearch + "\n\n" + (socialIntel || "")).trim();
 
-  const fmcsaForFrontend = transformFMCSAForFrontend(fmcsaData);
+  const enrichedData = await callClaudeSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
 
-  try {
-    // Return cache hit immediately if fresh
-    if (cached && !isSentimentStale(cached.enriched_date)) {
-      console.log(`[aiEnrichment] Using cached enrichment for DOT ${dot} (${cached.cache_age_days} days old)`);
-      return { ...cached, fmcsa: fmcsaForFrontend, fromCache: true };
-    }
+  // Cache the result for the next request
+  await cacheSentimentEnrichment(enrichedData, traceId).catch(() => {});
 
-    // SYNTHESIS: Claude with research + FMCSA context
-    const { systemPrompt, userPrompt } = buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel);
-    const combinedResearch = (rawResearch + "\n\n" + (socialIntel || "")).trim();
+  const elapsed = Date.now() - startTime;
+  console.log(`[aiEnrichment] Background enrichment complete for DOT ${dot} in ${elapsed}ms`);
 
-    const enrichedData = await callClaudeSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
-
-    // Fire-and-forget cache write — don't block the response
-    cacheSentimentEnrichment(enrichedData, traceId).catch(() => {});
-
-    const elapsed = Date.now() - startTime;
-    console.log(`[aiEnrichment] Enrichment complete for DOT ${dot} in ${elapsed}ms`);
-
-    return { ...enrichedData, fmcsa: fmcsaForFrontend, fromCache: false };
-
-  } catch (error) {
-    console.error(`[aiEnrichment] Enrichment Pipeline Error for DOT ${dot}:`, error.message);
-    return generateFallbackEnrichment(dot, carrierData, driverPrefs, error.message, fmcsaForFrontend);
-  }
+  endTrace(traceId, 'completed', { elapsed, dot }).catch(() => {});
 }
 
 // ============================================================================

@@ -591,9 +591,17 @@ async function handleFindMatches(driverPrefs, userStatus) {
 
       const enrichment = await enrichWithRetry(dotNumber, topMatch.carrier, driverPrefs);
 
+      // Determine status: 'complete' (real data), 'building' (background in progress), or 'error'
+      let enrichStatus = 'complete';
+      if (enrichment.building) {
+        enrichStatus = 'building';
+      } else if (enrichment.error) {
+        enrichStatus = 'error';
+      }
+
       sendToHtml('enrichmentUpdate', {
         dot_number: dotNumber,
-        status: enrichment.error ? 'error' : 'complete',
+        status: enrichStatus,
         ...enrichment
       });
 
