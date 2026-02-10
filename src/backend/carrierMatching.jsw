@@ -1,7 +1,7 @@
 import { updateDriverPreferences, logCarrierInterest } from 'backend/driverProfiles';
 import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
 import * as dataAccess from 'backend/dataAccess';
-import { getRecruiterStats } from 'backend/recruiterStats';
+import { getRecruiterStatsBatch } from 'backend/recruiterStats';
 
 // ============================================================================
 // SHARED SCORING MODULE
@@ -67,13 +67,13 @@ async function getExistingEnrichments(dotNumbers) {
 export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
   const startTime = Date.now();
 
-  // Start distributed trace for this matching operation
-  const trace = await startTrace('findMatchingCarriers', {
+  // Generate traceId locally and fire-and-forget the Airtable insert
+  const traceId = 'tr_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+  startTrace('findMatchingCarriers', {
     isPremiumUser,
     operationType: driverPrefs.operationType,
     tags: ['carrier-matching', 'search']
-  });
-  const traceId = trace.traceId;
+  }).catch(() => {});
 
   console.log('🚀 ===== BACKEND: findMatchingCarriers =====');
   console.log('📋 Prefs received:', JSON.stringify(driverPrefs));
@@ -156,19 +156,15 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     const dotNumbers = topMatches.map(m => m.carrier.DOT_NUMBER);
 
     let cachedEnrichments = {};
-    const responsivenessStats = {};
+    let responsivenessStats = {};
 
     try {
-      const [enrichments] = await Promise.all([
+      const [enrichments, statsMap] = await Promise.all([
         getExistingEnrichments(dotNumbers),
-        Promise.all(dotNumbers.map(async (dot) => {
-          try {
-            const stats = await getRecruiterStats(dot);
-            responsivenessStats[dot] = stats;
-          } catch (e) { /* ignore */ }
-        }))
+        getRecruiterStatsBatch(dotNumbers)
       ]);
       cachedEnrichments = enrichments;
+      responsivenessStats = statsMap;
     } catch (cacheErr) {
       console.warn('⚠️ Cache/Stats lookup failed:', cacheErr.message);
     }
