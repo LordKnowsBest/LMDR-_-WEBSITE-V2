@@ -471,6 +471,7 @@ function handleMatchExplanationResult(data) {
         <i class="fa-solid fa-circle-exclamation"></i> Could not load explanation.
       </div>
     `;
+    panel.dataset.loaded = "true";
     return;
   }
 

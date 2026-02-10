@@ -420,7 +420,7 @@ async function handleGetMatchExplanation(payload) {
 
     const result = await getMatchExplanationForDriver(userStatus.userId, carrierDot);
 
-    sendToHtml('matchExplanation', result);
+    sendToHtml('matchExplanation', { ...result, carrierDot });
   } catch (error) {
     console.error('Error getting match explanation:', error);
     sendToHtml('matchExplanation', {
