@@ -587,7 +587,7 @@ export const AIRTABLE_TABLE_NAMES = {
 
   // Enrichment & Cache
   carrierEnrichments: 'v2_Carrier Enrichments',
-  carrierSafetyData: 'v2_Carrier Safety Data',
+  carrierSafetyData: 'v2_FMCSA Safety Data',
 
   // Billing & Subscriptions
   carrierSubscriptions: 'v2_Carrier Subscriptions',
