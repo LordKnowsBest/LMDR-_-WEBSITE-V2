@@ -17,9 +17,21 @@
 - Unit tests added and passing:
   - `src/public/__tests__/apiGateway.external.test.js`
   - `src/public/__tests__/externalDocumentApi.test.js`
+- External webhook reliability hardening:
+  - Added scheduled retry job entrypoint `src/backend/apiWebhookJobs.jsw` (`processApiWebhookRetries`)
+  - Added `jobs.config` schedule (`*/5 * * * *`) for queued webhook retries
+  - Wired CSA alert generation in `csaMonitorService.jsw` to dispatch partner safety alert webhook events via `apiWebhookService`
+  - Fixed CSA trend baseline parsing to compare against parsed prior snapshot basics
+- New tests added and passing:
+  - `src/public/__tests__/apiWebhookJobs.test.js`
+  - `src/public/__tests__/csaMonitorService.test.js`
+- API documentation baseline:
+  - Added OpenAPI spec draft for implemented `/v1/*` surface: `docs/api/openapi.external.v1.yaml`
+  - Added Postman collection: `docs/api/postman.external.v1.collection.json`
+  - Added initial integration guide: `docs/api/integration-guide.external.v1.md`
 
 ## Not Yet Implemented
-- OpenAPI specs / Postman collections / integration guides.
+- Category-specific integration guides (Safety/Intelligence/Operations/Matching/Documents/Engagement deep dives).
 - Full webhook delivery pipeline (signatures, retries, event dispatch).
 - Billing integration for API tiers and overage billing.
 - Frontend developer portal + admin partner management pages.
