@@ -724,7 +724,12 @@ async function handleRetryEnrichment(data) {
   await delay(2000);
 
   try {
-    const enrichment = await enrichCarrier(dotNumber, { DOT_NUMBER: dotNumber }, {});
+    // Look up full carrier data from last search results so enrichment has the carrier name
+    const matchData = lastSearchResults?.matches?.find(
+      m => String(m.carrier?.DOT_NUMBER) === String(dotNumber)
+    );
+    const carrierData = matchData?.carrier || { DOT_NUMBER: dotNumber };
+    const enrichment = await enrichCarrier(dotNumber, carrierData, {});
     sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'complete', ...enrichment });
   } catch (error) {
     sendToHtml('enrichmentUpdate', {
