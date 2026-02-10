@@ -2,7 +2,6 @@
 // Page Code for the Checkout Page
 
 import wixLocation from 'wix-location';
-import { getSecret } from 'wix-secrets-backend'; // Note: Only works in backend, will need backend function for key
 import { createPlacementDepositCheckout, getPublishableKey } from 'backend/stripeService';
 import { getLeadDetails } from 'backend/carrierLeadsService'; // Need to ensure this exists or create it
 
