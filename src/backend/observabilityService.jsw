@@ -72,10 +72,13 @@ async function requireSuperAdmin() {
 }
 
 // ============================================
-// CIRCUIT BREAKER — stops writing after consecutive failures
+// AIRTABLE WRITE THROTTLE
 // ============================================
+// Only CRITICAL-level events get persisted to Airtable.
+// Everything else is console-only to stay within the 50k record limit.
+const PERSIST_THRESHOLD = 4; // CRITICAL = 4, ERROR = 3
 let __logFailCount = 0;
-const LOG_FAIL_THRESHOLD = 3; // After 3 consecutive failures, stop trying
+const LOG_FAIL_THRESHOLD = 3;
 
 // ============================================
 // LOGGING FUNCTIONS
@@ -85,11 +88,6 @@ const LOG_FAIL_THRESHOLD = 3; // After 3 consecutive failures, stop trying
  * Log an event to the system
  */
 export async function log(logEntry) {
-    // Circuit breaker: skip writes after consecutive failures (table full, etc.)
-    if (__logFailCount >= LOG_FAIL_THRESHOLD) {
-        return { timestamp: new Date().toISOString(), level: logEntry.level || 'INFO', skipped: true };
-    }
-
     const entry = {
         timestamp: new Date().toISOString(),
         level: logEntry.level || 'INFO',
@@ -106,43 +104,33 @@ export async function log(logEntry) {
         tags: Array.isArray(logEntry.tags) ? logEntry.tags.join(', ') : (logEntry.tags || '')
     };
 
+    // Below CRITICAL threshold → console only, no Airtable write
+    if (entry.level_num < PERSIST_THRESHOLD || __logFailCount >= LOG_FAIL_THRESHOLD) {
+        return entry;
+    }
+
     try {
-        // 1. Add to errors collection for ERROR/CRITICAL levels
-        if (entry.level === 'ERROR' || entry.level === 'CRITICAL') {
-            const errorRecord = {
-                timestamp: entry.timestamp,
-                level: entry.level,
-                level_num: entry.level_num,
-                source: entry.source,
-                message: entry.message,
-                details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details),
-                trace_id: entry.trace_id,
-                span_id: entry.span_id,
-                parent_span_id: entry.parent_span_id,
-                user_id: entry.user_id,
-                session_id: entry.session_id,
-                duration: entry.duration,
-                tags: entry.tags
-            };
-            await dataAccess.insertRecord(COLLECTION_KEYS.errors, errorRecord, { suppressAuth: true });
-        }
-
-        // 2. Main SystemLogs entry
-        const logRecord = {
-            log_id: entry.trace_id + '_' + entry.span_id,
+        const errorRecord = {
+            timestamp: entry.timestamp,
             level: entry.level,
-            service: entry.source,
+            level_num: entry.level_num,
+            source: entry.source,
             message: entry.message,
-            log_date: entry.timestamp
+            details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details),
+            trace_id: entry.trace_id,
+            span_id: entry.span_id,
+            parent_span_id: entry.parent_span_id,
+            user_id: entry.user_id,
+            session_id: entry.session_id,
+            duration: entry.duration,
+            tags: entry.tags
         };
-        await dataAccess.insertRecord(COLLECTION_KEYS.logs, logRecord, { suppressAuth: true });
-
-        // Reset circuit breaker on success
+        await dataAccess.insertRecord(COLLECTION_KEYS.errors, errorRecord, { suppressAuth: true });
         __logFailCount = 0;
     } catch (error) {
         __logFailCount++;
         if (__logFailCount === LOG_FAIL_THRESHOLD) {
-            console.warn('[Observability] Circuit breaker tripped — logging disabled until next successful write');
+            console.warn('[Observability] Circuit breaker tripped — logging disabled');
         }
     }
 
@@ -185,16 +173,8 @@ export async function logExternalAPI(apiLog) {
  * Log a database operation
  */
 export async function logDatabase(dbLog) {
-    return log({
-        level: dbLog.error ? 'ERROR' : 'DEBUG',
-        source: 'database',
-        message: `${dbLog.operation} on ${dbLog.collection}`,
-        details: dbLog,
-        traceId: dbLog.traceId,
-        spanId: dbLog.spanId,
-        duration: dbLog.latencyMs,
-        tags: ['database', dbLog.collection]
-    });
+    // Console-only — database ops are too frequent to persist
+    return { timestamp: new Date().toISOString(), level: 'DEBUG', source: 'database' };
 }
 
 // ============================================
@@ -205,25 +185,11 @@ export async function logDatabase(dbLog) {
  * Start a new trace
  */
 export async function startTrace(name, metadata = {}) {
-    const trace = {
-        trace_id: generateTraceId(),
-        name,
-        start_time: new Date().toISOString(),
-        status: 'active',
-        spans: '[]',
-        metadata: typeof metadata === 'object' ? JSON.stringify(metadata) : String(metadata),
-        tags: Array.isArray(metadata.tags) ? metadata.tags.join(', ') : (metadata.tags || '')
-    };
-
-    try {
-        await dataAccess.insertRecord(COLLECTION_KEYS.traces, trace, { suppressAuth: true });
-    } catch (error) {
-        console.warn('[Observability] Could not persist trace:', error.message);
-    }
-
+    // In-memory only — no Airtable write (saves record quota)
+    const traceId = generateTraceId();
     return {
-        traceId: trace.trace_id,
-        startSpan: (spanName) => startSpan(trace.trace_id, spanName)
+        traceId,
+        startSpan: (spanName) => startSpan(traceId, spanName)
     };
 }
 
@@ -261,35 +227,8 @@ export function startSpan(traceId, name, parentSpanId = null) {
  * End a trace
  */
 export async function endTrace(traceId, status = 'completed', summary = {}) {
-    try {
-        const result = await dataAccess.queryRecords(COLLECTION_KEYS.traces, {
-            filters: { trace_id: traceId },
-            limit: 1,
-            suppressAuth: true
-        });
-
-        if (!result.success || result.items.length === 0) return null;
-
-        const trace = result.items[0];
-        const endTime = new Date();
-        const startTime = new Date(trace.start_time);
-        const duration = endTime.getTime() - startTime.getTime();
-
-        const traceUpdate = {
-            ...trace,
-            _id: trace._id,
-            end_time: endTime.toISOString(),
-            status: status,
-            duration: duration,
-            summary: typeof summary === 'object' ? JSON.stringify(summary) : String(summary)
-        };
-
-        const updateResult = await dataAccess.updateRecord(COLLECTION_KEYS.traces, traceUpdate, { suppressAuth: true });
-        return updateResult.record;
-    } catch (error) {
-        console.error('[Observability] Failed to end trace:', error.message);
-        return null;
-    }
+    // No-op — traces are in-memory only (saves record quota)
+    return null;
 }
 
 // ============================================
