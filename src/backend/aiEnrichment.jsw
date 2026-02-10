@@ -57,6 +57,24 @@ async function getCachedSecret(secretName) {
 
 export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialIntel = null) {
   const dot = String(dotNumber).trim();
+  const TOTAL_BUDGET_MS = 12000; // Hard ceiling — must return before Wix 14s gateway kills us
+
+  // Race the entire pipeline against a total timeout
+  // If we exceed budget, return fallback instead of letting Wix 504 us
+  const timeoutFallback = new Promise(resolve => {
+    setTimeout(() => {
+      console.warn(`[aiEnrichment] Total budget exceeded for DOT ${dot} — returning fallback`);
+      resolve(generateFallbackEnrichment(dot, carrierData, driverPrefs, 'Enrichment timeout', transformFMCSAForFrontend(null)));
+    }, TOTAL_BUDGET_MS);
+  });
+
+  return Promise.race([
+    _enrichCarrierPipeline(dot, carrierData, driverPrefs, socialIntel),
+    timeoutFallback
+  ]);
+}
+
+async function _enrichCarrierPipeline(dot, carrierData, driverPrefs, socialIntel) {
   const startTime = Date.now();
 
   // Generate traceId locally — fire-and-forget the trace start
@@ -69,10 +87,8 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
   }).catch(() => {});
 
   console.log(`[aiEnrichment] Starting enrichment for DOT ${dot}`);
-  log({ level: 'INFO', source: 'ai-enrichment', message: `Starting enrichment for DOT ${dot}`, traceId }).catch(() => {});
 
   // PARALLEL PHASE: Run FMCSA + cache check + Perplexity concurrently
-  // This saves 2-4s vs sequential — critical for Wix's ~14s gateway timeout
   const carrierName = carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
   const carrierLocation = `${carrierData.PHY_CITY || ''}, ${carrierData.PHY_STATE || ''}`;
 
@@ -93,14 +109,12 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
 
   console.log(`[aiEnrichment] Parallel phase done for DOT ${dot} in ${Date.now() - startTime}ms`);
 
-  // Use FMCSA names if available (more accurate than carrier data)
   const fmcsaForFrontend = transformFMCSAForFrontend(fmcsaData);
 
   try {
     // Return cache hit immediately if fresh
     if (cached && !isSentimentStale(cached.enriched_date)) {
       console.log(`[aiEnrichment] Using cached enrichment for DOT ${dot} (${cached.cache_age_days} days old)`);
-      endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime }).catch(() => {});
       return { ...cached, fmcsa: fmcsaForFrontend, fromCache: true };
     }
 
@@ -116,15 +130,10 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
     const elapsed = Date.now() - startTime;
     console.log(`[aiEnrichment] Enrichment complete for DOT ${dot} in ${elapsed}ms`);
 
-    log({ level: 'INFO', source: 'ai-enrichment', message: `Enrichment complete for DOT ${dot}`, traceId, duration: elapsed, details: { confidence: enrichedData.data_confidence } }).catch(() => {});
-    endTrace(traceId, 'completed', { fromCache: false, elapsed, confidence: enrichedData.data_confidence }).catch(() => {});
-
     return { ...enrichedData, fmcsa: fmcsaForFrontend, fromCache: false };
 
   } catch (error) {
     console.error(`[aiEnrichment] Enrichment Pipeline Error for DOT ${dot}:`, error.message);
-    log({ level: 'ERROR', source: 'ai-enrichment', message: `Enrichment failed for DOT ${dot}`, traceId, details: { error: error.message } }).catch(() => {});
-    endTrace(traceId, 'error', { error: error.message }).catch(() => {});
     return generateFallbackEnrichment(dot, carrierData, driverPrefs, error.message, fmcsaForFrontend);
   }
 }
