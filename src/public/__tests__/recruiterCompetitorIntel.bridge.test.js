@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Bridge Test: RECRUITER_COMPETITOR_INTEL.hvbs4.js
  *

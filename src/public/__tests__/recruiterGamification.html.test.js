@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * RECRUITER_GAMIFICATION HTML DOM Tests
  * ========================================

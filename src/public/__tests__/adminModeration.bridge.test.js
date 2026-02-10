@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_MODERATION Bridge Tests
  *

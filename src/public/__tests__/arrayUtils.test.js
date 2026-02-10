@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Unit tests for arrayUtils module
  */

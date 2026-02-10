@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * B2B Bridge Service - Integration Tests
  *

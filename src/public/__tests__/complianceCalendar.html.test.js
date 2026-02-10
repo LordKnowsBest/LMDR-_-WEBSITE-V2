@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * CARRIER_COMPLIANCE_CALENDAR HTML DOM Tests
  * ============================================

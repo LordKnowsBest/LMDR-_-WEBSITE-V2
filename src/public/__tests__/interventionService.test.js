@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Tests for interventionService.jsw
  * Covers template CRUD, variable substitution, default seeding, outcome tracking

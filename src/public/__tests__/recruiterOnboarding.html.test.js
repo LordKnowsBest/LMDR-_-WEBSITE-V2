@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * RECRUITER_ONBOARDING_DASHBOARD.html DOM Tests
  *

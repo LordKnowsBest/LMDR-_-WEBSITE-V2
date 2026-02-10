@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * HTML DOM TESTS: Quick Apply
  * ===========================

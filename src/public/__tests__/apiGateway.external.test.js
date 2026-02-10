@@ -1,3 +1,4 @@
+/* eslint-disable */
 import { handleGatewayRequest } from '../../backend/apiGateway.jsw';
 
 jest.mock('backend/apiAuthService', () => ({

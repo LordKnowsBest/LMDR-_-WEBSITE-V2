@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * BRIDGE TEST: Driver Dashboard Page
  * ====================================

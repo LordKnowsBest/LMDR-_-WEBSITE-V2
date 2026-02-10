@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * BRIDGE TESTS: Recruiter Driver Search Page
  * ==========================================

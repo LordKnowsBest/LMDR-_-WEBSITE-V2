@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * B2B Account Detail HTML DOM Tests
  *

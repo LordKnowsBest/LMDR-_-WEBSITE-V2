@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * B2B Pipeline Bridge Tests
  *

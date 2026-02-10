@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Recruiter Onboarding Dashboard Page Code Tests
  *

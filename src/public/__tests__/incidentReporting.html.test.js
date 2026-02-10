@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * CARRIER_INCIDENT_REPORTING HTML DOM Tests
  * ============================================

@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * RECRUITER_PREDICTIONS Bridge Test
  * Verifies PostMessage protocol between page code and HTML component

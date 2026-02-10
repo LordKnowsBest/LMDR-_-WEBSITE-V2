@@ -1,3 +1,4 @@
+/* eslint-disable */
 
 import { getMutualInterestForDriver } from '../../backend/mutualInterestService';
 import * as dataAccess from '../../backend/dataAccess';

@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * DRIVER_FORUMS Bridge Tests
  *

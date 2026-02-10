@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_COMMISSIONS Bridge + Unit Tests
  *

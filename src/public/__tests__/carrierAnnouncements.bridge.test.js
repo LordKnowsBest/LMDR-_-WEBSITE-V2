@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * CARRIER_ANNOUNCEMENTS Bridge Tests
  * ====================================

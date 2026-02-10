@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_OBSERVABILITY HTML DOM Tests
  * =====================================

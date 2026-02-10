@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_AI_ROUTER Page Code Tests
  *

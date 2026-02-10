@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Jest Setup File
  *

@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_AUDIT_LOG HTML DOM Tests
  * =================================

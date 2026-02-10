@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * CHALLENGES HTML DOM Tests
  * ===========================

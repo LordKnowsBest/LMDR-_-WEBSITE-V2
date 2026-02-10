@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Seasonal Event Service Tests
  *

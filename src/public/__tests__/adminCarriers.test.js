@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_CARRIERS Page Code Tests
  *

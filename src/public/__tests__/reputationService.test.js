@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Reputation Service Logic Tests
  * 

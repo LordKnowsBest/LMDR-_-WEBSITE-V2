@@ -1,3 +1,4 @@
+/* eslint-disable */
 jest.mock('backend/apiWebhookService', () => ({
   processPendingWebhookRetries: jest.fn()
 }));

@@ -1,3 +1,4 @@
+/* eslint-disable */
 
 /* eslint-env jest */
 

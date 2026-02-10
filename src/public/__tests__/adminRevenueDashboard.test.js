@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_REVENUE_DASHBOARD Bridge Tests
  *

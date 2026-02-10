@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Mock for wix-secrets-backend module
  * Used in Jest tests to simulate Wix Secrets API

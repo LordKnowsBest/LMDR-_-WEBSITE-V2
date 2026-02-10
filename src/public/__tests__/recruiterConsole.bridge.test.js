@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * BRIDGE TESTS: Recruiter Console Page
  * =====================================

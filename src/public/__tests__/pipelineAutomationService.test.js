@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Tests for pipelineAutomationService.jsw
  * Covers rule CRUD, conflict detection, event matching, stage transitions, audit logging

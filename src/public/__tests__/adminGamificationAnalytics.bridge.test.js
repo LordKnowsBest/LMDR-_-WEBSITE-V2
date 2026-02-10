@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_GAMIFICATION_ANALYTICS Bridge Tests
  *

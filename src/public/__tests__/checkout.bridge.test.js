@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * BRIDGE TESTS: Checkout Page
  * ===========================

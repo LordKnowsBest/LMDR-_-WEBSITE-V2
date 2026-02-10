@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Mock for wix-members-backend module
  * Used in Jest tests to simulate Wix Members API

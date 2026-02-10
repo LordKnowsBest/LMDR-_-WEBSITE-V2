@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Tests for savedSearchService.jsw
  * Covers CRUD operations, criteria serialization, ownership checks, alert processing

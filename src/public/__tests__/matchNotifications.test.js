@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Match Notifications Service - Logic Verification
  *

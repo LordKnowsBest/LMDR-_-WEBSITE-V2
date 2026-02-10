@@ -1,3 +1,4 @@
+/* eslint-disable */
 
 import { getMatchExplanationForDriver } from 'backend/matchExplanationService';
 import wixData from 'wix-data';

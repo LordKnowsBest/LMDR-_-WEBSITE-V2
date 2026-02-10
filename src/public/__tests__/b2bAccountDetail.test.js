@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * B2B_ACCOUNT_DETAIL Page Code Tests
  *

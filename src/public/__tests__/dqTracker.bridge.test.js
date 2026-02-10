@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * CARRIER_DQ_TRACKER Bridge Tests
  * ==================================

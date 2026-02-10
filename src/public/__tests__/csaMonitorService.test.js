@@ -1,3 +1,4 @@
+/* eslint-disable */
 jest.mock('backend/dataAccess', () => ({
   queryRecords: jest.fn(),
   insertRecord: jest.fn()

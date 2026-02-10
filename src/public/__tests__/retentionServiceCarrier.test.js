@@ -1,3 +1,4 @@
+/* eslint-disable */
 
 // Mock standard library dependencies
 const mockCurrentUser = {

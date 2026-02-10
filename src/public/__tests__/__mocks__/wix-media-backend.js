@@ -1,3 +1,4 @@
+/* eslint-disable */
 
 export const mediaManager = {
     upload: jest.fn().mockResolvedValue({

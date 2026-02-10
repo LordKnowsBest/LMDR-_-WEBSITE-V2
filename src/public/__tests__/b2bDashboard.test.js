@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * B2B Dashboard Page Code Tests
  *

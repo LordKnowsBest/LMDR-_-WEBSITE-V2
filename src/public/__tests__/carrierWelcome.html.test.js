@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Carrier_Welcome.html DOM Tests
  *

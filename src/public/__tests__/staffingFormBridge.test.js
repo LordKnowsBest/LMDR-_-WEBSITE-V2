@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Staffing Form Bridge Contract Tests (Homepage)
  */

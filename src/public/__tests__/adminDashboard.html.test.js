@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_DASHBOARD HTML DOM Tests
  * ===============================

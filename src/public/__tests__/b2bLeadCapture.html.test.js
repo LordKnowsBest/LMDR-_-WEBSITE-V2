@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * B2B Lead Capture HTML DOM Tests
  *

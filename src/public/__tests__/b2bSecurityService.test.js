@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * B2B Security Service - Unit Tests
  *

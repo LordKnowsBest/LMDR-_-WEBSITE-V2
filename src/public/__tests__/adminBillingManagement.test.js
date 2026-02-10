@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_BILLING_MANAGEMENT Bridge Tests
  *

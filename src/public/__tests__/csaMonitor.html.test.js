@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * CARRIER_CSA_MONITOR HTML DOM Tests
  * ====================================

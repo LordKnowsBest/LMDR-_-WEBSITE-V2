@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * HTML COMPONENT DOM TEST TEMPLATE
  * =================================

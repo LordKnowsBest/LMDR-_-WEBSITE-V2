@@ -1,3 +1,4 @@
+/* eslint-disable */
 import { checkAndTrackUsage } from '../../backend/rateLimitService.jsw';
 
 jest.mock('backend/dataAccess', () => ({

@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * CARRIER_ANNOUNCEMENTS.html DOM Tests
  * ======================================

@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Mock for wix-data module
  * Used in Jest tests to simulate Wix Data API

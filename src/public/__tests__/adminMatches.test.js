@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * ADMIN_MATCHES Page Code Tests
  *

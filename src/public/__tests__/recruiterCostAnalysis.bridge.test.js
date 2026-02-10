@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * RECRUITER_COST_ANALYSIS Bridge Tests
  *

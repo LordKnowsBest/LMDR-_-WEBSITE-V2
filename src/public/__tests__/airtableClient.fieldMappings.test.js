@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Airtable Client Field Mapping Tests (carrierStaffingRequests)
  */

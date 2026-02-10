@@ -1,3 +1,4 @@
+/* eslint-disable */
 
 import { getDriverApplications } from '../../backend/applicationService.jsw';
 import * as dataAccess from '../../backend/dataAccess';

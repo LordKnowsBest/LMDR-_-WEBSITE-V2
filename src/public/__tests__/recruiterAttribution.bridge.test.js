@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * RECRUITER_ATTRIBUTION Bridge Tests
  * ====================================

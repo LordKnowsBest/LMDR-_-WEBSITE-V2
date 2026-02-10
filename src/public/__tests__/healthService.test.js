@@ -1,3 +1,4 @@
+/* eslint-disable */
 const wixData = require('wix-data');
 const wixUsersBackend = require('wix-users-backend');
 

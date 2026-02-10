@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Bridge Test: Retention Dashboard Page Code
  *

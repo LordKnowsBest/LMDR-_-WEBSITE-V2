@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Bridge Test: RECRUITER_FUNNEL.c87yk.js
  *

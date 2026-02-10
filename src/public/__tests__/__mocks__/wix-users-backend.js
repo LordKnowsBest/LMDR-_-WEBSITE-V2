@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Mock for wix-users-backend module
  * Used in Jest tests to simulate Wix Users API

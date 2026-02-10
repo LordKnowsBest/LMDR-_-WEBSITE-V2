@@ -1,3 +1,4 @@
+/* eslint-disable */
 /**
  * Tests for callOutcomeService.jsw
  * Covers outcome logging, analytics, feedback weight aggregation, scoring bounds
