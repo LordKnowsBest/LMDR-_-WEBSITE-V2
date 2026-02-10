@@ -1,7 +1,6 @@
 import { updateDriverPreferences, logCarrierInterest } from 'backend/driverProfiles';
 import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
 import * as dataAccess from 'backend/dataAccess';
-import { getRecruiterStatsBatch } from 'backend/recruiterStats';
 
 // ============================================================================
 // SHARED SCORING MODULE
@@ -152,42 +151,18 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     
     const topMatches = validCarriers.slice(0, maxResults);
     
-    // STEP 5: Check enrichment cache & responsiveness (parallel)
-    console.log('📦 Step 6: Checking enrichment cache & responsiveness...');
-    const dotNumbers = topMatches.map(m => m.carrier.DOT_NUMBER);
+    // STEP 5: Build response immediately — enrichment/stats are nice-to-have, not blocking
+    const matchesWithStatus = topMatches.map(m => ({
+      ...m,
+      enrichment: null,
+      needsEnrichment: true,
+      fromCache: false,
+      recruiterStats: null
+    }));
 
-    let cachedEnrichments = {};
-    let responsivenessStats = {};
-
-    try {
-      const [enrichments, statsMap] = await Promise.all([
-        getExistingEnrichments(dotNumbers),
-        getRecruiterStatsBatch(dotNumbers)
-      ]);
-      cachedEnrichments = enrichments;
-      responsivenessStats = statsMap;
-    } catch (cacheErr) {
-      console.warn('⚠️ Cache/Stats lookup failed:', cacheErr.message);
-    }
-    
-    // STEP 6: Build final response
-    const matchesWithStatus = topMatches.map(m => {
-      const dotNum = String(m.carrier.DOT_NUMBER);
-      const cached = cachedEnrichments[dotNum];
-      
-      return {
-        ...m,
-        enrichment: cached || null,
-        needsEnrichment: !cached,
-        fromCache: !!cached,
-        recruiterStats: responsivenessStats[dotNum] || null
-      };
-    });
-
-    const needsFreshCount = matchesWithStatus.filter(m => m.needsEnrichment).length;
     const elapsed = Date.now() - startTime;
 
-    // Fire-and-forget final observability (don't block the response)
+    // Fire-and-forget: enrichment, stats, observability (all non-blocking)
     Promise.all([
       log({ level: 'INFO', source: 'carrier-matching', message: `Match complete: ${matchesWithStatus.length} results`, traceId, duration: elapsed, details: { totalScored: scoredCarriers.length, totalMatches: validCarriers.length, returned: matchesWithStatus.length } }),
       endTrace(traceId, 'completed', { totalMatches: matchesWithStatus.length, totalScored: scoredCarriers.length, elapsed })
@@ -203,8 +178,8 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
       totalMatches: validCarriers.length,
       userTier: isPremiumUser ? 'premium' : 'free',
       maxAllowed: maxResults,
-      cachedCount: matchesWithStatus.length - needsFreshCount,
-      needsEnrichmentCount: needsFreshCount,
+      cachedCount: 0,
+      needsEnrichmentCount: matchesWithStatus.length,
       driverProfile: driverProfile ? {
         id: driverProfile._id,
         displayName: driverProfile.display_name,
