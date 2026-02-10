@@ -11,26 +11,31 @@ const CONFIG = {
   // Collection keys (camelCase, matching configData.js)
   enrichmentsKey: 'carrierEnrichments',
 
-  // Claude Configuration — Haiku for real-time speed (fits Wix 14s timeout)
+  // Groq Configuration — LPU hardware, sub-second inference
+  groqModel: 'llama-3.3-70b-versatile',
+  groqSecret: 'GROQ',
+  groqEndpoint: 'https://api.groq.com/openai/v1/chat/completions',
+  groqTimeoutMs: 3000,
+
+  // Claude Configuration — kept as fallback
   claudeModel: 'claude-haiku-4-5-20251001',
   claudeSecret: 'CLAUDE_API_KEY',
   claudeEndpoint: 'https://api.anthropic.com/v1/messages',
 
-  // Perplexity Configuration — sonar (faster than sonar-pro)
+  // Perplexity Configuration — sonar for real-time web research
   perplexityModel: 'sonar',
   perplexitySecret: 'PERPLEXITY_API_KEY',
   perplexityEndpoint: 'https://api.perplexity.ai/chat/completions',
 
-  // Timeouts & Limits — total budget must fit Wix gateway timeout (~10s observed)
+  // Timeouts & Limits — Groq is fast enough to re-enable Perplexity
   perplexityTimeoutMs: 4000,
   claudeTimeoutMs: 5000,
   maxTokens: 800,
   cacheExpiryDays: 14,
 
-  // Feature Flags — Perplexity disabled for real-time (adds 3-8s, exceeds Wix timeout)
-  // Perplexity runs in background batch job (runEnrichmentBatch) instead
-  enablePerplexity: false,
-  fallbackToClaudeOnly: true
+  // Feature Flags — Perplexity re-enabled (Groq synthesis is <1s, total fits 8s budget)
+  enablePerplexity: true,
+  fallbackToClaudeOnly: false
 };
 
 // ============================================================================
@@ -38,6 +43,7 @@ const CONFIG = {
 // ============================================================================
 let __perplexityKeyCache = null;
 let __claudeKeyCache = null;
+let __groqKeyCache = null;
 let __keyCacheTime = 0;
 const KEY_CACHE_TTL = 3600000; // 1 hour
 
@@ -45,9 +51,11 @@ async function getCachedSecret(secretName) {
   const now = Date.now();
   if (secretName === CONFIG.perplexitySecret && __perplexityKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __perplexityKeyCache;
   if (secretName === CONFIG.claudeSecret && __claudeKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __claudeKeyCache;
+  if (secretName === CONFIG.groqSecret && __groqKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __groqKeyCache;
   const key = await getSecret(secretName);
   if (secretName === CONFIG.perplexitySecret) __perplexityKeyCache = key;
   if (secretName === CONFIG.claudeSecret) __claudeKeyCache = key;
+  if (secretName === CONFIG.groqSecret) __groqKeyCache = key;
   __keyCacheTime = now;
   return key;
 }
@@ -138,14 +146,20 @@ async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialInt
   const fmcsaData = fmcsaResult.status === 'fulfilled' ? fmcsaResult.value : { error: true };
   const rawResearch = researchResult.status === 'fulfilled' ? researchResult.value : '';
 
-  // SYNTHESIS: Claude
+  // SYNTHESIS: Groq LPU (sub-second inference) with Claude fallback
   const { systemPrompt, userPrompt } = buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel);
   const combinedResearch = (rawResearch + "\n\n" + (socialIntel || "")).trim();
 
-  const enrichedData = await callClaudeSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
+  let enrichedData;
+  try {
+    enrichedData = await callGroqSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
+  } catch (groqErr) {
+    console.warn(`[aiEnrichment] Groq failed for DOT ${dot}: ${groqErr.message} — falling back to Claude`);
+    enrichedData = await callClaudeSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
+  }
 
-  // Cache the result for the next request
-  await cacheSentimentEnrichment(enrichedData, traceId).catch(() => {});
+  // Fire-and-forget cache write — don't block the response
+  cacheSentimentEnrichment(enrichedData, traceId).catch(() => {});
 
   const elapsed = Date.now() - startTime;
   console.log(`[aiEnrichment] Background enrichment complete for DOT ${dot} in ${elapsed}ms`);
@@ -333,7 +347,102 @@ function buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel) {
 }
 
 // ============================================================================
-// STAGE 3: CLAUDE SYNTHESIS ENGINE
+// STAGE 3: GROQ LPU SYNTHESIS ENGINE (PRIMARY)
+// ============================================================================
+
+async function callGroqSynthesisWithTimeout(system, user, research, dotNumber, traceId = null) {
+  const apiStartTime = Date.now();
+
+  const apiKey = await getCachedSecret(CONFIG.groqSecret);
+  if (!apiKey) {
+    throw new Error('Groq API key not configured');
+  }
+
+  console.log(`[aiEnrichment] Groq: Synthesizing enrichment for DOT ${dotNumber}`);
+
+  const researchContext = research && research.length > 50
+    ? `\n\nWEB RESEARCH & SOCIAL FINDINGS:\n${research}`
+    : '\n\nNOTE: Limited web research available. Use industry knowledge to make reasonable inferences.';
+
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Groq timeout')), CONFIG.groqTimeoutMs);
+  });
+
+  const fetchPromise = fetch(CONFIG.groqEndpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: CONFIG.groqModel,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `${user}${researchContext}` }
+      ],
+      max_tokens: CONFIG.maxTokens,
+      temperature: 0.3
+    })
+  });
+
+  try {
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+    const latencyMs = Date.now() - apiStartTime;
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'No error details');
+      logAIOperation({
+        source: 'ai-enrichment',
+        operation: 'synthesis',
+        functionId: 'groq-synthesis',
+        provider: 'groq',
+        model: CONFIG.groqModel,
+        latencyMs,
+        error: `HTTP ${response.status}: ${errorText}`,
+        traceId
+      }).catch(() => {});
+      throw new Error(`Groq API Error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    const responseText = data.choices?.[0]?.message?.content || '';
+    const usage = data.usage || {};
+
+    console.log(`[aiEnrichment] Groq returned ${responseText.length} chars in ${latencyMs}ms`);
+
+    logAIOperation({
+      source: 'ai-enrichment',
+      operation: 'synthesis',
+      functionId: 'groq-synthesis',
+      provider: 'groq',
+      model: CONFIG.groqModel,
+      inputTokens: usage.prompt_tokens,
+      outputTokens: usage.completion_tokens,
+      totalTokens: usage.total_tokens,
+      latencyMs,
+      traceId
+    }).catch(() => {});
+
+    return parseSentimentResponse(responseText, dotNumber);
+
+  } catch (error) {
+    const latencyMs = Date.now() - apiStartTime;
+    logAIOperation({
+      source: 'ai-enrichment',
+      operation: 'synthesis',
+      functionId: 'groq-synthesis',
+      provider: 'groq',
+      model: CONFIG.groqModel,
+      latencyMs,
+      error: error.message,
+      traceId
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+// ============================================================================
+// STAGE 3b: CLAUDE SYNTHESIS ENGINE (FALLBACK)
 // ============================================================================
 
 async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber, traceId = null) {
@@ -528,8 +637,8 @@ function parseSentimentResponse(responseText, dotNumber) {
       data_confidence: parsed.data_confidence || 'Low',
       ai_summary: parsed.ai_summary || 'Limited data available. Contact carrier for details.',
       enriched_date: new Date(),
-      enrichment_version: 9, // Bumped version for Social Scanner support
-      source: 'claude-perplexity-hybrid-v3'
+      enrichment_version: 10,
+      source: 'groq-perplexity-hybrid-v4'
     };
   } catch (parseError) {
     console.error('[aiEnrichment] Failed to parse Claude response:', parseError.message);
@@ -540,7 +649,7 @@ function parseSentimentResponse(responseText, dotNumber) {
       data_confidence: "None",
       error: true,
       enriched_date: new Date(),
-      enrichment_version: 9
+      enrichment_version: 10
     };
   }
 }
