@@ -33,6 +33,25 @@ const CONFIG = {
 };
 
 // ============================================================================
+// SECRET CACHING (avoid repeated Wix Secrets lookups)
+// ============================================================================
+let __perplexityKeyCache = null;
+let __claudeKeyCache = null;
+let __keyCacheTime = 0;
+const KEY_CACHE_TTL = 3600000; // 1 hour
+
+async function getCachedSecret(secretName) {
+  const now = Date.now();
+  if (secretName === CONFIG.perplexitySecret && __perplexityKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __perplexityKeyCache;
+  if (secretName === CONFIG.claudeSecret && __claudeKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __claudeKeyCache;
+  const key = await getSecret(secretName);
+  if (secretName === CONFIG.perplexitySecret) __perplexityKeyCache = key;
+  if (secretName === CONFIG.claudeSecret) __claudeKeyCache = key;
+  __keyCacheTime = now;
+  return key;
+}
+
+// ============================================================================
 // MAIN ENRICHMENT PIPELINE - FAULT TOLERANT
 // ============================================================================
 
@@ -40,16 +59,17 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
   const dot = String(dotNumber).trim();
   const startTime = Date.now();
 
-  // Start distributed trace for this enrichment pipeline
-  const trace = await startTrace('enrichCarrier', {
+  // Generate traceId locally — fire-and-forget the trace start
+  const traceId = 'tr_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  startTrace('enrichCarrier', {
     dotNumber: dot,
     hasSocialIntel: !!socialIntel,
-    tags: ['ai-enrichment', 'pipeline']
-  });
-  const traceId = trace.traceId;
+    tags: ['ai-enrichment', 'pipeline'],
+    traceId
+  }).catch(() => {});
 
   console.log(`[aiEnrichment] Starting enrichment for DOT ${dot}`);
-  await log({ level: 'INFO', source: 'ai-enrichment', message: `Starting enrichment for DOT ${dot}`, traceId });
+  log({ level: 'INFO', source: 'ai-enrichment', message: `Starting enrichment for DOT ${dot}`, traceId }).catch(() => {});
 
   // STEP 1: Always fetch Federal Truth (FMCSA) first
   let fmcsaData;
@@ -58,7 +78,7 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
     console.log(`[aiEnrichment] FMCSA data retrieved for DOT ${dot}`);
   } catch (err) {
     console.error(`[aiEnrichment] FMCSA Service failed for ${dot}:`, err.message);
-    await log({ level: 'WARN', source: 'ai-enrichment', message: `FMCSA service failed for DOT ${dot}`, traceId, details: { error: err.message } });
+    log({ level: 'WARN', source: 'ai-enrichment', message: `FMCSA service failed for DOT ${dot}`, traceId, details: { error: err.message } }).catch(() => {});
     fmcsaData = { error: true, error_message: "FMCSA Service Unavailable" };
   }
 
@@ -70,8 +90,8 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
     const cached = await getCachedSentiment(dot, traceId);
     if (cached && !isSentimentStale(cached.enriched_date)) {
       console.log(`[aiEnrichment] Using cached enrichment for DOT ${dot} (${cached.cache_age_days} days old)`);
-      await log({ level: 'INFO', source: 'ai-enrichment', message: `Cache hit for DOT ${dot}`, traceId, details: { cacheAgeDays: cached.cache_age_days } });
-      await endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime });
+      log({ level: 'INFO', source: 'ai-enrichment', message: `Cache hit for DOT ${dot}`, traceId, details: { cacheAgeDays: cached.cache_age_days } }).catch(() => {});
+      endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime }).catch(() => {});
       return { ...cached, fmcsa: fmcsaForFrontend, fromCache: true };
     }
 
@@ -102,15 +122,15 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
     const elapsed = Date.now() - startTime;
     console.log(`[aiEnrichment] Enrichment complete for DOT ${dot} in ${elapsed}ms`);
 
-    await log({ level: 'INFO', source: 'ai-enrichment', message: `Enrichment complete for DOT ${dot}`, traceId, duration: elapsed, details: { confidence: enrichedData.data_confidence } });
-    await endTrace(traceId, 'completed', { fromCache: false, elapsed, confidence: enrichedData.data_confidence });
+    log({ level: 'INFO', source: 'ai-enrichment', message: `Enrichment complete for DOT ${dot}`, traceId, duration: elapsed, details: { confidence: enrichedData.data_confidence } }).catch(() => {});
+    endTrace(traceId, 'completed', { fromCache: false, elapsed, confidence: enrichedData.data_confidence }).catch(() => {});
 
     return { ...enrichedData, fmcsa: fmcsaForFrontend, fromCache: false };
 
   } catch (error) {
     console.error(`[aiEnrichment] Enrichment Pipeline Error for DOT ${dot}:`, error.message);
-    await log({ level: 'ERROR', source: 'ai-enrichment', message: `Enrichment failed for DOT ${dot}`, traceId, details: { error: error.message } });
-    await endTrace(traceId, 'error', { error: error.message });
+    log({ level: 'ERROR', source: 'ai-enrichment', message: `Enrichment failed for DOT ${dot}`, traceId, details: { error: error.message } }).catch(() => {});
+    endTrace(traceId, 'error', { error: error.message }).catch(() => {});
     return generateFallbackEnrichment(dot, carrierData, driverPrefs, error.message, fmcsaForFrontend);
   }
 }
@@ -123,7 +143,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
   const apiStartTime = Date.now();
 
   try {
-    const apiKey = await getSecret(CONFIG.perplexitySecret);
+    const apiKey = await getCachedSecret(CONFIG.perplexitySecret);
     if (!apiKey) {
       console.warn('[aiEnrichment] Perplexity API key not configured');
       return generateInternalResearchFallback(carrierName);
@@ -163,7 +183,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
 
     if (!response.ok) {
       console.warn(`[aiEnrichment] Perplexity API Error: ${response.status}`);
-      await logAIOperation({
+      logAIOperation({
         source: 'ai-enrichment',
         operation: 'research',
         functionId: 'perplexity-research',
@@ -172,7 +192,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
         latencyMs,
         error: `HTTP ${response.status}`,
         traceId
-      });
+      }).catch(() => {});
       return generateInternalResearchFallback(carrierName);
     }
 
@@ -183,7 +203,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
     console.log(`[aiEnrichment] Perplexity returned ${content.length} chars`);
 
     // Log successful AI operation
-    await logAIOperation({
+    logAIOperation({
       source: 'ai-enrichment',
       operation: 'research',
       functionId: 'perplexity-research',
@@ -194,7 +214,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
       totalTokens: usage.total_tokens,
       latencyMs,
       traceId
-    });
+    }).catch(() => {});
 
     return content;
 
@@ -205,7 +225,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
     } else {
       console.error("[aiEnrichment] Perplexity fetch failed:", e.message);
     }
-    await logAIOperation({
+    logAIOperation({
       source: 'ai-enrichment',
       operation: 'research',
       functionId: 'perplexity-research',
@@ -214,7 +234,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
       latencyMs,
       error: e.message,
       traceId
-    });
+    }).catch(() => {});
     return generateInternalResearchFallback(carrierName);
   }
 }
@@ -299,7 +319,7 @@ function buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel) {
 async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber, traceId = null) {
   const apiStartTime = Date.now();
 
-  const apiKey = await getSecret(CONFIG.claudeSecret);
+  const apiKey = await getCachedSecret(CONFIG.claudeSecret);
   if (!apiKey) {
     throw new Error('Claude API key not configured');
   }
@@ -338,7 +358,7 @@ async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber,
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => 'No error details');
-      await logAIOperation({
+      logAIOperation({
         source: 'ai-enrichment',
         operation: 'synthesis',
         functionId: 'claude-synthesis',
@@ -347,7 +367,7 @@ async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber,
         latencyMs,
         error: `HTTP ${response.status}: ${errorText}`,
         traceId
-      });
+      }).catch(() => {});
       throw new Error(`Claude API Error: ${response.status} - ${errorText}`);
     }
 
@@ -358,7 +378,7 @@ async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber,
     console.log(`[aiEnrichment] Claude returned ${responseText.length} chars`);
 
     // Log successful AI operation
-    await logAIOperation({
+    logAIOperation({
       source: 'ai-enrichment',
       operation: 'synthesis',
       functionId: 'claude-synthesis',
@@ -369,13 +389,13 @@ async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber,
       totalTokens: (usage.input_tokens || 0) + (usage.output_tokens || 0),
       latencyMs,
       traceId
-    });
+    }).catch(() => {});
 
     return parseSentimentResponse(responseText, dotNumber);
 
   } catch (error) {
     const latencyMs = Date.now() - apiStartTime;
-    await logAIOperation({
+    logAIOperation({
       source: 'ai-enrichment',
       operation: 'synthesis',
       functionId: 'claude-synthesis',
@@ -384,7 +404,7 @@ async function callClaudeSynthesisWithTimeout(system, user, research, dotNumber,
       latencyMs,
       error: error.message,
       traceId
-    });
+    }).catch(() => {});
     throw error;
   }
 }
@@ -565,43 +585,6 @@ async function cacheSentimentEnrichment(sentimentData, traceId = null) {
   } catch (error) {
     console.error('[aiEnrichment] Failed to cache enrichment:', error.message);
   }
-}
-
-// ============================================================================
-// FALLBACK ENRICHMENT
-// ============================================================================
-
-function generateFallbackEnrichment(dotNumber, carrierData, driverPrefs, errorMessage, fmcsaData) {
-  const carrierName = carrierData?.LEGAL_NAME || fmcsaData?.legal_name || 'This carrier';
-  const city = carrierData?.PHY_CITY || fmcsaData?.phy_city || 'their location';
-  const state = carrierData?.PHY_STATE || fmcsaData?.phy_state || '';
-  const fleetSize = carrierData?.NBR_POWER_UNIT || fmcsaData?.total_power_units || 0;
-
-  let inferredRouteType = 'Regional/OTR';
-  if (fleetSize < 20) inferredRouteType = 'Regional/Local';
-  else if (fleetSize > 200) inferredRouteType = 'OTR/Dedicated';
-
-  return {
-    dot_number: String(dotNumber),
-    freight_types: 'General Freight',
-    route_types: inferredRouteType,
-    home_time: 'Contact Carrier',
-    pay_cpm_range: 'Market Rate ($0.55-0.70)',
-    sign_on_bonus: 'Contact for current offers',
-    benefits: 'Contact for details',
-    hiring_status: 'Contact Carrier',
-    driver_sentiment: 'No reviews available',
-    sentiment_pros: JSON.stringify([]),
-    sentiment_cons: JSON.stringify([]),
-    sources_found: JSON.stringify(['FMCSA SAFER']),
-    data_confidence: 'Low',
-    ai_summary: `${carrierName} is a ${fleetSize > 0 ? fleetSize + '-truck' : ''} carrier based in ${city}${state ? ', ' + state : ''}. AI research was temporarily unavailable. Check FMCSA safety records above and contact the carrier directly for job details.`,
-    fmcsa: fmcsaData,
-    error: true,
-    errorMessage: errorMessage,
-    enriched_date: new Date(),
-    enrichment_version: 9
-  };
 }
 
 // ============================================================================

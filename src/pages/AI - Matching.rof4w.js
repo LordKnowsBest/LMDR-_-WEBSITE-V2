@@ -574,12 +574,30 @@ async function handleFindMatches(driverPrefs, userStatus) {
       driverProfile: result.driverProfile
     });
 
-    // Handle enrichments
+    // Handle enrichments — only auto-enrich the #1 match; rest are on-demand via button click
     const needsEnrichment = result.matches.filter(m => m.needsEnrichment);
 
     if (needsEnrichment.length > 0) {
-      console.log(`🤖 Starting enrichment for ${needsEnrichment.length} carriers`);
-      await enrichCarriersSequentially(needsEnrichment, driverPrefs);
+      console.log(`🤖 Auto-enriching top match (${needsEnrichment.length} total need enrichment)`);
+      const topMatch = needsEnrichment[0];
+      const dotNumber = topMatch.carrier.DOT_NUMBER;
+
+      sendToHtml('enrichmentUpdate', {
+        dot_number: dotNumber,
+        status: 'loading',
+        position: 1,
+        total: 1
+      });
+
+      const enrichment = await enrichWithRetry(dotNumber, topMatch.carrier, driverPrefs);
+
+      sendToHtml('enrichmentUpdate', {
+        dot_number: dotNumber,
+        status: enrichment.error ? 'error' : 'complete',
+        ...enrichment
+      });
+
+      sendToHtml('enrichmentComplete', { totalEnriched: 1 });
     }
 
   } catch (error) {
