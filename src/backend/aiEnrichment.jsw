@@ -76,29 +76,41 @@ async function getCachedSecret(secretName) {
 // MAIN ENRICHMENT PIPELINE - FAULT TOLERANT
 // ============================================================================
 
-export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialIntel = null) {
+/**
+ * @param {string} dotNumber
+ * @param {Object} carrierData - Normalized carrier with UPPERCASE keys
+ * @param {Object} driverPrefs
+ * @param {string|null} socialIntel
+ * @param {Object} [options] - Pipeline overrides
+ * @param {boolean} [options.enableWebResearch] - Force web research on/off
+ * @param {string}  [options.researchProvider] - 'perplexity' | 'gemini'
+ * @param {number}  [options.budgetMs] - Override pipeline timeout
+ * @param {boolean} [options.skipCache] - Ignore existing cache (force re-enrich)
+ */
+export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialIntel = null, options = {}) {
   const dot = String(dotNumber).trim();
   const startTime = Date.now();
 
-  console.log(`[aiEnrichment] Starting enrichment for DOT ${dot}`);
+  console.log(`[aiEnrichment] Starting enrichment for DOT ${dot}${options.enableWebResearch ? ' (with web research)' : ''}`);
 
   try {
-    // FAST PATH: Check cache first (single Airtable read, ~1-2s)
+    // FAST PATH: Check cache first (unless skipCache is set for batch re-enrichment)
     const traceId = 'tr_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
-    const cached = await getCachedSentiment(dot, traceId).catch(() => null);
 
-    if (cached && !isSentimentStale(cached.enriched_date)) {
-      console.log(`[aiEnrichment] Cache hit for DOT ${dot} (${cached.cache_age_days}d old, ${Date.now() - startTime}ms)`);
-      return { ...cached, fmcsa: transformFMCSAForFrontend(null), fromCache: true };
+    if (!options.skipCache) {
+      const cached = await getCachedSentiment(dot, traceId).catch(() => null);
+      if (cached && !isSentimentStale(cached.enriched_date)) {
+        console.log(`[aiEnrichment] Cache hit for DOT ${dot} (${cached.cache_age_days}d old, ${Date.now() - startTime}ms)`);
+        return { ...cached, fmcsa: transformFMCSAForFrontend(null), fromCache: true };
+      }
     }
 
-    // NO CACHE: Run full pipeline synchronously with timeout budget
-    // Fire-and-forget is unreliable in Wix serverless — runtime kills the promise after HTTP response
-    console.log(`[aiEnrichment] No cache for DOT ${dot} — running pipeline with 8s budget`);
+    // Run full pipeline synchronously with timeout budget
+    const ENRICHMENT_BUDGET_MS = options.budgetMs || 8000;
+    console.log(`[aiEnrichment] No cache for DOT ${dot} — running pipeline with ${ENRICHMENT_BUDGET_MS / 1000}s budget`);
 
-    const ENRICHMENT_BUDGET_MS = 8000;
     const pipelineResult = await Promise.race([
-      _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialIntel, traceId)
+      _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialIntel, traceId, options)
         .then(result => ({ completed: true, ...result }))
         .catch(err => {
           console.error(`[aiEnrichment] Pipeline failed for DOT ${dot}:`, err.message);
@@ -131,7 +143,7 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
  * Background enrichment — runs after we've already returned to the caller.
  * Writes result to cache so the next "Retry" request gets the real data.
  */
-async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialIntel, traceId) {
+async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialIntel, traceId, options = {}) {
   const startTime = Date.now();
 
   startTrace('enrichCarrier', {
@@ -145,10 +157,17 @@ async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialInt
   const carrierName = carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
   const carrierLocation = `${carrierData.PHY_CITY || ''}, ${carrierData.PHY_STATE || ''}`;
 
-  const researchFn = CONFIG.enableWebResearch
-    ? (CONFIG.researchProvider === 'gemini'
-        ? fetchGeminiResearchWithTimeout(carrierName, carrierLocation, traceId)
-        : fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId))
+  // Options can override web research settings (used by nightly batch)
+  const doWebResearch = options.enableWebResearch !== undefined ? options.enableWebResearch : CONFIG.enableWebResearch;
+  const provider = options.researchProvider || CONFIG.researchProvider;
+
+  // Nightly batch gets generous 30s timeout; real-time uses CONFIG defaults
+  const researchTimeoutMs = options.budgetMs ? 30000 : null;
+
+  const researchFn = doWebResearch
+    ? (provider === 'gemini'
+        ? fetchGeminiResearchWithTimeout(carrierName, carrierLocation, traceId, researchTimeoutMs)
+        : fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId, researchTimeoutMs))
     : Promise.resolve('');
 
   const [fmcsaResult, researchResult] = await Promise.allSettled([
@@ -189,20 +208,21 @@ async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialInt
 // STAGE 1: GEMINI WEB RESEARCH (Google Search Grounding)
 // ============================================================================
 
-async function fetchGeminiResearchWithTimeout(carrierName, carrierLocation, traceId = null) {
+async function fetchGeminiResearchWithTimeout(carrierName, carrierLocation, traceId = null, timeoutOverrideMs = null) {
   const apiStartTime = Date.now();
+  const timeoutMs = timeoutOverrideMs || CONFIG.geminiTimeoutMs;
 
   try {
     const apiKey = await getCachedSecret(CONFIG.geminiSecret);
     if (!apiKey) {
       console.warn('[aiEnrichment] Gemini API key not configured — falling back to Perplexity');
-      return fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId);
+      return fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId, timeoutOverrideMs);
     }
 
-    console.log(`[aiEnrichment] Gemini: Researching "${carrierName}" with Google Search`);
+    console.log(`[aiEnrichment] Gemini: Researching "${carrierName}" with Google Search (${timeoutMs / 1000}s timeout)`);
 
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Gemini timeout')), CONFIG.geminiTimeoutMs);
+      setTimeout(() => reject(new Error('Gemini timeout')), timeoutMs);
     });
 
     const fetchPromise = fetch(`${CONFIG.geminiEndpoint}?key=${apiKey}`, {
@@ -250,7 +270,7 @@ async function fetchGeminiResearchWithTimeout(carrierName, carrierLocation, trac
   } catch (e) {
     const latencyMs = Date.now() - apiStartTime;
     if (e.message === 'Gemini timeout') {
-      console.warn(`[aiEnrichment] Gemini timed out after ${CONFIG.geminiTimeoutMs}ms — using fallback`);
+      console.warn(`[aiEnrichment] Gemini timed out after ${timeoutMs}ms — using fallback`);
     } else {
       console.error('[aiEnrichment] Gemini fetch failed:', e.message);
     }
@@ -267,8 +287,9 @@ async function fetchGeminiResearchWithTimeout(carrierName, carrierLocation, trac
 // STAGE 1b: PERPLEXITY RESEARCHER (legacy fallback)
 // ============================================================================
 
-async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId = null) {
+async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId = null, timeoutOverrideMs = null) {
   const apiStartTime = Date.now();
+  const timeoutMs = timeoutOverrideMs || CONFIG.perplexityTimeoutMs;
 
   try {
     const apiKey = await getCachedSecret(CONFIG.perplexitySecret);
@@ -277,10 +298,10 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
       return generateInternalResearchFallback(carrierName);
     }
 
-    console.log(`[aiEnrichment] Perplexity: Researching "${carrierName}"`);
+    console.log(`[aiEnrichment] Perplexity: Researching "${carrierName}" (${timeoutMs / 1000}s timeout)`);
 
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Perplexity timeout')), CONFIG.perplexityTimeoutMs);
+      setTimeout(() => reject(new Error('Perplexity timeout')), timeoutMs);
     });
 
     const fetchPromise = fetch(CONFIG.perplexityEndpoint, {
@@ -290,7 +311,8 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: CONFIG.perplexityModel,
+        // Use sonar-pro for nightly batch (thorough), sonar for real-time (fast)
+        model: timeoutMs >= 10000 ? 'sonar-pro' : CONFIG.perplexityModel,
         messages: [
           {
             role: "system",
@@ -298,7 +320,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
           },
           {
             role: "user",
-            content: `Research CDL driver jobs at "${carrierName}" (${carrierLocation}). Find: current CPM pay range, any sign-on bonuses, typical home time, and 2-3 driver reviews or sentiment. Focus on 2024-2025 data only.`
+            content: `Research CDL driver jobs at "${carrierName}" (${carrierLocation}). Find: current CPM pay range, any sign-on bonuses, typical home time, freight types, and 2-3 driver reviews or sentiment. Focus on 2025-2026 data only.`
           }
         ],
         max_tokens: 600,
@@ -349,7 +371,7 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
   } catch (e) {
     const latencyMs = Date.now() - apiStartTime;
     if (e.message === 'Perplexity timeout') {
-      console.warn(`[aiEnrichment] Perplexity timed out after ${CONFIG.perplexityTimeoutMs}ms - using fallback`);
+      console.warn(`[aiEnrichment] Perplexity timed out after ${timeoutMs}ms - using fallback`);
     } else {
       console.error("[aiEnrichment] Perplexity fetch failed:", e.message);
     }
@@ -406,6 +428,16 @@ function buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel) {
     `;
   }
 
+  // Carrier intelligence scores (from Carriers Master — higher = better, 0-100 scale)
+  const payCPM = carrierData?.PAY_CPM || 0;
+  const turnoverPct = carrierData?.TURNOVER_PERCENT || 0;
+  const accidentRate = carrierData?.ACCIDENT_RATE || 0;
+  const avgTruckAge = carrierData?.AVG_TRUCK_AGE || 0;
+  const combinedScore = carrierData?.COMBINED_SCORE || 0;
+  const recruitmentScore = carrierData?.RECRUITMENT_SCORE || 0;
+  const operationType = carrierData?.CARRIER_OPERATION || 'Unknown';
+  const recentMileage = carrierData?.RECENT_MILEAGE || 0;
+
   const userPrompt = `VERIFIED FMCSA DATA (treat as ground truth):
   - Carrier Name: ${carrierName}
   - DOT Number: ${fmcsaData?.dot_number || 'Unknown'}
@@ -413,6 +445,16 @@ function buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel) {
   - Fleet Size: ${fleetSize} power units (${fleetCategory} fleet)
   - Driver Count: ${driverCount}
   - Location: ${fmcsaData?.phy_city || carrierData?.PHY_CITY || 'Unknown'}, ${fmcsaData?.phy_state || carrierData?.PHY_STATE || 'Unknown'}
+  - Operation Type: ${operationType}
+
+  CARRIER INTELLIGENCE SCORES (proprietary analysis):
+  - Pay Rate: ${payCPM > 0 ? '$' + payCPM.toFixed(2) + ' CPM' : 'Not available'}
+  - Combined Quality Score: ${combinedScore}/100 ${combinedScore >= 80 ? '(Excellent)' : combinedScore >= 60 ? '(Good)' : combinedScore >= 40 ? '(Average)' : '(Below Average)'}
+  - Recruitment Score: ${recruitmentScore}/100 ${recruitmentScore >= 70 ? '(Actively recruiting)' : '(Low recruiting activity)'}
+  - Driver Turnover: ${turnoverPct > 0 ? turnoverPct + '%' : 'Not available'} ${turnoverPct > 0 && turnoverPct < 50 ? '(Good retention)' : turnoverPct >= 80 ? '(High turnover - red flag)' : ''}
+  - Accident Rate: ${accidentRate > 0 ? accidentRate.toFixed(2) : 'Not available'}
+  - Average Truck Age: ${avgTruckAge > 0 ? avgTruckAge.toFixed(1) + ' years' : 'Not available'} ${avgTruckAge > 0 && avgTruckAge <= 3 ? '(New fleet)' : avgTruckAge > 5 ? '(Aging fleet)' : ''}
+  - Recent Mileage: ${recentMileage > 0 ? recentMileage.toLocaleString() + ' miles' : 'Not available'}
 
   ${socialContext}
 

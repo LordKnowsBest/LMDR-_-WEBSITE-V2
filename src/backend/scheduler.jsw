@@ -140,6 +140,138 @@ export async function runEnrichmentBatch() {
 }
 
 // ============================================================================
+// JOB: NIGHTLY WEB RESEARCH BATCH
+// Uses Perplexity sonar-pro for thorough web research (no time pressure).
+// Pre-populates enrichment cache so real-time searches get High confidence data.
+// ============================================================================
+
+const NIGHTLY_CONFIG = {
+  batchSize: 25,           // Carriers per nightly run
+  perplexityTimeout: 30000, // 30s — no rush at night
+  delayBetweenMs: 3000,    // 3s between calls (conservative rate limiting)
+  budgetMs: 45000,         // 45s per carrier (FMCSA + Perplexity + Groq)
+  maxStaleAgeDays: 7       // Re-enrich if older than 7 days
+};
+
+export async function runNightlyWebResearch() {
+  console.log('🌙 SCHEDULER: Starting nightly web research batch...');
+  const startTime = Date.now();
+  const traceId = `nightly-research-${Date.now()}`;
+
+  let processedCount = 0;
+  let errorCount = 0;
+  let skippedCount = 0;
+
+  try {
+    // Fetch top carriers by combined score — these are most likely to be matched
+    const carrierResult = await dataAccess.queryRecords(CONFIG.carriersKey, {
+      sort: [{ field: 'combined_score', direction: 'desc' }],
+      limit: 200,
+      suppressAuth: true
+    });
+
+    if (!carrierResult.success || carrierResult.items.length === 0) {
+      console.log('🌙 No carriers to research');
+      return { status: 'empty' };
+    }
+
+    // Find carriers with no enrichment or stale/low-confidence enrichment
+    const candidates = await filterForResearch(carrierResult.items, NIGHTLY_CONFIG.maxStaleAgeDays);
+    const batch = candidates.slice(0, NIGHTLY_CONFIG.batchSize);
+
+    console.log(`🌙 Found ${candidates.length} candidates, processing ${batch.length}`);
+
+    for (const carrier of batch) {
+      const dot = String(carrier.dot_number || carrier.DOT_NUMBER).trim();
+      if (!dot) continue;
+
+      try {
+        console.log(`🌙 [${processedCount + 1}/${batch.length}] Researching DOT ${dot}: ${carrier.legal_name || carrier.LEGAL_NAME || 'Unknown'}`);
+
+        // Run full pipeline with Perplexity web research enabled
+        await enrichCarrier(dot, carrier, {
+          minCPM: 0.50,
+          operationType: 'Any',
+          driverName: 'Nightly Research Bot',
+          isSystemJob: true
+        }, null, {
+          enableWebResearch: true,
+          researchProvider: 'perplexity',
+          budgetMs: NIGHTLY_CONFIG.budgetMs,
+          skipCache: true  // Force re-enrichment even if cached
+        });
+
+        processedCount++;
+
+        if (processedCount < batch.length) {
+          await sleep(NIGHTLY_CONFIG.delayBetweenMs);
+        }
+      } catch (err) {
+        console.error(`🌙 ❌ FAILED DOT ${dot}:`, err.message);
+        errorCount++;
+      }
+    }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`🌙 Nightly research complete: ${processedCount} enriched, ${errorCount} errors, ${elapsed}s`);
+
+    await log({
+      level: 'INFO',
+      source: 'scheduler',
+      message: `Nightly web research complete: ${processedCount} carriers enriched`,
+      traceId,
+      details: { processedCount, errorCount, skippedCount, candidates: candidates.length, duration: elapsed }
+    });
+
+    return { success: true, processed: processedCount, errors: errorCount, timeTaken: elapsed };
+  } catch (error) {
+    console.error('🌙 ❌ NIGHTLY RESEARCH CRITICAL FAILURE:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Filter carriers that need web research:
+ * - No enrichment at all
+ * - Enrichment older than maxAgeDays
+ * - Low confidence enrichment (worth re-enriching with web data)
+ */
+async function filterForResearch(carriers, maxAgeDays) {
+  const dotNumbers = carriers.map(c => String(c.dot_number || c.DOT_NUMBER)).filter(d => d);
+  if (dotNumbers.length === 0) return [];
+
+  try {
+    const existingResult = await dataAccess.queryRecords(CONFIG.enrichmentsKey, {
+      filters: { dot_number: { hasSome: dotNumbers } },
+      limit: 200,
+      suppressAuth: true
+    });
+
+    const enrichmentMap = {};
+    (existingResult.items || []).forEach(item => { enrichmentMap[item.dot_number] = item; });
+
+    return carriers.filter(c => {
+      const dot = String(c.dot_number || c.DOT_NUMBER);
+      const existing = enrichmentMap[dot];
+
+      // No enrichment at all — definitely needs research
+      if (!existing) return true;
+
+      // Low confidence — worth re-enriching with real web data
+      if (existing.data_confidence === 'Low') return true;
+
+      // Stale enrichment
+      const enrichedDate = existing.enriched_date ? new Date(existing.enriched_date) : new Date(0);
+      const ageInDays = (Date.now() - enrichedDate.getTime()) / (1000 * 60 * 60 * 24);
+      return ageInDays > maxAgeDays;
+    });
+  } catch (err) {
+    console.error('🌙 Filter logic error:', err.message);
+    return [];
+  }
+}
+
+// ============================================================================
 // JOB: PROCESS ABANDONMENT FOLLOW-UPS
 // ============================================================================
 
