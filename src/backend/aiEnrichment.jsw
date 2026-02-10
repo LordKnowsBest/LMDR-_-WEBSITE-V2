@@ -22,19 +22,26 @@ const CONFIG = {
   claudeSecret: 'CLAUDE_API_KEY',
   claudeEndpoint: 'https://api.anthropic.com/v1/messages',
 
-  // Perplexity Configuration — sonar for real-time web research
+  // Gemini Configuration — Google Search grounding for real-time web research
+  geminiModel: 'gemini-2.0-flash',
+  geminiSecret: 'GEMINI_API_KEY',
+  geminiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+  geminiTimeoutMs: 3000,
+
+  // Perplexity Configuration — kept as fallback (disabled)
   perplexityModel: 'sonar',
   perplexitySecret: 'PERPLEXITY_API_KEY',
   perplexityEndpoint: 'https://api.perplexity.ai/chat/completions',
-
-  // Timeouts & Limits — Groq is fast enough to re-enable Perplexity
   perplexityTimeoutMs: 4000,
+
+  // Timeouts & Limits
   claudeTimeoutMs: 5000,
   maxTokens: 800,
   cacheExpiryDays: 14,
 
-  // Feature Flags — Perplexity re-enabled (Groq synthesis is <1s, total fits 8s budget)
-  enablePerplexity: true,
+  // Feature Flags — Gemini replaces Perplexity (faster Google Search grounding)
+  enableWebResearch: true,
+  researchProvider: 'gemini', // 'gemini' or 'perplexity'
   fallbackToClaudeOnly: false
 };
 
@@ -44,6 +51,7 @@ const CONFIG = {
 let __perplexityKeyCache = null;
 let __claudeKeyCache = null;
 let __groqKeyCache = null;
+let __geminiKeyCache = null;
 let __keyCacheTime = 0;
 const KEY_CACHE_TTL = 3600000; // 1 hour
 
@@ -52,10 +60,12 @@ async function getCachedSecret(secretName) {
   if (secretName === CONFIG.perplexitySecret && __perplexityKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __perplexityKeyCache;
   if (secretName === CONFIG.claudeSecret && __claudeKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __claudeKeyCache;
   if (secretName === CONFIG.groqSecret && __groqKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __groqKeyCache;
+  if (secretName === CONFIG.geminiSecret && __geminiKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __geminiKeyCache;
   const key = await getSecret(secretName);
   if (secretName === CONFIG.perplexitySecret) __perplexityKeyCache = key;
   if (secretName === CONFIG.claudeSecret) __claudeKeyCache = key;
   if (secretName === CONFIG.groqSecret) __groqKeyCache = key;
+  if (secretName === CONFIG.geminiSecret) __geminiKeyCache = key;
   __keyCacheTime = now;
   return key;
 }
@@ -129,18 +139,22 @@ async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialInt
     traceId
   }).catch(() => {});
 
-  // PARALLEL PHASE: FMCSA + Perplexity (if enabled)
+  // PARALLEL PHASE: FMCSA + Web Research (Gemini or Perplexity)
   const carrierName = carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
   const carrierLocation = `${carrierData.PHY_CITY || ''}, ${carrierData.PHY_STATE || ''}`;
+
+  const researchFn = CONFIG.enableWebResearch
+    ? (CONFIG.researchProvider === 'gemini'
+        ? fetchGeminiResearchWithTimeout(carrierName, carrierLocation, traceId)
+        : fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId))
+    : Promise.resolve('');
 
   const [fmcsaResult, researchResult] = await Promise.allSettled([
     getCarrierSafetyData(dot).catch(err => {
       console.error(`[aiEnrichment] FMCSA failed for ${dot}:`, err.message);
       return { error: true, error_message: "FMCSA Service Unavailable" };
     }),
-    CONFIG.enablePerplexity
-      ? fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId)
-      : Promise.resolve('')
+    researchFn
   ]);
 
   const fmcsaData = fmcsaResult.status === 'fulfilled' ? fmcsaResult.value : { error: true };
@@ -170,7 +184,85 @@ async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialInt
 }
 
 // ============================================================================
-// STAGE 1: PERPLEXITY RESEARCHER
+// STAGE 1: GEMINI WEB RESEARCH (Google Search Grounding)
+// ============================================================================
+
+async function fetchGeminiResearchWithTimeout(carrierName, carrierLocation, traceId = null) {
+  const apiStartTime = Date.now();
+
+  try {
+    const apiKey = await getCachedSecret(CONFIG.geminiSecret);
+    if (!apiKey) {
+      console.warn('[aiEnrichment] Gemini API key not configured — falling back to Perplexity');
+      return fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId);
+    }
+
+    console.log(`[aiEnrichment] Gemini: Researching "${carrierName}" with Google Search`);
+
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Gemini timeout')), CONFIG.geminiTimeoutMs);
+    });
+
+    const fetchPromise = fetch(`${CONFIG.geminiEndpoint}?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          role: 'user',
+          parts: [{ text: `Research CDL truck driver jobs at "${carrierName}" (${carrierLocation}). Find: current CPM pay range, any sign-on bonuses, typical home time, freight types, and 2-3 recent driver reviews or sentiment. Focus on 2025-2026 data. Be concise, max 300 words.` }]
+        }],
+        tools: [{ google_search: {} }],
+        generationConfig: {
+          maxOutputTokens: 600,
+          temperature: 0.2
+        }
+      })
+    });
+
+    const response = await Promise.race([fetchPromise, timeoutPromise]);
+    const latencyMs = Date.now() - apiStartTime;
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      console.warn(`[aiEnrichment] Gemini API Error: ${response.status} — ${errBody.slice(0, 200)}`);
+      logAIOperation({
+        source: 'ai-enrichment', operation: 'research', functionId: 'gemini-research',
+        provider: 'google', model: CONFIG.geminiModel, latencyMs,
+        error: `HTTP ${response.status}`, traceId
+      }).catch(() => {});
+      return generateInternalResearchFallback(carrierName);
+    }
+
+    const result = await response.json();
+    const content = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+    console.log(`[aiEnrichment] Gemini returned ${content.length} chars in ${latencyMs}ms`);
+
+    logAIOperation({
+      source: 'ai-enrichment', operation: 'research', functionId: 'gemini-research',
+      provider: 'google', model: CONFIG.geminiModel, latencyMs, traceId
+    }).catch(() => {});
+
+    return content;
+
+  } catch (e) {
+    const latencyMs = Date.now() - apiStartTime;
+    if (e.message === 'Gemini timeout') {
+      console.warn(`[aiEnrichment] Gemini timed out after ${CONFIG.geminiTimeoutMs}ms — using fallback`);
+    } else {
+      console.error('[aiEnrichment] Gemini fetch failed:', e.message);
+    }
+    logAIOperation({
+      source: 'ai-enrichment', operation: 'research', functionId: 'gemini-research',
+      provider: 'google', model: CONFIG.geminiModel, latencyMs,
+      error: e.message, traceId
+    }).catch(() => {});
+    return generateInternalResearchFallback(carrierName);
+  }
+}
+
+// ============================================================================
+// STAGE 1b: PERPLEXITY RESEARCHER (legacy fallback)
 // ============================================================================
 
 async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId = null) {
