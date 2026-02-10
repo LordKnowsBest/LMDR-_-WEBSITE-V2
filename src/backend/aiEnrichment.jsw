@@ -11,20 +11,20 @@ const CONFIG = {
   // Collection keys (camelCase, matching configData.js)
   enrichmentsKey: 'carrierEnrichments',
 
-  // Claude Configuration
-  claudeModel: 'claude-sonnet-4-20250514',
+  // Claude Configuration — Haiku for real-time speed (fits Wix 14s timeout)
+  claudeModel: 'claude-haiku-4-5-20251001',
   claudeSecret: 'CLAUDE_API_KEY',
   claudeEndpoint: 'https://api.anthropic.com/v1/messages',
 
-  // Perplexity Configuration - USE FAST MODEL
-  perplexityModel: 'sonar-pro',
+  // Perplexity Configuration — sonar (faster than sonar-pro)
+  perplexityModel: 'sonar',
   perplexitySecret: 'PERPLEXITY_API_KEY',
   perplexityEndpoint: 'https://api.perplexity.ai/chat/completions',
 
-  // Timeouts & Limits
-  perplexityTimeoutMs: 25000,
-  claudeTimeoutMs: 30000,
-  maxTokens: 1200,
+  // Timeouts & Limits — total budget must fit Wix ~14s gateway timeout
+  perplexityTimeoutMs: 6000,
+  claudeTimeoutMs: 6000,
+  maxTokens: 800,
   cacheExpiryDays: 14,
 
   // Feature Flags
@@ -71,53 +71,47 @@ export async function enrichCarrier(dotNumber, carrierData, driverPrefs, socialI
   console.log(`[aiEnrichment] Starting enrichment for DOT ${dot}`);
   log({ level: 'INFO', source: 'ai-enrichment', message: `Starting enrichment for DOT ${dot}`, traceId }).catch(() => {});
 
-  // STEP 1: Always fetch Federal Truth (FMCSA) first
-  let fmcsaData;
-  try {
-    fmcsaData = await getCarrierSafetyData(dot);
-    console.log(`[aiEnrichment] FMCSA data retrieved for DOT ${dot}`);
-  } catch (err) {
-    console.error(`[aiEnrichment] FMCSA Service failed for ${dot}:`, err.message);
-    log({ level: 'WARN', source: 'ai-enrichment', message: `FMCSA service failed for DOT ${dot}`, traceId, details: { error: err.message } }).catch(() => {});
-    fmcsaData = { error: true, error_message: "FMCSA Service Unavailable" };
-  }
+  // PARALLEL PHASE: Run FMCSA + cache check + Perplexity concurrently
+  // This saves 2-4s vs sequential — critical for Wix's ~14s gateway timeout
+  const carrierName = carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
+  const carrierLocation = `${carrierData.PHY_CITY || ''}, ${carrierData.PHY_STATE || ''}`;
 
-  // TRANSFORM: Ensure data matches frontend expectations
+  const [fmcsaResult, cacheResult, researchResult] = await Promise.allSettled([
+    getCarrierSafetyData(dot).catch(err => {
+      console.error(`[aiEnrichment] FMCSA Service failed for ${dot}:`, err.message);
+      return { error: true, error_message: "FMCSA Service Unavailable" };
+    }),
+    getCachedSentiment(dot, traceId),
+    CONFIG.enablePerplexity
+      ? fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId)
+      : Promise.resolve('')
+  ]);
+
+  const fmcsaData = fmcsaResult.status === 'fulfilled' ? fmcsaResult.value : { error: true, error_message: "FMCSA Service Unavailable" };
+  const cached = cacheResult.status === 'fulfilled' ? cacheResult.value : null;
+  const rawResearch = researchResult.status === 'fulfilled' ? researchResult.value : '';
+
+  console.log(`[aiEnrichment] Parallel phase done for DOT ${dot} in ${Date.now() - startTime}ms`);
+
+  // Use FMCSA names if available (more accurate than carrier data)
   const fmcsaForFrontend = transformFMCSAForFrontend(fmcsaData);
 
   try {
-    // Check for fresh cache first - skip expensive API calls
-    const cached = await getCachedSentiment(dot, traceId);
+    // Return cache hit immediately if fresh
     if (cached && !isSentimentStale(cached.enriched_date)) {
       console.log(`[aiEnrichment] Using cached enrichment for DOT ${dot} (${cached.cache_age_days} days old)`);
-      log({ level: 'INFO', source: 'ai-enrichment', message: `Cache hit for DOT ${dot}`, traceId, details: { cacheAgeDays: cached.cache_age_days } }).catch(() => {});
       endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime }).catch(() => {});
       return { ...cached, fmcsa: fmcsaForFrontend, fromCache: true };
     }
 
-    // STEP 2: Attempt Perplexity research (with timeout protection)
-    const carrierName = fmcsaData?.legal_name || carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
-    const carrierLocation = `${fmcsaData?.phy_city || carrierData.PHY_CITY || ''}, ${fmcsaData?.phy_state || carrierData.PHY_STATE || ''}`;
-
-    let rawResearch = '';
-
-    // We run standard Perplexity research (Job/Pay data) unless specifically disabled
-    // socialIntel (Reddit gossip) is separate and additive
-    if (CONFIG.enablePerplexity) {
-      rawResearch = await fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId);
-    }
-
-    // STEP 3: Synthesis via Claude (always runs)
-    // Pass socialIntel into the prompt builder
+    // SYNTHESIS: Claude with research + FMCSA context
     const { systemPrompt, userPrompt } = buildGroundedPrompt(carrierData, driverPrefs, fmcsaData, socialIntel);
-
-    // Combine standard research + social intel for Claude's context
     const combinedResearch = (rawResearch + "\n\n" + (socialIntel || "")).trim();
 
     const enrichedData = await callClaudeSynthesisWithTimeout(systemPrompt, userPrompt, combinedResearch, dot, traceId);
 
-    // STEP 4: Persist and Return
-    await cacheSentimentEnrichment(enrichedData, traceId);
+    // Fire-and-forget cache write — don't block the response
+    cacheSentimentEnrichment(enrichedData, traceId).catch(() => {});
 
     const elapsed = Date.now() - startTime;
     console.log(`[aiEnrichment] Enrichment complete for DOT ${dot} in ${elapsed}ms`);

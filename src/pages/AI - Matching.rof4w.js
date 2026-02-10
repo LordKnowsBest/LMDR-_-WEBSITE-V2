@@ -23,9 +23,9 @@ try {
 
 const CONFIG = {
   htmlComponentId: 'html4',
-  enrichmentDelayMs: 8000,
+  enrichmentDelayMs: 3000,
   maxRetries: 2,
-  retryDelayMs: 15000,
+  retryDelayMs: 3000,
   signupPageUrl: '/signup',
   loginPageUrl: '/account/my-account',
   profilePageUrl: '/driver-profile',
