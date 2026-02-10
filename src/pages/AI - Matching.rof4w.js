@@ -594,7 +594,11 @@ async function handleFindMatches(driverPrefs, userStatus) {
     // Store results for later use (e.g., anonymous match explanations)
     lastSearchResults = { ...result, matches: enrichedMatches };
 
-    // Send results with tier info AND profile info
+    // Handle enrichments — only auto-enrich the #1 match; rest are on-demand via button click
+    const needsEnrichment = result.matches.filter(m => m.needsEnrichment);
+    const autoEnrichDot = needsEnrichment.length > 0 ? String(needsEnrichment[0].carrier.DOT_NUMBER) : null;
+
+    // Send results with tier info AND profile info (include autoEnrichDot so HTML knows which card to show loading)
     sendToHtml('matchResults', {
       matches: enrichedMatches,
       totalScored: result.totalScored,
@@ -603,11 +607,9 @@ async function handleFindMatches(driverPrefs, userStatus) {
       totalMatches: result.totalMatches,
       upsellMessage: result.upsellMessage,
       isPremium: isPremium,
-      driverProfile: result.driverProfile
+      driverProfile: result.driverProfile,
+      autoEnrichDot
     });
-
-    // Handle enrichments — only auto-enrich the #1 match; rest are on-demand via button click
-    const needsEnrichment = result.matches.filter(m => m.needsEnrichment);
 
     if (needsEnrichment.length > 0) {
       console.log(`🤖 Auto-enriching top match (${needsEnrichment.length} total need enrichment)`);
