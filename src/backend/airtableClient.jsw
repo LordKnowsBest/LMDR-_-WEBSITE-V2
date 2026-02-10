@@ -1973,55 +1973,68 @@ export async function queryRecords(tableName, options = {}) {
   const airtableTable = getTableName(tableName);
   const encodedTable = encodeURIComponent(airtableTable);
 
-  // Build query parameters
-  const params = new URLSearchParams();
+  const maxRecords = options.maxRecords || 100;
+  const allRecords = [];
+  let pageOffset = options.offset || null;
 
-  if (options.filterByFormula) {
-    params.append('filterByFormula', options.filterByFormula);
-  }
+  // Paginate: Airtable returns max 100 per page. Loop until we have enough or no more pages.
+  do {
+    const params = new URLSearchParams();
 
-  if (options.sort && Array.isArray(options.sort)) {
-    options.sort.forEach((sortConfig, index) => {
-      params.append(`sort[${index}][field]`, sortConfig.field);
-      params.append(`sort[${index}][direction]`, sortConfig.direction || 'asc');
-    });
-  }
+    if (options.filterByFormula) {
+      params.append('filterByFormula', options.filterByFormula);
+    }
 
-  if (options.maxRecords) {
-    params.append('maxRecords', String(options.maxRecords));
-  }
+    if (options.sort && Array.isArray(options.sort)) {
+      options.sort.forEach((sortConfig, index) => {
+        params.append(`sort[${index}][field]`, sortConfig.field);
+        params.append(`sort[${index}][direction]`, sortConfig.direction || 'asc');
+      });
+    }
 
-  if (options.offset) {
-    params.append('offset', options.offset);
-  }
+    params.append('pageSize', '100');
+    params.append('maxRecords', String(maxRecords));
 
-  if (options.fields && Array.isArray(options.fields)) {
-    options.fields.forEach(field => {
-      params.append('fields[]', field);
-    });
-  }
+    if (pageOffset) {
+      params.append('offset', pageOffset);
+    }
 
-  if (options.view) {
-    params.append('view', options.view);
-  }
+    if (options.fields && Array.isArray(options.fields)) {
+      options.fields.forEach(field => {
+        params.append('fields[]', field);
+      });
+    }
 
-  const queryString = params.toString();
-  const endpoint = `/${encodedTable}${queryString ? '?' + queryString : ''}`;
+    if (options.view) {
+      params.append('view', options.view);
+    }
 
-  try {
-    const response = await airtableRequest(endpoint, 'GET');
+    const queryString = params.toString();
+    const endpoint = `/${encodedTable}${queryString ? '?' + queryString : ''}`;
 
-    const records = (response.records || []).map(record => toWixFormat(record, tableName));
+    try {
+      const response = await airtableRequest(endpoint, 'GET');
+      const pageRecords = (response.records || []).map(record => toWixFormat(record, tableName));
+      allRecords.push(...pageRecords);
+      pageOffset = response.offset || null;
 
-    return {
-      records,
-      offset: response.offset || null,
-      hasMore: !!response.offset
-    };
-  } catch (error) {
-    console.error(`[airtableClient] queryRecords error (${tableName}):`, error.message);
-    return { success: false, error: error.message, records: [] };
-  }
+      // Rate limit: 200ms between pages (~5 req/sec Airtable limit)
+      if (pageOffset && allRecords.length < maxRecords) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    } catch (error) {
+      console.error(`[airtableClient] queryRecords error (${tableName}):`, error.message);
+      return { success: false, error: error.message, records: [] };
+    }
+  } while (pageOffset && allRecords.length < maxRecords);
+
+  console.log(`[airtableClient] Retrieved ${allRecords.length} total records from ${tableName}`);
+
+  return {
+    records: allRecords,
+    offset: pageOffset,
+    hasMore: !!pageOffset
+  };
 }
 
 /**
