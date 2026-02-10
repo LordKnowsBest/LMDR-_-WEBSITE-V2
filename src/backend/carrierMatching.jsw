@@ -12,9 +12,32 @@ const CONFIG = {
   // MATCH LIMITS - Free vs Premium
   freeUserMaxResults: 2,
   premiumUserMaxResults: 10,
-  
+
   defaultMaxDistance: 100
 };
+
+// ============================================================================
+// IN-MEMORY CARRIER CACHE (avoids Airtable query on repeat searches)
+// ============================================================================
+let __carrierCache = null;
+let __carrierCacheTime = 0;
+const CARRIER_CACHE_TTL = 300000; // 5 minutes
+
+async function getCachedCarriers() {
+  const now = Date.now();
+  if (__carrierCache && (now - __carrierCacheTime < CARRIER_CACHE_TTL)) {
+    console.log(`📦 Using cached carriers (${__carrierCache.length} items, ${Math.round((now - __carrierCacheTime) / 1000)}s old)`);
+    return { success: true, items: __carrierCache, fromCache: true };
+  }
+
+  const result = await dataAccess.queryRecords('carriers', { limit: 500 });
+  if (result.success && result.items?.length > 0) {
+    __carrierCache = result.items;
+    __carrierCacheTime = now;
+    console.log(`📦 Carrier cache refreshed: ${result.items.length} items`);
+  }
+  return { ...result, fromCache: false };
+}
 
 // ============================================================================
 // CACHE LOOKUP
@@ -65,76 +88,78 @@ async function getExistingEnrichments(dotNumbers) {
 
 export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
   const startTime = Date.now();
-
-  // Generate traceId locally and fire-and-forget the Airtable insert
-  const traceId = 'tr_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
-  startTrace('findMatchingCarriers', {
-    isPremiumUser,
-    operationType: driverPrefs.operationType,
-    tags: ['carrier-matching', 'search']
-  }).catch(() => {});
+  const TOTAL_BUDGET_MS = 12000; // Must return before Wix ~14s gateway timeout
 
   console.log('🚀 ===== BACKEND: findMatchingCarriers =====');
   console.log('📋 Prefs received:', JSON.stringify(driverPrefs));
   console.log('👤 Premium user:', isPremiumUser);
-  log({ level: 'INFO', source: 'carrier-matching', message: 'Starting carrier match', traceId, details: { isPremiumUser, operationType: driverPrefs.operationType } }).catch(() => {});
 
   const maxResults = isPremiumUser
     ? CONFIG.premiumUserMaxResults
     : CONFIG.freeUserMaxResults;
 
-  console.log(`📊 Max results to return: ${maxResults}`);
-  
-  // Fire off driver profile update (non-blocking — result only used in response payload)
-  let resolvedProfile = null;
+  // Fire off profile update (non-blocking, returns immediately for non-logged-in users)
+  // Use a ref object so the async mutation is visible inside the pipeline
+  const profileRef = { value: null };
   updateDriverPreferences(driverPrefs)
-    .then(r => { resolvedProfile = r.success ? r.profile : null; })
+    .then(r => { profileRef.value = r.success ? r.profile : null; })
     .catch(() => {});
-  
+
+  // Hard timeout: return graceful error instead of letting Wix 504 us
+  const timeoutFallback = new Promise(resolve => {
+    setTimeout(() => {
+      console.warn(`[carrierMatching] Total budget exceeded (${TOTAL_BUDGET_MS}ms) — returning timeout error`);
+      resolve({
+        success: false,
+        matches: [],
+        totalScored: 0,
+        error: 'Search timed out. Please try again — repeat searches are faster.',
+        userTier: isPremiumUser ? 'premium' : 'free'
+      });
+    }, TOTAL_BUDGET_MS);
+  });
+
+  return Promise.race([
+    _findMatchingCarriersPipeline(driverPrefs, isPremiumUser, maxResults, startTime, profileRef),
+    timeoutFallback
+  ]);
+}
+
+async function _findMatchingCarriersPipeline(driverPrefs, isPremiumUser, maxResults, startTime, profileRef) {
+  // Generate traceId locally — defer ALL observability writes until after response is built
+  const traceId = 'tr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
   try {
-    // STEP 1: Query the database
-    console.log('📌 Step 1: Querying Carriers collection...');
+    // STEP 1: Fetch carriers (cached) + weights in parallel — this is the critical path
+    console.log('📌 Step 1: Fetching carriers + weights...');
     const queryStartTime = Date.now();
-    
-    // Parallel fetch: carrier query + config weights (saves ~600ms)
+
     const [result, fetchedWeights] = await Promise.all([
-      dataAccess.queryRecords('carriers', { limit: 500 }),
+      getCachedCarriers(),
       getCarrierMatchingWeights().catch(() => SCORING_CONFIG.weights)
     ]);
 
     if (!result.success) throw new Error(result.error);
-    let carrierItems = result.items || [];
-
+    const carrierItems = result.items || [];
     const queryLatency = Date.now() - queryStartTime;
-    logDatabase({ operation: 'query', collection: 'Carriers', affectedRows: carrierItems.length, latencyMs: queryLatency, traceId }).catch(() => {});
 
-    console.log(`📊 Step 2: Query complete. Found ${carrierItems.length} carriers`);
+    console.log(`📊 Step 2: Got ${carrierItems.length} carriers in ${queryLatency}ms (cache: ${result.fromCache})`);
 
     if (carrierItems.length === 0) {
-      log({ level: 'WARN', source: 'carrier-matching', message: 'No carriers in database', traceId }).catch(() => {});
-      endTrace(traceId, 'completed', { totalMatches: 0, elapsed: Date.now() - startTime }).catch(() => {});
       return {
-        success: true,
-        matches: [],
-        totalScored: 0,
+        success: true, matches: [], totalScored: 0,
         message: 'No carriers in database',
-        userTier: isPremiumUser ? 'premium' : 'free',
-        driverProfile: null
+        userTier: isPremiumUser ? 'premium' : 'free', driverProfile: null
       };
     }
 
-    // STEP 2: Score all carriers
-    console.log('🧮 Step 3: Scoring carriers...');
-
-    const globalWeights = fetchedWeights;
-
-    const customWeights = driverPrefs.customWeights || globalWeights;
-    const scoredCarriers = carrierItems.map(rawCarrier => 
+    // STEP 2: Score all carriers (synchronous, ~10ms)
+    const customWeights = driverPrefs.customWeights || fetchedWeights;
+    const scoredCarriers = carrierItems.map(rawCarrier =>
       calculateMatchScore(driverPrefs, rawCarrier, customWeights)
     );
-    
-    // STEP 3: Composite Scoring - Group divisions of the same carrier
-    console.log('🔄 Step 4: Performing composite grouping...');
+
+    // STEP 3: Group divisions of the same carrier
     const groupedCarriers = {};
     for (const scored of scoredCarriers) {
       const legalName = scored.carrier.LEGAL_NAME;
@@ -145,13 +170,11 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     const distinctCarriers = Object.values(groupedCarriers);
 
     // STEP 4: Filter and sort
-    console.log('🔄 Step 5: Filtering and sorting...');
     const validCarriers = distinctCarriers.filter(c => c.overallScore >= 10);
     validCarriers.sort((a, b) => b.overallScore - a.overallScore);
-    
     const topMatches = validCarriers.slice(0, maxResults);
-    
-    // STEP 5: Build response immediately — enrichment/stats are nice-to-have, not blocking
+
+    // STEP 5: Build response
     const matchesWithStatus = topMatches.map(m => ({
       ...m,
       enrichment: null,
@@ -161,15 +184,17 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     }));
 
     const elapsed = Date.now() - startTime;
+    console.log(`✅ Match complete: ${matchesWithStatus.length} results in ${elapsed}ms`);
 
-    // Fire-and-forget: enrichment, stats, observability (all non-blocking)
+    // Fire-and-forget: ALL observability AFTER building the response
     Promise.all([
+      startTrace('findMatchingCarriers', { isPremiumUser, tags: ['carrier-matching'], traceId }),
       log({ level: 'INFO', source: 'carrier-matching', message: `Match complete: ${matchesWithStatus.length} results`, traceId, duration: elapsed, details: { totalScored: scoredCarriers.length, totalMatches: validCarriers.length, returned: matchesWithStatus.length } }),
+      logDatabase({ operation: 'query', collection: 'Carriers', affectedRows: carrierItems.length, latencyMs: queryLatency, traceId }),
       endTrace(traceId, 'completed', { totalMatches: matchesWithStatus.length, totalScored: scoredCarriers.length, elapsed })
     ]).catch(() => {});
 
-    // Use whatever profile data resolved during the work above (no extra wait)
-    const driverProfile = resolvedProfile;
+    const driverProfile = profileRef.value;
 
     return {
       success: true,
@@ -194,7 +219,7 @@ export async function findMatchingCarriers(driverPrefs, isPremiumUser = false) {
     };
 
   } catch (error) {
-    // Fire-and-forget error logging (don't delay error response)
+    console.error(`[carrierMatching] Pipeline error:`, error.message);
     Promise.all([
       log({ level: 'ERROR', source: 'carrier-matching', message: `Match failed: ${error.message}`, traceId, details: { error: error.message } }),
       endTrace(traceId, 'error', { error: error.message })
