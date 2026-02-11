@@ -418,16 +418,83 @@ async function handleGetMatchExplanation(payload) {
       return;
     }
 
+    // Try backend service first
     const result = await getMatchExplanationForDriver(userStatus.userId, carrierDot);
 
-    sendToHtml('matchExplanation', { ...result, carrierDot });
+    // If backend succeeded, send it
+    if (result.success) {
+      sendToHtml('matchExplanation', { ...result, carrierDot });
+      return;
+    }
+
+    // Backend failed (no carrier hiring prefs) — fall back to local match data
+    const matchData = lastSearchResults?.matches?.find(
+      m => String(m.carrier?.DOT_NUMBER) === String(carrierDot)
+    );
+
+    if (matchData) {
+      sendToHtml('matchExplanation', {
+        success: true,
+        carrierDot,
+        overallScore: matchData.overallScore,
+        explanation: {
+          summary: matchData.overallScore >= 70
+            ? 'This carrier is a strong match for your preferences.'
+            : matchData.overallScore >= 50
+              ? 'This carrier partially matches your preferences.'
+              : 'This carrier has some differences from your preferences.',
+          categories: Object.entries(matchData.breakdown || {}).map(([key, val]) => ({
+            key,
+            label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
+            score: Math.round(val.score || 0),
+            weight: val.weight || 0,
+            text: val.reason || `Score: ${Math.round(val.score || 0)}%`,
+            status: (val.score || 0) >= 70 ? 'good' : (val.score || 0) >= 40 ? 'partial' : 'poor'
+          })),
+          tip: 'Complete your profile to unlock personalized match insights.'
+        }
+      });
+    } else {
+      sendToHtml('matchExplanation', {
+        success: false,
+        carrierDot,
+        error: 'Match data not available'
+      });
+    }
   } catch (error) {
     console.error('Error getting match explanation:', error);
-    sendToHtml('matchExplanation', {
-      success: false,
-      carrierDot: payload?.carrierDot,
-      error: 'Failed to retrieve match explanation'
-    });
+
+    // Last resort fallback from local data
+    const carrierDot = payload?.carrierDot;
+    const matchData = lastSearchResults?.matches?.find(
+      m => String(m.carrier?.DOT_NUMBER) === String(carrierDot)
+    );
+
+    if (matchData) {
+      sendToHtml('matchExplanation', {
+        success: true,
+        carrierDot,
+        overallScore: matchData.overallScore,
+        explanation: {
+          summary: 'Based on your search preferences:',
+          categories: Object.entries(matchData.breakdown || {}).map(([key, val]) => ({
+            key,
+            label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
+            score: Math.round(val.score || 0),
+            weight: val.weight || 0,
+            text: val.reason || `Score: ${Math.round(val.score || 0)}%`,
+            status: (val.score || 0) >= 70 ? 'good' : (val.score || 0) >= 40 ? 'partial' : 'poor'
+          })),
+          tip: 'Complete your profile to unlock personalized match insights.'
+        }
+      });
+    } else {
+      sendToHtml('matchExplanation', {
+        success: false,
+        carrierDot,
+        error: 'Failed to retrieve match explanation'
+      });
+    }
   }
 }
 
