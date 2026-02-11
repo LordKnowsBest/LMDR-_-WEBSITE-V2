@@ -806,11 +806,31 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
       feedbackWeights = await getCarrierFeedbackWeights(carrierDot);
     } catch (e) { /* ignore */ }
 
+    // Batch-fetch ALL mutual interests for this carrier ONCE (avoids N+1 Airtable queries)
+    const mutualInterestSet = new Set();
+    if (options.includeMutualMatches) {
+      try {
+        const interestResult = await dataAccess.queryRecords('driverCarrierInterests', {
+          filters: { carrier_dot: carrierDot, status: 'interested' },
+          limit: 1000,
+          suppressAuth: true
+        });
+        if (interestResult.success && interestResult.items) {
+          for (const item of interestResult.items) {
+            if (item.driver_id) mutualInterestSet.add(item.driver_id);
+          }
+        }
+        console.log(`[driverMatching] Batch-loaded ${mutualInterestSet.size} mutual interests for carrier ${carrierDot}`);
+      } catch (e) {
+        console.warn('[driverMatching] Failed to batch-load mutual interests:', e.message);
+      }
+    }
+
     // Process in parallel chunks to maximize throughput
     const CHUNK_SIZE = 50;
     for (let i = 0; i < drivers.length; i += CHUNK_SIZE) {
       const chunk = drivers.slice(i, i + CHUNK_SIZE);
-      const chunkResults = await Promise.all(chunk.map(async (driver) => {
+      const chunkResults = chunk.map((driver) => {
         try {
           // Apply feedback adjustments if available
           let finalWeights = scoringPrefs;
@@ -821,17 +841,10 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
           // Use global weights if no custom weights provided in options
           const scoreResult = calculateDriverMatchScore(driver, finalWeights, options.weights || globalWeights, filters);
           const rationaleResult = generateDriverMatchRationale(scoreResult.scores || {}, driver, scoringPrefs);
-          
-          // Check for mutual match
-          let isMutualMatch = false;
-          let mutualMatchBoost = 0;
-          if (options.includeMutualMatches) {
-            const interest = await checkDriverInterest(carrierDot, driver._id);
-            if (interest.hasInterest) {
-              isMutualMatch = true;
-              mutualMatchBoost = MUTUAL_MATCH_SCORE_BOOST;
-            }
-          }
+
+          // Check for mutual match via in-memory set (no API call)
+          const isMutualMatch = mutualInterestSet.has(driver._id);
+          const mutualMatchBoost = isMutualMatch ? MUTUAL_MATCH_SCORE_BOOST : 0;
 
           return {
             driver,
@@ -853,7 +866,7 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
             error: err.message
           };
         }
-      }));
+      });
       scoredDrivers.push(...chunkResults);
     }
 
