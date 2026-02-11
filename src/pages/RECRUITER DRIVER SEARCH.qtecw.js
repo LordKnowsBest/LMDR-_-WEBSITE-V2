@@ -299,18 +299,26 @@ async function handleViewProfile(htmlComponent, data) {
     const driver = result.driver;
 
     // Format driver profile for frontend
+    const rawEndorsements = driver.endorsements;
+    const endorsements = Array.isArray(rawEndorsements) ? rawEndorsements
+      : (typeof rawEndorsements === 'string' && rawEndorsements ? rawEndorsements.split(',').map(e => e.trim()) : []);
+
+    let location = 'Unknown';
+    if (driver.city && driver.state) location = `${driver.city}, ${driver.state}`;
+    else if (driver.state) location = driver.state;
+    else if (driver.zip_code) location = driver.zip_code;
+    else if (driver.home_zip) location = driver.home_zip;
+
     const profile = {
       id: driver._id,
       name: `${driver.first_name || ''} ${driver.last_name || ''}`.trim() || 'Driver',
-      location: driver.city && driver.state
-        ? `${driver.city}, ${driver.state}`
-        : driver.zip_code || 'Unknown',
+      location,
       phone: driver.phone || null,
       email: driver.email || null,
       experienceYears: driver.years_experience || 0,
-      cdlClass: driver.cdl_class || 'A',
-      endorsements: driver.endorsements || [],
-      equipment: driver.equipment_experience || [],
+      cdlClass: driver.cdl_class || null,
+      endorsements,
+      equipment: Array.isArray(driver.equipment_experience) ? driver.equipment_experience : [],
       availability: driver.availability || 'unknown',
       salaryExpectation: driver.salary_expectation || null,
       preferredRoutes: driver.preferred_routes || [],
