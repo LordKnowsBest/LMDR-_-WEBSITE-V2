@@ -60,6 +60,43 @@ const DEFAULT_PAGE_SIZE = 20;
 /** Score boost for mutual matches */
 const MUTUAL_MATCH_SCORE_BOOST = 10;
 
+// ============================================================================
+// IN-MEMORY CACHE (survives across warm Wix serverless invocations)
+// ============================================================================
+
+const _driverCache = new Map();       // key → { data, expiry }
+const CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
+
+function getCacheKey(filters) {
+  // Stable JSON key from sorted filter entries
+  const sorted = Object.keys(filters).sort().reduce((acc, k) => {
+    acc[k] = filters[k];
+    return acc;
+  }, {});
+  return JSON.stringify(sorted);
+}
+
+function getCachedDrivers(key) {
+  const entry = _driverCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiry) {
+    _driverCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function setCachedDrivers(key, data) {
+  // Evict stale entries if cache grows large (prevent memory leaks)
+  if (_driverCache.size > 50) {
+    const now = Date.now();
+    for (const [k, v] of _driverCache) {
+      if (now > v.expiry) _driverCache.delete(k);
+    }
+  }
+  _driverCache.set(key, { data, expiry: Date.now() + CACHE_TTL_MS });
+}
+
 /** Source priority for dedup (higher wins) */
 const SOURCE_PRIORITY = {
   driver_profiles: 5,
@@ -361,6 +398,14 @@ const SOURCE_NORMALIZERS = {
  * @returns {Promise<Array>} Merged, deduplicated driver array
  */
 async function queryAllDriverSources(driverFilters) {
+  // Check cache first
+  const cacheKey = getCacheKey(driverFilters);
+  const cached = getCachedDrivers(cacheKey);
+  if (cached) {
+    console.log(`[driverMatching] CACHE HIT — ${cached.length} drivers (key: ${cacheKey.substring(0, 60)}…)`);
+    return cached;
+  }
+
   // Source-specific limits: higher for filterable sources, moderate for unfiltered
   const SOURCE_LIMITS = {
     driverProfiles: 1000,
@@ -442,6 +487,11 @@ async function queryAllDriverSources(driverFilters) {
 
   const deduped = Array.from(emailMap.values());
   console.log(`[driverMatching] After dedup: ${deduped.length} unique drivers from ${allDrivers.length} total`);
+
+  // Cache the result
+  setCachedDrivers(cacheKey, deduped);
+  console.log(`[driverMatching] CACHE SET — ${deduped.length} drivers cached for 5min`);
+
   return deduped;
 }
 
