@@ -234,22 +234,30 @@ async function handleSearchDrivers(htmlComponent, data) {
 
   if (result.success) {
     // Transform matches to frontend format
-    const drivers = result.matches.map(match => ({
-      id: match.driver._id,
-      name: `${match.driver.first_name || ''} ${match.driver.last_name || ''}`.trim() || 'Driver',
-      location: match.driver.city && match.driver.state
-        ? `${match.driver.city}, ${match.driver.state}`
-        : match.driver.zip_code || 'Unknown',
-      experienceYears: match.driver.years_experience || 0,
-      matchScore: Math.round(match.score),
-      cdlClass: match.driver.cdl_class || 'A',
-      endorsements: match.driver.endorsements || [],
-      rationale: match.rationale.join(' ') || 'Good match based on your criteria.',
-      isMutualMatch: match.isMutualMatch || false,
-      availability: match.driver.availability || 'unknown',
-      source: match.driver._source || 'driver_profiles',
-      sourceLabel: match.driver._source_label || 'Profile'
-    }));
+    const drivers = result.matches.map(match => {
+      const d = match.driver;
+      // Build location string from available fields
+      let location = 'Unknown';
+      if (d.city && d.state) location = `${d.city}, ${d.state}`;
+      else if (d.state) location = d.state;
+      else if (d.zip_code) location = d.zip_code;
+      else if (d.home_zip) location = d.home_zip;
+
+      return {
+        id: d._id,
+        name: `${d.first_name || ''} ${d.last_name || ''}`.trim() || 'Driver',
+        location,
+        experienceYears: d.years_experience || 0,
+        matchScore: Math.round(match.score),
+        cdlClass: d.cdl_class || null,
+        endorsements: d.endorsements || [],
+        rationale: match.rationale.join(' ') || 'Good match based on your criteria.',
+        isMutualMatch: match.isMutualMatch || false,
+        availability: d.availability || 'unknown',
+        source: d._source || 'driver_profiles',
+        sourceLabel: d._source_label || 'Profile'
+      };
+    });
 
     // Get quota status to include with results
     const quotaStatus = await getFormattedQuotaStatus();
