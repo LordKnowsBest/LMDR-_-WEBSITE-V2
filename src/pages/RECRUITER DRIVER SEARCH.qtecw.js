@@ -228,7 +228,9 @@ async function handleSearchDrivers(htmlComponent, data) {
       endorsements: match.driver.endorsements || [],
       rationale: match.rationale.join(' ') || 'Good match based on your criteria.',
       isMutualMatch: match.isMutualMatch || false,
-      availability: match.driver.availability || 'unknown'
+      availability: match.driver.availability || 'unknown',
+      source: match.driver._source || 'driver_profiles',
+      sourceLabel: match.driver._source_label || 'Profile'
     }));
 
     // Get quota status to include with results

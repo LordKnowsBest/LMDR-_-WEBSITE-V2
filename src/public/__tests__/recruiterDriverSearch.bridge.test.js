@@ -142,7 +142,9 @@ async function handleSearchDrivers(data) {
             endorsements: match.driver.endorsements || [],
             rationale: match.rationale.join(' ') || 'Good match based on your criteria.',
             isMutualMatch: match.isMutualMatch || false,
-            availability: match.driver.availability || 'unknown'
+            availability: match.driver.availability || 'unknown',
+            source: match.driver._source || 'driver_profiles',
+            sourceLabel: match.driver._source_label || 'Profile'
         }));
 
         const usage = await mockSubscriptionService.getUsageStats(currentCarrierDot);
@@ -532,6 +534,60 @@ describe('RecruiterDriverSearch Bridge Tests', () => {
 
             expect(result.data.drivers[0].name).toBe('Driver');
             expect(result.data.drivers[0].location).toBe('75001');
+        });
+
+        it('should include source and sourceLabel fields in driver results', async () => {
+            mockDriverMatching.findMatchingDrivers.mockResolvedValue({
+                success: true,
+                matches: [
+                    {
+                        driver: {
+                            _id: 'd1',
+                            first_name: 'John',
+                            last_name: 'Doe',
+                            city: 'Dallas',
+                            state: 'TX',
+                            cdl_class: 'A',
+                            _source: 'applications',
+                            _source_label: 'Application'
+                        },
+                        score: 80,
+                        rationale: ['Applied recently'],
+                        isMutualMatch: false
+                    },
+                    {
+                        driver: {
+                            _id: 'd2',
+                            first_name: 'Jane',
+                            last_name: 'Smith',
+                            city: 'Houston',
+                            state: 'TX',
+                            cdl_class: 'A'
+                            // No _source — should default to driver_profiles
+                        },
+                        score: 75,
+                        rationale: ['Good match'],
+                        isMutualMatch: false
+                    }
+                ],
+                pagination: { totalCount: 2 }
+            });
+
+            mockSubscriptionService.getUsageStats.mockResolvedValue({ used: 0, quota: 50, remaining: 50 });
+            mockSubscriptionService.getSubscription.mockResolvedValue({ plan_type: 'pro', is_active: true });
+
+            const result = await processMessage({
+                type: 'searchDrivers',
+                data: { cdlClasses: ['A'] }
+            });
+
+            expect(result.data.success).toBe(true);
+            // First driver has explicit source
+            expect(result.data.drivers[0].source).toBe('applications');
+            expect(result.data.drivers[0].sourceLabel).toBe('Application');
+            // Second driver defaults to driver_profiles
+            expect(result.data.drivers[1].source).toBe('driver_profiles');
+            expect(result.data.drivers[1].sourceLabel).toBe('Profile');
         });
     });
 

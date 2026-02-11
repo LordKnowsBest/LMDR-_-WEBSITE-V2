@@ -33,6 +33,10 @@ export const DATA_SOURCE = {
   carrierAccounts: 'airtable',    // Active platform carrier accounts — v2_Carriers (has Owner)
   driverProfiles: 'airtable',
   driverJobs: 'airtable',
+  legacyDriverLeads: 'airtable',
+  driverApplications: 'airtable',
+  fbCampaignDrivers: 'airtable',
+  scoredDrivers: 'airtable',
 
   // -------------------------------------------------------------------------
   // Matching & Interests
@@ -367,6 +371,10 @@ export const WIX_COLLECTION_NAMES = {
   carrierAccounts: 'Carriers',    // Wix fallback (same collection, different query patterns)
   driverProfiles: 'DriverProfiles',
   driverJobs: 'DriverJobs',
+  legacyDriverLeads: 'LegacyDriverLeads',
+  driverApplications: 'DriverApplications',
+  fbCampaignDrivers: 'FBCampaignDrivers',
+  scoredDrivers: 'ScoredDrivers',
 
   // Matching & Interests
   driverCarrierInterests: 'DriverCarrierInterests',
@@ -565,6 +573,10 @@ export const AIRTABLE_TABLE_NAMES = {
   carrierAccounts: 'v2_Carriers',   // → TABLE_NAMES['v2_Carriers'] → 'v2_Carriers' (active platform accounts)
   driverProfiles: 'v2_Driver Profiles',
   driverJobs: 'v2_Driver Jobs',
+  legacyDriverLeads: 'Legacy Driver Leads',
+  driverApplications: 'Applications',
+  fbCampaignDrivers: 'CDL DRIVERS NJ FB CAMPAIGN',
+  scoredDrivers: 'Scored Drivers',
 
   // Matching & Interests
   driverCarrierInterests: 'v2_Driver Carrier Interests',
