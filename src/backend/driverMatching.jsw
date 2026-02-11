@@ -1031,42 +1031,69 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
  */
 export async function getDriverProfile(carrierDot, driverId, options = {}) {
   try {
-    // Access control (also retrieves subscription)
-    const accessCheck = await performAccessCheck(carrierDot);
-    if (!accessCheck.success) {
-      return { success: false, error: accessCheck.error };
+    let userId, subscription;
+
+    if (DEV_MODE_BYPASS_CARRIER) {
+      console.log('[driverMatching] DEV MODE: Bypassing profile access checks');
+      userId = 'dev-mode';
+      subscription = { plan_type: 'enterprise', is_active: true, monthly_view_quota: -1, views_used_this_month: 0 };
+    } else {
+      // Access control (also retrieves subscription)
+      const accessCheck = await performAccessCheck(carrierDot);
+      if (!accessCheck.success) {
+        return { success: false, error: accessCheck.error };
+      }
+
+      userId = accessCheck.userId;
+      subscription = accessCheck.subscription;
+
+      // Check subscription tier
+      if (subscription.plan_type === 'free') {
+        return {
+          success: false,
+          error: 'Viewing driver profiles requires a Pro or Enterprise subscription. Please upgrade.'
+        };
+      }
+
+      // Check subscription is active
+      if (!subscription.is_active) {
+        return {
+          success: false,
+          error: 'Your subscription has expired or is inactive. Please renew to view profiles.'
+        };
+      }
+
+      // Check quota
+      const quotaCheck = await checkViewQuota(carrierDot);
+      if (!quotaCheck.hasQuota) {
+        return {
+          success: false,
+          error: 'Your monthly profile view quota is exhausted. Quota resets on your next billing cycle.'
+        };
+      }
     }
 
-    const userId = accessCheck.userId;
-    const subscription = accessCheck.subscription;
+    // Try primary source first, then fall back to extra sources
+    let driver = await dataAccess.getRecord('driverProfiles', driverId, { suppressAuth: true });
 
-    // Check subscription tier
-    if (subscription.plan_type === 'free') {
-      return {
-        success: false,
-        error: 'Viewing driver profiles requires a Pro or Enterprise subscription. Please upgrade.'
-      };
+    if (!driver) {
+      // Driver may be from an extra source — search across all tables
+      for (const sourceKey of EXTRA_DRIVER_SOURCES) {
+        try {
+          const result = await dataAccess.queryRecords(sourceKey, {
+            filters: { _id: driverId },
+            limit: 1,
+            suppressAuth: true
+          });
+          if (result.success && result.items && result.items.length > 0) {
+            const normalizer = SOURCE_NORMALIZERS[sourceKey];
+            driver = normalizer ? normalizer(result.items[0]) : result.items[0];
+            console.log(`[driverMatching] Found driver ${driverId} in ${sourceKey}`);
+            break;
+          }
+        } catch (e) { /* try next source */ }
+      }
     }
-
-    // Check subscription is active
-    if (!subscription.is_active) {
-      return {
-        success: false,
-        error: 'Your subscription has expired or is inactive. Please renew to view profiles.'
-      };
-    }
-
-    // Check quota
-    const quotaCheck = await checkViewQuota(carrierDot);
-    if (!quotaCheck.hasQuota) {
-      return {
-        success: false,
-        error: 'Your monthly profile view quota is exhausted. Quota resets on your next billing cycle.'
-      };
-    }
-
-    // Get driver profile using dataAccess
-    const driver = await dataAccess.getRecord('driverProfiles', driverId, { suppressAuth: true });
 
     if (!driver) {
       return {
@@ -1083,35 +1110,41 @@ export async function getDriverProfile(carrierDot, driverId, options = {}) {
       };
     }
 
-    // Record the view in CarrierDriverViews using dataAccess
-    const viewRecord = {
-      carrier_dot: carrierDot,
-      driver_id: driverId,
-      recruiter_id: userId,
-      view_type: 'full_profile',
-      billing_period: new Date().toISOString().slice(0, 7), // YYYY-MM format
-      _createdDate: new Date()
-    };
+    // Record the view (skip in dev mode to avoid polluting data)
+    let viewId = null;
+    if (!DEV_MODE_BYPASS_CARRIER) {
+      const viewRecord = {
+        carrier_dot: carrierDot,
+        driver_id: driverId,
+        recruiter_id: userId,
+        view_type: 'full_profile',
+        billing_period: new Date().toISOString().slice(0, 7),
+        _createdDate: new Date()
+      };
 
-    if (options.matchScore !== undefined) {
-      viewRecord.match_score = options.matchScore;
+      if (options.matchScore !== undefined) {
+        viewRecord.match_score = options.matchScore;
+      }
+
+      await dataAccess.insertRecord('carrierDriverViews', viewRecord, { suppressAuth: true });
+      const viewResult = await recordProfileView(carrierDot, driverId, { userId });
+      viewId = viewResult.viewId;
+
+      notifyDriverProfileViewedNonBlocking(driverId, {
+        carrierDot,
+        carrierName: subscription.company_name || 'A Carrier'
+      });
     }
-
-    await dataAccess.insertRecord('carrierDriverViews', viewRecord, { suppressAuth: true });
-
-    // Record profile view for quota tracking
-    const viewResult = await recordProfileView(carrierDot, driverId, { userId });
-
-    // NOTIFICATION: Notify driver they were viewed (non-blocking)
-    notifyDriverProfileViewedNonBlocking(driverId, { 
-      carrierDot, 
-      carrierName: subscription.company_name || 'A Carrier' 
-    });
 
     return {
       success: true,
-      driver: maskPII(driver), // Always mask, full unlock happens via contact/application
-      viewId: viewResult.viewId
+      driver: DEV_MODE_BYPASS_CARRIER ? driver : maskPII(driver),
+      viewId,
+      quota: {
+        used: subscription.views_used_this_month || 0,
+        total: subscription.monthly_view_quota === -1 ? 'Unlimited' : subscription.monthly_view_quota,
+        remaining: subscription.monthly_view_quota === -1 ? 'Unlimited' : Math.max(0, (subscription.monthly_view_quota || 0) - (subscription.views_used_this_month || 0))
+      }
     };
 
   } catch (err) {
