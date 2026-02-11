@@ -19,6 +19,7 @@ import { saveDriverToPipeline, sendMessageToDriver } from 'backend/driverOutreac
 import { getUsageStats, getSubscription } from 'backend/subscriptionService';
 import { getWeightPreferences, saveWeightPreferences } from 'backend/carrierPreferences';
 import { getCarrierIdentity } from 'backend/recruiter_service';
+import { routeAIRequest } from 'backend/aiRouterService';
 
 /** DEV MODE: Set to true to bypass carrier identity lookup */
 const DEV_MODE_BYPASS_CARRIER = true; // TODO: Set to false for production
@@ -171,6 +172,10 @@ function attachMessageHandlers(htmlComponent) {
           console.log('[VELO] Driver search component is ready');
           // Send initial quota status when component loads
           await handleGetQuotaStatus(htmlComponent);
+          break;
+
+        case 'generateAIDraft':
+          await handleGenerateAIDraft(htmlComponent, msg.data);
           break;
 
         case 'loadSavedSearches':
@@ -483,6 +488,63 @@ async function getFormattedQuotaStatus() {
       resetDate: null,
       canSearch: false
     };
+  }
+}
+
+/**
+ * Handle AI draft generation for email/text messages
+ */
+async function handleGenerateAIDraft(htmlComponent, data) {
+  try {
+    const driver = data.driver || {};
+    const mode = data.mode || 'email';
+    const isText = mode === 'text';
+
+    const driverSummary = [
+      driver.name ? `Name: ${driver.name}` : null,
+      driver.cdlClass ? `CDL: Class ${driver.cdlClass}` : null,
+      driver.endorsements?.length ? `Endorsements: ${driver.endorsements.join(', ')}` : null,
+      driver.experienceYears ? `Experience: ${driver.experienceYears} years` : null,
+      driver.location ? `Location: ${driver.location}` : null,
+      driver.availability ? `Availability: ${driver.availability}` : null,
+      driver.equipment?.length ? `Equipment: ${driver.equipment.join(', ')}` : null
+    ].filter(Boolean).join('\n');
+
+    const prompt = isText
+      ? `Write a short, friendly SMS recruitment text message (under 160 characters) to a truck driver. Be professional but casual. Do not include subject lines or greetings like "Dear". Just a direct, compelling message. Do not use placeholder brackets like [Company Name] — just say "we" or "our team".
+
+Driver info:
+${driverSummary}
+
+Write ONLY the text message, nothing else.`
+      : `Write a brief, professional recruitment email to a truck driver. Keep it under 150 words. Be warm and specific to their qualifications. Do not use placeholder brackets like [Company Name] — just say "we" or "our team". Include a subject line on the first line prefixed with "Subject: ".
+
+Driver info:
+${driverSummary}
+
+Write ONLY the email (subject line + body), nothing else.`;
+
+    const aiResult = await routeAIRequest('driver_chat', {
+      prompt,
+      maxTokens: isText ? 100 : 300,
+      temperature: 0.8
+    });
+
+    htmlComponent.postMessage({
+      type: 'generateAIDraftResult',
+      data: {
+        success: true,
+        draft: aiResult.content?.trim() || '',
+        model: aiResult.model,
+        tokensUsed: aiResult.tokensUsed
+      }
+    });
+  } catch (error) {
+    console.error('[VELO] AI draft generation error:', error);
+    htmlComponent.postMessage({
+      type: 'generateAIDraftResult',
+      data: { success: false, error: error.message || 'AI generation failed' }
+    });
   }
 }
 
