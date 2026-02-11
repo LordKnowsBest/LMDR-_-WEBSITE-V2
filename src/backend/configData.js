@@ -41,7 +41,7 @@ export const DATA_SOURCE = {
   carrierDriverViews: 'airtable',
   matchEvents: 'airtable',
   carrierHiringPreferences: 'airtable',
-  driverInterests: 'airtable',
+  driverJobPreferences: 'airtable',
 
   // -------------------------------------------------------------------------
   // Messaging & Notifications
@@ -373,7 +373,7 @@ export const WIX_COLLECTION_NAMES = {
   carrierDriverViews: 'CarrierDriverViews',
   matchEvents: 'MatchEvents',
   carrierHiringPreferences: 'CarrierHiringPreferences',
-  driverInterests: 'DriverInterests',
+  driverJobPreferences: 'DriverJobPreferences',
 
   // Messaging & Notifications
   messages: 'Messages',
@@ -571,7 +571,7 @@ export const AIRTABLE_TABLE_NAMES = {
   carrierDriverViews: 'v2_Carrier Driver Views',
   matchEvents: 'v2_Match Events',
   carrierHiringPreferences: 'v2_Carrier Hiring Preferences',
-  driverInterests: 'v2_Driver Interests',
+  driverJobPreferences: 'v2_Driver Job Preferences',
 
   // Messaging & Notifications
   messages: 'v2_Messages',

@@ -1,4 +1,4 @@
-# v2_Driver Interests
+# v2_Driver Job Preferences
 
 ## Table Metadata
 
@@ -29,7 +29,7 @@
 Use these mappings in `airtableClient.jsw` FIELD_MAPPINGS:
 
 ```javascript
-'v2_Driver Interests': {
+'DriverJobPreferences': {
   'driver_id': 'Driver ID',
   'preferred_home_time': 'Preferred Home Time',
   'max_miles_from_home': 'Max Miles From Home',
@@ -46,5 +46,8 @@ Use these mappings in `airtableClient.jsw` FIELD_MAPPINGS:
 
 ## Notes
 
+- Renamed from `v2_Driver Interests` to `v2_Driver Job Preferences` (2026-02-10)
+- This table stores driver job preferences (home time, miles, team willingness)
+- NOT the same as `v2_Driver Carrier Interests` which stores application/interest records
 - Auto-generated schema documentation
 - Generated: 2026-01-27
