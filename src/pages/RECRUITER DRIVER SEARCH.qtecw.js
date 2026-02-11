@@ -20,6 +20,10 @@ import { getUsageStats, getSubscription } from 'backend/subscriptionService';
 import { getWeightPreferences, saveWeightPreferences } from 'backend/carrierPreferences';
 import { getCarrierIdentity } from 'backend/recruiter_service';
 
+/** DEV MODE: Set to true to bypass carrier identity lookup */
+const DEV_MODE_BYPASS_CARRIER = true; // TODO: Set to false for production
+const DEV_MODE_FALLBACK_DOT = '0000000'; // Placeholder DOT for dev mode
+
 // Cache the carrier DOT for the current recruiter session
 let currentCarrierDot = null;
 
@@ -66,6 +70,12 @@ $w.onReady(async function () {
  * Uses dual-source helpers (Airtable/Wix) from recruiter_service.jsw
  */
 async function loadCarrierIdentity() {
+  if (DEV_MODE_BYPASS_CARRIER) {
+    currentCarrierDot = DEV_MODE_FALLBACK_DOT;
+    console.log('[VELO] DEV MODE: Using fallback carrier DOT:', DEV_MODE_FALLBACK_DOT);
+    return;
+  }
+
   try {
     console.log('[VELO] Loading carrier identity...');
     const identity = await getCarrierIdentity();
@@ -401,6 +411,18 @@ async function handleGetQuotaStatus(htmlComponent) {
  * Get formatted quota status for frontend display
  */
 async function getFormattedQuotaStatus() {
+  if (DEV_MODE_BYPASS_CARRIER) {
+    return {
+      tier: 'enterprise',
+      used: 0,
+      limit: 'Unlimited',
+      remaining: 'Unlimited',
+      resetDate: null,
+      daysUntilReset: 30,
+      canSearch: true
+    };
+  }
+
   if (!currentCarrierDot) {
     return {
       tier: 'free',

@@ -40,6 +40,9 @@ async function awardRecruiterPointsNonBlocking(recruiterId, action, metadata = {
 /** DEV MODE: Set to true to bypass role verification during development */
 const DEV_MODE_BYPASS_ROLES = true; // TODO: Set to false for production
 
+/** DEV MODE: Set to true to bypass carrier auth + subscription checks */
+const DEV_MODE_BYPASS_CARRIER = true; // TODO: Set to false for production
+
 /** Allowed roles for accessing driver matching features */
 const ALLOWED_ROLES = ['recruiter', 'admin'];
 
@@ -662,32 +665,45 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
   });
 
   try {
-    // Access control (also retrieves subscription)
-    const accessCheck = await performAccessCheck(carrierDot);
-    if (!accessCheck.success) {
-      await log({ level: 'WARN', source: 'driver-matching', message: `Access denied: ${accessCheck.error}`, traceId });
-      await endTrace(traceId, 'denied', { error: accessCheck.error, elapsed: Date.now() - startTime });
-      return { success: false, error: accessCheck.error };
-    }
+    let subscription;
 
-    const subscription = accessCheck.subscription;
-
-    // Check if tier allows searching
-    if (subscription.plan_type === 'free') {
-      return {
-        success: false,
-        error: 'Driver search requires a Pro or Enterprise subscription. Please upgrade to access this feature.',
-        code: 'SUBSCRIPTION_TIER_LIMIT'
+    if (DEV_MODE_BYPASS_CARRIER) {
+      // DEV MODE: Skip all access control and use a synthetic subscription
+      console.log('[driverMatching] DEV MODE: Bypassing carrier auth + subscription checks');
+      subscription = {
+        plan_type: 'enterprise',
+        is_active: true,
+        monthly_view_quota: -1,
+        views_used_this_month: 0
       };
-    }
+    } else {
+      // Access control (also retrieves subscription)
+      const accessCheck = await performAccessCheck(carrierDot);
+      if (!accessCheck.success) {
+        await log({ level: 'WARN', source: 'driver-matching', message: `Access denied: ${accessCheck.error}`, traceId });
+        await endTrace(traceId, 'denied', { error: accessCheck.error, elapsed: Date.now() - startTime });
+        return { success: false, error: accessCheck.error };
+      }
 
-    // Check if subscription is active
-    if (!subscription.is_active) {
-      return {
-        success: false,
-        error: 'Your subscription has expired or is inactive. Please renew to search drivers.',
-        code: 'SUBSCRIPTION_INACTIVE'
-      };
+      subscription = accessCheck.subscription;
+
+      // Check if tier allows searching
+      if (subscription.plan_type === 'free') {
+        return {
+          success: false,
+          error: 'Driver search requires a Pro or Enterprise subscription. Please upgrade to access this feature.',
+          code: 'SUBSCRIPTION_TIER_LIMIT'
+        };
+      }
+
+      // Check if subscription is active
+      if (!subscription.is_active) {
+        return {
+          success: false,
+          error: 'Your subscription has expired or is inactive. Please renew to search drivers.',
+          code: 'SUBSCRIPTION_INACTIVE'
+        };
+      }
     }
 
     // Build base query FIRST - exclude non-searchable and hidden drivers
