@@ -371,131 +371,103 @@ async function handleHtmlMessage(msg) {
 }
 
 async function handleGetMatchExplanation(payload) {
+  const carrierDot = payload?.carrierDot;
+
   try {
     const userStatus = await getUserStatus();
 
-    // For anonymous users, build explanation from local match data
-    if (!userStatus.loggedIn) {
-      const matchData = lastSearchResults?.matches?.find(
-        m => String(m.carrier?.DOT_NUMBER) === String(payload?.carrierDot)
-      );
-
-      if (matchData) {
-        sendToHtml('matchExplanation', {
-          success: true,
-          carrierDot: payload.carrierDot,
-          overallScore: matchData.overallScore,
-          explanation: {
-            summary: matchData.overallScore >= 70
-              ? 'This carrier is a strong match for your preferences.'
-              : matchData.overallScore >= 50
-                ? 'This carrier partially matches your preferences.'
-                : 'This carrier has some differences from your preferences.',
-            categories: Object.entries(matchData.breakdown || {}).map(([key, val]) => ({
-              key,
-              label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
-              score: Math.round(val.score || 0),
-              weight: val.weight || 0,
-              text: val.reason || `Score: ${Math.round(val.score || 0)}%`,
-              status: (val.score || 0) >= 70 ? 'good' : (val.score || 0) >= 40 ? 'partial' : 'poor'
-            })),
-            tip: 'Sign up to see personalized match insights based on your full profile.'
-          }
-        });
-      } else {
-        sendToHtml('matchExplanation', {
-          success: false,
-          carrierDot: payload?.carrierDot,
-          error: 'Match data not available'
-        });
+    // For logged-in users, try backend service first
+    if (userStatus.loggedIn && carrierDot) {
+      const result = await getMatchExplanationForDriver(userStatus.userId, carrierDot);
+      if (result.success) {
+        sendToHtml('matchExplanation', { ...result, carrierDot });
+        return;
       }
-      return;
     }
 
-    const { carrierDot } = payload;
-    if (!carrierDot) {
-      console.warn('Missing carrierDot for match explanation');
-      return;
-    }
+    // Fall back to local match data (works for both anonymous + backend failure)
+    const explanation = buildLocalExplanation(carrierDot);
+    sendToHtml('matchExplanation', explanation);
 
-    // Try backend service first
-    const result = await getMatchExplanationForDriver(userStatus.userId, carrierDot);
-
-    // If backend succeeded, send it
-    if (result.success) {
-      sendToHtml('matchExplanation', { ...result, carrierDot });
-      return;
-    }
-
-    // Backend failed (no carrier hiring prefs) — fall back to local match data
-    const matchData = lastSearchResults?.matches?.find(
-      m => String(m.carrier?.DOT_NUMBER) === String(carrierDot)
-    );
-
-    if (matchData) {
-      sendToHtml('matchExplanation', {
-        success: true,
-        carrierDot,
-        overallScore: matchData.overallScore,
-        explanation: {
-          summary: matchData.overallScore >= 70
-            ? 'This carrier is a strong match for your preferences.'
-            : matchData.overallScore >= 50
-              ? 'This carrier partially matches your preferences.'
-              : 'This carrier has some differences from your preferences.',
-          categories: Object.entries(matchData.breakdown || {}).map(([key, val]) => ({
-            key,
-            label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
-            score: Math.round(val.score || 0),
-            weight: val.weight || 0,
-            text: val.reason || `Score: ${Math.round(val.score || 0)}%`,
-            status: (val.score || 0) >= 70 ? 'good' : (val.score || 0) >= 40 ? 'partial' : 'poor'
-          })),
-          tip: 'Complete your profile to unlock personalized match insights.'
-        }
-      });
-    } else {
-      sendToHtml('matchExplanation', {
-        success: false,
-        carrierDot,
-        error: 'Match data not available'
-      });
-    }
   } catch (error) {
     console.error('Error getting match explanation:', error);
-
-    // Last resort fallback from local data
-    const carrierDot = payload?.carrierDot;
-    const matchData = lastSearchResults?.matches?.find(
-      m => String(m.carrier?.DOT_NUMBER) === String(carrierDot)
-    );
-
-    if (matchData) {
-      sendToHtml('matchExplanation', {
-        success: true,
-        carrierDot,
-        overallScore: matchData.overallScore,
-        explanation: {
-          summary: 'Based on your search preferences:',
-          categories: Object.entries(matchData.breakdown || {}).map(([key, val]) => ({
-            key,
-            label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
-            score: Math.round(val.score || 0),
-            weight: val.weight || 0,
-            text: val.reason || `Score: ${Math.round(val.score || 0)}%`,
-            status: (val.score || 0) >= 70 ? 'good' : (val.score || 0) >= 40 ? 'partial' : 'poor'
-          })),
-          tip: 'Complete your profile to unlock personalized match insights.'
-        }
-      });
-    } else {
-      sendToHtml('matchExplanation', {
-        success: false,
-        carrierDot,
-        error: 'Failed to retrieve match explanation'
-      });
-    }
+    const explanation = buildLocalExplanation(carrierDot);
+    sendToHtml('matchExplanation', explanation);
   }
+}
+
+// ============================================================================
+// LOCAL MATCH EXPLANATION BUILDER
+// ============================================================================
+
+const SCORE_LABELS = {
+  location: 'Location',
+  pay: 'Pay',
+  operationType: 'Operation Type',
+  turnover: 'Turnover',
+  safety: 'Safety Record',
+  truckAge: 'Fleet Age',
+  fleetSize: 'Fleet Size',
+  qualityScore: 'Overall Quality'
+};
+
+const SCORE_TEXT = {
+  location: { good: 'Within your preferred distance', partial: 'Moderate commute distance', poor: 'Outside your preferred range' },
+  pay: { good: 'Meets or exceeds your pay target', partial: 'Close to your pay expectations', poor: 'Below your minimum CPM' },
+  operationType: { good: 'Matches your preferred run type', partial: 'Similar operation style', poor: 'Different operation type' },
+  turnover: { good: 'Low driver turnover', partial: 'Average turnover rate', poor: 'High turnover rate' },
+  safety: { good: 'Strong safety record', partial: 'Acceptable safety record', poor: 'Safety concerns noted' },
+  truckAge: { good: 'Modern fleet equipment', partial: 'Average fleet age', poor: 'Older fleet equipment' },
+  fleetSize: { good: 'Matches your fleet size preference', partial: 'Different fleet size than preferred', poor: 'Very different fleet size' },
+  qualityScore: { good: 'High overall quality score', partial: 'Average quality score', poor: 'Below average quality score' }
+};
+
+function buildLocalExplanation(carrierDot) {
+  const matchData = lastSearchResults?.matches?.find(
+    m => String(m.carrier?.DOT_NUMBER) === String(carrierDot)
+  );
+
+  if (!matchData) {
+    return { success: false, carrierDot, error: 'Match data not available' };
+  }
+
+  const scores = matchData.scores || {};
+  const overall = matchData.overallScore || 0;
+
+  const categories = Object.entries(scores)
+    .filter(([key]) => SCORE_LABELS[key])
+    .map(([key, score]) => {
+      const s = Math.round(score || 0);
+      const tier = s >= 70 ? 'good' : s >= 40 ? 'partial' : 'poor';
+      return {
+        key,
+        label: SCORE_LABELS[key],
+        score: s,
+        weight: 0,
+        text: SCORE_TEXT[key]?.[tier] || `Score: ${s}%`,
+        status: tier
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const summary = overall >= 70
+    ? 'This carrier is a strong match for your preferences.'
+    : overall >= 50
+      ? 'This carrier partially matches your preferences.'
+      : 'This carrier has some differences from your preferences.';
+
+  // Use the scoring module's rationale if available
+  const rationale = matchData.rationale || [];
+  const tip = rationale.length > 0
+    ? rationale[0]
+    : 'Keep your profile updated to maintain accurate match scores.';
+
+  return {
+    success: true,
+    carrierDot,
+    overallScore: overall,
+    explanation: { summary, categories, tip }
+  };
 }
 
 // ============================================================================
