@@ -159,11 +159,10 @@ function renderMatchCard(match, rank) {
       ` : ''}
       
       <div class="match-actions">
-        <button class="${appliedCarrierDOTs.has(String(dotNumber)) ? 'interested-btn applied' : 'interested-btn'}" 
-          data-dot="${dotNumber}" 
+        <button class="${appliedCarrierDOTs.has(String(dotNumber)) ? 'interested-btn applied' : 'interested-btn'}"
+          data-dot="${dotNumber}"
           data-name="${escapeHtml(carrierName)}"
           data-score="${match.overallScore || 0}"
-          onclick="handleInterestClick(event)"
           ${appliedCarrierDOTs.has(String(dotNumber)) ? 'disabled' : ''}>
           <i class="fa-solid ${appliedCarrierDOTs.has(String(dotNumber)) ? 'fa-check' : 'fa-heart'}"></i> 
           ${appliedCarrierDOTs.has(String(dotNumber)) ? 'Application Sent' : "I'm Interested"}

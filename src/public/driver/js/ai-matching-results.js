@@ -155,11 +155,6 @@ function showResults(data) {
     }
   }
 
-  document.querySelectorAll('.interested-btn').forEach(btn => {
-    btn.addEventListener('click', handleInterestClick);
-  });
-
-
   // Wire up signup/login buttons
   const signupBtn = document.getElementById('signupBtn');
   const loginBtn = document.getElementById('loginBtn');
