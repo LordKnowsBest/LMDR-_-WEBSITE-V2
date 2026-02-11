@@ -173,6 +173,14 @@ function attachMessageHandlers(htmlComponent) {
           await handleGetQuotaStatus(htmlComponent);
           break;
 
+        case 'loadSavedSearches':
+          // Saved searches not yet implemented — return empty list
+          htmlComponent.postMessage({
+            type: 'loadSavedSearchesResult',
+            data: { success: true, searches: [] }
+          });
+          break;
+
         default:
           console.warn('[VELO] Unknown message type:', msg.type);
       }
@@ -216,8 +224,8 @@ async function handleSearchDrivers(htmlComponent, data) {
   });
 
   const options = {
-    page: Math.floor((data.offset || 0) / (data.limit || 5)),
-    pageSize: data.limit || 5,
+    page: 0,
+    pageSize: data.limit || 500,
     usePreferences: true,
     includeMutualMatches: true
   };
