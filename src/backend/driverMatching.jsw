@@ -361,21 +361,39 @@ const SOURCE_NORMALIZERS = {
  * @returns {Promise<Array>} Merged, deduplicated driver array
  */
 async function queryAllDriverSources(driverFilters) {
-  // Cap per-source to keep total under Wix serverless timeout (~14s)
-  const EXTRA_SOURCE_LIMIT = 100;
+  // Source-specific limits: higher for filterable sources, moderate for unfiltered
+  const SOURCE_LIMITS = {
+    driverProfiles: 1000,
+    legacyDriverLeads: 500,      // No CDL field — can't filter, keep moderate
+    driverApplications: 1000,    // Has CDL Class field
+    fbCampaignDrivers: 1000,     // Has cdl_type field
+    scoredDrivers: 1000          // Has cdl_class field
+  };
+
+  // Build per-source filters where possible (CDL class)
+  const cdlFilter = driverFilters.cdl_types || driverFilters.cdl_class;
+  const extraSourceFilters = {};
+
+  // Applications: CDL Class field is a text field like "Class A"
+  if (cdlFilter && Array.isArray(cdlFilter) && cdlFilter.length === 1) {
+    extraSourceFilters.driverApplications = { cdl_class: `Class ${cdlFilter[0]}` };
+    extraSourceFilters.scoredDrivers = { cdl_class: cdlFilter[0] };
+    // FB Campaign: cdl_type values are like "cdl_a", "cdl_b"
+    extraSourceFilters.fbCampaignDrivers = { cdl_type: `cdl_${cdlFilter[0].toLowerCase()}` };
+  }
 
   // Query primary source (DriverProfiles) with full filters
   const primaryPromise = dataAccess.queryRecords('driverProfiles', {
     filters: driverFilters,
-    limit: 500,
+    limit: SOURCE_LIMITS.driverProfiles,
     suppressAuth: true
   });
 
-  // Query additional sources with capped limits — scoring ranks them anyway
+  // Query additional sources with per-source filters and limits
   const extraPromises = EXTRA_DRIVER_SOURCES.map(sourceKey =>
     dataAccess.queryRecords(sourceKey, {
-      filters: {},
-      limit: EXTRA_SOURCE_LIMIT,
+      filters: extraSourceFilters[sourceKey] || {},
+      limit: SOURCE_LIMITS[sourceKey] || 500,
       suppressAuth: true
     }).catch(err => {
       console.warn(`[driverMatching] Failed to query ${sourceKey}:`, err.message);
