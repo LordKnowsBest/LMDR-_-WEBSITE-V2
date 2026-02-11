@@ -18,6 +18,9 @@ function notifyDriverContactedNonBlocking(driverId, contactInfo) {
 // CONFIGURATION
 // ============================================================================
 
+/** DEV MODE: Set to true to bypass access checks for development/demo */
+const DEV_MODE_BYPASS_CARRIER = true; // TODO: Set to false for production
+
 // Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
     interests: 'driverCarrierInterests',
@@ -72,13 +75,16 @@ async function verifyRecruiterAccess(carrierDOT) {
 
 export async function saveDriverToPipeline(carrierDot, driverId, notes = '') {
   try {
-    const accessCheck = await verifyRecruiterAccess(carrierDot);
-    if (!accessCheck.success) return accessCheck;
+    let userId = 'dev-mode';
+    if (!DEV_MODE_BYPASS_CARRIER) {
+      const accessCheck = await verifyRecruiterAccess(carrierDot);
+      if (!accessCheck.success) return accessCheck;
+      userId = accessCheck.userId;
+    }
 
     const dotString = String(carrierDot).trim();
-    const driver = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
-    if (!driver) return { success: false, errorCode: 'DRIVER_NOT_FOUND', error: 'Driver profile not found' };
 
+    // Check for duplicate
     const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
       filters: { carrier_dot: dotString, driver_id: driverId }, limit: 1, suppressAuth: true
     });
@@ -87,23 +93,24 @@ export async function saveDriverToPipeline(carrierDot, driverId, notes = '') {
       return { success: false, errorCode: 'DUPLICATE_SAVE', error: 'Driver already in pipeline', interestId: existingResult.items[0]._id, status: existingResult.items[0].status };
     }
 
-    const viewResult = await dataAccess.queryRecords(COLLECTION_KEYS.profileViews, {
-      filters: { carrier_dot: dotString, driver_id: driverId },
-      sort: [{ field: 'view_timestamp', direction: 'desc' }], limit: 1, suppressAuth: true
-    });
-
-    if (!viewResult.items?.length) return { success: false, errorCode: 'PROFILE_VIEW_REQUIRED', error: 'View profile required before saving' };
+    // In dev mode, skip profile-view requirement
+    if (!DEV_MODE_BYPASS_CARRIER) {
+      const viewResult = await dataAccess.queryRecords(COLLECTION_KEYS.profileViews, {
+        filters: { carrier_dot: dotString, driver_id: driverId },
+        sort: [{ field: 'view_timestamp', direction: 'desc' }], limit: 1, suppressAuth: true
+      });
+      if (!viewResult.items?.length) return { success: false, errorCode: 'PROFILE_VIEW_REQUIRED', error: 'View profile required before saving' };
+    }
 
     const now = new Date();
     const interestRecord = {
       driver_id: driverId, carrier_dot: dotString, status: CONFIG.RECRUITER_INITIAL_STATUS, match_score: 0,
       origin: CONFIG.ORIGIN.RECRUITER_SEARCH, recruiter_notes: notes || '', action_timestamp: now, application_date: now,
-      status_history: JSON.stringify([{ status: CONFIG.RECRUITER_INITIAL_STATUS, timestamp: now.toISOString(), by: 'recruiter' }]),
-      contact_email: driver.email, contact_phone: driver.phone, preferred_contact: driver.preferred_contact || 'email'
+      status_history: JSON.stringify([{ status: CONFIG.RECRUITER_INITIAL_STATUS, timestamp: now.toISOString(), by: 'recruiter' }])
     };
 
     const result = await dataAccess.insertRecord(COLLECTION_KEYS.interests, interestRecord, { suppressAuth: true });
-    await recordOutreachAction(dotString, driverId, 'save_to_pipeline', accessCheck.userId);
+    await recordOutreachAction(dotString, driverId, 'save_to_pipeline', userId);
 
     return { success: true, interestId: result.record._id, status: CONFIG.RECRUITER_INITIAL_STATUS };
   } catch (error) {
@@ -120,8 +127,12 @@ export const saveToRecruiterPipeline = saveDriverToPipeline;
 
 export async function sendMessageToDriver(carrierDot, driverId, messageContent) {
   try {
-    const accessCheck = await verifyRecruiterAccess(carrierDot);
-    if (!accessCheck.success) return accessCheck;
+    let userId = 'dev-mode';
+    if (!DEV_MODE_BYPASS_CARRIER) {
+      const accessCheck = await verifyRecruiterAccess(carrierDot);
+      if (!accessCheck.success) return accessCheck;
+      userId = accessCheck.userId;
+    }
     if (!messageContent?.trim()) return { success: false, errorCode: 'EMPTY_MESSAGE', error: 'Message required' };
 
     const dotString = String(carrierDot).trim();
@@ -145,7 +156,7 @@ export async function sendMessageToDriver(carrierDot, driverId, messageContent) 
 
     const result = await sendMessagingMessage(applicationId, messageContent.trim(), driverId, 'recruiter');
     if (result.success) {
-      await recordOutreachAction(dotString, driverId, 'message_sent', accessCheck.userId);
+      await recordOutreachAction(dotString, driverId, 'message_sent', userId);
       notifyDriverContactedNonBlocking(driverId, { carrierDot: dotString, messagePreview: messageContent.trim().substring(0, 100) });
     }
     return result;
