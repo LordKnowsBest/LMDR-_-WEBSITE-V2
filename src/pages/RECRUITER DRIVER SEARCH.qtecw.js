@@ -216,8 +216,8 @@ async function handleSearchDrivers(htmlComponent, data) {
   });
 
   const options = {
-    page: Math.floor((data.offset || 0) / (data.limit || 20)),
-    pageSize: data.limit || 20,
+    page: Math.floor((data.offset || 0) / (data.limit || 5)),
+    pageSize: data.limit || 5,
     usePreferences: true,
     includeMutualMatches: true
   };
