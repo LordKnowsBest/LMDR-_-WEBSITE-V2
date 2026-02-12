@@ -321,6 +321,7 @@ async function handleViewProfile(htmlComponent, data) {
       phone: driver.phone || null,
       email: driver.email || null,
       experienceYears: driver.years_experience || 0,
+      matchScore: data.matchScore || 0,
       cdlClass: driver.cdl_class || null,
       endorsements,
       equipment: Array.isArray(driver.equipment_experience) ? driver.equipment_experience : [],
