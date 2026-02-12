@@ -656,10 +656,11 @@ async function getCarrierPreferences(carrierDot) {
   try {
     const result = await dataAccess.queryRecords('carrierHiringPreferences', {
       filters: {
-        carrier_dot: carrierDot,
-        is_active: true
+        carrier_dot: Number(carrierDot),
+        is_active: 'Yes'
       },
-      limit: 1
+      limit: 1,
+      suppressAuth: true
     });
 
     return result.success && result.items.length > 0 ? result.items[0] : null;
@@ -682,7 +683,8 @@ async function checkDriverInterest(carrierDot, driverId) {
         carrier_dot: carrierDot,
         status: 'interested'
       },
-      limit: 1
+      limit: 1,
+      suppressAuth: true
     });
 
     if (result.success && result.items.length > 0) {
@@ -853,31 +855,10 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
       carrierPrefs = await getCarrierPreferences(carrierDot);
     }
 
-    // DEV MODE: Use synthetic preferences when none exist so scoring differentiates drivers
+    // DEV MODE: Log warning when no carrier prefs found (real record should exist in Airtable)
     if (DEV_MODE_BYPASS_CARRIER && !carrierPrefs) {
-      console.log('[driverMatching] DEV MODE: Using synthetic carrier preferences for scoring');
-      carrierPrefs = {
-        carrier_dot: DEV_MODE_FALLBACK_DOT,
-        required_cdl_types: filters.cdl_types || ['A'],
-        required_endorsements: filters.endorsements || [],
-        min_experience_years: 2,
-        max_experience_years: null,
-        equipment_types: filters.equipment_types || ['dry_van', 'reefer', 'flatbed'],
-        target_zip_codes: filters.zip_code ? [filters.zip_code] : [],
-        target_states: ['TX', 'LA', 'OK', 'AR', 'MS'],
-        target_radius_miles: filters.radius_miles || 150,
-        urgency: filters.availability || 'immediate',
-        offered_pay_min_cpm: 55,
-        offered_pay_max_cpm: 72,
-        accepts_recent_grads: 'Yes',
-        is_active: true,
-        weight_qualifications: 30,
-        weight_experience: 20,
-        weight_location: 20,
-        weight_availability: 15,
-        weight_salaryFit: 10,
-        weight_engagement: 5
-      };
+      console.warn('[driverMatching] DEV MODE: No carrier prefs found for', carrierDot,
+        '- scoring will use default weights via dynamic calculation');
     }
 
     // Post-query CDL class filter (extra sources bypass DB-level filters)
@@ -950,8 +931,13 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
             finalWeights = applyFeedbackAdjustments(scoringPrefs, feedbackWeights);
           }
 
-          // Use global weights if no custom weights provided in options
-          const scoreResult = calculateDriverMatchScore(driver, finalWeights, options.weights || globalWeights, filters);
+          // When carrier prefs have weight_* fields, don't override with globalWeights
+          const hasCarrierWeights = finalWeights &&
+            typeof finalWeights.weight_qualifications === 'number';
+          const explicitWeights = options.weights
+            ? options.weights
+            : (hasCarrierWeights ? null : globalWeights);
+          const scoreResult = calculateDriverMatchScore(driver, finalWeights, explicitWeights, filters);
           const rationaleResult = generateDriverMatchRationale(scoreResult.scores || {}, driver, scoringPrefs);
 
           // Check for mutual match via in-memory set (no API call)
@@ -1246,7 +1232,8 @@ export async function detectMutualMatch(carrierDot, driverId) {
         carrier_dot: carrierDot,
         status: 'interested'
       },
-      limit: 1
+      limit: 1,
+      suppressAuth: true
     });
 
     if (result.success && result.items.length > 0) {

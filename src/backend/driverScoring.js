@@ -923,10 +923,10 @@ const applyFeedbackAdjustments = (baseWeights, feedbackWeights) => {
     );
   }
 
-  // Reduce salary_fit weight when negative outcomes suggest pay mismatch isn't the issue
-  if (adjusted.weight_salary_fit !== undefined) {
-    adjusted.weight_salary_fit = Math.round(
-      adjusted.weight_salary_fit * (1 - negativeAdj)
+  // Reduce salaryFit weight when negative outcomes suggest pay mismatch isn't the issue
+  if (adjusted.weight_salaryFit !== undefined) {
+    adjusted.weight_salaryFit = Math.round(
+      adjusted.weight_salaryFit * (1 - negativeAdj)
     );
   }
 

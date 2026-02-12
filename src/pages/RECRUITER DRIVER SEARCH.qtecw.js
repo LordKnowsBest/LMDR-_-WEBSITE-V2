@@ -626,8 +626,8 @@ async function handleGetWeightPreferences(htmlComponent) {
     };
 
     htmlComponent.postMessage({
-      type: 'loadWeightPreferences',
-      data: { success: true, weights, isDefault: result.isDefault }
+      type: 'getWeightPreferencesResult',
+      data: { success: true, preferences: weights, isDefault: result.isDefault }
     });
 
     console.log('[VELO] Sent weight preferences to sidebar');
@@ -640,7 +640,7 @@ async function handleGetWeightPreferences(htmlComponent) {
 async function handleSaveWeightPreferences(htmlComponent, data) {
   if (!currentCarrierDot) {
     htmlComponent.postMessage({
-      type: 'savePreferencesResult',
+      type: 'saveWeightPreferencesResult',
       data: { success: false, error: 'No carrier assigned' }
     });
     return;
@@ -661,7 +661,7 @@ async function handleSaveWeightPreferences(htmlComponent, data) {
   const result = await saveWeightPreferences(currentCarrierDot, weights);
 
   htmlComponent.postMessage({
-    type: 'savePreferencesResult',
+    type: 'saveWeightPreferencesResult',
     data: {
       success: result.success,
       error: result.error,
