@@ -602,7 +602,7 @@ export const AIRTABLE_TABLE_NAMES = {
   carrierSafetyData: 'v2_FMCSA Safety Data',
 
   // Billing & Subscriptions
-  carrierSubscriptions: 'v2_Carrier Subscriptions',
+  carrierSubscriptions: 'v2_Subscriptions',
   profileViews: 'v2_Profile Views',
   billingHistory: 'v2_Billing History',
   stripeEvents: 'v2_Stripe Events',
