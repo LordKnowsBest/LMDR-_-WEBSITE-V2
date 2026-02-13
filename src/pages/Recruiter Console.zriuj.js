@@ -75,6 +75,7 @@ import {
 } from 'backend/pipelineAutomationService';
 
 import { getRecruiterHealthStatus } from 'backend/recruiterHealthService.jsw';
+import { routeAIRequest } from 'backend/aiRouterService';
 
 // Recruiter OS — Analytics imports
 import {
@@ -160,6 +161,7 @@ const MESSAGE_REGISTRY = {
     'getQuotaStatus',
     'getWeightPreferences',
     'saveWeightPreferences',
+    'generateAIDraft',
     'navigateTo',
     'logFeatureInteraction', // Feature adoption tracking
     // Saved Search messages
@@ -230,6 +232,7 @@ const MESSAGE_REGISTRY = {
     'getQuotaStatusResult',
     'getWeightPreferencesResult',
     'saveWeightPreferencesResult',
+    'generateAIDraftResult',
     'recruiterProfile',
     // Saved Search responses
     'saveSearchResult',
@@ -456,6 +459,10 @@ async function handleHtmlMessage(msg, component) {
 
       case 'saveWeightPreferences':
         await handleSaveWeightPreferences(msg.data, component);
+        break;
+
+      case 'generateAIDraft':
+        await handleGenerateAIDraft(msg.data, component);
         break;
 
       case 'navigateTo':
@@ -1194,6 +1201,51 @@ function handleNavigateTo(data) {
 
   const route = pageRoutes[data.page] || data.page;
   wixLocation.to(route);
+}
+
+// ============================================================================
+// AI DRAFT HANDLER
+// ============================================================================
+
+async function handleGenerateAIDraft(data, component) {
+  try {
+    const driver = data.driver || {};
+    const mode = data.mode || 'email';
+    const isText = mode === 'text';
+
+    const driverSummary = [
+      driver.name ? `Name: ${driver.name}` : null,
+      driver.cdlClass ? `CDL: Class ${driver.cdlClass}` : null,
+      driver.endorsements?.length ? `Endorsements: ${driver.endorsements.join(', ')}` : null,
+      driver.experienceYears ? `Experience: ${driver.experienceYears} years` : null,
+      driver.location ? `Location: ${driver.location}` : null,
+      driver.availability ? `Availability: ${driver.availability}` : null,
+      driver.equipment?.length ? `Equipment: ${driver.equipment.join(', ')}` : null
+    ].filter(Boolean).join('\n');
+
+    const prompt = isText
+      ? `Write a short, friendly SMS recruitment text message (under 160 characters) to a truck driver. Be professional but casual. Do not include subject lines or greetings like "Dear". Just a direct, compelling message. Do not use placeholder brackets like [Company Name] — just say "we" or "our team".\n\nDriver info:\n${driverSummary}\n\nWrite ONLY the text message, nothing else.`
+      : `Write a brief, professional recruitment email to a truck driver. Keep it under 150 words. Be warm and specific to their qualifications. Do not use placeholder brackets like [Company Name] — just say "we" or "our team". Include a subject line on the first line prefixed with "Subject: ".\n\nDriver info:\n${driverSummary}\n\nWrite ONLY the email (subject line + body), nothing else.`;
+
+    const aiResult = await routeAIRequest('driver_chat', {
+      prompt,
+      maxTokens: isText ? 100 : 300,
+      temperature: 0.8
+    });
+
+    sendToHtml(component, 'generateAIDraftResult', {
+      success: true,
+      draft: aiResult.content?.trim() || '',
+      model: aiResult.model,
+      tokensUsed: aiResult.tokensUsed
+    });
+  } catch (error) {
+    console.error('AI draft generation error:', error);
+    sendToHtml(component, 'generateAIDraftResult', {
+      success: false,
+      error: error.message || 'AI generation failed'
+    });
+  }
 }
 
 // ============================================================================
