@@ -144,30 +144,6 @@
         </button>
       </div>
 
-      <!-- Weight Preferences Panel (hidden by default) -->
-      <div id="weights-panel" style="display:none" class="mt-3 neu rounded-2xl p-4">
-        <div class="flex items-center justify-between mb-3">
-          <div class="flex items-center gap-2">
-            <span class="material-symbols-outlined text-lmdr-blue text-[16px]">tune</span>
-            <h3 class="text-[13px] font-bold text-lmdr-dark">Match Weight Preferences</h3>
-          </div>
-          <div class="flex items-center gap-2">
-            <button onclick="ROS.views._search.resetWeights()" class="text-[10px] font-bold text-tan hover:text-lmdr-dark">Reset</button>
-            <button onclick="document.getElementById('weights-panel').style.display='none'" class="text-tan hover:text-lmdr-dark">
-              <span class="material-symbols-outlined text-[16px]">close</span>
-            </button>
-          </div>
-        </div>
-        <div class="text-[10px] text-tan mb-3">Adjust how much each factor influences your match scores. Total should equal 100%.</div>
-        <div id="weight-sliders" class="space-y-2"></div>
-        <div class="flex items-center justify-between mt-3">
-          <span class="text-[11px] font-bold" id="weights-total">Total: 100%</span>
-          <button onclick="ROS.views._search.saveWeights()" id="save-weights-btn" class="px-4 py-2 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[11px] font-bold shadow-md hover:shadow-lg transition-shadow">
-            Save Weights
-          </button>
-        </div>
-      </div>
-
       <!-- Filter Orbs -->
       <div class="mt-3 flex flex-col gap-2" id="search-filter-orbs">
         ${renderFilterOrbs()}
@@ -265,6 +241,11 @@
     selectedDriverData = null;
     viewedDriverIds.clear();
     isSearching = false;
+    // Clean up floating elements
+    const alertEl = document.getElementById('no-carrier-alert');
+    if (alertEl) alertEl.remove();
+    const orbEl = document.getElementById('weights-orb');
+    if (orbEl) orbEl.remove();
   }
 
   // ── onMessage ──
@@ -866,48 +847,105 @@
     }).filter(Boolean).join('');
   }
 
-  // ── No Carrier State ──
+  // ── No Carrier Alert (side-sliding) ──
   function renderNoCarrierState() {
-    const container = document.getElementById('search-results');
-    if (!container) return;
-    container.innerHTML = `
-      <div class="text-center py-12">
-        <span class="material-symbols-outlined text-[48px] text-amber-400 block mb-3">domain_add</span>
-        <h3 class="text-[15px] font-bold text-lmdr-dark mb-2">No Carrier Assigned</h3>
-        <p class="text-[12px] text-tan mb-4 max-w-xs mx-auto">You need to add a carrier (DOT number) before searching for drivers. Go to Carriers to add your first one.</p>
-        <button onclick="ROS.views.showView('carriers')" class="px-5 py-2.5 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[12px] font-bold shadow-lg hover:shadow-xl transition-shadow inline-flex items-center gap-2">
-          <span class="material-symbols-outlined text-[16px]">add_business</span>Add a Carrier
-        </button>
+    if (document.getElementById('no-carrier-alert')) return;
+    const alert = document.createElement('div');
+    alert.id = 'no-carrier-alert';
+    alert.className = 'no-carrier-alert';
+    alert.innerHTML = `
+      <div class="neu-s rounded-2xl p-4 border-l-4 border-amber-400" style="background:#F5F5DC">
+        <div class="flex items-start gap-3">
+          <span class="material-symbols-outlined text-amber-400 text-[24px] shrink-0 mt-0.5">warning</span>
+          <div class="flex-1 min-w-0">
+            <h4 class="text-[13px] font-bold text-lmdr-dark leading-tight">No Carrier Assigned</h4>
+            <p class="text-[11px] text-tan mt-1 leading-snug">Add a carrier (DOT number) to start searching for drivers.</p>
+            <button onclick="ROS.views.showView('carriers');var a=document.getElementById('no-carrier-alert');if(a)a.remove()"
+                    class="mt-2.5 px-4 py-2 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[11px] font-bold shadow-md hover:shadow-lg transition-shadow inline-flex items-center gap-1.5">
+              <span class="material-symbols-outlined text-[14px]">add_business</span>Add Carrier
+            </button>
+          </div>
+          <button onclick="document.getElementById('no-carrier-alert').remove()" class="text-tan hover:text-lmdr-dark shrink-0 mt-0.5">
+            <span class="material-symbols-outlined text-[16px]">close</span>
+          </button>
+        </div>
       </div>`;
-    const pagination = document.getElementById('search-pagination');
-    if (pagination) pagination.style.display = 'none';
+    document.body.appendChild(alert);
   }
 
-  // ── Weight Preferences ──
-  function renderWeightSliders() {
-    const container = document.getElementById('weight-sliders');
-    if (!container) return;
-    const labels = {
-      qualifications: { name: 'Qualifications', icon: 'verified', color: 'text-lmdr-blue' },
-      experience: { name: 'Experience', icon: 'work_history', color: 'text-violet-500' },
-      location: { name: 'Location', icon: 'location_on', color: 'text-emerald-500' },
-      availability: { name: 'Availability', icon: 'event_available', color: 'text-amber-500' },
-      salary_fit: { name: 'Salary Fit', icon: 'payments', color: 'text-teal-500' },
-      engagement: { name: 'Engagement', icon: 'trending_up', color: 'text-rose-400' }
-    };
+  // ── Weight Preferences (floating orb with donut chart) ──
+  const WEIGHT_META = {
+    qualifications: { name: 'Qualifications', icon: 'verified', color: 'text-lmdr-blue', hex: '#2563eb' },
+    experience:     { name: 'Experience',     icon: 'work_history', color: 'text-violet-500', hex: '#8b5cf6' },
+    location:       { name: 'Location',       icon: 'location_on', color: 'text-emerald-500', hex: '#10b981' },
+    availability:   { name: 'Availability',   icon: 'event_available', color: 'text-amber-500', hex: '#f59e0b' },
+    salary_fit:     { name: 'Salary Fit',     icon: 'payments', color: 'text-teal-500', hex: '#14b8a6' },
+    engagement:     { name: 'Engagement',     icon: 'trending_up', color: 'text-rose-400', hex: '#fb7185' }
+  };
 
-    container.innerHTML = Object.entries(weights).map(([key, val]) => {
-      const info = labels[key] || { name: key, icon: 'circle', color: 'text-tan' };
-      return `
-      <div class="flex items-center gap-3">
-        <span class="material-symbols-outlined ${info.color} text-[16px] w-5">${info.icon}</span>
-        <span class="text-[11px] font-bold text-lmdr-dark w-[90px]">${info.name}</span>
-        <input type="range" min="0" max="50" value="${val}" class="flex-1 accent-blue-600 h-1.5"
+  function renderDonutChart() {
+    const entries = Object.entries(weights);
+    const total = entries.reduce((s, [, v]) => s + v, 0);
+    const r = 36, cx = 48, cy = 48, sw = 10;
+    const C = 2 * Math.PI * r;
+    let arcs = '', offset = 0;
+    for (const [key, val] of entries) {
+      if (val <= 0) continue;
+      const dash = (val / (total || 1)) * C;
+      arcs += `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${WEIGHT_META[key].hex}"
+        stroke-width="${sw}" stroke-dasharray="${dash} ${C - dash}" stroke-dashoffset="${-offset}"
+        stroke-linecap="butt" transform="rotate(-90 ${cx} ${cy})"/>`;
+      offset += dash;
+    }
+    const fill = total === 100 ? '#10b981' : total > 100 ? '#f87171' : '#f59e0b';
+    return `<svg width="96" height="96" viewBox="0 0 96 96">
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#E8E0C8" stroke-width="${sw}"/>
+      ${arcs}
+      <text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central"
+            font-size="14" font-weight="800" fill="${fill}">${total}%</text>
+    </svg>`;
+  }
+
+  function buildWeightsOrbHTML() {
+    const total = Object.values(weights).reduce((a, b) => a + b, 0);
+    const sliders = Object.entries(weights).map(([key, val]) => {
+      const m = WEIGHT_META[key];
+      return `<div class="flex items-center gap-2">
+        <span class="material-symbols-outlined ${m.color} text-[14px] w-4">${m.icon}</span>
+        <span class="text-[10px] font-bold text-lmdr-dark w-[68px] truncate">${m.name}</span>
+        <input type="range" min="0" max="100" value="${val}" class="flex-1 accent-blue-600 h-1"
                id="wslider-${key}" oninput="ROS.views._search.updateWeight('${key}',this.value)"/>
-        <span class="text-[11px] font-bold text-lmdr-blue w-[35px] text-right" id="wval-${key}">${val}%</span>
+        <span class="text-[10px] font-bold text-lmdr-blue w-[28px] text-right" id="wval-${key}">${val}%</span>
       </div>`;
     }).join('');
-    updateWeightsTotal();
+
+    return `
+      <div class="flex items-center justify-between mb-3">
+        <div class="flex items-center gap-2">
+          <span class="material-symbols-outlined text-lmdr-blue text-[16px]">tune</span>
+          <span class="text-[12px] font-bold text-lmdr-dark">Match Weights</span>
+        </div>
+        <button onclick="document.getElementById('weights-orb').remove()" class="text-tan hover:text-lmdr-dark">
+          <span class="material-symbols-outlined text-[16px]">close</span>
+        </button>
+      </div>
+      <div class="flex gap-3 items-start">
+        <div id="weights-donut" class="shrink-0">${renderDonutChart()}</div>
+        <div class="flex-1 space-y-1.5">${sliders}</div>
+      </div>
+      <div class="flex items-center justify-between mt-3 pt-2 border-t border-tan/10">
+        <div class="flex items-center gap-3">
+          <span class="text-[10px] font-bold ${total === 100 ? 'text-emerald-500' : 'text-red-400'}" id="weights-total">Total: ${total}%</span>
+          <button onclick="ROS.views._search.resetWeights()" class="text-[9px] font-bold text-tan hover:text-lmdr-dark underline">Reset</button>
+        </div>
+        <button onclick="ROS.views._search.saveWeights()" id="save-weights-btn"
+                class="px-3 py-1.5 rounded-lg bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[10px] font-bold shadow-md">Save</button>
+      </div>`;
+  }
+
+  function refreshWeightsOrb() {
+    const orb = document.getElementById('weights-orb');
+    if (orb) orb.innerHTML = buildWeightsOrbHTML();
   }
 
   function updateWeightsTotal() {
@@ -915,8 +953,10 @@
     const el = document.getElementById('weights-total');
     if (el) {
       el.textContent = `Total: ${total}%`;
-      el.className = total === 100 ? 'text-[11px] font-bold text-emerald-500' : 'text-[11px] font-bold text-red-400';
+      el.className = total === 100 ? 'text-[10px] font-bold text-emerald-500' : 'text-[10px] font-bold text-red-400';
     }
+    const donut = document.getElementById('weights-donut');
+    if (donut) donut.innerHTML = renderDonutChart();
   }
 
   function loadWeightsFromVelo(prefs) {
@@ -926,7 +966,7 @@
     if (prefs.weight_availability !== undefined) weights.availability = prefs.weight_availability;
     if (prefs.weight_salary_fit !== undefined) weights.salary_fit = prefs.weight_salary_fit;
     if (prefs.weight_engagement !== undefined) weights.engagement = prefs.weight_engagement;
-    renderWeightSliders();
+    refreshWeightsOrb();
   }
 
   function handleWeightSaveResult(data) {
@@ -937,14 +977,14 @@
       btn.classList.remove('from-lmdr-blue', 'to-lmdr-deep');
       btn.classList.add('from-emerald-400', 'to-emerald-600');
       setTimeout(() => {
-        btn.textContent = 'Save Weights';
+        btn.textContent = 'Save';
         btn.classList.add('from-lmdr-blue', 'to-lmdr-deep');
         btn.classList.remove('from-emerald-400', 'to-emerald-600');
       }, 1500);
       showToast('Weight preferences saved');
     } else {
       showToast(data && data.error ? data.error : 'Failed to save', 'error');
-      btn.textContent = 'Save Weights';
+      btn.textContent = 'Save';
       btn.disabled = false;
     }
   }
@@ -1167,31 +1207,36 @@
     },
 
     toggleWeights: function() {
-      const panel = document.getElementById('weights-panel');
-      if (!panel) return;
-      if (panel.style.display === 'none') {
-        panel.style.display = 'block';
-        renderWeightSliders();
-      } else {
-        panel.style.display = 'none';
-      }
+      const existing = document.getElementById('weights-orb');
+      if (existing) { existing.remove(); return; }
+      const orb = document.createElement('div');
+      orb.id = 'weights-orb';
+      orb.className = 'weights-float-orb neu rounded-2xl p-4';
+      orb.style.animation = 'fadeUp .3s ease';
+      orb.innerHTML = buildWeightsOrbHTML();
+      document.body.appendChild(orb);
     },
 
     updateWeight: function(key, val) {
-      weights[key] = parseInt(val);
+      const raw = parseInt(val) || 0;
+      const otherTotal = Object.entries(weights).filter(([k]) => k !== key).reduce((s, [, v]) => s + v, 0);
+      const clamped = Math.min(Math.max(raw, 0), 100 - otherTotal);
+      weights[key] = clamped;
+      const slider = document.getElementById('wslider-' + key);
+      if (slider && clamped !== raw) slider.value = clamped;
       const valEl = document.getElementById('wval-' + key);
-      if (valEl) valEl.textContent = val + '%';
+      if (valEl) valEl.textContent = clamped + '%';
       updateWeightsTotal();
     },
 
     resetWeights: function() {
       weights = { qualifications: 25, experience: 20, location: 20, availability: 15, salary_fit: 10, engagement: 10 };
-      renderWeightSliders();
+      refreshWeightsOrb();
     },
 
     saveWeights: function() {
       const btn = document.getElementById('save-weights-btn');
-      if (btn) { btn.textContent = 'Saving...'; btn.disabled = true; }
+      if (btn) { btn.textContent = 'Saving\u2026'; btn.disabled = true; }
       ROS.bridge.sendToVelo('saveWeightPreferences', {
         weight_qualifications: weights.qualifications,
         weight_experience: weights.experience,
