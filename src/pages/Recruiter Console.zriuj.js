@@ -76,6 +76,36 @@ import {
 
 import { getRecruiterHealthStatus } from 'backend/recruiterHealthService.jsw';
 
+// Recruiter OS — Analytics imports
+import {
+  getFunnelMetrics,
+  getBottleneckAnalysis,
+  calculateCostPerHire,
+  getCompetitorComparison,
+  generateHiringForecast,
+  getTurnoverRiskAnalysis,
+  getPayBenchmarks
+} from 'backend/recruiterAnalyticsService.jsw';
+
+// Recruiter OS — Onboarding imports
+import {
+  getActiveWorkflows,
+  updateWorkflowStatus
+} from 'backend/onboardingWorkflowService.jsw';
+
+// Recruiter OS — Retention imports
+import {
+  getCarrierRetentionDashboard,
+  getInterventionSuggestions
+} from 'backend/retentionService.jsw';
+
+// Recruiter OS — Leaderboard imports
+import {
+  getLeaderboard,
+  getLeaderboardSummary,
+  getUserLeaderboardPosition
+} from 'backend/leaderboardService.jsw';
+
 import wixLocation from 'wix-location';
 
 let wixUsers;
@@ -157,7 +187,20 @@ const MESSAGE_REGISTRY = {
     'deleteAutomationRule',
     'toggleRuleStatus',
     'getAutomationLog',
-    'getSystemHealth' // New System Health Check
+    'getSystemHealth', // New System Health Check
+    // ── Recruiter OS Messages ──
+    'recruiterOSReady',
+    'getFunnelData',
+    'getCostData',
+    'getCompetitorData',
+    'getPredictionsData',
+    'getWorkflows',
+    'updateWorkflowStep',
+    'getRetentionData',
+    'getAtRiskDrivers',
+    'getLeaderboard',
+    'getBadges',
+    'getSettingsData'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -213,7 +256,20 @@ const MESSAGE_REGISTRY = {
     'automationRuleDeleted',
     'automationRuleToggled',
     'automationLogLoaded',
-    'systemHealthUpdate' // New System Health Response
+    'systemHealthUpdate', // New System Health Response
+    // ── Recruiter OS Responses ──
+    'recruiterOSInit',
+    'funnelDataLoaded',
+    'costDataLoaded',
+    'competitorDataLoaded',
+    'predictionsLoaded',
+    'workflowsLoaded',
+    'workflowUpdated',
+    'retentionDataLoaded',
+    'atRiskDriversLoaded',
+    'leaderboardLoaded',
+    'badgesLoaded',
+    'settingsDataLoaded'
   ]
 };
 
@@ -485,6 +541,44 @@ async function handleHtmlMessage(msg, component) {
 
       case 'getSystemHealth':
         await handleGetSystemHealth(msg.data, component);
+        break;
+
+      // ========== Recruiter OS Handlers ==========
+      case 'recruiterOSReady':
+        await handleRecruiterOSReady(component);
+        break;
+      case 'getFunnelData':
+        await handleGetFunnelData(msg.data, component);
+        break;
+      case 'getCostData':
+        await handleGetCostData(msg.data, component);
+        break;
+      case 'getCompetitorData':
+        await handleGetCompetitorData(msg.data, component);
+        break;
+      case 'getPredictionsData':
+        await handleGetPredictionsData(msg.data, component);
+        break;
+      case 'getWorkflows':
+        await handleGetWorkflows(msg.data, component);
+        break;
+      case 'updateWorkflowStep':
+        await handleUpdateWorkflowStep(msg.data, component);
+        break;
+      case 'getRetentionData':
+        await handleGetRetentionData(msg.data, component);
+        break;
+      case 'getAtRiskDrivers':
+        await handleGetAtRiskDrivers(msg.data, component);
+        break;
+      case 'getLeaderboard':
+        await handleGetLeaderboardData(msg.data, component);
+        break;
+      case 'getBadges':
+        await handleGetBadges(msg.data, component);
+        break;
+      case 'getSettingsData':
+        await handleGetSettingsData(component);
         break;
 
       default:
@@ -1350,6 +1444,180 @@ async function handleGetAutomationLog(component) {
 // ============================================================================
 // SYSTEM HEALTH HANDLERS
 // ============================================================================
+
+// ============================================================================
+// RECRUITER OS HANDLERS
+// ============================================================================
+
+async function handleRecruiterOSReady(component) {
+  console.log('Recruiter OS ready, initializing...');
+
+  if (!wixUsers || !wixUsers.currentUser.loggedIn) {
+    wixLocation.to('/account/my-account');
+    return;
+  }
+
+  // Reuse existing profile/carrier init
+  const result = await getOrCreateRecruiterProfile();
+  if (!result.success) {
+    sendToHtml(component, 'error', { message: result.error });
+    return;
+  }
+
+  cachedRecruiterProfile = result.profile;
+  cachedCarriers = result.carriers || [];
+  if (cachedCarriers.length > 0) {
+    currentCarrierDOT = result.defaultCarrierDOT || cachedCarriers[0].carrier_dot;
+  }
+
+  sendToHtml(component, 'recruiterOSInit', {
+    profile: {
+      name: result.profile.name || result.profile.recruiter_name || '',
+      tier: result.profile.subscription_tier || 'Free',
+      currentCarrierDOT
+    },
+    carriers: cachedCarriers.map(c => ({
+      dot: c.carrier_dot,
+      name: c.carrier_name || c.legal_name || ''
+    })),
+    memberId: wixUsers?.currentUser?.id || null
+  });
+}
+
+async function handleGetFunnelData(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'funnelDataLoaded', { stages: [] });
+    return;
+  }
+  try {
+    const result = await getFunnelMetrics(currentCarrierDOT, data?.dateRange);
+    sendToHtml(component, 'funnelDataLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'funnelDataLoaded', { error: error.message, stages: [] });
+  }
+}
+
+async function handleGetCostData(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'costDataLoaded', {});
+    return;
+  }
+  try {
+    const result = await calculateCostPerHire(currentCarrierDOT, data?.dateRange);
+    sendToHtml(component, 'costDataLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'costDataLoaded', { error: error.message });
+  }
+}
+
+async function handleGetCompetitorData(data, component) {
+  try {
+    const region = data?.region || 'national';
+    const jobType = data?.jobType || 'CDL-A OTR';
+    const result = await getCompetitorComparison(region, jobType);
+    sendToHtml(component, 'competitorDataLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'competitorDataLoaded', { error: error.message });
+  }
+}
+
+async function handleGetPredictionsData(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'predictionsLoaded', {});
+    return;
+  }
+  try {
+    const [forecast, risk] = await Promise.all([
+      generateHiringForecast(currentCarrierDOT, data?.monthsAhead || 3),
+      getTurnoverRiskAnalysis(currentCarrierDOT)
+    ]);
+    sendToHtml(component, 'predictionsLoaded', { forecast, risk });
+  } catch (error) {
+    sendToHtml(component, 'predictionsLoaded', { error: error.message });
+  }
+}
+
+async function handleGetWorkflows(data, component) {
+  try {
+    const filters = data?.filters || {};
+    if (currentCarrierDOT) filters.carrierId = currentCarrierDOT;
+    const result = await getActiveWorkflows(filters);
+    sendToHtml(component, 'workflowsLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'workflowsLoaded', { error: error.message, workflows: [] });
+  }
+}
+
+async function handleUpdateWorkflowStep(data, component) {
+  try {
+    const result = await updateWorkflowStatus(data.workflowId, data.status, data.metadata || {});
+    sendToHtml(component, 'workflowUpdated', result);
+  } catch (error) {
+    sendToHtml(component, 'workflowUpdated', { success: false, error: error.message });
+  }
+}
+
+async function handleGetRetentionData(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'retentionDataLoaded', {});
+    return;
+  }
+  try {
+    const result = await getCarrierRetentionDashboard(currentCarrierDOT);
+    sendToHtml(component, 'retentionDataLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'retentionDataLoaded', { error: error.message });
+  }
+}
+
+async function handleGetAtRiskDrivers(data, component) {
+  // At-risk drivers come from retention dashboard
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'atRiskDriversLoaded', { drivers: [] });
+    return;
+  }
+  try {
+    const result = await getCarrierRetentionDashboard(currentCarrierDOT);
+    sendToHtml(component, 'atRiskDriversLoaded', {
+      drivers: result.atRiskDrivers || result.at_risk_drivers || []
+    });
+  } catch (error) {
+    sendToHtml(component, 'atRiskDriversLoaded', { error: error.message, drivers: [] });
+  }
+}
+
+async function handleGetLeaderboardData(data, component) {
+  try {
+    const type = data?.type || 'overall';
+    const period = data?.period || 'monthly';
+    const result = await getLeaderboard(type, period);
+    sendToHtml(component, 'leaderboardLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'leaderboardLoaded', { error: error.message, entries: [] });
+  }
+}
+
+async function handleGetBadges(data, component) {
+  try {
+    const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+    if (!recruiterId) {
+      sendToHtml(component, 'badgesLoaded', { badges: [] });
+      return;
+    }
+    const result = await getUserLeaderboardPosition(recruiterId);
+    sendToHtml(component, 'badgesLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'badgesLoaded', { error: error.message, badges: [] });
+  }
+}
+
+async function handleGetSettingsData(component) {
+  sendToHtml(component, 'settingsDataLoaded', {
+    profile: cachedRecruiterProfile,
+    carriers: cachedCarriers,
+    currentCarrierDOT
+  });
+}
 
 async function handleGetSystemHealth(data, component) {
   // Use currentCarrierDOT as context if not provided
