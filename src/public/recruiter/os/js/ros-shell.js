@@ -30,7 +30,7 @@
       <div class="flex flex-1 min-h-0 relative">
         <div class="rail-overlay" id="railOverlay"></div>
         ${buildRail()}
-        <div class="flex-1 overflow-y-auto relative pb-24 ws-grid" id="ros-stage">
+        <div class="flex-1 overflow-y-auto relative pb-24 px-5 ws-grid" id="ros-stage">
           <div id="ros-view-container" class="h-full"></div>
         </div>
         ${buildChatThread()}
