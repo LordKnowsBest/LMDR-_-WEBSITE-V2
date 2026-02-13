@@ -220,7 +220,7 @@
       <div class="spot-box w-[520px] rounded-2xl overflow-hidden shadow-2xl">
         <div class="bg-lmdr-dark p-4 flex items-center gap-3 border-b border-white/5">
           <span class="material-symbols-outlined text-white/30 text-[20px]">search</span>
-          <input id="slIn" class="flex-1 bg-transparent border-none outline-none text-white text-[15px] font-medium placeholder-white/25" placeholder="Search tools, drivers, commands..." oninput="ROS.spotlight.filter(this.value)"/>
+          <input id="slIn" class="flex-1 bg-transparent border-none outline-none text-white text-[16px] font-medium placeholder-white/25" placeholder="Search tools, drivers, commands..." oninput="ROS.spotlight.filter(this.value)"/>
           <span class="text-[9px] text-white/20 font-bold bg-white/[0.06] px-2 py-0.5 rounded border border-white/[0.06]">ESC</span>
         </div>
         <div class="bg-lmdr-dark p-2 max-h-[320px] overflow-y-auto" id="slR"></div>

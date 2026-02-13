@@ -61,7 +61,7 @@
 
       <!-- Compose Bar -->
       <div class="flex gap-2 mt-4" id="msg-compose" style="display:none">
-        <input id="msg-input" class="flex-1 px-4 py-3 neu-in rounded-xl text-sm text-lmdr-dark placeholder-tan/50 outline-none font-medium"
+        <input id="msg-input" class="flex-1 px-4 py-3 neu-in rounded-xl text-base text-lmdr-dark placeholder-tan/50 outline-none font-medium"
                placeholder="Type a message..."
                onkeydown="if(event.key==='Enter')ROS.views._messages.sendReply()"/>
         <button onclick="ROS.views._messages.sendReply()" class="px-5 py-3 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-sm font-bold shadow-lg">

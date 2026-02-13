@@ -49,7 +49,7 @@
 
       <!-- Add Carrier -->
       <div class="flex gap-2 mt-4">
-        <input id="add-carrier-dot" class="flex-1 px-4 py-3 neu-in rounded-xl text-sm text-lmdr-dark placeholder-tan/50 outline-none font-medium"
+        <input id="add-carrier-dot" class="flex-1 px-4 py-3 neu-in rounded-xl text-base text-lmdr-dark placeholder-tan/50 outline-none font-medium"
                placeholder="Enter DOT number to add carrier..."
                onkeydown="if(event.key==='Enter')ROS.views._carriers.addCarrier()"/>
         <button onclick="ROS.views._carriers.addCarrier()" class="px-5 py-3 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-sm font-bold shadow-lg">

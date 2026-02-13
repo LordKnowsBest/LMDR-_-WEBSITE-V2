@@ -48,7 +48,7 @@
       <div class="flex gap-3 mt-4">
         <div class="flex-1 flex items-center px-4 py-3 neu-in rounded-xl">
           <span class="material-symbols-outlined text-tan text-[18px]">search</span>
-          <input id="search-input" class="bg-transparent border-none focus:ring-0 text-sm text-lmdr-dark placeholder-tan/50 w-full ml-2 outline-none font-medium"
+          <input id="search-input" class="bg-transparent border-none focus:ring-0 text-base text-lmdr-dark placeholder-tan/50 w-full ml-2 outline-none font-medium"
                  placeholder="Name, CDL type, location, endorsements..."
                  onkeydown="if(event.key==='Enter')ROS.views._search.doSearch()"/>
         </div>

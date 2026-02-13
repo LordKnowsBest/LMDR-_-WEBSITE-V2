@@ -74,8 +74,8 @@
             </button>
           </div>
           <div class="flex flex-col gap-3">
-            <input id="tel-log-driver" class="px-4 py-3 neu-in rounded-xl text-sm text-lmdr-dark placeholder-tan/50 outline-none font-medium" placeholder="Driver name or ID" />
-            <select id="tel-log-outcome" class="px-4 py-3 neu-in rounded-xl text-sm text-lmdr-dark outline-none font-medium">
+            <input id="tel-log-driver" class="px-4 py-3 neu-in rounded-xl text-base text-lmdr-dark placeholder-tan/50 outline-none font-medium" placeholder="Driver name or ID" />
+            <select id="tel-log-outcome" class="px-4 py-3 neu-in rounded-xl text-base text-lmdr-dark outline-none font-medium">
               <option value="">Select outcome...</option>
               <option value="connected">Connected</option>
               <option value="voicemail">Voicemail</option>
@@ -84,8 +84,8 @@
               <option value="not_interested">Not Interested</option>
               <option value="callback">Callback Requested</option>
             </select>
-            <input id="tel-log-duration" type="number" class="px-4 py-3 neu-in rounded-xl text-sm text-lmdr-dark placeholder-tan/50 outline-none font-medium" placeholder="Duration (minutes)" />
-            <textarea id="tel-log-notes" class="px-4 py-3 neu-in rounded-xl text-sm text-lmdr-dark placeholder-tan/50 outline-none font-medium resize-none h-20" placeholder="Notes..."></textarea>
+            <input id="tel-log-duration" type="number" class="px-4 py-3 neu-in rounded-xl text-base text-lmdr-dark placeholder-tan/50 outline-none font-medium" placeholder="Duration (minutes)" />
+            <textarea id="tel-log-notes" class="px-4 py-3 neu-in rounded-xl text-base text-lmdr-dark placeholder-tan/50 outline-none font-medium resize-none h-20" placeholder="Notes..."></textarea>
             <button onclick="ROS.views._telemetry.submitLogCall()" class="px-5 py-3 rounded-xl bg-gradient-to-br from-orange-500 to-amber-600 text-white text-sm font-bold shadow-lg">
               Log Call
             </button>
