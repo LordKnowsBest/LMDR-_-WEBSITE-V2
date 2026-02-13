@@ -31,6 +31,11 @@
   const viewedDriverIds = new Set();
   let sortField = 'matchScore';
   let isSearching = false;
+  let hasCarrier = true; // assume true until told otherwise
+  let weights = {
+    qualifications: 25, experience: 20, location: 20,
+    availability: 15, salary_fit: 10, engagement: 10
+  };
 
   // ── Filter Definitions ──
   const FILTER_GROUPS = {
@@ -119,8 +124,8 @@
       </div>
 
       <!-- Search Bar + Sort -->
-      <div class="flex gap-3 mt-4 items-center">
-        <div class="flex-1 flex items-center px-4 py-3 neu-in rounded-xl">
+      <div class="flex gap-2 mt-4 items-center flex-wrap">
+        <div class="flex-1 flex items-center px-4 py-3 neu-in rounded-xl min-w-[200px]">
           <span class="material-symbols-outlined text-tan text-[18px]">search</span>
           <input id="search-input" class="bg-transparent border-none focus:ring-0 text-base text-lmdr-dark placeholder-tan/50 w-full ml-2 outline-none font-medium"
                  placeholder="Name, CDL type, location, endorsements..."
@@ -132,8 +137,35 @@
           <option value="location">Location</option>
         </select>
         <button onclick="ROS.views._search.doSearch()" class="px-5 py-3 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-sm font-bold flex items-center gap-2 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/40 transition-shadow whitespace-nowrap">
-          <span class="material-symbols-outlined text-[18px]">auto_awesome</span>AI Match
+          <span class="material-symbols-outlined text-[18px]">search</span>Search
         </button>
+        <button onclick="ROS.views._search.toggleWeights()" class="px-3 py-3 rounded-xl neu-x text-tan hover:text-lmdr-blue transition-colors" title="Match Weight Preferences">
+          <span class="material-symbols-outlined text-[18px]">tune</span>
+        </button>
+      </div>
+
+      <!-- Weight Preferences Panel (hidden by default) -->
+      <div id="weights-panel" style="display:none" class="mt-3 neu rounded-2xl p-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <span class="material-symbols-outlined text-lmdr-blue text-[16px]">tune</span>
+            <h3 class="text-[13px] font-bold text-lmdr-dark">Match Weight Preferences</h3>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="ROS.views._search.resetWeights()" class="text-[10px] font-bold text-tan hover:text-lmdr-dark">Reset</button>
+            <button onclick="document.getElementById('weights-panel').style.display='none'" class="text-tan hover:text-lmdr-dark">
+              <span class="material-symbols-outlined text-[16px]">close</span>
+            </button>
+          </div>
+        </div>
+        <div class="text-[10px] text-tan mb-3">Adjust how much each factor influences your match scores. Total should equal 100%.</div>
+        <div id="weight-sliders" class="space-y-2"></div>
+        <div class="flex items-center justify-between mt-3">
+          <span class="text-[11px] font-bold" id="weights-total">Total: 100%</span>
+          <button onclick="ROS.views._search.saveWeights()" id="save-weights-btn" class="px-4 py-2 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[11px] font-bold shadow-md hover:shadow-lg transition-shadow">
+            Save Weights
+          </button>
+        </div>
       </div>
 
       <!-- Filter Orbs -->
@@ -166,9 +198,9 @@
 
       <!-- Results -->
       <div class="flex flex-col gap-3 mt-4" id="search-results">
-        <div class="text-center py-12 text-tan text-[13px]">
+        <div id="search-empty-state" class="text-center py-12 text-tan text-[13px]">
           <span class="material-symbols-outlined text-[48px] text-tan/30 block mb-3">person_search</span>
-          Enter search criteria and click AI Match to find drivers
+          Select your filters and click Search to find matching drivers
         </div>
       </div>
 
@@ -220,6 +252,7 @@
   function onMount() {
     ROS.bridge.sendToVelo('driverSearchReady', {});
     ROS.bridge.sendToVelo('getQuotaStatus', {});
+    ROS.bridge.sendToVelo('getWeightPreferences', {});
   }
 
   function onUnmount() {
@@ -242,6 +275,12 @@
           quotaStatus = data.quotaStatus;
           renderQuotaBar();
         }
+        if (data && data.currentCarrierDOT) {
+          hasCarrier = true;
+        } else if (data && data.carriers && data.carriers.length === 0) {
+          hasCarrier = false;
+          renderNoCarrierState();
+        }
         break;
 
       case 'searchDriversResult':
@@ -256,7 +295,13 @@
           currentPage = 0;
           applySortAndPaginate();
         } else {
-          renderError(data && data.error ? data.error : 'Search failed');
+          const err = data && data.error ? data.error : 'Search failed';
+          if (err.toLowerCase().includes('no carrier')) {
+            hasCarrier = false;
+            renderNoCarrierState();
+          } else {
+            renderError(err);
+          }
         }
         break;
 
@@ -327,8 +372,19 @@
         showToast(data && data.success ? 'Search saved' : 'Failed to save search', data && data.success ? 'success' : 'error');
         break;
 
+      case 'getWeightPreferencesResult':
+        if (data && data.success && data.preferences) {
+          loadWeightsFromVelo(data.preferences);
+        }
+        break;
+
+      case 'saveWeightPreferencesResult':
+        handleWeightSaveResult(data);
+        break;
+
       case 'noCarrierAssigned':
-        renderError(data && data.message ? data.message : 'No carrier assigned. Please add a carrier first.');
+        hasCarrier = false;
+        renderNoCarrierState();
         break;
     }
   }
@@ -810,6 +866,89 @@
     }).filter(Boolean).join('');
   }
 
+  // ── No Carrier State ──
+  function renderNoCarrierState() {
+    const container = document.getElementById('search-results');
+    if (!container) return;
+    container.innerHTML = `
+      <div class="text-center py-12">
+        <span class="material-symbols-outlined text-[48px] text-amber-400 block mb-3">domain_add</span>
+        <h3 class="text-[15px] font-bold text-lmdr-dark mb-2">No Carrier Assigned</h3>
+        <p class="text-[12px] text-tan mb-4 max-w-xs mx-auto">You need to add a carrier (DOT number) before searching for drivers. Go to Carriers to add your first one.</p>
+        <button onclick="ROS.views.showView('carriers')" class="px-5 py-2.5 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[12px] font-bold shadow-lg hover:shadow-xl transition-shadow inline-flex items-center gap-2">
+          <span class="material-symbols-outlined text-[16px]">add_business</span>Add a Carrier
+        </button>
+      </div>`;
+    const pagination = document.getElementById('search-pagination');
+    if (pagination) pagination.style.display = 'none';
+  }
+
+  // ── Weight Preferences ──
+  function renderWeightSliders() {
+    const container = document.getElementById('weight-sliders');
+    if (!container) return;
+    const labels = {
+      qualifications: { name: 'Qualifications', icon: 'verified', color: 'text-lmdr-blue' },
+      experience: { name: 'Experience', icon: 'work_history', color: 'text-violet-500' },
+      location: { name: 'Location', icon: 'location_on', color: 'text-emerald-500' },
+      availability: { name: 'Availability', icon: 'event_available', color: 'text-amber-500' },
+      salary_fit: { name: 'Salary Fit', icon: 'payments', color: 'text-teal-500' },
+      engagement: { name: 'Engagement', icon: 'trending_up', color: 'text-rose-400' }
+    };
+
+    container.innerHTML = Object.entries(weights).map(([key, val]) => {
+      const info = labels[key] || { name: key, icon: 'circle', color: 'text-tan' };
+      return `
+      <div class="flex items-center gap-3">
+        <span class="material-symbols-outlined ${info.color} text-[16px] w-5">${info.icon}</span>
+        <span class="text-[11px] font-bold text-lmdr-dark w-[90px]">${info.name}</span>
+        <input type="range" min="0" max="50" value="${val}" class="flex-1 accent-blue-600 h-1.5"
+               id="wslider-${key}" oninput="ROS.views._search.updateWeight('${key}',this.value)"/>
+        <span class="text-[11px] font-bold text-lmdr-blue w-[35px] text-right" id="wval-${key}">${val}%</span>
+      </div>`;
+    }).join('');
+    updateWeightsTotal();
+  }
+
+  function updateWeightsTotal() {
+    const total = Object.values(weights).reduce((a, b) => a + b, 0);
+    const el = document.getElementById('weights-total');
+    if (el) {
+      el.textContent = `Total: ${total}%`;
+      el.className = total === 100 ? 'text-[11px] font-bold text-emerald-500' : 'text-[11px] font-bold text-red-400';
+    }
+  }
+
+  function loadWeightsFromVelo(prefs) {
+    if (prefs.weight_qualifications !== undefined) weights.qualifications = prefs.weight_qualifications;
+    if (prefs.weight_experience !== undefined) weights.experience = prefs.weight_experience;
+    if (prefs.weight_location !== undefined) weights.location = prefs.weight_location;
+    if (prefs.weight_availability !== undefined) weights.availability = prefs.weight_availability;
+    if (prefs.weight_salary_fit !== undefined) weights.salary_fit = prefs.weight_salary_fit;
+    if (prefs.weight_engagement !== undefined) weights.engagement = prefs.weight_engagement;
+    renderWeightSliders();
+  }
+
+  function handleWeightSaveResult(data) {
+    const btn = document.getElementById('save-weights-btn');
+    if (!btn) return;
+    if (data && data.success) {
+      btn.textContent = 'Saved!';
+      btn.classList.remove('from-lmdr-blue', 'to-lmdr-deep');
+      btn.classList.add('from-emerald-400', 'to-emerald-600');
+      setTimeout(() => {
+        btn.textContent = 'Save Weights';
+        btn.classList.add('from-lmdr-blue', 'to-lmdr-deep');
+        btn.classList.remove('from-emerald-400', 'to-emerald-600');
+      }, 1500);
+      showToast('Weight preferences saved');
+    } else {
+      showToast(data && data.error ? data.error : 'Failed to save', 'error');
+      btn.textContent = 'Save Weights';
+      btn.disabled = false;
+    }
+  }
+
   // ── Close Modal ──
   function closeModal(id) {
     const existing = document.getElementById(id);
@@ -854,6 +993,10 @@
   // ── Public API ──
   ROS.views._search = {
     doSearch: function() {
+      if (!hasCarrier) {
+        renderNoCarrierState();
+        return;
+      }
       filters = getFilters();
       renderActiveFilters();
       isSearching = true;
@@ -862,7 +1005,7 @@
 
       const input = document.getElementById('search-input');
       const query = input ? input.value.trim() : '';
-      const searchData = { ...filters, query, limit: 500 };
+      const searchData = { ...filters, query, limit: 500, usePreferences: true, includeMutualMatches: true };
       ROS.bridge.sendToVelo('searchDrivers', searchData);
     },
 
@@ -1021,6 +1164,42 @@
 
     deleteSaved: function(id) {
       ROS.bridge.sendToVelo('deleteSavedSearch', { searchId: id });
+    },
+
+    toggleWeights: function() {
+      const panel = document.getElementById('weights-panel');
+      if (!panel) return;
+      if (panel.style.display === 'none') {
+        panel.style.display = 'block';
+        renderWeightSliders();
+      } else {
+        panel.style.display = 'none';
+      }
+    },
+
+    updateWeight: function(key, val) {
+      weights[key] = parseInt(val);
+      const valEl = document.getElementById('wval-' + key);
+      if (valEl) valEl.textContent = val + '%';
+      updateWeightsTotal();
+    },
+
+    resetWeights: function() {
+      weights = { qualifications: 25, experience: 20, location: 20, availability: 15, salary_fit: 10, engagement: 10 };
+      renderWeightSliders();
+    },
+
+    saveWeights: function() {
+      const btn = document.getElementById('save-weights-btn');
+      if (btn) { btn.textContent = 'Saving...'; btn.disabled = true; }
+      ROS.bridge.sendToVelo('saveWeightPreferences', {
+        weight_qualifications: weights.qualifications,
+        weight_experience: weights.experience,
+        weight_location: weights.location,
+        weight_availability: weights.availability,
+        weight_salary_fit: weights.salary_fit,
+        weight_engagement: weights.engagement
+      });
     },
 
     upgrade: function() {
