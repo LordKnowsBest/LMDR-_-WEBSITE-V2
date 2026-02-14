@@ -283,14 +283,56 @@ export async function getBillingHistory(carrierDot, limit = 50) {
 export async function isEventProcessed(eventId) {
   try {
     const result = await dataAccess.queryRecords(CONFIG.stripeEventsKey, { filters: { event_id: eventId }, limit: 1, suppressAuth: true });
-    return (result.items?.length || 0) > 0;
+    if (!result.items?.length) return false;
+
+    const event = result.items[0];
+    // If completed/processed, return true
+    if (event.status === 'processed' || event.status === 'completed') return true;
+
+    // If processing and recent (< 5 mins), return true (idempotent wait)
+    if (event.status === 'processing') {
+      const created = new Date(event._createdDate);
+      const now = new Date();
+      // 5 minutes timeout for processing state
+      if ((now - created) < 5 * 60 * 1000) return true;
+    }
+
+    return false;
   } catch (e) { return false; }
 }
 
-export async function logStripeEvent(eventId, eventType, data = {}) {
+export async function logStripeEvent(eventId, eventType, data = {}, status = 'processed') {
   try {
-    await dataAccess.insertRecord(CONFIG.stripeEventsKey, { event_id: eventId, event_type: eventType, processed_at: new Date() }, { suppressAuth: true });
-  } catch (e) { }
+    const payload = {
+      event_id: eventId,
+      event_type: eventType,
+      processed_at: new Date(),
+      status: status
+    };
+    if (data && Object.keys(data).length > 0) {
+      payload.metadata = data;
+    }
+
+    const result = await dataAccess.insertRecord(CONFIG.stripeEventsKey, payload, { suppressAuth: true });
+    return result.record?._id || result._id;
+  } catch (e) {
+    console.error('Error logging stripe event', e);
+    return null;
+  }
+}
+
+export async function updateStripeEventStatus(eventId, status, error = null) {
+  try {
+    const result = await dataAccess.queryRecords(CONFIG.stripeEventsKey, { filters: { event_id: eventId }, limit: 1, suppressAuth: true });
+    if (!result.items?.length) return { success: false, error: 'Event not found' };
+
+    const record = result.items[0];
+    const updateData = { ...record, status };
+    if (error) updateData.error_message = String(error);
+
+    await dataAccess.updateRecord(CONFIG.stripeEventsKey, updateData, { suppressAuth: true });
+    return { success: true };
+  } catch (e) { return { success: false, error: e.message }; }
 }
 
 export async function getPublishableKey() {

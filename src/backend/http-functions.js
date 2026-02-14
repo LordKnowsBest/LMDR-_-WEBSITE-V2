@@ -5,6 +5,7 @@
 
 import { ok, badRequest, serverError } from 'wix-http-functions';
 import { getSecret } from 'wix-secrets-backend';
+import crypto from 'crypto';
 import {
   upsertSubscription,
   upsertApiSubscriptionFromStripe,
@@ -15,6 +16,7 @@ import {
   recordBillingEvent,
   isEventProcessed,
   logStripeEvent,
+  updateStripeEventStatus,
   updatePaymentStatus
 } from 'backend/stripeService';
 import { updateLeadStatus } from 'backend/carrierLeadsService';
@@ -46,33 +48,39 @@ export async function post_stripe_webhook(request) {
     // Verify signature
     const verificationResult = await verifyStripeSignature(body, signature);
     if (!verificationResult.success) {
-      console.error('[Webhook] Signature verification failed');
+      console.error('[Webhook] Signature verification failed:', verificationResult.error);
       return badRequest({ error: 'Invalid signature' });
     }
 
     const event = JSON.parse(body);
 
-    // Idempotency check - skip if already processed
+    // Idempotency check - skip if already processed (or processing)
     const alreadyProcessed = await isEventProcessed(event.id);
     if (alreadyProcessed) {
-      console.log(`[Webhook] Event ${event.id} already processed, skipping`);
+      console.log(`[Webhook] Event ${event.id} already processed (or processing), skipping`);
       return ok({ received: true, status: 'already_processed' });
     }
 
-    // Route event to appropriate handler
-    const result = await handleStripeEvent(event);
+    // Log as processing
+    await logStripeEvent(event.id, event.type, {}, 'processing');
 
-    // Log the event for idempotency
-    await logStripeEvent(event.id, event.type, {
-      carrierDot: result.carrierDot,
-      status: result.status
-    });
+    try {
+      // Route event to appropriate handler
+      const result = await handleStripeEvent(event);
 
-    console.log(`[Webhook] Processed ${event.type} (${event.id})`);
+      // Update log to completed
+      await updateStripeEventStatus(event.id, 'completed');
 
-    return ok({ received: true, status: result.status });
+      console.log(`[Webhook] Processed ${event.type} (${event.id})`);
+      return ok({ received: true, status: result.status });
+
+    } catch (processError) {
+      console.error('[Webhook] Error processing event:', processError);
+      await updateStripeEventStatus(event.id, 'failed', processError.message);
+      return serverError({ error: processError.message });
+    }
   } catch (error) {
-    console.error('[Webhook] Error processing event:', error);
+    console.error('[Webhook] Error handling request:', error);
     return serverError({ error: error.message });
   }
 }
@@ -115,12 +123,17 @@ async function verifyStripeSignature(payload, signature) {
       return { success: false, error: 'Timestamp outside tolerance' };
     }
 
-    // Compute expected signature
     const signedPayload = `${timestamp}.${payload}`;
-    const expectedSignature = await computeHmacSignature(signedPayload, webhookSecret);
 
-    // Compare signatures (timing-safe comparison)
-    if (expectedSignature !== signatureHash) {
+    // Create HMAC using Node crypto
+    const hmac = crypto.createHmac('sha256', webhookSecret);
+    const expectedSignature = hmac.update(signedPayload).digest('hex');
+
+    // Timing safe comparison
+    const signatureBuffer = Buffer.from(signatureHash, 'hex');
+    const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+
+    if (signatureBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(signatureBuffer, expectedBuffer)) {
       return { success: false, error: 'Signature mismatch' };
     }
 
@@ -128,40 +141,6 @@ async function verifyStripeSignature(payload, signature) {
   } catch (error) {
     console.error('[Webhook] Signature verification error:', error);
     return { success: false, error: error.message };
-  }
-}
-
-/**
- * Compute HMAC-SHA256 signature
- * Wix Velo uses Web Crypto API
- */
-async function computeHmacSignature(message, secret) {
-  try {
-    // Encode the key and message
-    const encoder = new TextEncoder();
-    const keyData = encoder.encode(secret);
-    const messageData = encoder.encode(message);
-
-    // Import key for HMAC
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign']
-    );
-
-    // Sign the message
-    const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageData);
-
-    // Convert to hex string
-    const hashArray = Array.from(new Uint8Array(signature));
-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-    return hashHex;
-  } catch (error) {
-    console.error('[Webhook] HMAC computation error:', error);
-    throw error;
   }
 }
 
