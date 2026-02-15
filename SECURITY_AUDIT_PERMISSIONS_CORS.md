@@ -1,19 +1,23 @@
 # Security Audit: Permissions & CORS Policy
 
-**Date:** 2024-05-24
-**Target:** `src/backend/permissions.json` & `src/backend/apiGateway.jsw`
+**Date:** 2026-03-03
 **Auditor:** Jules (AI Security Specialist)
+**Target:** LMDR Platform Backend (`src/backend`)
 
-## Executive Summary
+## 1. Executive Summary
 
-A security audit of the backend permissions and CORS configuration revealed **CRITICAL** vulnerabilities. The current configuration grants unrestricted `Anonymous` access to all backend web modules, including sensitive administrative and database services. Additionally, the CORS policy is overly permissive, allowing any origin to invoke the API.
+A comprehensive audit of the backend access control (`permissions.json`) and CORS configuration (`apiGateway.jsw`) was conducted.
 
-## 1. Permissions Audit (`src/backend/permissions.json`)
+**Critical Findings:**
+1.  **Global Permissions Wildcard:** The current `permissions.json` grants `Anonymous` (unauthenticated) users full access to invoke **all** exported functions in **all** backend web modules (`.jsw` files). This is a critical security vulnerability that exposes sensitive administrative, billing, and database operations to the public.
+2.  **Unrestricted CORS:** The API Gateway (`apiGateway.jsw`) is configured with `Access-Control-Allow-Origin: *`, allowing any website to make requests to the API. While the API enforces authentication via Bearer tokens, this broad configuration increases the attack surface for key leakage and phishing.
+3.  **Direct Gateway Access:** `apiGateway.jsw` is currently exposed to the client via the global wildcard. This allows potential attackers to bypass the standard HTTP endpoints and invoke the gateway logic directly from the browser console, potentially probing for vulnerabilities in the handler itself.
 
-### Finding 1: Global Wildcard Exposure (CRITICAL)
+## 2. Detailed Findings
 
-The `permissions.json` file contains a global wildcard configuration that grants `Anonymous`, `SiteMember`, and `SiteOwner` identical `invoke: true` access to **every** web method in the backend.
+### 2.1 Permissions (`src/backend/permissions.json`)
 
+**Current Configuration:**
 ```json
 {
   "web-methods": {
@@ -28,62 +32,80 @@ The `permissions.json` file contains a global wildcard configuration that grants
 }
 ```
 
-### Impact Analysis
+**Impact:**
+Every exported function in the backend is callable by anyone. This includes:
+*   **Critical Risk (Admin/Billing/DB):**
+    *   `dataAccess.jsw`: `queryRecords`, `insertRecord`, `updateRecord`, `deleteRecord` (Allows arbitrary database manipulation if `suppressAuth` is passed or implied).
+    *   `stripeService.jsw`: `upsertSubscription`, `resetQuota`, `updateSubscriptionStatus` (Allows manipulation of billing state).
+    *   `apiAuthService.jsw`: `rotateApiKey` (Could allow unauthorized key rotation/hijacking).
+    *   `admin_*.jsw`: All administrative services (e.g., `admin_service.jsw`, `admin_billingService.jsw`).
+    *   `rateLimitService.jsw`: `checkAndTrackUsage`.
+    *   `apiGateway.jsw`: `handleGatewayRequest` (Should be internal only).
 
-This misconfiguration exposes 120+ backend modules to the public internet. Authenticated checks within some modules provide a layer of defense, but many critical modules rely on the caller being trusted or use `suppressAuth` internally based on arguments.
+*   **Medium Risk (Business Logic):**
+    *   `emailService.jsw`: `sendEmail` (Spam risk).
+    *   `notificationDispatcher.jsw`.
 
-#### High-Risk Exposures
+*   **Low Risk (Public Data):**
+    *   `publicStatsService.jsw`.
+    *   `weatherAlertService.jsw` (Read-only parts).
 
-| Module | Risk Level | Capability Exposed |
-| :--- | :--- | :--- |
-| **`src/backend/dataAccess.jsw`** | **CRITICAL** | **Full Database Control.** Exports `queryRecords`, `insertRecord`, `updateRecord`, `deleteRecord`. Accepts `{ suppressAuth: true }` in options, allowing an anonymous attacker to dump, modify, or delete the entire database. |
-| **`src/backend/stripeService.jsw`** | **CRITICAL** | **Financial Manipulation.** Exports `upsertSubscription` which allows modifying subscription status and tiers directly. Also allows spamming Stripe with `createCheckoutSession`. |
-| **`src/backend/apiAuthService.jsw`** | **HIGH** | **Credential Rotation.** Exports `rotateApiKey` which, if `partnerId` is guessed, could allow an attacker to invalidate and replace API keys. |
-| **`src/backend/apiGateway.jsw`** | **HIGH** | **Internal Logic Exposure.** Exports `handleGatewayRequest` which is intended for internal use by `http-functions.js` but is exposed to the frontend. |
-| **`src/backend/admin_*.jsw`** | **HIGH** | **Administrative Control.** All admin services (billing, dashboard, users) are publicly callable. |
+### 2.2 CORS Policy (`src/backend/apiGateway.jsw`)
 
-### Recommendation
-
-**Immediate Remediation Required:**
-1.  Change the default wildcard policy to `ADMIN` (SiteOwner) only.
-2.  Explicitly grant `SiteMember` or `Anonymous` access only to specific files/methods that require it.
-
-## 2. CORS Audit (`src/backend/apiGateway.jsw`)
-
-### Finding 2: Overly Permissive CORS Origin (HIGH)
-
-The `apiGateway.jsw` module (used by `http-functions.js`) sets the `Access-Control-Allow-Origin` header to `*`.
-
+**Current Configuration:**
 ```javascript
 const JSON_HEADERS = {
   'Access-Control-Allow-Origin': '*',
-  ...
+  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type'
 };
 ```
 
-### Impact Analysis
--   **Phishing / CSRF**: Malicious websites can make requests to the API from a victim's browser. While the API requires an `Authorization` header (Bearer token), if a user's browser automatically sent credentials (cookies) or if the token was stored in a way accessible to the browser context, this would be catastrophic.
--   **Resource Abuse**: Any website can embed calls to the API, potentially consuming quotas or triggering costs.
+**Impact:**
+*   **Origin `*`**: Allows any domain to send requests. While standard for public APIs, it removes a layer of defense.
+*   **Methods**: `GET`, `POST`, `DELETE`, `OPTIONS` are standard. `PUT` and `PATCH` are not enabled, which aligns with the current usage.
+*   **Headers**: Restricted to `Authorization` and `Content-Type`, which is good practice.
 
-### Finding 3: Missing Preflight Cache
+## 3. Recommendations
 
-The `Access-Control-Max-Age` header is missing.
--   **Impact**: Browsers will send a preflight `OPTIONS` request for every single API call, doubling the latency and server load.
+### 3.1 Permissions Remediation
 
-### Recommendation
+**Immediate Action Required:** Replace the global wildcard in `permissions.json` with a "Deny by Default" strategy.
 
-1.  **Restrict Origin**: Replace `*` with a whitelist of trusted domains (e.g., `https://www.lastmiledr.app`, `https://admin.lastmiledr.app`).
-2.  **Cache Preflight**: Add `Access-Control-Max-Age: 86400` (24 hours) to reduce overhead.
-3.  **Review Methods**: `DELETE` is enabled and used (`/v1/safety/alerts/:id`), so it must remain.
+1.  **Default Rule:** Restrict `*` (all files) to `SiteOwner` (Admin) only.
+2.  **Public Exceptions:** Explicitly grant `Anonymous` access only to:
+    *   `publicStatsService.jsw`
+    *   `carrierLeadsService.jsw` (Specific methods: `submitCarrierStaffingRequest`, `getMatchPreview`)
+    *   `weatherAlertService.jsw` (Read-only methods)
+    *   `surveyService.jsw` (`processResponse`)
+3.  **Member Exceptions:** Grant `SiteMember` access to user-centric modules:
+    *   `recruiter_service.jsw`
+    *   `driverProfiles.jsw`
+    *   `memberService.jsw`
+    *   `messaging.jsw`
+    *   `savedSearchService.jsw` (Excluding admin batch jobs)
+4.  **Internal Restriction:** Ensure `apiGateway.jsw` and `stripeService.jsw` are restricted to `SiteOwner`. They are used by `http-functions.js` (server-side), so client-side access is unnecessary and dangerous.
 
-## 3. Remediation Plan
+### 3.2 CORS Remediation
 
-A revised `permissions_revised.json` file will be generated to implement the least-privilege principle.
+1.  **Restrict Origin:** If the API is intended only for specific partners or the main app, replace `*` with a whitelist of allowed domains (or dynamically check `Origin` header against a whitelist).
+2.  **Verify Usage:** If `*` is required for a public API platform, ensure that `validateApiKey` is robust and that rate limiting (`rateLimitService`) effectively mitigates abuse.
 
-### Proposed Permissions Model
+### 3.3 Code-Level Improvements
 
-| Role | Access Scope | Examples |
+*   **`apiAuthService.jsw`**: The `rotateApiKey` function should include an internal check to verify that the caller is authorized to rotate the key for the given `partnerId`, even if `permissions.json` is tightened.
+*   **`dataAccess.jsw`**: Review the use of `suppressAuth: true`. It is widely used. Ensure that any function calling it performs its own strict permission checks before delegation.
+
+## 4. Proposed Configuration
+
+A revised permissions file has been generated at `src/backend/permissions_proposed.json` implementing the "Deny by Default" strategy.
+
+### Risk Rating Summary
+| Category | Status | Risk Level |
 | :--- | :--- | :--- |
-| **ADMIN** (Default) | All sensitive & internal modules | `dataAccess`, `stripeService` (sensitive methods), `admin_*`, `apiGateway` |
-| **SiteMember** | User-centric business logic | `memberService`, `driverProfiles`, `applicationService` |
-| **Anonymous** | Public content & entry points | `contentService`, `publicStatsService`, `stripeService` (checkout init only) |
+| **Permissions** | **FAIL** | **CRITICAL** |
+| **CORS** | **WARN** | **HIGH** |
+| **Auth Implementation** | **PASS** | **LOW** |
+
+---
+*End of Report*
