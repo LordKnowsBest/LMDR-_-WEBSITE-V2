@@ -1,0 +1,157 @@
+// ============================================================================
+// VOICE CAMPAIGN SERVICE - Manages outbound voice call campaigns
+// Supports bulk calling with chunked processing and rate limiting
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+import { initiateOutboundCall } from 'backend/voiceService';
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+const COLLECTIONS = {
+  campaigns: 'voiceCampaigns',
+  contacts: 'voiceCampaignContacts'
+};
+
+export async function createCampaign(recruiterId, config) {
+  const campaign = {
+    recruiterId,
+    name: config.name,
+    assistantId: config.assistantId,
+    phoneNumberId: config.phoneNumberId,
+    status: 'draft',
+    totalContacts: 0,
+    completedCalls: 0,
+    successfulCalls: 0,
+    createdAt: new Date().toISOString()
+  };
+
+  const result = await dataAccess.insertRecord(COLLECTIONS.campaigns, campaign, { suppressAuth: true });
+  const campaignId = result._id || result.id;
+
+  // Add contacts if provided
+  if (config.contacts && config.contacts.length > 0) {
+    const chunks = chunkArray(config.contacts, 10);
+    for (const chunk of chunks) {
+      await Promise.all(chunk.map(contact =>
+        dataAccess.insertRecord(COLLECTIONS.contacts, {
+          campaignId,
+          phoneNumber: contact.phoneNumber,
+          name: contact.name || '',
+          driverId: contact.driverId || '',
+          status: 'pending',
+          metadata: JSON.stringify(contact.metadata || {})
+        }, { suppressAuth: true })
+      ));
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Update total count
+    await dataAccess.updateRecord(COLLECTIONS.campaigns, {
+      _id: campaignId,
+      totalContacts: config.contacts.length
+    }, { suppressAuth: true });
+  }
+
+  return { campaignId, ...campaign, totalContacts: config.contacts?.length || 0 };
+}
+
+export async function startCampaign(campaignId) {
+  // Update campaign status
+  await dataAccess.updateRecord(COLLECTIONS.campaigns, {
+    _id: campaignId,
+    status: 'running',
+    startedAt: new Date().toISOString()
+  }, { suppressAuth: true });
+
+  // Get pending contacts
+  const contactsResult = await dataAccess.queryRecords(COLLECTIONS.contacts, {
+    filters: { campaignId, status: 'pending' },
+    limit: 1000,
+    suppressAuth: true
+  });
+
+  const contacts = contactsResult.items || [];
+  if (contacts.length === 0) {
+    return { success: true, message: 'No pending contacts' };
+  }
+
+  // Get campaign details for assistant ID
+  const campaignResult = await dataAccess.queryRecords(COLLECTIONS.campaigns, {
+    filters: { _id: campaignId },
+    limit: 1,
+    suppressAuth: true
+  });
+  const campaign = campaignResult.items?.[0];
+  if (!campaign) throw new Error('Campaign not found');
+
+  // Process in chunks
+  const chunks = chunkArray(contacts, 10);
+  let completed = 0;
+  let successful = 0;
+
+  for (const chunk of chunks) {
+    const results = await Promise.all(
+      chunk.map(async (contact) => {
+        try {
+          await initiateOutboundCall(
+            campaign.assistantId,
+            campaign.phoneNumberId,
+            { phoneNumber: contact.phoneNumber, name: contact.name },
+            { campaignId, contactId: contact._id }
+          );
+
+          await dataAccess.updateRecord(COLLECTIONS.contacts, {
+            _id: contact._id,
+            status: 'called',
+            calledAt: new Date().toISOString()
+          }, { suppressAuth: true });
+
+          return { success: true };
+        } catch (error) {
+          await dataAccess.updateRecord(COLLECTIONS.contacts, {
+            _id: contact._id,
+            status: 'failed',
+            error: error.message
+          }, { suppressAuth: true });
+          return { success: false };
+        }
+      })
+    );
+
+    completed += results.length;
+    successful += results.filter(r => r.success).length;
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // Update campaign
+  await dataAccess.updateRecord(COLLECTIONS.campaigns, {
+    _id: campaignId,
+    status: 'completed',
+    completedCalls: completed,
+    successfulCalls: successful,
+    completedAt: new Date().toISOString()
+  }, { suppressAuth: true });
+
+  return { success: true, completed, successful };
+}
+
+export async function getCampaignStatus(campaignId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.campaigns, {
+    filters: { _id: campaignId },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  return result.items?.[0] || null;
+}
+
+export async function getCampaigns(recruiterId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.campaigns, {
+    filters: { recruiterId },
+    limit: 50,
+    sort: { createdAt: 'desc' },
+    suppressAuth: true
+  });
+
+  return result.items || [];
+}

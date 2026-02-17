@@ -76,6 +76,9 @@ import {
 
 import { getRecruiterHealthStatus } from 'backend/recruiterHealthService.jsw';
 import { routeAIRequest } from 'backend/aiRouterService';
+import { handleAgentTurn } from 'backend/agentService';
+import { getVoiceConfig } from 'backend/voiceService';
+import { getCampaigns, createCampaign, startCampaign, getCampaignStatus } from 'backend/voiceCampaignService';
 
 // Recruiter OS — Analytics imports
 import {
@@ -587,6 +590,56 @@ async function handleHtmlMessage(msg, component) {
       case 'getSettingsData':
         await handleGetSettingsData(component);
         break;
+
+      // ── Agent & Voice ──
+      case 'agentMessage': {
+        const agentText = msg.data?.text || '';
+        const agentCtx = msg.data?.context || {};
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        sendToHtml(component, 'agentTyping', {});
+        try {
+          const agentResult = await handleAgentTurn('recruiter', recruiterId, agentText, {
+            ...agentCtx,
+            carrierDot: currentCarrierDOT
+          });
+          sendToHtml(component, 'agentResponse', agentResult);
+        } catch (err) {
+          sendToHtml(component, 'agentResponse', { error: err.message });
+        }
+        break;
+      }
+      case 'getVoiceConfig': {
+        try {
+          const voiceConf = await getVoiceConfig();
+          sendToHtml(component, 'voiceReady', voiceConf);
+        } catch (err) {
+          console.warn('Voice config failed:', err.message);
+        }
+        break;
+      }
+      case 'getCampaigns': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+        if (!recruiterId) { sendToHtml(component, 'campaignsLoaded', { campaigns: [] }); break; }
+        const campaigns = await getCampaigns(recruiterId);
+        sendToHtml(component, 'campaignsLoaded', { campaigns });
+        break;
+      }
+      case 'createCampaign': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+        const result = await createCampaign(recruiterId, msg.data);
+        sendToHtml(component, 'campaignCreated', result);
+        break;
+      }
+      case 'startCampaign': {
+        const result = await startCampaign(msg.data?.campaignId);
+        sendToHtml(component, 'campaignStarted', result);
+        break;
+      }
+      case 'getCampaignStatus': {
+        const result = await getCampaignStatus(msg.data?.campaignId);
+        sendToHtml(component, 'campaignStatusLoaded', result);
+        break;
+      }
 
       default:
         console.warn('⚠️ Unhandled action:', action);

@@ -1,0 +1,108 @@
+// ============================================================================
+// VOICE SERVICE - VAPI Voice AI Integration
+// Manages voice assistants, outbound calls, and transcripts
+// ============================================================================
+
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import * as dataAccess from 'backend/dataAccess';
+
+const VAPI_BASE_URL = 'https://api.vapi.ai';
+
+const COLLECTIONS = {
+  callLogs: 'voiceCallLogs',
+  assistants: 'voiceAssistants'
+};
+
+async function vapiRequest(method, path, body = null) {
+  const apiKey = await getSecret('VAPI_PRIVATE_KEY');
+  if (!apiKey) throw new Error('VAPI_PRIVATE_KEY not configured');
+
+  const options = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    }
+  };
+
+  if (body) {
+    options.body = JSON.stringify(body);
+  }
+
+  const response = await fetch(`${VAPI_BASE_URL}${path}`, options);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`VAPI API error: ${response.status} - ${errorText}`);
+  }
+
+  return await response.json();
+}
+
+export async function createAssistant(config) {
+  const result = await vapiRequest('POST', '/assistant', config);
+
+  // Store assistant record
+  await dataAccess.insertRecord(COLLECTIONS.assistants, {
+    assistantId: result.id,
+    name: config.name || 'Unnamed Assistant',
+    config: JSON.stringify(config),
+    createdAt: new Date().toISOString()
+  }, { suppressAuth: true });
+
+  return result;
+}
+
+export async function getAssistant(assistantId) {
+  return await vapiRequest('GET', `/assistant/${assistantId}`);
+}
+
+export async function initiateOutboundCall(assistantId, phoneNumberId, customer, metadata = {}) {
+  const callConfig = {
+    assistantId,
+    phoneNumberId,
+    customer: {
+      number: customer.phoneNumber,
+      name: customer.name || undefined
+    },
+    metadata
+  };
+
+  const result = await vapiRequest('POST', '/call', callConfig);
+
+  // Log the call
+  await dataAccess.insertRecord(COLLECTIONS.callLogs, {
+    callId: result.id,
+    assistantId,
+    direction: 'outbound',
+    customerPhone: customer.phoneNumber,
+    customerName: customer.name || '',
+    status: 'initiated',
+    metadata: JSON.stringify(metadata),
+    startedAt: new Date().toISOString()
+  }, { suppressAuth: true });
+
+  return result;
+}
+
+export async function getCallTranscript(callId) {
+  return await vapiRequest('GET', `/call/${callId}`);
+}
+
+export async function listCalls(filters = {}) {
+  const queryParams = new URLSearchParams();
+  if (filters.assistantId) queryParams.append('assistantId', filters.assistantId);
+  if (filters.limit) queryParams.append('limit', String(filters.limit));
+
+  const path = `/call${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
+  return await vapiRequest('GET', path);
+}
+
+export async function getVoiceConfig() {
+  const publicKey = await getSecret('VAPI_PUBLIC_KEY');
+  return {
+    publicKey: publicKey || null,
+    configured: !!publicKey
+  };
+}

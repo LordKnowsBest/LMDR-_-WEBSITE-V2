@@ -111,20 +111,62 @@
   }
 
   /**
-   * Intent detection — keyword matching against INTENT_MAP
-   * Architecture hook: replace this function body with async Claude API call
-   * when NLU_ENABLED feature flag is set
+   * Intent detection — keyword matching against INTENT_MAP with NLU fallback.
+   * When NLU_ENABLED, sends message to agentService via postMessage bridge
+   * and falls back to keyword matching for instant local routing.
    */
   function detectIntent(text) {
-    if (ROS.config.features.NLU_ENABLED) {
-      // Future: return await classifyIntent(text);
-    }
+    // Always try keyword matching first for instant view routing
     const lower = text.toLowerCase();
     for (const rule of ROS.INTENT_MAP) {
       if (rule.keys.some(k => lower.includes(k))) return rule;
     }
+
+    // If NLU enabled and no keyword match, route to agent for intelligent response
+    if (ROS.config.features.NLU_ENABLED) {
+      sendToAgent(text);
+      return null; // No immediate view routing — agent response arrives async
+    }
+
     return null;
   }
+
+  /**
+   * Send a message to the agent orchestration layer via postMessage bridge
+   */
+  function sendToAgent(text) {
+    if (window.parent) {
+      window.parent.postMessage({
+        type: 'recruiterOS',
+        action: 'agentMessage',
+        data: { text, context: { surface: 'recruiter' } }
+      }, '*');
+    }
+  }
+
+  // Listen for agent responses from page code
+  window.addEventListener('message', function (event) {
+    if (!event.data || event.source !== window.parent) return;
+    if (event.data.action === 'agentResponse' && event.data.payload) {
+      const payload = event.data.payload;
+      const text = payload.error || payload.response || payload.content || 'I couldn\'t process that request.';
+      // Remove typing indicator and show agent response
+      const tp = document.getElementById('ros-tp');
+      if (tp) tp.remove();
+      const msgs = document.getElementById('chatMsgs');
+      if (!msgs) return;
+      const aiDiv = document.createElement('div');
+      aiDiv.className = 'flex gap-2.5';
+      aiDiv.style.animation = 'msgIn .3s ease';
+      aiDiv.innerHTML = `
+        <div class="w-6 h-6 rounded-lg bg-gradient-to-br from-lmdr-blue to-lmdr-deep flex items-center justify-center shrink-0 mt-0.5">
+          <span class="material-symbols-outlined text-white text-[12px]">smart_toy</span>
+        </div>
+        <div class="p-3 rounded-2xl rounded-tl-sm neu-ins text-[12px] text-lmdr-dark/80 leading-relaxed max-w-[90%]">${text}</div>`;
+      msgs.appendChild(aiDiv);
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+  });
 
   function getFallbackResponse(text) {
     const l = text.toLowerCase();

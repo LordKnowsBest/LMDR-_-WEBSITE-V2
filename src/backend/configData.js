@@ -290,7 +290,17 @@ export const DATA_SOURCE = {
   invoices: 'airtable',
   commissions: 'airtable',
   salesReps: 'airtable',
-  commissionRules: 'airtable'
+  commissionRules: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Agent & Voice Platform
+  // -------------------------------------------------------------------------
+  agentConversations: 'airtable',
+  agentTurns: 'airtable',
+  voiceCallLogs: 'airtable',
+  voiceAssistants: 'airtable',
+  voiceCampaigns: 'airtable',
+  voiceCampaignContacts: 'airtable'
 };
 
 // =============================================================================
@@ -556,7 +566,15 @@ export const WIX_COLLECTION_NAMES = {
   invoices: 'Invoices',
   commissions: 'Commissions',
   salesReps: 'SalesReps',
-  commissionRules: 'CommissionRules'
+  commissionRules: 'CommissionRules',
+
+  // Agent & Voice Platform
+  agentConversations: 'AgentConversations',
+  agentTurns: 'AgentTurns',
+  voiceCallLogs: 'VoiceCallLogs',
+  voiceAssistants: 'VoiceAssistants',
+  voiceCampaigns: 'VoiceCampaigns',
+  voiceCampaignContacts: 'VoiceCampaignContacts'
 };
 
 // =============================================================================
@@ -788,7 +806,15 @@ export const AIRTABLE_TABLE_NAMES = {
   invoices: 'v2_Invoices',
   commissions: 'v2_Commissions',
   salesReps: 'v2_Sales Reps',
-  commissionRules: 'v2_Commission Rules'
+  commissionRules: 'v2_Commission Rules',
+
+  // Agent & Voice Platform
+  agentConversations: 'v2_Agent Conversations',
+  agentTurns: 'v2_Agent Turns',
+  voiceCallLogs: 'v2_Voice Call Logs',
+  voiceAssistants: 'v2_Voice Assistants',
+  voiceCampaigns: 'v2_Voice Campaigns',
+  voiceCampaignContacts: 'v2_Voice Campaign Contacts'
 };
 
 // =============================================================================

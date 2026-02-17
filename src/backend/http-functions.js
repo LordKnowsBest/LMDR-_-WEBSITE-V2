@@ -24,6 +24,9 @@ import {
   markCheckoutRecovered
 } from 'backend/abandonmentEmailService';
 import { handleGatewayRequest } from 'backend/apiGateway';
+import { handleAgentTurn } from 'backend/agentService';
+import { getVoiceConfig } from 'backend/voiceService';
+import * as dataAccess from 'backend/dataAccess';
 
 // Data source configuration imports
 // Note: http-functions.js uses standard imports (not .jsw)
@@ -538,4 +541,95 @@ export async function delete_api_gateway(request) {
 
 export async function options_api_gateway(request) {
   return handleGatewayRequest(request);
+}
+
+// ============================================================================
+// VAPI VOICE WEBHOOK ENDPOINT
+// POST https://www.lastmiledeliveryrecruiting.com/_functions/vapi_webhook
+// ============================================================================
+
+export async function post_vapi_webhook(request) {
+  try {
+    const body = await request.body.json();
+    const messageType = body.message?.type;
+
+    switch (messageType) {
+      case 'end-of-call-report': {
+        // Save transcript and summary to voiceCallLogs
+        const callData = body.message;
+        await dataAccess.insertRecord('voiceCallLogs', {
+          callId: callData.call?.id || '',
+          transcript: JSON.stringify(callData.transcript || ''),
+          summary: callData.summary || '',
+          duration: callData.call?.duration || 0,
+          endedReason: callData.endedReason || '',
+          recordingUrl: callData.recordingUrl || '',
+          completedAt: new Date().toISOString()
+        }, { suppressAuth: true });
+        return ok({ success: true });
+      }
+
+      case 'function-call':
+      case 'tool-calls': {
+        // Execute backend service and return result within 7.5s
+        const toolCall = body.message.toolCallList?.[0] || body.message.functionCall;
+        if (!toolCall) return ok({ results: [] });
+
+        const toolName = toolCall.function?.name || toolCall.name;
+        const toolArgs = typeof toolCall.function?.arguments === 'string'
+          ? JSON.parse(toolCall.function.arguments)
+          : toolCall.function?.arguments || toolCall.arguments || {};
+
+        // Determine role from metadata
+        const role = body.message.call?.metadata?.role || 'driver';
+        const userId = body.message.call?.metadata?.userId || 'voice-user';
+
+        // Use agent service for tool execution
+        const result = await handleAgentTurn(role, userId, `Execute tool: ${toolName}`, {
+          directToolCall: { name: toolName, input: toolArgs }
+        });
+
+        return ok({
+          results: [{
+            toolCallId: toolCall.id,
+            result: result.response
+          }]
+        });
+      }
+
+      case 'assistant-request': {
+        // Return dynamic assistant config
+        return ok({
+          assistant: {
+            model: {
+              provider: 'anthropic',
+              model: 'claude-sonnet-4-20250514',
+              messages: [{
+                role: 'system',
+                content: 'You are an AI assistant for Last Mile Driver Recruiting. Help callers with carrier matching, job information, and trucking industry questions.'
+              }]
+            },
+            voice: {
+              provider: '11labs',
+              voiceId: 'paula'
+            }
+          }
+        });
+      }
+
+      default:
+        return ok({ success: true });
+    }
+  } catch (error) {
+    console.error('[VAPI Webhook] Error:', error);
+    return serverError({ error: error.message });
+  }
+}
+
+export function get_vapi_webhook(request) {
+  return ok({
+    status: 'healthy',
+    service: 'vapi-webhook',
+    timestamp: new Date().toISOString()
+  });
 }

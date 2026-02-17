@@ -1,0 +1,448 @@
+// ============================================================================
+// AGENT SERVICE - Central AI Orchestration Layer
+// Takes user messages, builds role-scoped tools, calls AI with tool definitions,
+// executes tool_use responses against real backend services, loops until text response
+// ============================================================================
+
+import { routeAIRequest } from 'backend/aiRouterService';
+import { createConversation, addTurn, getRecentContext } from 'backend/agentConversationService';
+import * as dataAccess from 'backend/dataAccess';
+
+// Tool definitions mapped to existing backend services
+const TOOL_DEFINITIONS = {
+  // Driver tools
+  find_matches: {
+    name: 'find_matches',
+    description: 'Find carriers matching driver preferences (zip, distance, pay, run type)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        zip: { type: 'string', description: 'Driver home zip code' },
+        maxDistance: { type: 'number', description: 'Maximum commute distance in miles' },
+        minCPM: { type: 'number', description: 'Minimum cents per mile' },
+        operationType: { type: 'string', enum: ['OTR', 'Regional', 'Local', 'any'] }
+      },
+      required: ['zip']
+    },
+    serviceModule: 'backend/carrierMatching',
+    serviceFunction: 'findMatchingCarriers',
+    roles: ['driver']
+  },
+  get_carrier_details: {
+    name: 'get_carrier_details',
+    description: 'Get detailed AI-enriched information about a specific carrier by DOT number',
+    input_schema: {
+      type: 'object',
+      properties: {
+        dotNumber: { type: 'string', description: 'USDOT number of the carrier' }
+      },
+      required: ['dotNumber']
+    },
+    serviceModule: 'backend/aiEnrichment',
+    serviceFunction: 'enrichCarrier',
+    roles: ['driver', 'recruiter', 'admin']
+  },
+  explain_match: {
+    name: 'explain_match',
+    description: 'Explain why a driver matched with a specific carrier',
+    input_schema: {
+      type: 'object',
+      properties: {
+        driverId: { type: 'string' },
+        carrierDot: { type: 'string' }
+      },
+      required: ['driverId', 'carrierDot']
+    },
+    serviceModule: 'backend/matchExplanationService',
+    serviceFunction: 'getMatchExplanationForDriver',
+    roles: ['driver']
+  },
+  get_fmcsa_data: {
+    name: 'get_fmcsa_data',
+    description: 'Get FMCSA safety data for a carrier',
+    input_schema: {
+      type: 'object',
+      properties: {
+        dotNumber: { type: 'string', description: 'USDOT number' }
+      },
+      required: ['dotNumber']
+    },
+    serviceModule: 'backend/externalFmcsaApi',
+    serviceFunction: 'getCarrierSafety',
+    roles: ['driver', 'recruiter', 'admin']
+  },
+  road_conditions: {
+    name: 'road_conditions',
+    description: 'Get current road conditions for a location',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lat: { type: 'number' },
+        lon: { type: 'number' },
+        zip: { type: 'string' }
+      }
+    },
+    serviceModule: 'backend/roadConditionService',
+    serviceFunction: 'getRoadConditions',
+    roles: ['driver']
+  },
+  find_parking: {
+    name: 'find_parking',
+    description: 'Search for truck parking near a location',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lat: { type: 'number' },
+        lon: { type: 'number' },
+        radius: { type: 'number', description: 'Search radius in miles' }
+      }
+    },
+    serviceModule: 'backend/parkingService',
+    serviceFunction: 'searchParking',
+    roles: ['driver']
+  },
+  // Recruiter tools
+  search_drivers: {
+    name: 'search_drivers',
+    description: 'Search for CDL drivers matching criteria',
+    input_schema: {
+      type: 'object',
+      properties: {
+        zip: { type: 'string' },
+        maxDistance: { type: 'number' },
+        endorsements: { type: 'string', description: 'Comma-separated endorsements (Hazmat, Tanker, Doubles)' },
+        minExperience: { type: 'number', description: 'Minimum years of experience' }
+      }
+    },
+    serviceModule: 'backend/driverMatching',
+    serviceFunction: 'findMatchingDrivers',
+    roles: ['recruiter']
+  },
+  get_pipeline: {
+    name: 'get_pipeline',
+    description: 'Get pipeline candidates for a carrier',
+    input_schema: {
+      type: 'object',
+      properties: {
+        carrierDot: { type: 'string' },
+        status: { type: 'string', enum: ['new', 'contacted', 'screening', 'interview', 'offer', 'hired'] }
+      },
+      required: ['carrierDot']
+    },
+    serviceModule: 'backend/recruiter_service',
+    serviceFunction: 'getPipelineCandidates',
+    roles: ['recruiter']
+  },
+  update_candidate_status: {
+    name: 'update_candidate_status',
+    description: 'Update a candidate status in the pipeline',
+    input_schema: {
+      type: 'object',
+      properties: {
+        interestId: { type: 'string' },
+        newStatus: { type: 'string', enum: ['new', 'contacted', 'screening', 'interview', 'offer', 'hired', 'rejected'] }
+      },
+      required: ['interestId', 'newStatus']
+    },
+    serviceModule: 'backend/recruiter_service',
+    serviceFunction: 'updateCandidateStatus',
+    roles: ['recruiter']
+  },
+  send_message: {
+    name: 'send_message',
+    description: 'Send a message to a driver or recruiter',
+    input_schema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string' },
+        content: { type: 'string' },
+        receiverId: { type: 'string' }
+      },
+      required: ['applicationId', 'content', 'receiverId']
+    },
+    serviceModule: 'backend/messaging',
+    serviceFunction: 'sendMessage',
+    roles: ['recruiter']
+  },
+  schedule_interview: {
+    name: 'schedule_interview',
+    description: 'Request interview availability from a candidate',
+    input_schema: {
+      type: 'object',
+      properties: {
+        applicationId: { type: 'string' }
+      },
+      required: ['applicationId']
+    },
+    serviceModule: 'backend/interviewScheduler',
+    serviceFunction: 'requestAvailability',
+    roles: ['recruiter']
+  },
+  log_call: {
+    name: 'log_call',
+    description: 'Log a call outcome with a driver',
+    input_schema: {
+      type: 'object',
+      properties: {
+        carrierDot: { type: 'string' },
+        driverId: { type: 'string' },
+        outcome: { type: 'string', enum: ['interested', 'callback', 'not_now', 'wrong_fit', 'no_answer', 'voicemail'] },
+        notes: { type: 'string' }
+      },
+      required: ['carrierDot', 'outcome']
+    },
+    serviceModule: 'backend/callOutcomeService',
+    serviceFunction: 'logCallOutcome',
+    roles: ['recruiter']
+  },
+  get_recruiter_analytics: {
+    name: 'get_recruiter_analytics',
+    description: 'Get funnel and recruiting analytics metrics',
+    input_schema: {
+      type: 'object',
+      properties: {
+        carrierDot: { type: 'string' },
+        period: { type: 'string', enum: ['week', 'month', 'quarter'] }
+      }
+    },
+    serviceModule: 'backend/recruiterAnalyticsService',
+    serviceFunction: 'getFunnelMetrics',
+    roles: ['recruiter']
+  },
+  // Admin tools
+  get_system_health: {
+    name: 'get_system_health',
+    description: 'Get system health and observability metrics',
+    input_schema: { type: 'object', properties: {} },
+    serviceModule: 'backend/observabilityService',
+    serviceFunction: 'getMetrics',
+    roles: ['admin']
+  },
+  get_driver_stats: {
+    name: 'get_driver_stats',
+    description: 'Get driver statistics and listings for admin',
+    input_schema: {
+      type: 'object',
+      properties: {
+        page: { type: 'number' },
+        pageSize: { type: 'number' },
+        status: { type: 'string' }
+      }
+    },
+    serviceModule: 'backend/admin_service',
+    serviceFunction: 'getDrivers',
+    roles: ['admin']
+  },
+  manage_prompts: {
+    name: 'manage_prompts',
+    description: 'Manage AI prompt templates (list, create, update)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', enum: ['list', 'get', 'create', 'update'] },
+        promptId: { type: 'string' },
+        data: { type: 'object' }
+      },
+      required: ['operation']
+    },
+    serviceModule: 'backend/promptLibraryService',
+    serviceFunction: null,
+    roles: ['admin']
+  },
+  // Carrier/B2B tools
+  get_account: {
+    name: 'get_account',
+    description: 'Get B2B account details',
+    input_schema: {
+      type: 'object',
+      properties: {
+        accountId: { type: 'string' }
+      },
+      required: ['accountId']
+    },
+    serviceModule: 'backend/b2bAccountService',
+    serviceFunction: 'getAccount',
+    roles: ['carrier', 'admin']
+  },
+  get_signals: {
+    name: 'get_signals',
+    description: 'Get match signals for a B2B account',
+    input_schema: {
+      type: 'object',
+      properties: {
+        accountId: { type: 'string' }
+      },
+      required: ['accountId']
+    },
+    serviceModule: 'backend/b2bMatchSignalService',
+    serviceFunction: 'getSignals',
+    roles: ['carrier', 'admin']
+  },
+  get_opportunities: {
+    name: 'get_opportunities',
+    description: 'Get pipeline opportunities for B2B',
+    input_schema: {
+      type: 'object',
+      properties: {
+        accountId: { type: 'string' },
+        stage: { type: 'string' }
+      }
+    },
+    serviceModule: 'backend/b2bPipelineService',
+    serviceFunction: 'getOpportunities',
+    roles: ['carrier', 'admin']
+  }
+};
+
+// Role system prompts
+const ROLE_SYSTEM_PROMPTS = {
+  driver: 'You are LMDR\'s AI assistant for CDL truck drivers. Help drivers find carrier matches, understand safety data, check road conditions, and navigate their job search. Be friendly, practical, and driver-focused. When you have tools available, use them to provide real data rather than generic answers.',
+  recruiter: 'You are VelocityMatch\'s AI recruiting assistant. Help recruiters find qualified drivers, manage their pipeline, schedule interviews, track analytics, and optimize their recruiting workflow. Be efficient and data-driven.',
+  admin: 'You are the VelocityMatch platform admin assistant. Help administrators monitor system health, manage AI configurations, review driver and carrier data, and handle platform operations.',
+  carrier: 'You are VelocityMatch\'s B2B assistant for carrier accounts. Help carriers understand their hiring pipeline, review match signals, and manage their account.'
+};
+
+// Get tools for a role
+function getToolsForRole(role) {
+  return Object.values(TOOL_DEFINITIONS)
+    .filter(t => t.roles.includes(role))
+    .map(t => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.input_schema
+    }));
+}
+
+// Execute a tool call against the real backend service
+async function executeTool(toolName, toolInput) {
+  const toolDef = TOOL_DEFINITIONS[toolName];
+  if (!toolDef) {
+    return { error: `Unknown tool: ${toolName}` };
+  }
+
+  try {
+    // Dynamic import of the service module
+    const serviceModule = await import(toolDef.serviceModule);
+
+    // Special case for manage_prompts (dynamic dispatch)
+    if (toolName === 'manage_prompts') {
+      const { operation, promptId, data } = toolInput;
+      switch (operation) {
+        case 'list': return await serviceModule.getPrompts(data || {});
+        case 'get': return await serviceModule.getActivePrompt(promptId);
+        case 'create': return await serviceModule.createPrompt(data);
+        case 'update': return await serviceModule.updatePrompt(promptId, data);
+        default: return { error: `Unknown prompt operation: ${operation}` };
+      }
+    }
+
+    // Standard tool execution
+    const fn = serviceModule[toolDef.serviceFunction];
+    if (!fn) {
+      return { error: `Function ${toolDef.serviceFunction} not found in ${toolDef.serviceModule}` };
+    }
+
+    // Call with spread input values
+    const args = Object.values(toolInput);
+    const result = await fn(...args);
+    return result;
+  } catch (error) {
+    console.error(`Tool execution error [${toolName}]:`, error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Main entry point - handles one agent turn
+ * Loops tool_use responses until a text response is returned
+ */
+export async function handleAgentTurn(role, userId, message, context = {}) {
+  if (!ROLE_SYSTEM_PROMPTS[role]) {
+    throw new Error(`Unknown role: ${role}`);
+  }
+
+  // Get or create conversation
+  let conversationId = context.conversationId;
+  if (!conversationId) {
+    const conv = await createConversation(role, userId);
+    conversationId = conv.conversationId;
+  }
+
+  // Get recent context
+  const recentTurns = await getRecentContext(conversationId, 20);
+
+  // Build messages array
+  const messages = [];
+  for (const turn of recentTurns) {
+    messages.push({ role: turn.role, content: turn.content });
+  }
+  messages.push({ role: 'user', content: message });
+
+  // Save user turn
+  await addTurn(conversationId, 'user', message);
+
+  // Get role-scoped tools
+  const tools = getToolsForRole(role);
+
+  // Agent loop - keep calling AI until we get a text response (not tool_use)
+  let currentMessages = [...messages];
+  const maxIterations = 5;
+
+  for (let i = 0; i < maxIterations; i++) {
+    const aiResponse = await routeAIRequest('agent_orchestration', {
+      system: ROLE_SYSTEM_PROMPTS[role],
+      messages: currentMessages,
+      tools,
+      maxTokens: 2048
+    });
+
+    // Check if response contains tool_use blocks
+    const toolUseBlocks = (aiResponse.contentBlocks || []).filter(b => b.type === 'tool_use');
+    const textBlocks = (aiResponse.contentBlocks || []).filter(b => b.type === 'text');
+
+    if (aiResponse.stopReason === 'tool_use' && toolUseBlocks.length > 0) {
+      // Add assistant message with tool_use blocks
+      currentMessages.push({ role: 'assistant', content: aiResponse.contentBlocks });
+
+      // Execute each tool call
+      const toolResults = [];
+      for (const toolBlock of toolUseBlocks) {
+        const result = await executeTool(toolBlock.name, toolBlock.input);
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: toolBlock.id,
+          content: JSON.stringify(result)
+        });
+      }
+
+      // Add tool results as user message
+      currentMessages.push({ role: 'user', content: toolResults });
+
+      // Save tool execution turn
+      await addTurn(conversationId, 'assistant', JSON.stringify(toolUseBlocks), toolUseBlocks);
+    } else {
+      // Text response - we're done
+      const responseText = aiResponse.content || textBlocks.map(b => b.text).join('\n');
+      await addTurn(conversationId, 'assistant', responseText);
+
+      return {
+        conversationId,
+        response: responseText,
+        toolsUsed: currentMessages.length > messages.length + 1,
+        role
+      };
+    }
+  }
+
+  // Safety: if we hit max iterations, return what we have
+  const finalText = 'I\'ve been working on your request but need to summarize. Let me know if you need more details.';
+  await addTurn(conversationId, 'assistant', finalText);
+  return { conversationId, response: finalText, toolsUsed: true, role };
+}
+
+/**
+ * Get available tools for a role (for UI display)
+ */
+export async function getAvailableTools(role) {
+  return getToolsForRole(role);
+}

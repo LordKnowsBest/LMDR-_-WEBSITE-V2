@@ -318,6 +318,71 @@ Supplementary docs are auto-injected by hooks when editing relevant files. They 
 - **Key Methods:** `getResourcesByCategory(cat)`, `submitTip(data)`, `getApprovedTips(cat)`
 - **Features:** Content categorization, community submission moderation, helpfulness tracking.
 
+### Agent Orchestration Service
+**File:** `src/backend/agentService.jsw`
+- **Purpose:** Central agent orchestration layer — wraps existing services as tool definitions per role.
+- **Key Method:** `handleAgentTurn(role, userId, message, context)` — builds role-scoped tools, calls AI with tool definitions, executes tool_use responses in a loop, returns final text.
+- **Roles:** `driver`, `recruiter`, `admin`, `carrier` — each scoped to relevant backend services.
+- **Dependencies:** `aiRouterService.jsw` (with `agent_orchestration` function), `agentConversationService.jsw`
+
+### Agent Conversation Service
+**File:** `src/backend/agentConversationService.jsw`
+- **Purpose:** Persists agent conversations and turns to Airtable.
+- **Key Methods:** `createConversation(role, userId)`, `addTurn(conversationId, role, content, toolCalls)`, `getRecentContext(conversationId, maxTurns)`, `endConversation(conversationId)`
+- **Collections:** `agentConversations`, `agentTurns`
+
+### Voice Service (VAPI)
+**File:** `src/backend/voiceService.jsw`
+- **Purpose:** VAPI REST API wrapper for voice call management.
+- **Key Methods:** `createAssistant(config)`, `initiateOutboundCall(assistantId, phoneNumberId, customer, metadata)`, `getCallTranscript(callId)`, `listCalls(filters)`, `getVoiceConfig()`
+- **Secret:** `VAPI_PRIVATE_KEY` via `wix-secrets-backend`
+- **Collections:** `voiceCallLogs`, `voiceAssistants`
+
+### Voice Campaign Service
+**File:** `src/backend/voiceCampaignService.jsw`
+- **Purpose:** Outbound calling campaign management for recruiters.
+- **Key Methods:** `createCampaign(recruiterId, config)`, `startCampaign(campaignId)`, `getCampaignStatus(campaignId)`, `getCampaigns(recruiterId)`
+- **Collections:** `voiceCampaigns`, `voiceCampaignContacts`
+
+## Agent & Voice Integration
+
+All 4 user-facing surfaces (Driver, Recruiter, Admin, B2B) have agent chat overlays and voice integration wired through postMessage.
+
+### Agent Chat Pattern
+
+Each surface has a CDN-served JS module that renders a floating chat FAB + sliding panel:
+- `driver/js/ai-matching-agent.js` — LMDR branding (logo "LM")
+- `admin/js/admin-agent.js` — VelocityMatch branding (logo "VM")
+- `admin/js/b2b-agent.js` — VelocityMatch branding (logo "VM")
+- `recruiter/os/js/ros-chat.js` — Uses existing ROS chat thread with NLU_ENABLED flag
+
+**PostMessage flow:** HTML sends `{ action: 'agentMessage', payload: { text } }` → Page code calls `handleAgentTurn(role, userId, text, context)` → Returns `{ action: 'agentResponse', payload }`.
+
+### Voice Components
+
+- `js/voice-agent-ui.js` — Reusable floating voice orb + transcript panel (VAPI Web SDK)
+- `css/voice-agent.css` — Orb animations and transcript panel styling
+- `js/voice-agent-bridge.js` — Bridges VoiceAgent events to postMessage
+- `recruiter/os/js/ros-voice.js` — ROS-specific voice wrapper
+
+### VAPI Webhooks
+
+`src/backend/http-functions.js` handles VAPI webhooks at `/api/vapi-webhook`:
+- `end-of-call-report` → saves transcript/summary to `voiceCallLogs`
+- `function-call` / `tool-calls` → executes backend service, returns result
+- `assistant-request` → returns dynamic assistant config
+
+### New Airtable Collections
+
+| Config Key | Airtable Table | Purpose |
+|------------|---------------|---------|
+| `agentConversations` | `v2_Agent Conversations` | Conversation sessions |
+| `agentTurns` | `v2_Agent Turns` | Individual conversation turns |
+| `voiceCallLogs` | `v2_Voice Call Logs` | Call transcripts and metadata |
+| `voiceAssistants` | `v2_Voice Assistants` | VAPI assistant configurations |
+| `voiceCampaigns` | `v2_Voice Campaigns` | Outbound campaign definitions |
+| `voiceCampaignContacts` | `v2_Voice Campaign Contacts` | Campaign contact records |
+
 ## Page Code Wiring (Priority 1)
 
 All 9 Priority 1 pages follow a shared wiring pattern connecting Wix page code to HTML iframe components via `postMessage`.

@@ -31,9 +31,10 @@ ROS.config = {
 
   // ── Feature Flags ──
   features: {
-    NLU_ENABLED: false,        // Claude API intent detection
+    NLU_ENABLED: true,         // Claude API intent detection via agentService
     NBA_ENABLED: false,        // Next Best Action chips
     DARK_MODE_ENABLED: false,  // Theme toggle in settings
+    VOICE_ENABLED: true,       // VAPI voice integration
     THEME_MODE: 'light'
   },
 

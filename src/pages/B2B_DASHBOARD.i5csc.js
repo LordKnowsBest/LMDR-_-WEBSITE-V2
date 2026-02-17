@@ -39,6 +39,8 @@
 
 import wixLocation from 'wix-location';
 import { handleB2BAction } from 'backend/b2bBridgeService';
+import { handleAgentTurn } from 'backend/agentService';
+import { getVoiceConfig } from 'backend/voiceService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
@@ -113,6 +115,35 @@ async function routeMessage(component, message) {
     const accountId = message.accountId;
     if (accountId) {
       wixLocation.to(`/b2b-account-detail?accountId=${encodeURIComponent(accountId)}`);
+    }
+    return;
+  }
+
+  // ---- Agent & Voice actions ----
+  if (action === 'agentMessage') {
+    try {
+      const text = message.data?.text || message.payload?.text || '';
+      const context = message.data?.context || message.payload?.context || {};
+      const result = await handleAgentTurn('carrier', 'b2b-user', text, context);
+      if (typeof component.postMessage === 'function') {
+        component.postMessage({ action: 'agentResponse', payload: result });
+      }
+    } catch (error) {
+      if (typeof component.postMessage === 'function') {
+        component.postMessage({ action: 'agentResponse', payload: { error: error.message } });
+      }
+    }
+    return;
+  }
+
+  if (action === 'getVoiceConfig') {
+    try {
+      const config = await getVoiceConfig();
+      if (typeof component.postMessage === 'function') {
+        component.postMessage({ action: 'voiceReady', payload: config });
+      }
+    } catch (error) {
+      console.error('[B2B Dashboard] Voice config error:', error);
     }
     return;
   }

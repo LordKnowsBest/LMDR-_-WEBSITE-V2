@@ -22,7 +22,11 @@ const MESSAGE_REGISTRY = {
     'discoverabilityUpdated',
     'mutualInterestData', // Phase 1: Mutual interest response
     'matchExplanation', // Phase 3: Match explanation result
-    'pong' // Health check response
+    'pong', // Health check response
+    'agentResponse', // Agent orchestration response
+    'agentTyping', // Agent is processing
+    'agentToolResult', // Agent tool execution result
+    'voiceReady' // Voice configuration ready
   ],
   // Messages TO Velo that HTML sends
   outbound: [
@@ -40,6 +44,10 @@ const MESSAGE_REGISTRY = {
     'getMutualInterest', // Phase 1: Fetch mutual interests
     'loginForApplication', // Trigger Wix login from application submit
     'getMatchExplanation', // Phase 3: Request match explanation
+    'agentMessage', // Send message to agent
+    'startVoiceCall', // Initiate voice call
+    'endVoiceCall', // End voice call
+    'getVoiceConfig', // Request voice configuration
     'ping' // Health check
   ]
 };

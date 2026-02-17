@@ -14,6 +14,8 @@ import {
     getFunnelConversion,
     updateFeatureStatus
 } from 'backend/featureAdoptionService';
+import { handleAgentTurn } from 'backend/agentService';
+import { getVoiceConfig } from 'backend/voiceService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
@@ -113,6 +115,14 @@ async function routeMessage(component, message) {
                 await handleUpdateFeatureStatus(component, message.featureId, message.status, message.reason);
                 break;
 
+            case 'agentMessage':
+                await handleAgentMessage(component, message);
+                break;
+
+            case 'getVoiceConfig':
+                await handleGetVoiceConfig(component);
+                break;
+
             default:
                 console.warn('ADMIN_DASHBOARD: Unknown action:', action);
         }
@@ -206,6 +216,26 @@ async function handleUpdateFeatureStatus(component, featureId, status, reason) {
     const data = await updateFeatureStatus(featureId, status, reason || '');
     safeSend(component, { action: 'updateFeatureStatusResult', payload: data });
     safeSend(component, { action: 'actionSuccess', message: `Feature "${featureId}" status updated to "${status}"` });
+}
+
+// ============================================
+// AGENT & VOICE HANDLERS
+// ============================================
+
+async function handleAgentMessage(component, message) {
+    const text = message.data?.text || message.payload?.text || '';
+    const context = message.data?.context || message.payload?.context || {};
+    if (!text) {
+        safeSend(component, { action: 'agentResponse', payload: { error: 'No message text provided' } });
+        return;
+    }
+    const result = await handleAgentTurn('admin', 'admin-user', text, context);
+    safeSend(component, { action: 'agentResponse', payload: result });
+}
+
+async function handleGetVoiceConfig(component) {
+    const config = await getVoiceConfig();
+    safeSend(component, { action: 'voiceReady', payload: config });
 }
 
 // ============================================

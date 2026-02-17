@@ -6,6 +6,8 @@ import { submitApplication, getDriverApplications } from 'backend/applicationSer
 import { extractDocumentForAutoFill } from 'backend/ocrService.jsw';
 import { getMatchExplanationForDriver } from 'backend/matchExplanationService.jsw';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
+import { handleAgentTurn } from 'backend/agentService';
+import { getVoiceConfig } from 'backend/voiceService';
 import wixLocation from 'wix-location';
 import wixWindow from 'wix-window';
 
@@ -67,6 +69,10 @@ const MESSAGE_REGISTRY = {
     'getDriverApplications', // Fetch driver applications history
     'getMutualInterest', // Phase 1: Fetch mutual interests
     'loginForApplication', // Trigger Wix login from application submit
+    'agentMessage', // Send message to AI agent
+    'startVoiceCall', // Initiate voice call
+    'endVoiceCall', // End voice call
+    'getVoiceConfig', // Request voice configuration
     'ping' // Health check
   ],
   // Messages TO HTML that page code sends
@@ -89,6 +95,10 @@ const MESSAGE_REGISTRY = {
     'matchExplanation', // Return detailed match rationale
     'driverApplications', // Return driver applications
     'mutualInterestData', // Phase 1: Return mutual interest data
+    'agentResponse', // Agent orchestration response
+    'agentTyping', // Agent is processing
+    'agentToolResult', // Tool execution result
+    'voiceReady', // Voice configuration ready
     'pong' // Health check response
   ]
 };
@@ -363,6 +373,35 @@ async function handleHtmlMessage(msg) {
       // Non-blocking feature tracking
       logFeatureInteraction(msg.data.featureId, msg.data.userId, msg.data.action, msg.data)
         .catch(err => console.warn('Feature tracking failed:', err.message));
+      break;
+
+    case 'agentMessage': {
+      const agentText = msg.data?.text || '';
+      const agentContext = msg.data?.context || {};
+      const userId = cachedDriverProfile?._id || cachedUserStatus?.memberId || 'anonymous';
+      sendToHtml('agentTyping', {});
+      try {
+        const agentResult = await handleAgentTurn('driver', userId, agentText, agentContext);
+        sendToHtml('agentResponse', agentResult);
+      } catch (err) {
+        sendToHtml('agentResponse', { error: err.message });
+      }
+      break;
+    }
+
+    case 'getVoiceConfig': {
+      try {
+        const voiceConf = await getVoiceConfig();
+        sendToHtml('voiceReady', voiceConf);
+      } catch (err) {
+        console.warn('Voice config failed:', err.message);
+      }
+      break;
+    }
+
+    case 'startVoiceCall':
+    case 'endVoiceCall':
+      // Voice calls handled client-side via VAPI SDK — no backend action needed
       break;
 
     default:
