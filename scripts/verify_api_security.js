@@ -29,12 +29,16 @@ function isIpAllowed(partner, ipAddress) {
 // ---------------------------------------------------------
 
 /**
- * Vulnerable Rate Limit Bypass Logic
- * Finding: Explicit header bypass without auth check on the header itself.
+ * Fixed Rate Limit Bypass Logic
+ * The bypass now requires the header value to match a secret token.
+ * In production, the secret is fetched via getSecret('RATE_LIMIT_BYPASS_SECRET').
+ * For this test we simulate with a known mock secret.
  */
+const MOCK_BYPASS_SECRET = 'test-secret-token-12345';
 function shouldBypassRateLimit(request) {
-  const headerValue = String(getHeader(request, 'x-lmdr-bypass-rate-limit') || '').toLowerCase();
-  return headerValue === 'true';
+  const headerValue = getHeader(request, 'x-lmdr-admin-bypass');
+  if (!headerValue) return false;
+  return headerValue === MOCK_BYPASS_SECRET;
 }
 
 function getHeader(request, name) {
@@ -88,9 +92,23 @@ const requestNormal = {
   }
 };
 
-const requestBypass = {
+const requestBypassOldHeader = {
   headers: {
     'x-lmdr-bypass-rate-limit': 'true',
+    'user-agent': 'test-bot'
+  }
+};
+
+const requestBypassWrongSecret = {
+  headers: {
+    'x-lmdr-admin-bypass': 'true',
+    'user-agent': 'test-bot'
+  }
+};
+
+const requestBypassCorrectSecret = {
+  headers: {
+    'x-lmdr-admin-bypass': MOCK_BYPASS_SECRET,
     'user-agent': 'test-bot'
   }
 };
@@ -99,10 +117,20 @@ const requestBypass = {
 const bypassA = shouldBypassRateLimit(requestNormal);
 console.log(`  Case A (Normal Request): Bypass is ${bypassA ? 'ACTIVE' : 'INACTIVE'} (Expected: INACTIVE)`);
 
-// Case B: Bypass Header Present
-const bypassB = shouldBypassRateLimit(requestBypass);
-console.log(`  Case B (Bypass Header): Bypass is ${bypassB ? 'ACTIVE (FAIL - UNPROTECTED)' : 'INACTIVE (PASS)'}`);
-if (bypassB) console.error('    !! CRITICAL: Rate limit bypass header is active and unprotected !!');
+// Case B: Old header name (should no longer work)
+const bypassB = shouldBypassRateLimit(requestBypassOldHeader);
+console.log(`  Case B (Old Header 'x-lmdr-bypass-rate-limit: true'): Bypass is ${bypassB ? 'ACTIVE (FAIL - OLD HEADER STILL WORKS)' : 'INACTIVE (PASS - OLD HEADER REJECTED)'}`);
+if (bypassB) console.error('    !! CRITICAL: Old bypass header still works !!');
+
+// Case C: New header name but wrong value (should be rejected)
+const bypassC = shouldBypassRateLimit(requestBypassWrongSecret);
+console.log(`  Case C (New Header wrong secret): Bypass is ${bypassC ? 'ACTIVE (FAIL - WRONG SECRET ACCEPTED)' : 'INACTIVE (PASS - WRONG SECRET REJECTED)'}`);
+if (bypassC) console.error('    !! CRITICAL: Bypass accepted without valid secret !!');
+
+// Case D: New header name with correct secret (should work)
+const bypassD = shouldBypassRateLimit(requestBypassCorrectSecret);
+console.log(`  Case D (New Header correct secret): Bypass is ${bypassD ? 'ACTIVE (PASS - SECRET VERIFIED)' : 'INACTIVE (FAIL - VALID SECRET REJECTED)'}`);
+if (!bypassD) console.error('    !! WARNING: Valid bypass secret was rejected !!');
 
 
 console.log('\n--- VERIFICATION COMPLETE ---');

@@ -1,4 +1,5 @@
 import { getSecret } from 'wix-secrets-backend';
+import { currentMember } from 'wix-members-backend';
 import * as dataAccess from 'backend/dataAccess';
 
 const COLLECTIONS = {
@@ -14,6 +15,22 @@ const KEY_TOUCH_THROTTLE_MS = 5 * 60 * 1000;
 
 const keyLookupCache = new Map();
 const keyLastTouched = new Map();
+
+/**
+ * Check if current caller is an admin.
+ * @returns {Promise<boolean>}
+ */
+async function isAdmin() {
+  try {
+    const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+    if (!member) return false;
+    const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+    const memberRole = member.contactDetails?.customFields?.role || '';
+    return adminRoles.includes(memberRole.toLowerCase());
+  } catch (error) {
+    return false;
+  }
+}
 
 /**
  * Parse bearer token from an Authorization header.
@@ -100,6 +117,14 @@ export async function validateApiKey({ authorizationHeader, ipAddress = null }) 
  * @returns {Promise<Object>}
  */
 export async function rotateApiKey(partnerId, keyId, options = {}) {
+  // Authorization: allow backend-to-backend calls (suppressAuth), otherwise require admin
+  if (!options.suppressAuth) {
+    const authorized = await isAdmin();
+    if (!authorized) {
+      return { success: false, error: 'Unauthorized: Admin access required to rotate API keys' };
+    }
+  }
+
   const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
     suppressAuth: true
   });
@@ -149,9 +174,13 @@ function hasMatchingKey(partner, keyHash) {
 }
 
 function isIpAllowed(partner, ipAddress) {
-  if (!ipAddress) return true;
   const whitelist = Array.isArray(partner.ip_whitelist) ? partner.ip_whitelist : [];
+  // No whitelist configured — no IP restriction applies
   if (!whitelist.length) return true;
+  // SECURITY: If a whitelist IS configured but the IP is missing/stripped,
+  // DENY access. Failing open here would let an attacker bypass the
+  // whitelist by stripping the IP header (e.g., via proxy manipulation).
+  if (!ipAddress) return false;
   return whitelist.includes(ipAddress);
 }
 
