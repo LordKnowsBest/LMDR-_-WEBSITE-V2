@@ -183,6 +183,138 @@ The external config does not load reliably in Wix HTML components.
 Use the same inline config as `src/public/landing/Homepage.HTML` and remove:
 `<script src="../lmdr-config.js"></script>`.
 
+### HTML Shell Pattern (Enforced by Hook)
+
+**CRITICAL: All HTML pages MUST follow the Shell + CDN Modules pattern.**
+A PostToolUse hook (`enforce-html-shell-pattern`) blocks any Write/Edit that creates monolithic HTML files.
+
+**Gold standard:** `src/public/recruiter/os/RecruiterOS.html` — 100 lines, zero inline business logic.
+
+#### What the Pattern Means
+
+| Layer | Lives in | Example |
+|-------|----------|---------|
+| **HTML Shell** | The `.html` file | Markup, root container, `<head>` meta/fonts |
+| **Tailwind Config** | Inline `<script>` in `<head>` | `tailwind.config = { ... }` (required for Wix iframes) |
+| **CSS** | External via CDN | `cdn.jsdelivr.net/gh/.../css/module.css` |
+| **JS Modules** | External via CDN | `cdn.jsdelivr.net/gh/.../js/module.js` |
+| **Bootstrap** | Inline `<script>` at bottom | `DOMContentLoaded` init, <10 lines |
+
+#### Enforced Thresholds
+
+| Rule | Limit | Action |
+|------|-------|--------|
+| Single inline `<script>` block | **80 lines max** | BLOCKED — extract to external JS module |
+| Total inline JS across all blocks | **150 lines max** | BLOCKED — split into CDN modules |
+| HTML > 200 lines with 0 CDN scripts | **Must have >=1** | BLOCKED — must use CDN pattern |
+
+#### CDN URL Pattern
+
+```html
+<!-- @main (follows latest commit) -->
+<script src="https://cdn.jsdelivr.net/gh/LordKnowsBest/LMDR-_-WEBSITE-V2@main/src/public/<surface>/js/<module>.js"></script>
+
+<!-- @<commit-hash> (pinned for cache control) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/LordKnowsBest/LMDR-_-WEBSITE-V2@a166efd/src/public/<surface>/css/<styles>.css"/>
+```
+
+#### Required File Structure for New Pages
+
+When creating a new HTML page for surface `<surface>` (e.g., `admin`, `driver`, `recruiter`, `carrier`):
+
+```
+src/public/<surface>/
+├── PAGE_NAME.html          # Shell only (target: <150 lines)
+├── js/
+│   ├── page-name-config.js    # Constants, config
+│   ├── page-name-bridge.js    # PostMessage communication with Wix
+│   ├── page-name-render.js    # DOM rendering functions
+│   └── page-name-logic.js     # Business logic, event handlers
+└── css/
+    └── page-name.css           # Component styles
+```
+
+#### Template: Minimal HTML Shell
+
+```html
+<!DOCTYPE html>
+<html class="light" lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover"/>
+  <title>VelocityMatch | Page Name</title>
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL@20..48,100..700,0..1&display=swap" rel="stylesheet"/>
+
+  <!-- Tailwind CDN + INLINE config (required for Wix iframes) -->
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            'lmdr-blue': '#2563eb', 'lmdr-deep': '#1e40af',
+            'lmdr-yellow': '#fbbf24', 'lmdr-dark': '#0f172a',
+            'beige': '#F5F5DC', 'beige-d': '#E8E0C8',
+            'tan': '#C8B896', 'ivory': '#FFFFF5', 'sg': '#859900'
+          },
+          fontFamily: { 'd': ['Inter', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+
+  <!-- External CSS via CDN -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/LordKnowsBest/LMDR-_-WEBSITE-V2@main/src/public/<surface>/css/<page>.css"/>
+</head>
+
+<body class="bg-beige font-d">
+  <!-- Root container — JS modules build into this -->
+  <div id="app-root" class="flex flex-col h-screen"></div>
+
+  <!-- ═══ Module Loading (ordered by dependency) ═══ -->
+  <script src="https://cdn.jsdelivr.net/gh/LordKnowsBest/LMDR-_-WEBSITE-V2@main/src/public/<surface>/js/<page>-config.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/LordKnowsBest/LMDR-_-WEBSITE-V2@main/src/public/<surface>/js/<page>-bridge.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/LordKnowsBest/LMDR-_-WEBSITE-V2@main/src/public/<surface>/js/<page>-render.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/LordKnowsBest/LMDR-_-WEBSITE-V2@main/src/public/<surface>/js/<page>-logic.js"></script>
+
+  <!-- ═══ Bootstrap ═══ -->
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      App.init();
+    });
+  </script>
+</body>
+</html>
+```
+
+#### Module Dependency Order
+
+Load scripts in this order (later modules depend on earlier ones):
+
+1. **Config** — constants, API endpoints, feature flags (no deps)
+2. **Bridge** — PostMessage communication with Wix page code (needs config)
+3. **Render** — DOM building and update functions (needs config)
+4. **Logic** — Event handlers, state management (needs config, bridge, render)
+5. **Views** — Per-view modules if using multi-view pattern (needs all above)
+6. **Voice/Agent** — Optional overlays (needs bridge)
+
+### Reusable CSS and JS
+
+Shared modules live at the `src/public/` root level and are available to all surfaces:
+
+| File | Purpose | CDN Path |
+|------|---------|----------|
+| `theme-styles.css` | Design tokens, shared component styles | `src/public/theme-styles.css` |
+| `css/voice-agent.css` | Voice orb + transcript panel | `src/public/css/voice-agent.css` |
+| `js/voice-agent-ui.js` | Reusable voice UI component | `src/public/js/voice-agent-ui.js` |
+| `js/voice-agent-bridge.js` | Voice event to postMessage bridge | `src/public/js/voice-agent-bridge.js` |
+
+When building components used across multiple surfaces, place them in `src/public/js/` or `src/public/css/` (not inside a surface subfolder).
+
 ### Test Files
 
 **All test files MUST be placed in `src/public/__tests__/`**
