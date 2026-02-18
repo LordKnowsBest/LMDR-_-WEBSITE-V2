@@ -261,35 +261,35 @@ A curated content hub for driver wellness with community-contributed tips.
 Connect new drivers with experienced mentors through an opt-in matching program.
 
 ### 4.1 Backend Collections
-- [ ] Task: Create `MentorProfiles` collection with schema from spec
-- [ ] Task: Create `MentorMatches` collection with status tracking
+- [x] Task: Create `MentorProfiles` collection with schema from spec
+- [x] Task: Create `MentorMatches` collection with status tracking
 - [ ] Task: Add indexes for mentor search (specialties, availability, status)
 - [ ] Task: Define milestone templates for common mentorship goals
 
 ### 4.2 Mentor Profile Backend
-- [ ] Task: Create `mentorService.jsw` for mentor management
-- [ ] Task: Implement `getMentorProfile()` with stats aggregation
-- [ ] Task: Implement `createMentorProfile()` with experience validation (5+ years)
-- [ ] Task: Implement `updateMentorProfile()` for availability/bio changes
+- [x] Task: Create `mentorService.jsw` for mentor management
+- [x] Task: Implement `getMentorProfile()` with stats aggregation
+- [x] Task: Implement `createMentorProfile()` with experience validation (5+ years)
+- [x] Task: Implement `updateMentorProfile()` for availability/bio changes
 - [ ] Task: Implement `pauseMentorProfile()` for temporary unavailability
-- [ ] Task: Implement mentor eligibility check (`canBeMentor()`)
+- [x] Task: Implement mentor eligibility check (`canBeMentor()`)
 
 ### 4.3 Mentor Discovery Backend
-- [ ] Task: Implement `searchMentors()` with filters (specialty, availability, language)
+- [x] Task: Implement `searchMentors()` with filters (specialty, availability, language)
 - [ ] Task: Implement `getMentorRecommendations()` with matching logic
 - [ ] Task: Matching factors: specialty match, timezone proximity, availability overlap
 - [ ] Task: Implement `getMentorStats()` for public profile stats
 
 ### 4.4 Matching Backend
-- [ ] Task: Implement `requestMentor()` with goals and intro message
-- [ ] Task: Implement `respondToRequest()` for mentor accept/decline
+- [x] Task: Implement `requestMentor()` with goals and intro message
+- [x] Task: Implement `respondToRequest()` for mentor accept/decline
 - [ ] Task: Create notification triggers for match status changes
-- [ ] Task: Implement `getMyMatches()` for both mentor and mentee views
+- [x] Task: Implement `getMyMatches()` for both mentor and mentee views
 - [ ] Task: Implement `getMenteeApplications()` for mentor's pending requests
 - [ ] Task: Create chat thread on match acceptance (link to Messages)
 
 ### 4.5 Progress Tracking Backend
-- [ ] Task: Implement `logMilestone()` for recording achievements
+- [x] Task: Implement `logMilestone()` for recording achievements
 - [ ] Task: Create milestone completion notifications
 - [ ] Task: Implement `completeMatch()` with feedback and rating
 - [ ] Task: Update mentor stats on completion (total helped, avg rating)
@@ -297,33 +297,33 @@ Connect new drivers with experienced mentors through an opt-in matching program.
 - [ ] Task: Implement match expiry after 90 days inactive
 
 ### 4.6 Mentor UI - Opt-In Flow
-- [ ] Task: Create `MENTOR_PROGRAM.html` in `src/public/driver/`
-- [ ] Task: Build program introduction/explainer section
-- [ ] Task: Create "Become a Mentor" flow for experienced drivers
-- [ ] Task: Build specialty selection multi-select
+- [x] Task: Create `MENTOR_PROGRAM.html` in `src/public/driver/`
+- [x] Task: Build program introduction/explainer section
+- [x] Task: Create "Become a Mentor" flow for experienced drivers
+- [x] Task: Build specialty selection multi-select
 - [ ] Task: Add availability preference selector
-- [ ] Task: Create bio/motivation textarea
-- [ ] Task: Add max mentees capacity selector (1-5)
-- [ ] Task: Show requirements checklist (5+ years, verified CDL)
+- [x] Task: Create bio/motivation textarea
+- [x] Task: Add max mentees capacity selector (1-5)
+- [x] Task: Show requirements checklist (5+ years, verified CDL)
 
 ### 4.7 Mentor UI - Discovery
-- [ ] Task: Build mentor search/browse interface
-- [ ] Task: Create filter panel (specialty, availability, experience)
-- [ ] Task: Build mentor card component with photo, bio, stats
-- [ ] Task: Display specialty badges and rating stars
-- [ ] Task: Add "Request Mentorship" button
+- [x] Task: Build mentor search/browse interface
+- [x] Task: Create filter panel (specialty, availability, experience)
+- [x] Task: Build mentor card component with photo, bio, stats
+- [x] Task: Display specialty badges and rating stars
+- [x] Task: Add "Request Mentorship" button
 
 ### 4.8 Mentor UI - Request Flow
-- [ ] Task: Create mentor request modal
-- [ ] Task: Add goals selection (checklist of common goals)
-- [ ] Task: Add intro message textarea
+- [x] Task: Create mentor request modal
+- [x] Task: Add goals selection (checklist of common goals)
+- [x] Task: Add intro message textarea
 - [ ] Task: Show expected response time
 - [ ] Task: Display confirmation after request sent
 
 ### 4.9 Mentor UI - Dashboard
-- [ ] Task: Create mentor dashboard section in driver dashboard
-- [ ] Task: Build active mentorships list with status
-- [ ] Task: Show pending requests for mentors (accept/decline)
+- [x] Task: Create mentor dashboard section in driver dashboard
+- [x] Task: Build active mentorships list with status
+- [x] Task: Show pending requests for mentors (accept/decline)
 - [ ] Task: Display milestone progress tracker
 - [ ] Task: Add "Message" button linking to chat
 - [ ] Task: Create "Complete Mentorship" flow with feedback form
@@ -359,8 +359,8 @@ Connect new drivers with experienced mentors through an opt-in matching program.
 
 ### 4.14 Wix Integration
 - [ ] Task: Create "Mentor Program" page in Wix Editor
-- [ ] Task: Add HTML component and connect to MENTOR_PROGRAM.html
-- [ ] Task: Set up postMessage bridge for backend calls
+- [x] Task: Add HTML component and connect to MENTOR_PROGRAM.html
+- [x] Task: Set up postMessage bridge for backend calls
 - [ ] Task: Add mentor badge display in driver profiles
 - [ ] Task: Update driver dashboard with mentorship section
 - [ ] Task: Configure member permissions for mentor features

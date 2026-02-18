@@ -1,19 +1,26 @@
 /* eslint-disable */
 
 // Mock standard library dependencies
-const mockCurrentUser = {
+let mockCurrentUser = {
     id: 'user123',
     loggedIn: true,
     email: 'carrier@example.com'
 };
 
 // Properly mock the default export for wix-users-backend
-jest.mock('wix-users-backend', () => ({
-    __esModule: true,
-    default: {
-        currentUser: mockCurrentUser
-    }
-}));
+jest.mock('wix-users-backend', () => {
+    mockCurrentUser = {
+        id: 'user123',
+        loggedIn: true,
+        email: 'carrier@example.com'
+    };
+    return {
+        __esModule: true,
+        default: {
+            currentUser: mockCurrentUser
+        }
+    };
+});
 
 // Mock Wix Data
 const mockWixData = {
@@ -135,3 +142,4 @@ describe('Carrier Retention Service Access Control', () => {
         });
     });
 });
+

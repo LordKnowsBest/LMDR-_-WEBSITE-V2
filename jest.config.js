@@ -19,6 +19,11 @@ module.exports = {
     '**/*.test.mjs'
   ],
 
+  // Ignore test templates that contain placeholder paths
+  testPathIgnorePatterns: [
+    '/_TEMPLATE_.*\\.test\\.js$'
+  ],
+
   // Module file extensions (include .jsw for Wix modules)
   moduleFileExtensions: ['js', 'jsw', 'mjs', 'json', 'node'],
 
@@ -31,10 +36,10 @@ module.exports = {
     '^wix-users-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-users-backend.js',
     '^wix-fetch$': '<rootDir>/src/public/__tests__/__mocks__/wix-fetch.js',
     '^wix-media-backend$': '<rootDir>/src/public/__tests__/__mocks__/wix-media-backend.js',
-    // Map backend imports (handle both .js and .jsw, prevent double .jsw)
+    // Map backend imports (handle both .js and .jsw, prevent double extension)
     '^backend/configData$': '<rootDir>/src/backend/configData.js',
     '^backend/(.+)\\.jsw$': '<rootDir>/src/backend/$1.jsw',
-    '^backend/(.+)$': '<rootDir>/src/backend/$1.jsw'
+    '^backend/(.+)$': ['<rootDir>/src/backend/$1.jsw', '<rootDir>/src/backend/$1.js']
   },
 
   // Setup files to run before tests

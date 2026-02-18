@@ -87,7 +87,19 @@ export const DRIVER_XP_ACTIONS = {
 
   // Cross-Platform Bonuses
   match_quality_bonus: { xp: 0, description: 'Match quality bonus (variable based on score)' },
-  referral_bonus: { xp: 0, description: 'Referral bonus (variable based on type)' }
+  referral_bonus: { xp: 0, description: 'Referral bonus (variable based on type)' },
+  
+  // Mentorship Actions
+  mentorship_requested: { xp: 10, dailyLimit: 1, description: 'Request a mentor' },
+  mentorship_accepted: { xp: 50, oneTime: true, description: 'Mentorship request accepted' },
+  mentorship_milestone_completed: { xp: 20, maxPerUser: 50, description: 'Complete mentorship milestone' },
+  mentorship_completed: { xp: 100, description: 'Complete mentorship program' },
+  mentor_program_completed: { xp: 200, description: 'Successfully mentor a rookie to completion' },
+
+  // Pet-Friendly & Health Actions
+  pet_location_added: { xp: 30, description: 'Add a new pet-friendly location' },
+  pet_review_left: { xp: 15, description: 'Leave a review for a pet-friendly spot' },
+  health_tip_approved: { xp: 25, description: 'Community health tip approved' }
 };
 
 // =============================================================================

@@ -132,23 +132,32 @@ const COLLECTION_KEYS = {
 
 async function validateSenderPermission(applicationId, senderId, senderType) {
     try {
+        // Try interests first (Standard job application)
         const application = await dataAccess.getRecord(COLLECTION_KEYS.interests, applicationId, { suppressAuth: true });
-        if (!application) return false;
-
-        if (senderType === 'driver') {
-            return application.driver_id === senderId;
-        } else if (senderType === 'recruiter') {
-            const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
-                filters: {
-                    recruiter_id: senderId,
-                    carrier_dot: application.carrier_dot,
-                    is_active: true
-                },
-                limit: 1,
-                suppressAuth: true
-            });
-            return result.items && result.items.length > 0;
+        
+        if (application) {
+            if (senderType === 'driver') {
+                return application.driver_id === senderId;
+            } else if (senderType === 'recruiter') {
+                const result = await dataAccess.queryRecords(COLLECTION_KEYS.recruiterCarriers, {
+                    filters: {
+                        recruiter_id: senderId,
+                        carrier_dot: application.carrier_dot,
+                        is_active: true
+                    },
+                    limit: 1,
+                    suppressAuth: true
+                });
+                return result.items && result.items.length > 0;
+            }
         }
+
+        // Try mentorship (Mentor-Mentee match)
+        const mentorMatch = await dataAccess.getRecord('mentorMatches', applicationId, { suppressAuth: true });
+        if (mentorMatch) {
+            return mentorMatch.mentorId === senderId || mentorMatch.menteeId === senderId;
+        }
+
         return false;
     } catch (error) {
         console.error('Error validating sender permission:', error);
@@ -163,34 +172,56 @@ function sanitizeContent(content) {
 
 async function triggerMessageNotification(receiverId, senderId, senderType, applicationId, messageContent) {
     try {
+        // Try interests
         const application = await dataAccess.getRecord(COLLECTION_KEYS.interests, applicationId, { suppressAuth: true });
-        if (!application) return;
+        
+        if (application) {
+            let senderName = 'Someone';
+            let recipientName = 'User';
+            let carrierName = application.carrier_name || '';
+            let isDriver = false;
 
-        let senderName = 'Someone';
-        let recipientName = 'User';
-        let carrierName = application.carrier_name || '';
-        let isDriver = false;
+            if (senderType === 'driver') {
+                const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
+                    filters: { user_id: senderId },
+                    limit: 1,
+                    suppressAuth: true
+                });
+                if (result.items?.[0]) senderName = result.items[0].first_name || 'A driver';
+                isDriver = false;
+            } else {
+                senderName = carrierName || 'A recruiter';
+                isDriver = true;
+                const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
+                    filters: { user_id: receiverId },
+                    limit: 1,
+                    suppressAuth: true
+                });
+                if (result.items?.[0]) recipientName = result.items[0].first_name || 'Driver';
+            }
 
-        if (senderType === 'driver') {
-            const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
+            await sendMessageNotification(receiverId, { recipientName, senderName, messagePreview: messageContent, carrierName, isDriver });
+            return;
+        }
+
+        // Try mentorship
+        const mentorMatch = await dataAccess.getRecord('mentorMatches', applicationId, { suppressAuth: true });
+        if (mentorMatch) {
+            const senderRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
                 filters: { user_id: senderId },
                 limit: 1,
                 suppressAuth: true
             });
-            if (result.items?.[0]) senderName = result.items[0].first_name || 'A driver';
-            isDriver = false;
-        } else {
-            senderName = carrierName || 'A recruiter';
-            isDriver = true;
-            const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverProfiles, {
-                filters: { user_id: receiverId },
-                limit: 1,
-                suppressAuth: true
+            const senderName = senderRes.items?.[0]?.first_name || 'Your Mentor/Mentee';
+            
+            await sendMessageNotification(receiverId, { 
+                recipientName: 'User', 
+                senderName, 
+                messagePreview: messageContent, 
+                carrierName: 'LMDR Mentorship', 
+                isDriver: true 
             });
-            if (result.items?.[0]) recipientName = result.items[0].first_name || 'Driver';
         }
-
-        await sendMessageNotification(receiverId, { recipientName, senderName, messagePreview: messageContent, carrierName, isDriver });
     } catch (error) {
         console.error('triggerMessageNotification error:', error);
     }

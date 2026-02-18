@@ -330,7 +330,13 @@ export const DATA_SOURCE = {
   // -------------------------------------------------------------------------
   // Knowledge Compendium
   // -------------------------------------------------------------------------
-  compendiumEntries: 'airtable'
+  compendiumEntries: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Self-Healing Pipeline
+  // -------------------------------------------------------------------------
+  remediationPlans: 'airtable',
+  incidentLog: 'airtable'
 };
 
 // =============================================================================
@@ -632,7 +638,11 @@ export const WIX_COLLECTION_NAMES = {
   runOutcomes: 'RunOutcomes',
 
   // Knowledge Compendium
-  compendiumEntries: 'CompendiumEntries'
+  compendiumEntries: 'CompendiumEntries',
+
+  // Self-Healing Pipeline
+  remediationPlans: 'RemediationPlans',
+  incidentLog: 'IncidentLog'
 };
 
 // =============================================================================
@@ -900,7 +910,11 @@ export const AIRTABLE_TABLE_NAMES = {
   runOutcomes: 'v2_Run Outcomes',
 
   // Knowledge Compendium
-  compendiumEntries: 'v2_Compendium Entries'
+  compendiumEntries: 'v2_Compendium Entries',
+
+  // Self-Healing Pipeline
+  remediationPlans: 'v2_Remediation Plans',
+  incidentLog: 'v2_Incident Log'
 };
 
 // =============================================================================
