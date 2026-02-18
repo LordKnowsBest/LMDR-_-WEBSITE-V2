@@ -556,3 +556,32 @@ All pages (except Recruiter Onboarding) use an **action-based protocol**:
 
 **Exception:** `RECRUITER_ONBOARDING_DASHBOARD` uses `{ type, data, timestamp }` envelope instead of `{ action, payload }`, and validates messages against a `MESSAGE_REGISTRY` object.
 
+## Admin Utility Expansion (2026-01-20)
+
+### New Airtable Collections
+
+| Config Key | Airtable Table | Purpose |
+|------------|---------------|---------|
+| `aiProviderCosts` | `v2_AI Provider Costs` | Cost/quality/latency metrics for provider selection |
+| `costOptimizerConfig` | `v2_Cost Optimizer Config` | Singleton configuration for cost optimizer mode |
+| `anomalyAlerts` | `v2_Anomaly Alerts` | Active and historical anomaly alerts |
+| `anomalyRules` | `v2_Anomaly Rules` | Detection rule definitions and thresholds |
+| `baselineMetrics` | `v2_Baseline Metrics` | Time-segmented baseline statistics |
+| `complianceReports` | `v2_Compliance Reports` | Generated report metadata and storage pointers |
+| `scheduledReports` | `v2_Scheduled Reports` | Report schedules for automated generation |
+
+### New/Expanded Backend APIs
+
+- `aiRouterService.jsw`
+  - `getCostOptimizerConfig()`, `updateCostOptimizerConfig()`, `getProviderCostMetrics()`
+  - `updateProviderCostData()`, `calculateQualityScore()`, `selectOptimalProvider()`
+  - `getCostSavingsReport()`, `updateProviderCostsJob()`
+- `observabilityService.jsw`
+  - `calculateBaseline()`, `updateBaselines()`, `runAnomalyDetection()`
+  - `getActiveAnomalies()`, `acknowledgeAnomaly()`, `resolveAnomaly()`
+  - `getAnomalyRules()`, `updateAnomalyRule()`, `createAnomalyRule()`, `deleteAnomalyRule()`, `getAnomalyHistory()`
+- `admin_audit_service.jsw`
+  - `generateComplianceReport()`, `getReportTemplates()`, `getReportStatus()`
+  - `listComplianceReports()`, `downloadReport()`, `deleteComplianceReport()`
+  - `createScheduledReport()`, `updateScheduledReport()`, `deleteScheduledReport()`, `getScheduledReports()`, `runScheduledReports()`
+
