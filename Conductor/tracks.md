@@ -418,3 +418,9 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Complete*
 *Goal: Predictive dashboard for recruiters/fleet managers to track driver performance (miles, deliveries, safety), monitor engagement, and predict turnover risk.*
 *Note: Referenced as dependency by Cross-Role Utility track.*
+
+## [/] Track: Agentic Orchestration (Cross-Role)
+*Link: [./conductor/tracks/agentic_orchestration_20260218/](./conductor/tracks/agentic_orchestration_20260218/)*
+*Priority: Critical*
+*Status: Blueprint Published*
+*Goal: Deliver fully orchestrated multi-agent execution across recruiter, carrier, driver, admin, and development operations with recursive compendium memory and policy-guarded autonomy.*
