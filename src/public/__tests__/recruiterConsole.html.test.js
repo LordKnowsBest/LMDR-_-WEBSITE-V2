@@ -210,8 +210,8 @@ function handleCarrierValidated(data) {
         const fleetEl = document.getElementById('preview-fleet');
 
         if (nameEl) nameEl.textContent = stripHtml(data.carrier.legalName);
-        if (dotEl) dotEl.textContent = data.carrier.dotNumber;
-        if (mcEl) mcEl.textContent = data.carrier.mcNumber || '--';
+        if (dotEl) dotEl.textContent = String(data.carrier.dotNumber || '');
+        if (mcEl) mcEl.textContent = String(data.carrier.mcNumber || '--');
         if (locationEl) locationEl.textContent = `${data.carrier.city}, ${data.carrier.state}`;
         if (fleetEl) fleetEl.textContent = data.carrier.fleetSize || '--';
 
@@ -396,6 +396,7 @@ function handleConversationData(data) {
         data.messages.forEach(msg => {
             const div = document.createElement('div');
             div.className = `chat-message ${msg.sender === 'recruiter' ? 'outbound' : 'inbound'}`;
+            div.classList.add(msg.sender === 'recruiter' ? 'outbound' : 'inbound');
             div.textContent = stripHtml(msg.content);
             div.setAttribute('data-id', msg._id || msg.id);
             container.children.push(div);

@@ -204,7 +204,7 @@ export async function searchMentors(filters = {}, limit = 20, offset = 0) {
         // For MVP, we'll fetch active mentors and filter in memory if needed
         const result = await dataAccess.queryRecords(COLLECTION_KEYS.mentorProfiles, {
             filters: queryFilters,
-            limit: 100 
+            limit: 100
         });
 
         let mentors = result.items || [];
@@ -502,15 +502,15 @@ export async function logMilestone(matchId, milestone) {
  */
 export async function completeMatch(matchId, feedback, rating) {
     const userId = await getCurrentUserId();
-    
+
     try {
         const match = await dataAccess.getRecord(COLLECTION_KEYS.mentorMatches, matchId);
         if (!match) throw new Error('Match not found');
-        
+
         if (match.mentorId !== userId && match.menteeId !== userId) {
             throw new Error('Unauthorized');
         }
-        
+
         const updateData = {
             ...match,
             status: MATCH_STATUS.COMPLETED,
@@ -526,9 +526,9 @@ export async function completeMatch(matchId, feedback, rating) {
             updateData.feedback_mentee = feedback;
             updateData.rating_of_mentor = Number(rating);
         }
-        
+
         await dataAccess.updateRecord(COLLECTION_KEYS.mentorMatches, updateData);
-        
+
         // Award XP
         await awardDriverXP(match.menteeId, 'mentorship_completed', { matchId });
         await awardDriverXP(match.mentorId, 'mentor_program_completed', { matchId });
@@ -539,13 +539,13 @@ export async function completeMatch(matchId, feedback, rating) {
                 filters: { driverId: match.mentorId },
                 limit: 1
             });
-            
+
             const profile = mentorResult.items?.[0];
             if (profile) {
                 const currentTotal = profile.totalMenteesHelped || 0;
                 const currentRating = profile.rating || 5.0;
                 const newRating = ((currentRating * currentTotal) + Number(rating)) / (currentTotal + 1);
-                
+
                 await updateMentorProfileInternal(profile._id, {
                     totalMenteesHelped: currentTotal + 1,
                     rating: Number(newRating.toFixed(2)),
@@ -561,11 +561,132 @@ export async function completeMatch(matchId, feedback, rating) {
                 });
             }
         }
-        
+
         return { success: true };
     } catch (error) {
         console.error('Error completing match:', error);
         throw error;
+    }
+}
+
+// ============================================
+// MATCH EXPIRY (§4.5)
+// ============================================
+
+/**
+ * Expire mentor matches that have been inactive for 90+ days.
+ * Intended to be called from a scheduled job (e.g. daily cron).
+ *
+ * @returns {{ expired: number, errors: number }}
+ */
+export async function expireInactiveMatches() {
+    const EXPIRY_DAYS = 90;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - EXPIRY_DAYS);
+
+    let expired = 0;
+    let errors = 0;
+
+    try {
+        // Fetch all active (Accepted) matches
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.mentorMatches, {
+            filters: { status: MATCH_STATUS.ACCEPTED },
+            limit: 500
+        });
+
+        const staleMatches = (result.items || []).filter(match => {
+            const lastActivity = match.lastActivity ? new Date(match.lastActivity) : new Date(match.requestedDate);
+            return lastActivity < cutoff;
+        });
+
+        for (const match of staleMatches) {
+            try {
+                // Mark as expired
+                await dataAccess.updateRecord(COLLECTION_KEYS.mentorMatches, {
+                    ...match,
+                    status: MATCH_STATUS.EXPIRED,
+                    expiredAt: new Date(),
+                    updatedAt: new Date()
+                });
+
+                // Decrement mentor's active mentee count
+                const mentorResult = await dataAccess.queryRecords(COLLECTION_KEYS.mentorProfiles, {
+                    filters: { driverId: match.mentorId },
+                    limit: 1
+                });
+                const mentorProfile = mentorResult.items?.[0];
+                if (mentorProfile) {
+                    await updateMentorProfileInternal(mentorProfile._id, {
+                        currentMentees: Math.max(0, (mentorProfile.currentMentees || 0) - 1)
+                    });
+                }
+
+                // Notify both parties
+                await sendMessageNotification(match.mentorId, {
+                    recipientName: 'Mentor',
+                    senderName: 'LMDR Program',
+                    messagePreview: 'A mentorship match has expired due to 90 days of inactivity.',
+                    dashboardUrl: 'https://www.lastmiledr.app/driver/mentor-program'
+                });
+                await sendMessageNotification(match.menteeId, {
+                    recipientName: 'Driver',
+                    senderName: 'LMDR Program',
+                    messagePreview: 'Your mentorship match has expired due to 90 days of inactivity. Find a new mentor anytime!',
+                    dashboardUrl: 'https://www.lastmiledr.app/driver/mentor-program'
+                });
+
+                expired++;
+            } catch (matchError) {
+                console.error(`Error expiring match ${match._id}:`, matchError);
+                errors++;
+            }
+        }
+
+        console.log(`expireInactiveMatches: expired=${expired}, errors=${errors}`);
+        return { expired, errors };
+
+    } catch (error) {
+        console.error('expireInactiveMatches fatal error:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get a single mentor profile by driverId (public, no auth required)
+ * Used by the public mentor profile page.
+ *
+ * @param {string} driverId
+ * @returns {object|null}
+ */
+export async function getMentorProfileByDriverId(driverId) {
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.mentorProfiles, {
+            filters: { driverId },
+            limit: 1
+        });
+        return result.items?.[0] || null;
+    } catch (error) {
+        console.error('getMentorProfileByDriverId error:', error);
+        return null;
+    }
+}
+
+/**
+ * Get completed mentorships for a mentor (testimonials / history)
+ *
+ * @param {string} mentorDriverId
+ * @returns {Array}
+ */
+export async function getMentorCompletedMatches(mentorDriverId) {
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.mentorMatches, {
+            filters: { mentorId: mentorDriverId, status: MATCH_STATUS.COMPLETED },
+            limit: 50
+        });
+        return result.items || [];
+    } catch (error) {
+        console.error('getMentorCompletedMatches error:', error);
+        return [];
     }
 }
 

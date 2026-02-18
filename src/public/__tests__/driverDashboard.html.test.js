@@ -174,10 +174,7 @@ let currentFilter = 'all';
 let isDiscoverable = false;
 
 function stripHtml(str) {
-    if (!str) return '';
-    const tmp = document.createElement('div');
-    tmp.textContent = str;
-    return tmp.textContent;
+    return String(str || '').replace(/<[^>]*>/g, '');
 }
 
 function sendToVelo(type, data = {}) {
@@ -190,7 +187,7 @@ function updateUnreadBadge(count, byApplication) {
     const badge = document.getElementById('unread-badge');
     if (badge) {
         if (count > 0) {
-            badge.textContent = count > 99 ? '99+' : count;
+            badge.textContent = String(count > 99 ? '99+' : count);
             badge.classList.remove('hidden');
         } else {
             badge.classList.add('hidden');
@@ -263,10 +260,10 @@ function renderInsightsPanel(stats) {
     const container = document.getElementById('insights-grid');
     if (!container || !stats) return;
 
-    document.getElementById('insight-views-count').textContent = stats.profileViews30d || 0;
-    document.getElementById('insight-search-count').textContent = stats.searchAppearances || 0;
-    document.getElementById('insight-active-apps').textContent = stats.activeApplications || 0;
-    document.getElementById('insight-offer-rate').textContent = stats.offerRate || '0%';
+    document.getElementById('insight-views-count').textContent = String(stats.profileViews30d || 0);
+    document.getElementById('insight-search-count').textContent = String(stats.searchAppearances || 0);
+    document.getElementById('insight-active-apps').textContent = String(stats.activeApplications || 0);
+    document.getElementById('insight-offer-rate').textContent = String(stats.offerRate || '0%');
 }
 
 function renderProfileStrength(profile) {
@@ -345,8 +342,8 @@ function renderDashboard(data) {
         ['applied', 'in_review', 'contacted', 'offer'].includes(a.status)
     ).length;
 
-    document.getElementById('stat-active').textContent = activeCount;
-    document.getElementById('stat-total').textContent = applications.length;
+    document.getElementById('stat-active').textContent = String(activeCount);
+    document.getElementById('stat-total').textContent = String(applications.length);
 
     loading.classList.add('hidden');
 

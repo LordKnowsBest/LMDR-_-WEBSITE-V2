@@ -8,6 +8,7 @@ import wixLocation from 'wix-location';
 import { session } from 'wix-storage';
 import { initUtmTracking } from 'public/js/utm-tracker.js';
 import { getUnreadCount } from 'backend/messaging';
+import { getUnreadForumCount } from 'backend/forumService';
 import { updateLastActive } from 'backend/memberService';
 import {
     createAnnouncement,
@@ -90,10 +91,27 @@ async function updateAuthState() {
  */
 async function loadNotificationBadge() {
     try {
-        const result = await getUnreadCount();
+        const user = wixUsers.currentUser;
+        const userId = user.id;
 
-        if (result.success && result.count > 0) {
-            const badgeText = result.count > 9 ? '9+' : String(result.count);
+        // Run both counts in parallel — forum failure never breaks DM badge
+        const [messagingResult, forumResult] = await Promise.allSettled([
+            getUnreadCount(),
+            getUnreadForumCount(userId)
+        ]);
+
+        const dmCount = (messagingResult.status === 'fulfilled' && messagingResult.value.success)
+            ? (messagingResult.value.count || 0)
+            : 0;
+
+        const forumCount = (forumResult.status === 'fulfilled' && forumResult.value.success)
+            ? (forumResult.value.count || 0)
+            : 0;
+
+        const totalCount = dmCount + forumCount;
+
+        if (totalCount > 0) {
+            const badgeText = totalCount > 9 ? '9+' : String(totalCount);
             safeSetText('#notificationBadge', badgeText);
             safeShow('#notificationBadge');
         } else {

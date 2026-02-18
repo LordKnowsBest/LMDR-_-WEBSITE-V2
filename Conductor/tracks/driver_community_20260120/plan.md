@@ -235,7 +235,7 @@ A curated content hub for driver wellness with community-contributed tips.
 - [x] Task: Add rich text editor for article content
 - [x] Task: Implement tip moderation queue
 - [x] Task: Add "Feature" toggle for homepage highlights
-- [ ] Task: Create content scheduling (publish date)
+- [x] Task: Create content scheduling (publish date)
 
 ### 3.7 Wix Integration
 - [x] Task: Create "Health & Wellness" page in Wix Editor
@@ -294,7 +294,7 @@ Connect new drivers with experienced mentors through an opt-in matching program.
 - [x] Task: Implement `completeMatch()` with feedback and rating
 - [x] Task: Update mentor stats on completion (total helped, avg rating)
 - [x] Task: Award reputation points on successful completion
-- [ ] Task: Implement match expiry after 90 days inactive
+- [x] Task: Implement match expiry after 90 days inactive
 
 ### 4.6 Mentor UI - Opt-In Flow
 - [x] Task: Create `MENTOR_PROGRAM.html` in `src/public/driver/`
@@ -329,11 +329,11 @@ Connect new drivers with experienced mentors through an opt-in matching program.
 - [x] Task: Create "Complete Mentorship" flow with feedback form
 
 ### 4.10 Mentor UI - Profile View
-- [ ] Task: Create public mentor profile page
-- [ ] Task: Display full bio, specialties, experience
-- [ ] Task: Show mentorship history (count, rating, testimonials)
-- [ ] Task: Add "Request Mentorship" CTA
-- [ ] Task: Display earned badges
+- [x] Task: Create public mentor profile page
+- [x] Task: Display full bio, specialties, experience
+- [x] Task: Show mentorship history (count, rating, testimonials)
+- [x] Task: Add "Request Mentorship" CTA
+- [x] Task: Display earned badges
 
 ### 4.11 Chat Integration
 - [x] Task: Extend messaging system for mentor-mentee threads

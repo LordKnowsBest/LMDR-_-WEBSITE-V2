@@ -335,14 +335,14 @@ When a compendium file exceeds 1,500 lines:
 
 ## Exit Criteria
 
-- [ ] 100% of tools have policy tags (risk_level, requires_approval, success_metric)
-- [ ] 100% of high-risk actions are approval-gated (zero bypasses in production)
-- [ ] 80%+ of agent runs score quality_score >= 60
-- [ ] Run ledger captures every agent action with full correlation chain
-- [ ] Cost per run is tracked and within budget caps
-- [ ] At least 1 cross-role signal pathway is live (carrier → recruiter)
-- [ ] Compendium freshness SLA met (weekly updates per department)
-- [ ] Human override rate < 20% (agents mostly make correct decisions)
+- [x] 100% of tools have policy tags (risk_level, requires_approval, success_metric) — Verified: 36/36 tools have complete policy objects
+- [x] 100% of high-risk actions are approval-gated (zero bypasses in production) — Verified: 5/5 execute_high tools have requires_approval: true
+- [ ] 80%+ of agent runs score quality_score >= 60 — Requires production traffic data
+- [x] Run ledger captures every agent action with full correlation chain — Verified: startRun/logStep/completeRun wired on all 6 exit paths in handleAgentTurn
+- [x] Cost per run is tracked and within budget caps — Verified: per-role token caps (10K-20K), 100 daily runs, 30s time cap, $0.50 alert threshold
+- [x] At least 1 cross-role signal pathway is live (carrier → recruiter) — Verified: 5 cross-role tools in crossRoleIntelService.jsw with role-scoped access
+- [ ] Compendium freshness SLA met (weekly updates per department) — Infrastructure built (runCurator + curator.md), requires ongoing operation
+- [ ] Human override rate < 20% (agents mostly make correct decisions) — Requires production traffic data
 
 ---
 

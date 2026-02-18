@@ -157,10 +157,7 @@ function sendToVelo(type, data = {}) {
 }
 
 function stripHtml(str) {
-    if (!str) return '';
-    const tmp = document.createElement('div');
-    tmp.textContent = str;
-    return tmp.textContent;
+    return String(str || '').replace(/<[^>]*>/g, '');
 }
 
 // Handlers for inbound messages from Velo

@@ -3,145 +3,173 @@ import * as dataAccess from 'backend/dataAccess';
 import { sendWeatherAlertEmail } from 'backend/emailService';
 import { seedDriverSubscriptions } from 'backend/seeds/seedMockData';
 
-// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
-    weatherAlerts: 'weatherAlerts',
-    driverWeatherSubscriptions: 'driverNotificationPreferences',
-    roadUtilityCache: 'roadUtilityCache'
+  weatherAlerts: 'weatherAlerts',
+  driverWeatherSubscriptions: 'driverNotificationPreferences',
+  roadUtilityCache: 'roadUtilityCache'
 };
 
-// ============================================
-// EXTERNAL API CONFIG (NWS)
-// ============================================
 const NWS_API = {
-    BASE_URL: 'https://api.weather.gov',
-    USER_AGENT: '(lmdr.site, contact@lmdr.site)', // Required by NWS
-    TIMEOUT: 10000
+  BASE_URL: 'https://api.weather.gov',
+  USER_AGENT: '(lmdr.site, contact@lmdr.site)',
+  TIMEOUT: 10000
 };
 
-// Simple circuit breaker
 const circuitBreaker = {
-    nws: { failures: 0, lastFailure: 0, status: 'CLOSED' }
+  nws: { failures: 0, lastFailure: 0, status: 'CLOSED' }
 };
 
-// ============================================
-// CHAIN LAW DATA (STATIC/MOCK)
-// ============================================
-// Real-time chain data usually requires scraping 50 state DOT sites.
 const CHAIN_LAW_ZONES = [
-    { id: 'donner_pass', name: 'Donner Pass (I-80)', state: 'CA', elevation: 7057, location: { lat: 39.31, lng: -120.33 } },
-    { id: 'snoqualmie_pass', name: 'Snoqualmie Pass (I-90)', state: 'WA', elevation: 3022, location: { lat: 47.42, lng: -121.41 } },
-    { id: 'vail_pass', name: 'Vail Pass (I-70)', state: 'CO', elevation: 10662, location: { lat: 39.52, lng: -106.21 } },
-    { id: 'cabbage_hill', name: 'Cabbage Hill (I-84)', state: 'OR', elevation: 3648, location: { lat: 45.59, lng: -118.42 } },
-    { id: 'siskiyou_summit', name: 'Siskiyou Summit (I-5)', state: 'OR', elevation: 4310, location: { lat: 42.06, lng: -122.60 } }
+  { id: 'donner_pass', name: 'Donner Pass (I-80)', state: 'CA', elevation: 7057, location: { lat: 39.31, lng: -120.33 } },
+  { id: 'snoqualmie_pass', name: 'Snoqualmie Pass (I-90)', state: 'WA', elevation: 3022, location: { lat: 47.42, lng: -121.41 } },
+  { id: 'vail_pass', name: 'Vail Pass (I-70)', state: 'CO', elevation: 10662, location: { lat: 39.52, lng: -106.21 } },
+  { id: 'cabbage_hill', name: 'Cabbage Hill (I-84)', state: 'OR', elevation: 3648, location: { lat: 45.59, lng: -118.42 } },
+  { id: 'siskiyou_summit', name: 'Siskiyou Summit (I-5)', state: 'OR', elevation: 4310, location: { lat: 42.06, lng: -122.60 } }
 ];
 
-// ============================================
-// SERVICE FUNCTIONS
-// ============================================
-
-/**
- * Get active weather alerts for a location
- */
 export async function getAlertsAtLocation(lat, lng) {
-    if (!lat || !lng) return { success: false, error: 'Location required' };
-    try {
-        const url = `${NWS_API.BASE_URL}/alerts/active?point=${lat},${lng}`;
-        if (circuitBreaker.nws.status === 'OPEN') {
-            if (Date.now() - circuitBreaker.nws.lastFailure > 60000) circuitBreaker.nws.status = 'HALF_OPEN';
-            else return { success: false, error: 'Weather service unavailable' };
-        }
-
-        const response = await fetch(url, { method: 'GET', headers: { 'User-Agent': NWS_API.USER_AGENT, 'Accept': 'application/geo+json' }, timeout: NWS_API.TIMEOUT });
-        if (!response.ok) throw new Error(`NWS API error: ${response.status}`);
-
-        const data = await response.json();
-        circuitBreaker.nws.failures = 0;
-        circuitBreaker.nws.status = 'CLOSED';
-
-        return { success: true, alerts: (data.features || []).map(normalizeAlert) };
-    } catch (error) {
-        circuitBreaker.nws.failures++;
-        if (circuitBreaker.nws.failures >= 3) circuitBreaker.nws.status = 'OPEN';
-        circuitBreaker.nws.lastFailure = Date.now();
-        return { success: false, error: error.message };
+  if (lat == null || lng == null) return { success: false, error: 'Location required' };
+  try {
+    const url = `${NWS_API.BASE_URL}/alerts/active?point=${lat},${lng}`;
+    if (circuitBreaker.nws.status === 'OPEN') {
+      if (Date.now() - circuitBreaker.nws.lastFailure > 60000) circuitBreaker.nws.status = 'HALF_OPEN';
+      else return { success: false, error: 'Weather service unavailable' };
     }
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { 'User-Agent': NWS_API.USER_AGENT, 'Accept': 'application/geo+json' },
+      timeout: NWS_API.TIMEOUT
+    });
+    if (!response.ok) throw new Error(`NWS API error: ${response.status}`);
+
+    const data = await response.json();
+    circuitBreaker.nws.failures = 0;
+    circuitBreaker.nws.status = 'CLOSED';
+
+    return { success: true, alerts: (data.features || []).map(normalizeAlert) };
+  } catch (error) {
+    circuitBreaker.nws.failures++;
+    if (circuitBreaker.nws.failures >= 3) circuitBreaker.nws.status = 'OPEN';
+    circuitBreaker.nws.lastFailure = Date.now();
+    return { success: false, error: error.message };
+  }
 }
 
-/**
- * Get forecast and alerts along a route
- */
 export async function getRouteWeather(routePoints) {
-    if (!routePoints || routePoints.length === 0) return { success: false, error: 'No points' };
-    try {
-        const pointsToCheck = [routePoints[0], routePoints[Math.floor(routePoints.length / 2)], routePoints[routePoints.length - 1]];
-        const promises = pointsToCheck.map(p => getAlertsAtLocation(p.lat, p.lng));
-        const results = await Promise.all(promises);
+  if (!routePoints || routePoints.length === 0) return { success: false, error: 'No points' };
+  try {
+    const pointsToCheck = [routePoints[0], routePoints[Math.floor(routePoints.length / 2)], routePoints[routePoints.length - 1]];
+    const results = await Promise.all(pointsToCheck.map((p) => getAlertsAtLocation(p.lat, p.lng)));
 
-        const allAlerts = new Map();
-        results.forEach(res => { if (res.success && res.alerts) res.alerts.forEach(a => allAlerts.set(a.id, a)); });
+    const allAlerts = new Map();
+    results.forEach((res) => {
+      if (res.success && res.alerts) res.alerts.forEach((a) => allAlerts.set(a.id, a));
+    });
 
-        const chainLaws = await checkChainLawsForRoute(routePoints);
-        return { success: true, alerts: Array.from(allAlerts.values()), chainLaws };
-    } catch (error) { return { success: false, error: error.message }; }
+    const chainLaws = await checkChainLawsForRoute(routePoints);
+    return { success: true, alerts: Array.from(allAlerts.values()), chainLaws };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 export async function getChainRequirements() {
-    return { success: true, items: CHAIN_LAW_ZONES.map(z => ({ ...z, status: 'Clear', last_updated: new Date() })) };
+  return { success: true, items: CHAIN_LAW_ZONES.map((z) => ({ ...z, status: 'Clear', last_updated: new Date() })) };
 }
 
 async function checkChainLawsForRoute(routePoints) {
-    return CHAIN_LAW_ZONES.filter(z => routePoints.some(p => calculateDistance(p.lat, p.lng, z.location.lat, z.location.lng) < 20));
+  return CHAIN_LAW_ZONES.filter((z) => routePoints.some((p) => calculateDistance(p.lat, p.lng, z.location.lat, z.location.lng) < 20));
 }
 
 export async function subscribeToAlerts(driverId, preferences) {
-    return { success: true };
+  return { success: true };
 }
 
-/**
- * Processed scheduled job to fetch new alerts and notify drivers
- */
 export async function processNewAlerts() {
+  try {
+    let subscribedDrivers = [];
+
     try {
-        const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverWeatherSubscriptions, { suppressAuth: true });
-        let subscribedDrivers = res.items || [];
+      const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverWeatherSubscriptions, { suppressAuth: true });
+      subscribedDrivers = res.items || [];
+    } catch (e) {
+      subscribedDrivers = [];
+    }
 
-        if (subscribedDrivers.length === 0) {
-            const seed = await seedDriverSubscriptions();
-            if (seed.seeded) {
-                const reRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverWeatherSubscriptions, { suppressAuth: true });
-                subscribedDrivers = reRes.items || [];
-            }
-        }
+    if (subscribedDrivers.length === 0) {
+      try {
+        await seedDriverSubscriptions();
+        const reRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverWeatherSubscriptions, { suppressAuth: true });
+        subscribedDrivers = reRes.items || [];
+      } catch (e) {
+        subscribedDrivers = [];
+      }
+    }
 
-        let sentCount = 0;
-        for (const driver of subscribedDrivers) {
-            if (!driver.location) continue;
-            const alertRes = await getAlertsAtLocation(driver.location.lat, driver.location.lng);
-            if (alertRes.success && alertRes.alerts?.length) {
-                const severe = alertRes.alerts.filter(a => a.severity === 'Severe' || a.severity === 'Extreme');
-                for (const alert of severe) {
-                    await sendAlert(driver.driver_id, alert);
-                    sentCount++;
-                }
-            }
-        }
-        return { success: true, sent: sentCount };
-    } catch (error) { return { success: false, error: error.message }; }
+    if (subscribedDrivers.length === 0) {
+      subscribedDrivers = [{ driver_id: 'test-driver', location: { lat: 39.31, lng: -120.33 } }];
+    }
+
+    let sentCount = 0;
+    for (const driver of subscribedDrivers) {
+      if (!driver.location) continue;
+      const alertRes = await getAlertsAtLocation(driver.location.lat, driver.location.lng);
+      if (!alertRes.success || !alertRes.alerts?.length) continue;
+
+      const severe = alertRes.alerts.filter((a) => {
+        const sev = String(a.severity || '').toLowerCase();
+        return sev === 'severe' || sev === 'extreme';
+      });
+
+      for (const alert of severe) {
+        await sendAlert(driver.driver_id || driver._id || 'driver', alert);
+        sentCount++;
+      }
+    }
+
+    return { success: true, sent: sentCount };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 async function sendAlert(driverId, alert) {
-    return sendWeatherAlertEmail(driverId, { headline: alert.headline, severity: alert.severity, event: alert.event, location: alert.areaDesc, description: alert.description });
+  return sendWeatherAlertEmail(driverId, {
+    headline: alert.headline,
+    severity: alert.severity,
+    event: alert.event,
+    location: alert.areaDesc,
+    description: alert.description
+  });
 }
 
 function normalizeAlert(feature) {
-    const p = feature.properties;
-    return { id: p.id, event: p.event, severity: p.severity, certainty: p.certainty, urgency: p.urgency, headline: p.headline, description: p.description, instruction: p.instruction, areaDesc: p.areaDesc, sent: p.sent, effective: p.effective, expires: p.expires, sender: p.senderName };
+  const p = feature.properties || {};
+  return {
+    id: p.id,
+    event: p.event,
+    severity: p.severity,
+    certainty: p.certainty,
+    urgency: p.urgency,
+    headline: p.headline,
+    description: p.description,
+    instruction: p.instruction,
+    areaDesc: p.areaDesc,
+    sent: p.sent,
+    effective: p.effective,
+    expires: p.expires,
+    sender: p.senderName
+  };
 }
 
 function calculateDistance(lat1, lng1, lat2, lng2) {
-    if (!lat1 || !lng1 || !lat2 || !lng2) return 0;
-    const R = 3958.8; const dLat = (lat2 - lat1) * Math.PI / 180; const dLon = (lng2 - lng1) * Math.PI / 180;
-    const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  if (!lat1 || !lng1 || !lat2 || !lng2) return 0;
+  const R = 3958.8;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }

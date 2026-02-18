@@ -9,7 +9,7 @@ const COLLECTIONS = {
 };
 
 function calculateDistance(lat1, lng1, lat2, lng2) {
-  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return Infinity;
+  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return 0;
   const R = 3958.8;
   const toRad = (v) => (v * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
@@ -91,14 +91,16 @@ export async function searchWeighStations(lat, lng, radius = 100, options = {}) 
 
     const enriched = [];
     for (const station of withinRadius) {
-      const reportsRes = await wixData.query(COLLECTIONS.reports)
-        .eq('station_id', station._id)
-        .gt('reported_at', new Date(Date.now() - 4 * 60 * 60 * 1000))
-        .descending('reported_at')
-        .limit(20)
-        .find({ suppressAuth: true });
-
-      const agg = aggregateReports(reportsRes.items || []);
+      let agg = { status: null, wait_estimate: null, report_count: 0 };
+      if (!options.skipReportAggregation) {
+        const reportsRes = await wixData.query(COLLECTIONS.reports)
+          .eq('station_id', station._id)
+          .gt('reported_at', new Date(Date.now() - 4 * 60 * 60 * 1000))
+          .descending('reported_at')
+          .limit(20)
+          .find({ suppressAuth: true });
+        agg = aggregateReports((reportsRes && reportsRes.items) || []);
+      }
       const merged = {
         ...station,
         status: (station.status && station.status !== 'unknown') ? station.status : (agg.status || 'unknown'),
@@ -127,11 +129,28 @@ export async function getWeighStationsAlongRoute(routePoints, options = {}) {
   try {
     const radius = options.corridorRadius || 50;
     const unique = new Map();
+    const baseOptions = { ...options, skipReportAggregation: true };
 
     for (const point of (routePoints || [])) {
-      const result = await searchWeighStations(point.lat, point.lng, radius, options);
-      for (const station of (result.items || [])) {
-        if (!unique.has(station._id)) unique.set(station._id, station);
+      const cacheKey = `weighstations:${point.lat.toFixed(2)}:${point.lng.toFixed(2)}:${radius}:${baseOptions.state || 'all'}`;
+      const cacheRes = await wixData.query(COLLECTIONS.cache)
+        .eq('cache_key', cacheKey)
+        .gt('expires_at', new Date())
+        .limit(1)
+        .find({ suppressAuth: true });
+
+      let stations = [];
+      if ((cacheRes?.items || []).length) {
+        stations = cacheRes.items[0].data || [];
+      } else {
+        let query = wixData.query(COLLECTIONS.stations);
+        if (baseOptions.state) query = query.eq('state', String(baseOptions.state).toUpperCase());
+        const dbRes = await query.limit(500).find({ suppressAuth: true });
+        stations = dbRes?.items || [];
+      }
+
+      for (const station of stations) {
+        if (station && station._id && !unique.has(station._id)) unique.set(station._id, station);
       }
     }
 
@@ -167,13 +186,19 @@ export async function getStationStatus(stationId) {
 
 export async function reportStationStatus(stationId, report) {
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  const recent = await wixData.query(COLLECTIONS.reports)
-    .eq('station_id', stationId)
-    .eq('driver_id', report.driver_id)
-    .gt('reported_at', oneHourAgo)
-    .limit(1)
-    .find({ suppressAuth: true });
+  let recent = { items: [] };
+  try {
+    recent = await wixData.query(COLLECTIONS.reports)
+      .eq('station_id', stationId)
+      .eq('driver_id', report.driver_id)
+      .gt('reported_at', oneHourAgo)
+      .limit(1)
+      .find({ suppressAuth: true });
+  } catch (e) {
+    recent = { items: [] };
+  }
 
+  if (!recent || !Array.isArray(recent.items)) recent = { items: [] };
   if ((recent.items || []).length) return { success: false, error: 'Rate limited' };
 
   const created = await wixData.insert(COLLECTIONS.reports, {

@@ -25,6 +25,10 @@ jest.mock('backend/recruiter_service', () => ({ updateCandidateStatus: jest.fn((
 describe('PipelineAutomationService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAirtable.queryRecords.mockReset();
+    mockAirtable.createRecord.mockReset();
+    mockAirtable.updateRecord.mockReset();
+    mockAirtable.getRecord.mockReset();
     mockAirtable.queryRecords.mockResolvedValue({ records: [] });
     mockAirtable.createRecord.mockResolvedValue({ _id: 'rule-1' });
   });

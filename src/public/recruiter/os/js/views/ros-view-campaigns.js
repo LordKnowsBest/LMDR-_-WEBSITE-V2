@@ -200,6 +200,16 @@
     }
   };
 
+  if (ROS.views && typeof ROS.views.registerView === 'function') {
+    ROS.views.registerView('campaigns', {
+      render,
+      onMount: loadCampaigns,
+      onUnmount: function () {},
+      onMessage: onData,
+      messages: ['campaignsLoaded', 'campaignCreated', 'campaignStarted']
+    });
+  }
+
   function escapeHtml(str) {
     const d = document.createElement('div');
     d.textContent = str;

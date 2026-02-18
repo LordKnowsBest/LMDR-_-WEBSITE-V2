@@ -229,7 +229,7 @@ function updateQuotaDisplay(quotaStatus) {
             ? Math.round((quotaStatus.used / quotaStatus.limit) * 100)
             : 0;
         barEl.style.width = `${percent}%`;
-        barEl.setAttribute('data-percent', percent);
+        barEl.setAttribute('data-percent', String(percent));
     }
 
     if (resetEl && quotaStatus.resetDate) {

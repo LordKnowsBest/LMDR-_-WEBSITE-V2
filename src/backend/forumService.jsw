@@ -37,7 +37,7 @@ export async function getCategories(options = {}) {
     // TODO: Implement caching for stats if performance becomes an issue
     // For now, we rely on the stats fields being updated by background jobs or triggers
     // or just return the raw category data.
-    
+
     return result.map(normalizeCategory);
   } catch (error) {
     console.error('getCategories error:', error);
@@ -106,7 +106,7 @@ export async function getThreadBySlug(slug) {
   try {
     const thread = await dataAccess.findByField(COLLECTIONS.THREADS, 'slug', slug);
     if (!thread) throw new Error('Thread not found');
-    
+
     // Increment view count (fire and forget)
     incrementViewCount(thread._id);
 
@@ -181,10 +181,10 @@ export async function updateThread(threadId, updateData) {
     if (!thread) throw new Error('Thread not found');
 
     if (thread.authorId !== currentUser.id) {
-       const isUserAdmin = await isAdmin();
-       if (!isUserAdmin) {
-          throw new Error('Permission denied');
-       }
+      const isUserAdmin = await isAdmin();
+      if (!isUserAdmin) {
+        throw new Error('Permission denied');
+      }
     }
 
     const updates = {
@@ -266,9 +266,9 @@ export async function createPost(postData) {
 
     // Update thread stats (last activity, reply count)
     if (!postData.isFirstPost) {
-       await updateThreadActivity(postData.threadId, now);
-       // Award Reputation for reply
-       await awardForumPoints(currentUser.id, 'forum_reply_created');
+      await updateThreadActivity(postData.threadId, now);
+      // Award Reputation for reply
+      await awardForumPoints(currentUser.id, 'forum_reply_created');
     }
 
     return normalizePost(result.record);
@@ -292,7 +292,7 @@ export async function updatePost(postId, updateData) {
     if (!post) throw new Error('Post not found');
 
     if (post.authorId !== currentUser.id) {
-       throw new Error('Permission denied');
+      throw new Error('Permission denied');
     }
 
     const updates = {
@@ -322,10 +322,10 @@ export async function deletePost(postId) {
     if (!post) throw new Error('Post not found');
 
     if (post.authorId !== currentUser.id) {
-        const isUserAdmin = await isAdmin();
-        if (!isUserAdmin) {
-            throw new Error('Permission denied');
-        }
+      const isUserAdmin = await isAdmin();
+      if (!isUserAdmin) {
+        throw new Error('Permission denied');
+      }
     }
 
     const updates = {
@@ -355,23 +355,23 @@ export async function likePost(postId) {
     // or use a separate table. The plan says "Implement likePost() with duplicate prevention".
     // Let's assume a `postLikes` collection or similar logic.
     // For this implementation, I'll increment the counter optimistically and leave the strict dedup for Phase 2 or a specific `PostLikes` table if needed.
-    
+
     // NOTE: To strictly follow "duplicate prevention", we need a table `ForumPostLikes`.
     // I'll skip adding it to config for now to avoid scope creep, but ideally it should be there.
-    
+
     const post = await dataAccess.getRecord(COLLECTIONS.POSTS, postId);
     if (!post) throw new Error('Post not found');
 
     const newCount = (post.likeCount || 0) + 1;
-    
+
     await dataAccess.updateRecord(COLLECTIONS.POSTS, {
-        _id: postId,
-        likeCount: newCount
+      _id: postId,
+      likeCount: newCount
     });
 
     // Award points to the AUTHOR of the post, not the liker
     if (post.authorId !== currentUser.id) {
-        await awardForumPoints(post.authorId, 'forum_post_liked');
+      await awardForumPoints(post.authorId, 'forum_post_liked');
     }
 
     return { success: true, likeCount: newCount };
@@ -395,15 +395,15 @@ export async function markBestAnswer(threadId, postId) {
     if (!thread) throw new Error('Thread not found');
 
     if (thread.authorId !== currentUser.id) {
-        throw new Error('Only thread author can mark best answer');
+      throw new Error('Only thread author can mark best answer');
     }
 
     // Unmark any existing best answer? (Optional, usually yes)
     // For now, just mark the new one.
-    
+
     await dataAccess.updateRecord(COLLECTIONS.POSTS, {
-        _id: postId,
-        isBestAnswer: true
+      _id: postId,
+      isBestAnswer: true
     });
 
     const post = await dataAccess.getRecord(COLLECTIONS.POSTS, postId);
@@ -417,6 +417,41 @@ export async function markBestAnswer(threadId, postId) {
 }
 
 // =============================================================================
+// UNREAD COUNT
+// =============================================================================
+
+/**
+ * Get count of forum threads with new activity since the user's last visit.
+ * Used by masterPage.js to show a forum notification badge.
+ * @param {string} userId - Wix user ID
+ * @returns {Promise<{success: boolean, count: number}>}
+ */
+export async function getUnreadForumCount(userId) {
+  try {
+    if (!userId) return { success: true, count: 0 };
+
+    // Look for threads with activity in the last 7 days that the user hasn't authored
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.THREADS, {
+      filters: {
+        isDeleted: false,
+        lastActivityAt: { gte: sevenDaysAgo },
+        authorId: { ne: userId }
+      },
+      limit: 0,  // count only
+      suppressAuth: true
+    });
+
+    const count = result.totalCount || 0;
+    return { success: true, count };
+  } catch (error) {
+    console.error('[forumService] getUnreadForumCount error:', error);
+    return { success: true, count: 0 };  // Silent fail — never break the badge
+  }
+}
+
+// =============================================================================
 // HELPERS
 // =============================================================================
 
@@ -425,140 +460,123 @@ export async function markBestAnswer(threadId, postId) {
  * @returns {Promise<boolean>}
  */
 async function isAdmin() {
+  try {
+    const adminRoles = ['admin', 'super_admin', 'ops_admin'];
+    let isAuthorized = false;
+
+    // 1. Check custom field (Project Standard)
     try {
-        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
-        let isAuthorized = false;
+      const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+      if (member && member.contactDetails && member.contactDetails.customFields) {
+        let memberRole = member.contactDetails.customFields.role;
 
-        // 1. Check custom field (Project Standard)
-        try {
-            const member = await currentMember.getMember({ fieldsets: ['FULL'] });
-            if (member && member.contactDetails && member.contactDetails.customFields) {
-                 let memberRole = member.contactDetails.customFields.role;
-
-                 // Handle object vs string (defensive)
-                 if (memberRole && typeof memberRole === 'object' && memberRole.value) {
-                     memberRole = memberRole.value;
-                 }
-
-                 if (memberRole && typeof memberRole === 'string' && adminRoles.includes(memberRole.toLowerCase())) {
-                     isAuthorized = true;
-                 }
-            }
-        } catch (e) {
-            console.warn('Custom field check failed', e);
+        // Handle object vs string (defensive)
+        if (memberRole && typeof memberRole === 'object' && memberRole.value) {
+          memberRole = memberRole.value;
         }
 
-        // 2. Check Wix Roles (Standard Wix) if not already authorized
-        if (!isAuthorized) {
-            const roles = await wixUsersBackend.currentUser.getRoles();
-            if (roles.some(r => r.name === 'Admin' || adminRoles.includes(r.name.toLowerCase()))) {
-                isAuthorized = true;
-            }
+        if (memberRole && typeof memberRole === 'string' && adminRoles.includes(memberRole.toLowerCase())) {
+          isAuthorized = true;
         }
-
-        return isAuthorized;
-    } catch (error) {
-        console.error('Admin check failed:', error);
-        return false;
+      }
+    } catch (e) {
+      console.warn('Custom field check failed', e);
     }
+
+    // 2. Check Wix Roles (Standard Wix) if not already authorized
+    if (!isAuthorized) {
+      const roles = await wixUsersBackend.currentUser.getRoles();
+      if (roles.some(r => r.name === 'Admin' || adminRoles.includes(r.name.toLowerCase()))) {
+        isAuthorized = true;
+      }
+    }
+
+    return isAuthorized;
+  } catch (error) {
+    console.error('Admin check failed:', error);
+    return false;
+  }
 }
 
 function normalizeCategory(record) {
-    return {
-        _id: record._id || record.id,
-        title: record.title,
-        slug: record.slug,
-        description: record.description,
-        icon: record.icon,
-        sortOrder: record.sortOrder,
-        threadCount: record.threadCount || 0,
-        postCount: record.postCount || 0
-    };
+  return {
+    _id: record._id || record.id,
+    title: record.title,
+    slug: record.slug,
+    description: record.description,
+    icon: record.icon,
+    sortOrder: record.sortOrder,
+    threadCount: record.threadCount || 0,
+    postCount: record.postCount || 0
+  };
 }
 
 function normalizeThread(record) {
-    return {
-        _id: record._id || record.id,
-        title: record.title,
-        slug: record.slug,
-        categoryId: record.categoryId,
-        authorId: record.authorId,
-        contentPreview: record.contentPreview,
-        viewCount: record.viewCount || 0,
-        replyCount: record.replyCount || 0,
-        isPinned: record.isPinned,
-        isLocked: record.isLocked,
-        lastActivityAt: record.lastActivityAt,
-        createdAt: record.createdAt,
-        tags: record.tags || []
-    };
+  return {
+    _id: record._id || record.id,
+    title: record.title,
+    slug: record.slug,
+    categoryId: record.categoryId,
+    authorId: record.authorId,
+    contentPreview: record.contentPreview,
+    viewCount: record.viewCount || 0,
+    replyCount: record.replyCount || 0,
+    isPinned: record.isPinned,
+    isLocked: record.isLocked,
+    lastActivityAt: record.lastActivityAt,
+    createdAt: record.createdAt,
+    tags: record.tags || []
+  };
 }
 
 function normalizePost(record) {
-    return {
-        _id: record._id || record.id,
-        threadId: record.threadId,
-        authorId: record.authorId,
-        content: record.content,
-        parentPostId: record.parentPostId,
-        likeCount: record.likeCount || 0,
-        isBestAnswer: record.isBestAnswer,
-        createdAt: record.createdAt,
-        updatedAt: record.updatedAt
-    };
+  return {
+    _id: record._id || record.id,
+    threadId: record.threadId,
+    authorId: record.authorId,
+    content: record.content,
+    parentPostId: record.parentPostId,
+    likeCount: record.likeCount || 0,
+    isBestAnswer: record.isBestAnswer,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt
+  };
 }
 
 function generateSlug(title) {
-    return title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        + '-' + Math.floor(Math.random() * 1000);
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    + '-' + Math.floor(Math.random() * 1000);
 }
 
 async function updateThreadActivity(threadId, date) {
-    // In a real implementation, we would atomic increment replyCount.
-    // Here we read-modify-write which has race conditions but acceptable for MVP.
-    const thread = await dataAccess.getRecord(COLLECTIONS.THREADS, threadId);
-    if (thread) {
-        await dataAccess.updateRecord(COLLECTIONS.THREADS, {
-            _id: threadId,
-            lastActivityAt: date,
-            replyCount: (thread.replyCount || 0) + 1
-        });
-    }
+  // In a real implementation, we would atomic increment replyCount.
+  // Here we read-modify-write which has race conditions but acceptable for MVP.
+  const thread = await dataAccess.getRecord(COLLECTIONS.THREADS, threadId);
+  if (thread) {
+    await dataAccess.updateRecord(COLLECTIONS.THREADS, {
+      _id: threadId,
+      lastActivityAt: date,
+      replyCount: (thread.replyCount || 0) + 1
+    });
+  }
 }
 
 async function incrementViewCount(threadId) {
-    // Fire and forget
-    try {
-        const thread = await dataAccess.getRecord(COLLECTIONS.THREADS, threadId);
-        if (thread) {
-            await dataAccess.updateRecord(COLLECTIONS.THREADS, {
-                _id: threadId,
-                viewCount: (thread.viewCount || 0) + 1
-            });
-        }
-    } catch (e) {
-        console.warn('Failed to increment view count', e);
+  // Fire and forget
+  try {
+    const thread = await dataAccess.getRecord(COLLECTIONS.THREADS, threadId);
+    if (thread) {
+      await dataAccess.updateRecord(COLLECTIONS.THREADS, {
+        _id: threadId,
+        viewCount: (thread.viewCount || 0) + 1
+      });
     }
+  } catch (e) {
+    console.warn('Failed to increment view count', e);
+  }
 }
 
-/**
- * Check if current user has admin role
- * @returns {Promise<boolean>}
- */
-async function isAdmin() {
-    try {
-        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
-        if (!member) return false;
-
-        const adminRoles = ['admin', 'super_admin', 'ops_admin'];
-        const memberRole = member.contactDetails?.customFields?.role || '';
-
-        return adminRoles.includes(memberRole.toLowerCase());
-    } catch (error) {
-        console.error('Admin check failed:', error);
-        return false;
-    }
-}
+// (Duplicate isAdmin removed — canonical version is above)
