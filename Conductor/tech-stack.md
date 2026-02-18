@@ -30,6 +30,10 @@
     *   `dqFileService.jsw`: Driver Qualification file completeness.
     *   `csaMonitorService.jsw`: BASIC score trending and alerts.
     *   `incidentService.jsw`: Incident reporting and DOT classification.
+*   **Admin Utility Expansion:** Services for operational efficiency and proactive monitoring:
+    *   `aiRouterService.jsw` (Extended): Multi-provider LLM routing with cost optimization logic.
+    *   `observabilityService.jsw` (Extended): Statistical anomaly detection engine for proactive alerts.
+    *   `admin_audit_service.jsw` (Extended): Advanced compliance report generation and scheduling.
 *   **Job Scheduler:** `jobs.config` for background tasks and automated match updates.
 *   **Payments & Subscriptions:** Stripe integration via `stripeService.jsw` for checkout, billing portal, and webhook handling.
 
@@ -46,3 +50,6 @@
     *   `ProfileViews`: Quota tracking
     *   `BillingHistory`: Payment event logs
     *   `StripeEventLog`: Idempotency tracking
+    *   `AIProviderCosts`: LLM pricing and quality metrics
+    *   `AnomalyAlerts`: Operational alert log
+    *   `ComplianceReports`: Generated audit exports

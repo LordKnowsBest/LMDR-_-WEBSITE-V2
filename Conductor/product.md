@@ -72,6 +72,11 @@ An AI-driven matching platform for CDL drivers and carriers, leveraging a 3-stag
 *   **CSA Monitor:** Real-time tracking of BASIC scores, trend analysis, and alerts.
 *   **Incident Reporting:** DOT-compliant accident/incident documentation and investigation workflow.
 
+### 3.8. Admin Utility Expansion
+*   **Cost Optimizer Mode:** AI router enhancement that automatically selects the most cost-effective LLM provider (Claude, Gemini, OpenAI, etc.) based on quality and cost thresholds.
+*   **Anomaly Alerts:** Proactive system monitoring that detects statistical outliers in error rates, latency drift, and unusual usage patterns.
+*   **Compliance Reporting:** Advanced audit trail reporting with PII masking and automated scheduling for SOC 2/HIPAA compliance.
+
 ## 4. Implementation Strategy (Phased Rollout)
 *   **Week 1: Core Driver UX:** Implement persistent profile, Job Save/Favorite, Basic Application Tracking.
 *   **Week 2: Engagement:** Launch Native Reviews system and Red Flag Warnings.
