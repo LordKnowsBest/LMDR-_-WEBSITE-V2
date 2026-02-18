@@ -261,7 +261,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planned*
 *Goal: Pay transparency and expense management - Settlement Viewer, Expense Tracker, Trip Pay Calculator, Tax Deduction Helper.*
 
-### [ ] Track: Driver Community
+### [~] Track: Driver Community
 *Link: [./tracks/driver_community_20260120/](./tracks/driver_community_20260120/)*
 *Depends on: driver_cockpit_20251221*
 *Priority: Medium*
@@ -422,7 +422,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 ## [/] Track: Agentic Orchestration (Cross-Role)
 *Link: [./conductor/tracks/agentic_orchestration_20260218/](./conductor/tracks/agentic_orchestration_20260218/)*
 *Priority: Critical*
-*Status: In Progress — Phases 1-2 Complete, Phase 3 Next*
+*Status: In Progress — Phases 1-3 Complete, Phase 4 Next*
 *Goal: Deliver fully orchestrated multi-agent execution across recruiter, carrier, driver, admin, and development operations with recursive compendium memory and policy-guarded autonomy.*
 *Completed (Execution Plane — 2026-02-17):*
 - *agentService.jsw (23 tools, 4 role scopes, tool_use iteration loop, dynamic dispatch)*
@@ -453,4 +453,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 - *Admin Run Monitor: admin-run-monitor.js (4-tab UI: Active Runs, Completed Runs, Approval Audit, Quality Trends)*
 - *Backend queries: getRecentRuns, getApprovalGatesByDateRange, getOutcomeTrends*
 - *4 new page code handlers on Admin Dashboard*
-*Next: Phase 3 — Recursive Compendium (department knowledge structure, curator agent, auto-sharding)*
+*Completed (Phase 3 — 2026-02-18):*
+- *Compendium/ directory: 5 departments (recruiter, carrier, driver, admin, dev) with INDEX.md + seeded playbooks/patterns/metrics*
+- *compendiumService.jsw (8 exports: CRUD, runDeltas, sharding check, weekly summary, runCurator)*
+- *Knowledge Curator agent (.claude/agents/curator.md) + run_curator admin tool*
+- *v2_Compendium Entries Airtable table (12 fields)*
+- *24 tests (compendiumService.test.js)*
+*Next: Phase 4 — Autonomous Operations (recruiter autopilot, admin self-healing, dev swarm)*
