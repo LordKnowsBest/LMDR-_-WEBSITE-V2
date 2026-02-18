@@ -22,19 +22,34 @@ This blueprint covers:
 
 ---
 
-## 3) Current-State Assessment (based on repository implementation)
+## 3) Current-State Assessment (updated 2026-02-17)
 
-### What already exists
-- Role-aware orchestration and role-scoped tools via `handleAgentTurn(role, userId, message, context)`.  
-- Four role prompts and role tool partitioning (driver/recruiter/carrier/admin).  
-- Bridge/page integrations dispatching `agentMessage` and voice setup across role surfaces.  
-- VAPI webhook + voice config plumbing available.
+### Execution Plane — DELIVERED
+- **Agent orchestration loop** — `agentService.jsw` with 22 tool definitions, 4 role scopes, tool_use iteration loop (max 5 iterations), dynamic service import and dispatch.
+- **Conversation persistence** — `agentConversationService.jsw` storing conversations and turns in Airtable (`v2_Agent Conversations`, `v2_Agent Turns`).
+- **VAPI voice integration** — `voiceService.jsw` (REST API wrapper), `voiceCampaignService.jsw` (outbound campaigns with chunked parallel processing), webhook handlers in `http-functions.js` for `end-of-call-report`, `function-call`, `assistant-request`.
+- **4 surface UIs** — Agent chat overlays (FAB + sliding panel) on Driver (LMDR branding), Recruiter (NLU-enabled ros-chat.js), Admin, B2B (VelocityMatch branding). Voice orbs via reusable `voice-agent-ui.js`.
+- **Page code wiring** — All 4 page code files modified with `agentMessage`, `getVoiceConfig` handlers. Recruiter also has `getCampaigns`, `createCampaign`, `startCampaign`, `getCampaignStatus`.
+- **6 Airtable tables** — Agent Conversations, Agent Turns, Voice Call Logs, Voice Assistants, Voice Campaigns, Voice Campaign Contacts.
+- **6 Claude Code agents** — deploy, test-bridge, seed-data, audit-schema, purge-cdn, create-page.
+- **Test coverage** — 7 suites (46 tests) + 1 e2e test.
+- **AI router extended** — `agent_orchestration` function in FUNCTION_REGISTRY, `callAnthropic()` supports `tools` param, returns `contentBlocks` + `stopReason`.
 
-### Gaps to close for full orchestration
-- Tool registry is broad but not yet guaranteed to expose every role action as a callable, policy-tagged capability.
-- Voice tool path passes `directToolCall` context that is not consumed by current agent turn path.
-- End-to-end tests are largely structural and need runtime workflow verification.
-- Cross-role knowledge graph and recursive compendium process are not yet systematized.
+### Control Plane — NOT BUILT (Phase 1A target)
+- **No policy tags** — All 22 tools are equally callable with no risk classification, approval gates, rate limits, or success metrics.
+- **No run ledger** — Agent runs are fire-and-forget. No `AgentRun`/`AgentStep` records, no correlation IDs, no cost tracking.
+- **No approval gates** — High-risk actions (send_message, schedule_interview, manage_prompts create/update) execute without human confirmation.
+- **No outcome evaluation** — No mechanism to assess whether an agent run produced a good result. "Did this help the driver?" is unanswerable.
+- **No cost controls** — No per-run token caps, no per-user daily limits, no spend alerting.
+
+### Knowledge Plane — NOT BUILT (Phase 3 target)
+- **No compendium** — No structured capture of patterns, playbooks, or postmortems.
+- **No curator agent** — Run outcomes don't produce learning artifacts.
+- **No cross-role signal sharing** — Carrier intelligence doesn't inform recruiter decisions and vice versa.
+- **No feedback loops** — Tool effectiveness isn't tracked; prompts aren't improved by outcome data.
+
+### Critical Insight
+The platform currently automates **activity**, not **outcomes**. Agents execute tool chains that look productive but lack any verification that the results are correct, helpful, or aligned with business goals. The Outcome Verification Spine (Phase 1A) is the immediate priority — without it, scaling automation scales risk.
 
 ---
 
