@@ -325,7 +325,12 @@ export const DATA_SOURCE = {
   agentRuns: 'airtable',
   agentSteps: 'airtable',
   approvalGates: 'airtable',
-  runOutcomes: 'airtable'
+  runOutcomes: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Knowledge Compendium
+  // -------------------------------------------------------------------------
+  compendiumEntries: 'airtable'
 };
 
 // =============================================================================
@@ -342,7 +347,7 @@ export function getDataSource(collectionName) {
   if (['adminUsers'].includes(collectionName)) {
     return 'wix';
   }
-  
+
   // DEFAULT POLICY: Everything else goes to Airtable
   return DATA_SOURCE[collectionName] || 'airtable';
 }
@@ -539,6 +544,8 @@ export const WIX_COLLECTION_NAMES = {
   healthTips: 'HealthTips',
   petFriendlyLocations: 'PetFriendlyLocations',
   petFriendlyReviews: 'PetFriendlyReviews',
+  mentorProfiles: 'MentorProfiles',
+  mentorMatches: 'MentorMatches',
 
   // B2B Business Development Suite
   b2bAccounts: 'B2BAccounts',
@@ -622,7 +629,10 @@ export const WIX_COLLECTION_NAMES = {
   agentRuns: 'AgentRuns',
   agentSteps: 'AgentSteps',
   approvalGates: 'ApprovalGates',
-  runOutcomes: 'RunOutcomes'
+  runOutcomes: 'RunOutcomes',
+
+  // Knowledge Compendium
+  compendiumEntries: 'CompendiumEntries'
 };
 
 // =============================================================================
@@ -798,6 +808,8 @@ export const AIRTABLE_TABLE_NAMES = {
   forumThreads: 'v2_Forum Threads',
   forumPosts: 'v2_Forum Posts',
   forumReports: 'v2_Forum Reports',
+  mentorProfiles: 'v2_Mentor Profiles',
+  mentorMatches: 'v2_Mentor Matches',
   healthResources: 'v2_Health Resources',
   healthTips: 'v2_Health Tips',
   petFriendlyLocations: 'v2_Pet Friendly Locations',
@@ -885,7 +897,10 @@ export const AIRTABLE_TABLE_NAMES = {
   agentRuns: 'v2_Agent Runs',
   agentSteps: 'v2_Agent Steps',
   approvalGates: 'v2_Approval Gates',
-  runOutcomes: 'v2_Run Outcomes'
+  runOutcomes: 'v2_Run Outcomes',
+
+  // Knowledge Compendium
+  compendiumEntries: 'v2_Compendium Entries'
 };
 
 // =============================================================================

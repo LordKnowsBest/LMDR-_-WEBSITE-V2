@@ -1,0 +1,465 @@
+// ============================================================================
+// COMPENDIUM SERVICE — Knowledge base query, update, and curation
+// Manages compendium entries stored in Airtable for agent retrieval
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  entries: 'compendiumEntries',
+  outcomes: 'runOutcomes',
+  steps: 'agentSteps',
+  runs: 'agentRuns'
+};
+
+function generateId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// ============================================================================
+// COMPENDIUM CRUD
+// ============================================================================
+
+/**
+ * Get compendium index for a department — list all entries
+ * @param {string} department - Department filter (recruiter/carrier/driver/admin/dev)
+ * @returns {Promise<Object>} { department, entries }
+ */
+export async function getCompendiumIndex(department) {
+  const filters = {};
+  if (department) filters.department = department;
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.entries, {
+    filters,
+    limit: 200,
+    suppressAuth: true
+  });
+
+  const items = (result && result.items) || [];
+  return {
+    department: department || 'all',
+    entries: items.map(e => ({
+      topic: e.topic || '',
+      file_path: e.file_path || '',
+      type: e.type || '',
+      confidence: e.confidence || 0,
+      last_updated: e.last_updated || '',
+      summary: e.content_summary || ''
+    }))
+  };
+}
+
+/**
+ * Get a single compendium entry by department + topic
+ * @param {string} department
+ * @param {string} topic
+ * @returns {Promise<Object|null>} Full entry record
+ */
+export async function getCompendiumEntry(department, topic) {
+  if (!department || !topic) return null;
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.entries, {
+    filters: { department, topic },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  const item = (result && result.items && result.items[0]) || null;
+  if (!item) return null;
+
+  return {
+    entry_id: item._id || item.id || '',
+    department: item.department || '',
+    topic: item.topic || '',
+    file_path: item.file_path || '',
+    type: item.type || '',
+    confidence: item.confidence || 0,
+    content_summary: item.content_summary || '',
+    evidence: item.evidence || '',
+    related_topics: item.related_topics || '',
+    last_updated: item.last_updated || '',
+    created_at: item.created_at || ''
+  };
+}
+
+/**
+ * Update a compendium entry after curator run
+ * @param {string} department
+ * @param {string} topic
+ * @param {Object} updates - { content_summary, confidence, evidence, ... }
+ * @returns {Promise<Object>} { updated, entry_id }
+ */
+export async function updateCompendiumEntry(department, topic, updates) {
+  if (!department || !topic) {
+    return { updated: false, error: 'department and topic required' };
+  }
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.entries, {
+    filters: { department, topic },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  const item = (result && result.items && result.items[0]) || null;
+  if (!item) {
+    return { updated: false, error: 'Entry not found' };
+  }
+
+  const recordId = item._id || item.id;
+  const fields = {
+    ...updates,
+    last_updated: new Date().toISOString()
+  };
+
+  await dataAccess.updateRecord(COLLECTIONS.entries, recordId, fields, {
+    suppressAuth: true
+  });
+
+  return { updated: true, entry_id: recordId };
+}
+
+/**
+ * Create a new compendium entry
+ * @param {string} department
+ * @param {Object} data - { topic, file_path, type, content_summary, confidence, evidence, related_topics }
+ * @returns {Promise<Object>} { created, entry_id }
+ */
+export async function createCompendiumEntry(department, data) {
+  if (!department || !data || !data.topic) {
+    return { created: false, error: 'department and topic required' };
+  }
+
+  const entryId = generateId('comp');
+  const record = {
+    entry_id: entryId,
+    department,
+    topic: data.topic,
+    file_path: data.file_path || '',
+    type: data.type || 'pattern',
+    content_summary: data.content_summary || '',
+    confidence: data.confidence || 50,
+    evidence: data.evidence || '',
+    related_topics: data.related_topics || '',
+    last_updated: new Date().toISOString(),
+    created_at: new Date().toISOString()
+  };
+
+  await dataAccess.insertRecord(COLLECTIONS.entries, record, {
+    suppressAuth: true
+  });
+
+  return { created: true, entry_id: entryId };
+}
+
+// ============================================================================
+// ANALYTICS — Run deltas and sharding
+// ============================================================================
+
+/**
+ * Extract learning deltas from recent agent runs for a role
+ * @param {string} role - Agent role (recruiter/carrier/driver/admin)
+ * @param {number} days - Analysis period in days (default 7)
+ * @returns {Promise<Object>} { role, period_days, total_runs, tool_effectiveness, top_patterns, regressions }
+ */
+export async function getRecentRunDeltas(role, days = 7) {
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+  const cutoffTime = new Date(cutoff).getTime();
+
+  // Get recent runs for the role
+  const runsQuery = {};
+  if (role && role !== 'all') runsQuery.role = role;
+
+  const runsResult = await dataAccess.queryRecords(COLLECTIONS.runs, {
+    filters: runsQuery,
+    limit: 500,
+    suppressAuth: true
+  });
+  const allRuns = (runsResult && runsResult.items) || [];
+  const recentRuns = allRuns.filter(r =>
+    new Date(r.started_at).getTime() >= cutoffTime
+  );
+
+  if (recentRuns.length === 0) {
+    return {
+      role: role || 'all',
+      period_days: days,
+      total_runs: 0,
+      tool_effectiveness: [],
+      top_patterns: [],
+      regressions: []
+    };
+  }
+
+  const runIds = recentRuns.map(r => r.run_id).filter(Boolean);
+
+  // Get steps for these runs
+  const stepsResult = await dataAccess.queryRecords(COLLECTIONS.steps, {
+    limit: 1000,
+    suppressAuth: true
+  });
+  const allSteps = (stepsResult && stepsResult.items) || [];
+  const runIdSet = new Set(runIds);
+  const relevantSteps = allSteps.filter(s => runIdSet.has(s.run_id));
+
+  // Get outcomes for these runs
+  const outcomesResult = await dataAccess.queryRecords(COLLECTIONS.outcomes, {
+    limit: 500,
+    suppressAuth: true
+  });
+  const allOutcomes = (outcomesResult && outcomesResult.items) || [];
+  const relevantOutcomes = allOutcomes.filter(o => runIdSet.has(o.run_id));
+
+  // Build tool effectiveness map
+  const toolStats = {};
+  for (const step of relevantSteps) {
+    const tool = step.tool_name;
+    if (!tool) continue;
+    if (!toolStats[tool]) {
+      toolStats[tool] = { tool, success_count: 0, fail_count: 0, total_latency: 0, count: 0 };
+    }
+    toolStats[tool].count++;
+    if (step.status === 'error' || step.result_summary === 'error') {
+      toolStats[tool].fail_count++;
+    } else {
+      toolStats[tool].success_count++;
+    }
+    toolStats[tool].total_latency += (step.latency_ms || 0);
+  }
+
+  const toolEffectiveness = Object.values(toolStats).map(t => ({
+    tool: t.tool,
+    success_count: t.success_count,
+    fail_count: t.fail_count,
+    success_rate: t.count > 0 ? Math.round((t.success_count / t.count) * 100) : 0,
+    avg_latency_ms: t.count > 0 ? Math.round(t.total_latency / t.count) : 0
+  }));
+
+  // Identify top patterns (tools frequently used together in high-quality runs)
+  const highQualityRuns = relevantOutcomes.filter(o => (o.quality_score || 0) >= 70);
+  const highQualityRunIds = new Set(highQualityRuns.map(o => o.run_id));
+  const toolCombos = {};
+  for (const runId of highQualityRunIds) {
+    const runSteps = relevantSteps.filter(s => s.run_id === runId);
+    const tools = [...new Set(runSteps.map(s => s.tool_name).filter(Boolean))].sort();
+    const comboKey = tools.join(' + ');
+    if (comboKey) {
+      toolCombos[comboKey] = (toolCombos[comboKey] || 0) + 1;
+    }
+  }
+  const topPatterns = Object.entries(toolCombos)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([combo, count]) => ({ tools: combo, occurrences: count }));
+
+  // Identify regressions (tools with quality_score dropping below 50)
+  const lowQualityRuns = relevantOutcomes.filter(o => (o.quality_score || 0) < 50);
+  const regressionTools = {};
+  for (const outcome of lowQualityRuns) {
+    const runSteps = relevantSteps.filter(s => s.run_id === outcome.run_id);
+    const errorSteps = runSteps.filter(s => s.status === 'error' || s.result_summary === 'error');
+    for (const step of errorSteps) {
+      if (step.tool_name) {
+        regressionTools[step.tool_name] = (regressionTools[step.tool_name] || 0) + 1;
+      }
+    }
+  }
+  const regressions = Object.entries(regressionTools)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([tool, count]) => ({ tool, error_count: count }));
+
+  return {
+    role: role || 'all',
+    period_days: days,
+    total_runs: recentRuns.length,
+    tool_effectiveness: toolEffectiveness,
+    top_patterns: topPatterns,
+    regressions
+  };
+}
+
+/**
+ * Check if any compendium file in a department exceeds the sharding threshold
+ * @param {string} department
+ * @returns {Promise<Object>} { needs_sharding, files_over_threshold }
+ */
+export async function checkShardingNeeded(department) {
+  const THRESHOLD = 5000; // characters
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.entries, {
+    filters: { department },
+    limit: 200,
+    suppressAuth: true
+  });
+
+  const items = (result && result.items) || [];
+  const overThreshold = items.filter(e =>
+    (e.content_summary || '').length > THRESHOLD
+  );
+
+  return {
+    needs_sharding: overThreshold.length > 0,
+    files_over_threshold: overThreshold.map(e => ({
+      topic: e.topic,
+      file_path: e.file_path,
+      length: (e.content_summary || '').length
+    }))
+  };
+}
+
+// ============================================================================
+// SUMMARIES AND CURATION
+// ============================================================================
+
+/**
+ * Generate weekly summary for a department
+ * @param {string} department
+ * @returns {Promise<Object>} { department, period, new_entries, updates, avg_confidence, regressions }
+ */
+export async function generateWeeklySummary(department) {
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+  const weekAgoTime = new Date(weekAgo).getTime();
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.entries, {
+    filters: { department },
+    limit: 200,
+    suppressAuth: true
+  });
+
+  const items = (result && result.items) || [];
+
+  const newEntries = items.filter(e =>
+    new Date(e.created_at).getTime() >= weekAgoTime
+  );
+  const updatedEntries = items.filter(e =>
+    new Date(e.last_updated).getTime() >= weekAgoTime &&
+    new Date(e.created_at).getTime() < weekAgoTime
+  );
+
+  const totalConfidence = items.reduce((sum, e) => sum + (e.confidence || 0), 0);
+  const avgConfidence = items.length > 0 ? Math.round(totalConfidence / items.length) : 0;
+
+  const regressions = items.filter(e => (e.confidence || 0) < 40);
+
+  return {
+    department: department || 'all',
+    period: '7d',
+    total_entries: items.length,
+    new_entries: newEntries.length,
+    updates: updatedEntries.length,
+    avg_confidence: avgConfidence,
+    regressions: regressions.map(e => ({
+      topic: e.topic,
+      confidence: e.confidence
+    }))
+  };
+}
+
+/**
+ * Run the Knowledge Curator — analyze recent agent outcomes and update compendium
+ * @param {string} department - Department to curate ('recruiter','carrier','driver','admin','dev','all')
+ * @param {number} days - Analysis period in days (default 7)
+ * @returns {Promise<Object>} { departments_curated, new_patterns, updated_patterns, regressions }
+ */
+export async function runCurator(department, days = 7) {
+  const departments = department === 'all'
+    ? ['recruiter', 'carrier', 'driver', 'admin', 'dev']
+    : [department];
+
+  let newPatterns = 0;
+  let updatedPatterns = 0;
+  let regressionsFound = 0;
+
+  for (const dept of departments) {
+    // Get role mapping (dev maps to admin for run data)
+    const role = dept === 'dev' ? 'admin' : dept;
+
+    // Get recent run deltas for this role
+    const deltas = await getRecentRunDeltas(role, days);
+
+    if (deltas.total_runs === 0) continue;
+
+    // Process tool effectiveness into compendium entries
+    for (const tool of deltas.tool_effectiveness) {
+      if (tool.success_count + tool.fail_count < 2) continue; // skip low-sample tools
+
+      const existing = await getCompendiumEntry(dept, `tool:${tool.tool}`);
+
+      if (existing) {
+        // Update existing entry with new evidence
+        const newEvidence = `${days}d window: ${tool.success_rate}% success (${tool.success_count}/${tool.success_count + tool.fail_count}), avg ${tool.avg_latency_ms}ms`;
+        const combinedEvidence = existing.evidence
+          ? `${existing.evidence}\n${newEvidence}`
+          : newEvidence;
+        const newConfidence = tool.success_rate >= 80 ? 90
+          : tool.success_rate >= 60 ? 70
+          : tool.success_rate >= 40 ? 50
+          : 30;
+
+        await updateCompendiumEntry(dept, `tool:${tool.tool}`, {
+          content_summary: `Tool ${tool.tool}: ${tool.success_rate}% success rate over ${days}d`,
+          confidence: newConfidence,
+          evidence: combinedEvidence
+        });
+        updatedPatterns++;
+      } else {
+        // Create new entry
+        await createCompendiumEntry(dept, {
+          topic: `tool:${tool.tool}`,
+          file_path: `Compendium/${dept}/tools/${tool.tool}.md`,
+          type: 'tool-effectiveness',
+          content_summary: `Tool ${tool.tool}: ${tool.success_rate}% success rate over ${days}d`,
+          confidence: tool.success_rate >= 80 ? 90 : tool.success_rate >= 60 ? 70 : 50,
+          evidence: `${days}d window: ${tool.success_rate}% success (${tool.success_count}/${tool.success_count + tool.fail_count}), avg ${tool.avg_latency_ms}ms`
+        });
+        newPatterns++;
+      }
+    }
+
+    // Record regressions
+    for (const reg of deltas.regressions) {
+      const existing = await getCompendiumEntry(dept, `regression:${reg.tool}`);
+      if (existing) {
+        await updateCompendiumEntry(dept, `regression:${reg.tool}`, {
+          content_summary: `Regression detected: ${reg.tool} with ${reg.error_count} errors in ${days}d`,
+          confidence: 30,
+          evidence: `${new Date().toISOString().substring(0, 10)}: ${reg.error_count} errors`
+        });
+      } else {
+        await createCompendiumEntry(dept, {
+          topic: `regression:${reg.tool}`,
+          file_path: `Compendium/${dept}/regressions/${reg.tool}.md`,
+          type: 'regression',
+          content_summary: `Regression detected: ${reg.tool} with ${reg.error_count} errors in ${days}d`,
+          confidence: 30,
+          evidence: `${new Date().toISOString().substring(0, 10)}: ${reg.error_count} errors`
+        });
+      }
+      regressionsFound++;
+    }
+
+    // Record top patterns
+    for (const pattern of deltas.top_patterns) {
+      const patternKey = `pattern:${pattern.tools.replace(/ \+ /g, '_')}`;
+      const existing = await getCompendiumEntry(dept, patternKey);
+      if (!existing) {
+        await createCompendiumEntry(dept, {
+          topic: patternKey,
+          file_path: `Compendium/${dept}/patterns/${patternKey}.md`,
+          type: 'tool-combo',
+          content_summary: `High-quality tool combo: ${pattern.tools} (${pattern.occurrences} occurrences)`,
+          confidence: pattern.occurrences >= 5 ? 85 : 60,
+          evidence: `${days}d window: ${pattern.occurrences} high-quality runs used this combo`
+        });
+        newPatterns++;
+      }
+    }
+  }
+
+  return {
+    departments_curated: departments.length,
+    new_patterns: newPatterns,
+    updated_patterns: updatedPatterns,
+    regressions: regressionsFound
+  };
+}
