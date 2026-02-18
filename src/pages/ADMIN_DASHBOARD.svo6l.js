@@ -1,4 +1,5 @@
 import wixLocation from 'wix-location';
+import wixUsers from 'wix-users';
 import {
     getDashboardOverview,
     getActivityChartData,
@@ -258,7 +259,8 @@ async function handleAgentMessage(component, message) {
         safeSend(component, { action: 'agentResponse', payload: { error: 'No message text provided' } });
         return;
     }
-    const result = await handleAgentTurn('admin', 'admin-user', text, context);
+    const userId = wixUsers.currentUser.loggedIn ? wixUsers.currentUser.id : 'anonymous-admin';
+    const result = await handleAgentTurn('admin', userId, text, context);
     if (result.type === 'approval_required') {
         safeSend(component, { action: 'agentApprovalRequired', payload: result });
     } else {

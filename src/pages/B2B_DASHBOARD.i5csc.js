@@ -38,6 +38,7 @@
 // ============================================================================
 
 import wixLocation from 'wix-location';
+import wixUsers from 'wix-users';
 import { handleB2BAction } from 'backend/b2bBridgeService';
 import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
@@ -124,7 +125,8 @@ async function routeMessage(component, message) {
     try {
       const text = message.data?.text || message.payload?.text || '';
       const context = message.data?.context || message.payload?.context || {};
-      const result = await handleAgentTurn('carrier', 'b2b-user', text, context);
+      const userId = wixUsers.currentUser.loggedIn ? wixUsers.currentUser.id : 'anonymous-b2b';
+      const result = await handleAgentTurn('carrier', userId, text, context);
       if (typeof component.postMessage === 'function') {
         if (result.type === 'approval_required') {
           component.postMessage({ action: 'agentApprovalRequired', payload: result });
