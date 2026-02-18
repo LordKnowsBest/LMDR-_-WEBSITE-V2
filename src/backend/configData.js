@@ -333,6 +333,12 @@ export const DATA_SOURCE = {
   compendiumEntries: 'airtable',
 
   // -------------------------------------------------------------------------
+  // Recruiter Autopilot
+  // -------------------------------------------------------------------------
+  autopilotCampaigns: 'airtable',
+  autopilotSteps: 'airtable',
+
+  // -------------------------------------------------------------------------
   // Self-Healing Pipeline
   // -------------------------------------------------------------------------
   remediationPlans: 'airtable',
@@ -640,6 +646,10 @@ export const WIX_COLLECTION_NAMES = {
   // Knowledge Compendium
   compendiumEntries: 'CompendiumEntries',
 
+  // Recruiter Autopilot
+  autopilotCampaigns: 'AutopilotCampaigns',
+  autopilotSteps: 'AutopilotSteps',
+
   // Self-Healing Pipeline
   remediationPlans: 'RemediationPlans',
   incidentLog: 'IncidentLog'
@@ -911,6 +921,10 @@ export const AIRTABLE_TABLE_NAMES = {
 
   // Knowledge Compendium
   compendiumEntries: 'v2_Compendium Entries',
+
+  // Recruiter Autopilot
+  autopilotCampaigns: 'v2_Autopilot Campaigns',
+  autopilotSteps: 'v2_Autopilot Steps',
 
   // Self-Healing Pipeline
   remediationPlans: 'v2_Remediation Plans',

@@ -1,0 +1,542 @@
+// ============================================================================
+// AUTOPILOT SERVICE - Recruiter autopilot workflow engine
+// Orchestrates multi-step recruiter campaigns with approval gates
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+const COLLECTIONS = {
+  campaigns: 'autopilotCampaigns',
+  steps: 'autopilotSteps',
+  approvalGates: 'approvalGates'
+};
+
+const STEP_TYPES = {
+  SEARCH_CANDIDATES: 'search_candidates',
+  SEND_MESSAGE: 'send_message',
+  VOICE_CALL: 'voice_call',
+  UPDATE_PIPELINE: 'update_pipeline',
+  LOG_OUTCOME: 'log_outcome'
+};
+
+const APPROVAL_REQUIRED_TYPES = new Set([STEP_TYPES.SEND_MESSAGE, STEP_TYPES.VOICE_CALL]);
+
+// ============================================================================
+// CREATE CAMPAIGN
+// ============================================================================
+
+/**
+ * Create a new autopilot campaign for a recruiter.
+ * @param {string} recruiterId - The recruiter's ID
+ * @param {Object} config - Campaign configuration
+ * @returns {Promise<Object>} Campaign summary with steps
+ */
+export async function createAutopilotCampaign(recruiterId, config) {
+  try {
+    const {
+      carrierDot,
+      objective = 'outreach',
+      targetFilters = {},
+      cadence = 'standard',
+      maxContacts = 20,
+      messagingTemplate = null
+    } = config || {};
+
+    if (!carrierDot) {
+      return { success: false, error: 'carrierDot is required' };
+    }
+
+    // Pull matching candidates based on objective
+    let candidates = [];
+    try {
+      if (objective === 'pipeline_advancement' || objective === 're_engagement') {
+        const { getPipelineCandidates } = await import('backend/recruiter_service');
+        const pipelineResult = await getPipelineCandidates(carrierDot, {
+          status: objective === 're_engagement' ? 'stale' : 'active',
+          limit: maxContacts,
+          ...targetFilters
+        });
+        candidates = pipelineResult?.candidates || [];
+      } else {
+        const { findMatchingDrivers } = await import('backend/driverMatching');
+        const matchResult = await findMatchingDrivers(carrierDot, {
+          limit: maxContacts,
+          ...targetFilters
+        });
+        candidates = matchResult?.drivers || matchResult?.matches || [];
+      }
+    } catch (err) {
+      console.warn('Autopilot: candidate fetch fallback — ', err.message);
+      candidates = [];
+    }
+
+    // Enrich with market context
+    let marketContext = null;
+    try {
+      const { getMarketIntel } = await import('backend/crossRoleIntelService');
+      marketContext = await getMarketIntel(targetFilters.region, targetFilters.jobType);
+    } catch (err) {
+      console.warn('Autopilot: market intel unavailable — ', err.message);
+    }
+
+    const contactCount = Math.min(candidates.length, maxContacts);
+    const cadenceDelayMap = { aggressive: 1, standard: 3, gentle: 7 };
+    const daysBetween = cadenceDelayMap[cadence] || 3;
+    const estimatedDuration = `${contactCount * daysBetween} days`;
+
+    // Create campaign record
+    const campaignRecord = {
+      recruiter_id: recruiterId,
+      carrier_dot: String(carrierDot),
+      objective,
+      cadence,
+      max_contacts: contactCount,
+      messaging_template: messagingTemplate || '',
+      status: 'active',
+      contacts_reached: 0,
+      responses: 0,
+      conversions: 0,
+      market_context: marketContext ? JSON.stringify(marketContext) : '',
+      created_at: new Date().toISOString()
+    };
+
+    const campaignResult = await dataAccess.insertRecord(
+      COLLECTIONS.campaigns, campaignRecord, { suppressAuth: true }
+    );
+    const campaignId = campaignResult._id || campaignResult.id;
+
+    // Create step records for each contact
+    const stepRecords = [];
+    const contactSlice = candidates.slice(0, maxContacts);
+    const chunks = chunkArray(contactSlice, 10);
+
+    for (const chunk of chunks) {
+      await Promise.all(chunk.map(async (contact) => {
+        const contactId = contact._id || contact.id || contact.driver_id || '';
+        const contactName = contact.name || contact.full_name || '';
+
+        const step = {
+          campaign_id: campaignId,
+          contact_id: contactId,
+          contact_name: contactName,
+          step_type: STEP_TYPES.SEND_MESSAGE,
+          status: 'pending',
+          order_index: stepRecords.length,
+          scheduled_at: '',
+          completed_at: '',
+          result: '',
+          created_at: new Date().toISOString()
+        };
+
+        const stepResult = await dataAccess.insertRecord(
+          COLLECTIONS.steps, step, { suppressAuth: true }
+        );
+        stepRecords.push({
+          stepId: stepResult._id || stepResult.id,
+          contactId,
+          contactName,
+          status: 'pending',
+          stepType: STEP_TYPES.SEND_MESSAGE
+        });
+      }));
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    // Log to run ledger
+    try {
+      const { logAgentAction } = await import('backend/agentRunLedgerService');
+      await logAgentAction({
+        action: 'autopilot_campaign_created',
+        actor: recruiterId,
+        details: { campaignId, objective, contactCount, cadence }
+      });
+    } catch (err) {
+      console.warn('Autopilot: ledger log skipped — ', err.message);
+    }
+
+    return {
+      success: true,
+      campaignId,
+      contactCount,
+      estimatedDuration,
+      objective,
+      cadence,
+      steps: stepRecords
+    };
+  } catch (error) {
+    console.error('createAutopilotCampaign error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// EXECUTE SINGLE STEP
+// ============================================================================
+
+/**
+ * Execute a single step in an autopilot workflow.
+ * @param {string} campaignId
+ * @param {string} stepId
+ * @returns {Promise<Object>} Step execution result
+ */
+export async function executeAutopilotStep(campaignId, stepId) {
+  try {
+    // Fetch step record
+    const stepResult = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { campaign_id: campaignId, _id: stepId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const step = stepResult?.items?.[0];
+    if (!step) {
+      return { success: false, error: 'Step not found' };
+    }
+
+    if (step.status === 'completed') {
+      return { success: true, stepId, status: 'already_completed', result: step.result };
+    }
+
+    const stepType = step.step_type;
+
+    // Approval-gated steps create a gate record and pause
+    if (APPROVAL_REQUIRED_TYPES.has(stepType)) {
+      const gateRecord = {
+        campaign_id: campaignId,
+        step_id: stepId,
+        step_type: stepType,
+        contact_id: step.contact_id,
+        contact_name: step.contact_name || '',
+        status: 'pending_approval',
+        created_at: new Date().toISOString()
+      };
+      await dataAccess.insertRecord(COLLECTIONS.approvalGates, gateRecord, { suppressAuth: true });
+
+      await dataAccess.updateRecord(COLLECTIONS.steps, {
+        _id: stepId,
+        status: 'awaiting_approval'
+      }, { suppressAuth: true });
+
+      return {
+        success: true,
+        stepId,
+        status: 'awaiting_approval',
+        result: `Approval required for ${stepType} to ${step.contact_name || step.contact_id}`,
+        nextStep: null
+      };
+    }
+
+    // Direct execution for read/update operations
+    let result = '';
+    if (stepType === STEP_TYPES.SEARCH_CANDIDATES) {
+      result = 'Candidates already loaded at campaign creation';
+    } else if (stepType === STEP_TYPES.UPDATE_PIPELINE) {
+      try {
+        const { updateCandidateStatus } = await import('backend/recruiter_service');
+        await updateCandidateStatus(step.contact_id, 'contacted');
+        result = 'Pipeline status updated to contacted';
+      } catch (err) {
+        result = `Pipeline update skipped: ${err.message}`;
+      }
+    } else if (stepType === STEP_TYPES.LOG_OUTCOME) {
+      result = 'Outcome logged';
+    }
+
+    await dataAccess.updateRecord(COLLECTIONS.steps, {
+      _id: stepId,
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      result
+    }, { suppressAuth: true });
+
+    // Log to ledger
+    try {
+      const { logAgentAction } = await import('backend/agentRunLedgerService');
+      await logAgentAction({
+        action: 'autopilot_step_executed',
+        details: { campaignId, stepId, stepType, result }
+      });
+    } catch (err) {
+      console.warn('Autopilot: ledger log skipped — ', err.message);
+    }
+
+    // Find next pending step
+    const nextSteps = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { campaign_id: campaignId, status: 'pending' },
+      limit: 1,
+      suppressAuth: true
+    });
+    const nextStep = nextSteps?.items?.[0]
+      ? { stepId: nextSteps.items[0]._id || nextSteps.items[0].id, stepType: nextSteps.items[0].step_type }
+      : null;
+
+    return { success: true, stepId, status: 'completed', result, nextStep };
+  } catch (error) {
+    console.error('executeAutopilotStep error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// ADVANCE CAMPAIGN
+// ============================================================================
+
+/**
+ * Process all pending steps in sequence, pausing at approval gates.
+ * @param {string} campaignId
+ * @returns {Promise<Object>} Advancement result
+ */
+export async function advanceCampaign(campaignId) {
+  try {
+    const stepsResult = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { campaign_id: campaignId, status: 'pending' },
+      limit: 200,
+      suppressAuth: true
+    });
+    const pendingSteps = stepsResult?.items || [];
+
+    if (pendingSteps.length === 0) {
+      return { success: true, message: 'No pending steps', stepsProcessed: 0 };
+    }
+
+    const results = [];
+    let pausedAtApproval = false;
+
+    const chunks = chunkArray(pendingSteps, 10);
+    for (const chunk of chunks) {
+      if (pausedAtApproval) break;
+
+      for (const step of chunk) {
+        const stepId = step._id || step.id;
+        const execResult = await executeAutopilotStep(campaignId, stepId);
+        results.push(execResult);
+
+        if (execResult.status === 'awaiting_approval') {
+          pausedAtApproval = true;
+          break;
+        }
+      }
+      if (!pausedAtApproval) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+
+    // Update campaign metrics
+    const allSteps = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { campaign_id: campaignId },
+      limit: 500,
+      suppressAuth: true
+    });
+    const all = allSteps?.items || [];
+    const completed = all.filter(s => s.status === 'completed').length;
+    const contactsReached = all.filter(s => s.status === 'completed' && s.step_type === STEP_TYPES.SEND_MESSAGE).length;
+
+    await dataAccess.updateRecord(COLLECTIONS.campaigns, {
+      _id: campaignId,
+      contacts_reached: contactsReached,
+      steps_completed: completed,
+      last_advanced_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    // If all steps complete, mark campaign done
+    const pending = all.filter(s => s.status === 'pending' || s.status === 'awaiting_approval').length;
+    if (pending === 0) {
+      await dataAccess.updateRecord(COLLECTIONS.campaigns, {
+        _id: campaignId,
+        status: 'completed',
+        completed_at: new Date().toISOString()
+      }, { suppressAuth: true });
+    }
+
+    return {
+      success: true,
+      stepsProcessed: results.length,
+      pausedAtApproval,
+      pendingApproval: pausedAtApproval
+        ? results.find(r => r.status === 'awaiting_approval')
+        : null,
+      metrics: { completed, contactsReached, remaining: pending }
+    };
+  } catch (error) {
+    console.error('advanceCampaign error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// GET STATUS
+// ============================================================================
+
+/**
+ * Get campaign progress and metrics.
+ * @param {string} campaignId
+ * @returns {Promise<Object>} Campaign status
+ */
+export async function getAutopilotStatus(campaignId) {
+  try {
+    if (!campaignId) {
+      return { success: false, error: 'campaignId is required' };
+    }
+
+    const campaignResult = await dataAccess.queryRecords(COLLECTIONS.campaigns, {
+      filters: { _id: campaignId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const campaign = campaignResult?.items?.[0];
+    if (!campaign) {
+      return { success: false, error: 'Campaign not found' };
+    }
+
+    const stepsResult = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { campaign_id: campaignId },
+      limit: 500,
+      suppressAuth: true
+    });
+    const steps = stepsResult?.items || [];
+
+    const total = steps.length;
+    const completed = steps.filter(s => s.status === 'completed').length;
+    const pending = steps.filter(s => s.status === 'pending').length;
+    const awaitingApproval = steps.filter(s => s.status === 'awaiting_approval').length;
+
+    const timeline = steps
+      .filter(s => s.completed_at)
+      .map(s => ({
+        stepId: s._id || s.id,
+        contactName: s.contact_name,
+        stepType: s.step_type,
+        completedAt: s.completed_at,
+        result: s.result
+      }))
+      .sort((a, b) => (a.completedAt || '').localeCompare(b.completedAt || ''));
+
+    return {
+      success: true,
+      campaignId,
+      status: campaign.status,
+      objective: campaign.objective,
+      cadence: campaign.cadence,
+      progress: { total, completed, pending, awaiting_approval: awaitingApproval },
+      metrics: {
+        contacts_reached: campaign.contacts_reached || 0,
+        responses: campaign.responses || 0,
+        conversions: campaign.conversions || 0
+      },
+      timeline
+    };
+  } catch (error) {
+    console.error('getAutopilotStatus error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// PAUSE / RESUME
+// ============================================================================
+
+/**
+ * Pause a running campaign.
+ * @param {string} campaignId
+ * @returns {Promise<Object>}
+ */
+export async function pauseCampaign(campaignId) {
+  try {
+    await dataAccess.updateRecord(COLLECTIONS.campaigns, {
+      _id: campaignId,
+      status: 'paused',
+      paused_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    return { success: true, campaignId, status: 'paused' };
+  } catch (error) {
+    console.error('pauseCampaign error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Resume a paused campaign.
+ * @param {string} campaignId
+ * @returns {Promise<Object>}
+ */
+export async function resumeCampaign(campaignId) {
+  try {
+    await dataAccess.updateRecord(COLLECTIONS.campaigns, {
+      _id: campaignId,
+      status: 'active',
+      resumed_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    return { success: true, campaignId, status: 'active' };
+  } catch (error) {
+    console.error('resumeCampaign error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// POSTMORTEM
+// ============================================================================
+
+/**
+ * Generate a structured postmortem after campaign completion.
+ * @param {string} campaignId
+ * @returns {Promise<Object>} Postmortem summary
+ */
+export async function generateCampaignPostmortem(campaignId) {
+  try {
+    const statusResult = await getAutopilotStatus(campaignId);
+    if (!statusResult.success) {
+      return statusResult;
+    }
+
+    const { progress, metrics, objective, cadence } = statusResult;
+    const totalContacts = progress.total || 1;
+    const responseRate = metrics.contacts_reached > 0
+      ? ((metrics.responses / metrics.contacts_reached) * 100).toFixed(1)
+      : '0.0';
+    const conversionRate = metrics.contacts_reached > 0
+      ? ((metrics.conversions / metrics.contacts_reached) * 100).toFixed(1)
+      : '0.0';
+    const completionRate = ((progress.completed / totalContacts) * 100).toFixed(1);
+
+    const postmortem = {
+      campaignId,
+      objective,
+      cadence,
+      total_contacts: totalContacts,
+      steps_completed: progress.completed,
+      completion_rate: `${completionRate}%`,
+      contacts_reached: metrics.contacts_reached,
+      responses: metrics.responses,
+      response_rate: `${responseRate}%`,
+      conversions: metrics.conversions,
+      conversion_rate: `${conversionRate}%`,
+      drop_off_stages: {
+        pending: progress.pending,
+        awaiting_approval: progress.awaiting_approval
+      },
+      generated_at: new Date().toISOString()
+    };
+
+    // Save to compendium
+    try {
+      const { createCompendiumEntry } = await import('backend/compendiumService');
+      await createCompendiumEntry({
+        department: 'recruiter',
+        category: 'postmortems',
+        title: `Autopilot Campaign ${campaignId} — ${objective}`,
+        content: JSON.stringify(postmortem, null, 2),
+        tags: ['autopilot', objective, cadence]
+      });
+    } catch (err) {
+      console.warn('Autopilot: compendium entry skipped — ', err.message);
+    }
+
+    return { success: true, postmortem };
+  } catch (error) {
+    console.error('generateCampaignPostmortem error:', error);
+    return { success: false, error: error.message };
+  }
+}
