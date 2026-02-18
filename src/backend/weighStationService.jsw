@@ -1,218 +1,227 @@
 import { fetch } from 'wix-fetch';
-import * as dataAccess from 'backend/dataAccess';
+import wixData from 'wix-data';
 
-// Collection keys for dataAccess routing
-const COLLECTION_KEYS = {
-    weighStations: 'weighStations',
-    weighStationReports: 'weighStationReports',
-    roadUtilityCache: 'roadUtilityCache',
-    driverBypassServices: 'driverBypassServices'
+const COLLECTIONS = {
+  stations: 'WeighStations',
+  reports: 'WeighStationReports',
+  cache: 'RoadUtilityCache',
+  bypass: 'DriverBypassServices'
 };
-
-// ============================================
-// HAVERSINE DISTANCE CALCULATION
-// ============================================
 
 function calculateDistance(lat1, lng1, lat2, lng2) {
-    if (!lat1 || !lng1 || !lat2 || !lng2) return Infinity;
-    const R = 3958.8; // Earth's radius in miles
-    const toRad = (value) => (value * Math.PI) / 180;
-    const dLat = toRad(lat2 - lat1);
-    const dLon = toRad(lng2 - lng1);
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-}
-
-// ============================================
-// STATE 511 API CONFIGURATION & CIRCUIT BREAKER
-// ============================================
-
-const WEIGH_STATION_APIS = {
-    FLORIDA: { url: 'https://fl511.com/api/v2/get/weighstations', timeout: 8000, normalizer: 'normalizeFL511Data' },
-    TEXAS: { url: 'https://api.drivetexas.org/weighstations', timeout: 8000, normalizer: 'normalizeTXData' },
-    COLORADO: { url: 'https://dtdapps.coloradodot.info/otis/api/weighstations', timeout: 8000, normalizer: 'normalizeCOData' },
-    NEVADA: { url: 'https://nvroads.com/api/weighstations', timeout: 8000, normalizer: 'normalizeNVData' },
-    GEORGIA: { url: 'https://511ga.org/api/weighstations', timeout: 8000, normalizer: 'normalizeGA511Data' }
-};
-
-const circuitBreaker = {};
-Object.keys(WEIGH_STATION_APIS).forEach(state => circuitBreaker[state.toLowerCase()] = { failures: 0, lastFailure: 0, status: 'CLOSED' });
-
-function checkCircuitBreaker(apiName) {
-    const cb = circuitBreaker[apiName];
-    if (!cb) return true;
-    if (cb.status === 'OPEN') {
-        if (Date.now() - cb.lastFailure > 60000) { cb.status = 'HALF_OPEN'; return true; }
-        return false;
-    }
-    return true;
-}
-
-function recordSuccess(apiName) {
-    const cb = circuitBreaker[apiName];
-    if (cb) { cb.failures = 0; cb.status = 'CLOSED'; }
-}
-
-function recordFailure(apiName) {
-    const cb = circuitBreaker[apiName];
-    if (cb) { cb.failures++; cb.lastFailure = Date.now(); if (cb.failures >= 3) cb.status = 'OPEN'; }
-}
-
-// ============================================
-// STATE 511 API NORMALIZERS
-// ============================================
-
-function normalizeStatus(rawStatus) {
-    if (rawStatus === true || rawStatus === 'true' || ['Open', 'OPEN', 'open'].includes(rawStatus)) return 'open';
-    if (rawStatus === false || rawStatus === 'false' || ['Closed', 'CLOSED', 'closed'].includes(rawStatus)) return 'closed';
-    return 'unknown';
-}
-
-function normalizeFL511Data(data) {
-    return (data || []).map(item => ({
-        external_id: `fl_${item.id || item.stationId}`, name: item.name || 'FL Weigh Station',
-        state: 'FL', highway: item.route || '', direction: item.direction || '', location: { lat: parseFloat(item.latitude), lng: parseFloat(item.longitude) },
-        status: normalizeStatus(item.status || item.open), prepass_enabled: !!item.prepass, last_status_update: new Date()
-    }));
-}
-
-// Additional normalizers simplified for brevity during migration...
-const normalizers = { normalizeFL511Data, normalizeTXData: d => [], normalizeCOData: d => [], normalizeNVData: d => [], normalizeGA511Data: d => [] };
-
-async function queryState511API(stateKey) {
-    const config = WEIGH_STATION_APIS[stateKey];
-    if (!config || !checkCircuitBreaker(stateKey.toLowerCase())) return [];
-    try {
-        const res = await fetch(config.url, { method: 'GET', timeout: config.timeout });
-        if (!res.ok) throw new Error(`${stateKey} error`);
-        const data = await res.json();
-        recordSuccess(stateKey.toLowerCase());
-        return normalizers[config.normalizer] ? normalizers[config.normalizer](data) : [];
-    } catch (e) {
-        recordFailure(stateKey.toLowerCase());
-        return [];
-    }
-}
-
-async function queryAllState511APIs() {
-    const results = await Promise.all(Object.keys(WEIGH_STATION_APIS).map(queryState511API));
-    return results.flat();
-}
-
-// ============================================
-// MAIN SERVICE FUNCTIONS
-// ============================================
-
-export async function searchWeighStations(lat, lng, radius = 100, options = {}) {
-    const cacheKey = `weighstations:${lat.toFixed(2)}:${lng.toFixed(2)}:${radius}:${options.state || 'all'}`;
-    try {
-        const cacheRes = await dataAccess.queryRecords(COLLECTION_KEYS.roadUtilityCache, {
-            filters: { cache_key: cacheKey, expires_at: { gt: new Date() } }, limit: 1, suppressAuth: true
-        });
-        if (cacheRes.items?.length) {
-            const items = cacheRes.items[0].data;
-            return { success: true, items: items.map(s => ({ ...s, bypass_probability: calculateBypassProbability(s, options.bypassServices) })), fromCache: true };
-        }
-
-        const dbRes = await dataAccess.queryRecords(COLLECTION_KEYS.weighStations, {
-            filters: options.state ? { state: options.state.toUpperCase() } : {}, limit: 500, suppressAuth: true
-        });
-        let stations = dbRes.items || [];
-
-        let liveData = [];
-        if (!options.state || ['FL', 'TX', 'CO', 'NV', 'GA'].includes(options.state.toUpperCase())) {
-            liveData = await queryAllState511APIs();
-        }
-
-        const merged = mergeStationData(stations, liveData);
-        const filtered = merged.map(s => ({ ...s, distance_miles: Math.round(calculateDistance(lat, lng, s.location?.lat, s.location?.lng) * 10) / 10 }))
-            .filter(s => s.distance_miles <= radius).sort((a,b) => a.distance_miles - b.distance_miles);
-
-        const enriched = await Promise.all(filtered.slice(0, 50).map(async (s) => {
-            const reportsRes = await dataAccess.queryRecords(COLLECTION_KEYS.weighStationReports, {
-                filters: { station_id: s._id, reported_at: { gt: new Date(Date.now() - 4 * 3600000) } }, limit: 20, suppressAuth: true
-            });
-            const agg = aggregateReports(reportsRes.items || []);
-            if (!s.status || s.status === 'unknown') { s.status = agg.status || 'unknown'; s.status_confidence = agg.status ? 'reported' : 'unknown'; }
-            return { ...s, wait_estimate: agg.wait_estimate, report_count: agg.report_count, bypass_probability: calculateBypassProbability(s, options.bypassServices) };
-        }));
-
-        const expiry = new Date(); expiry.setMinutes(expiry.getMinutes() + 10);
-        await dataAccess.insertRecord(COLLECTION_KEYS.roadUtilityCache, { cache_key: cacheKey, cache_type: 'weighstation', data: enriched, expires_at: expiry }, { suppressAuth: true }).catch(()=>{});
-
-        return { success: true, items: enriched };
-    } catch (e) {
-        return { success: false, error: e.message };
-    }
-}
-
-function calculateBypassProbability(station, driverServices = {}) {
-    const p = [];
-    if (driverServices.prepass && station.prepass_enabled) p.push(station.prepass_bypass_rate || 75);
-    if (driverServices.drivewyze && station.drivewyze_enabled) p.push(station.drivewyze_bypass_rate || 78);
-    return p.length ? Math.max(...p) : 0;
-}
-
-function mergeStationData(db, live) {
-    const map = new Map();
-    db.forEach(s => map.set(s.external_id || `${s.state}_${s.highway}_${s.direction}`, s));
-    live.forEach(s => {
-        if (map.has(s.external_id)) {
-            const e = map.get(s.external_id);
-            map.set(s.external_id, { ...e, status: s.status, status_confidence: s.status_confidence, last_status_update: s.last_status_update });
-        } else map.set(s.external_id, s);
-    });
-    return Array.from(map.values());
+  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return Infinity;
+  const R = 3958.8;
+  const toRad = (v) => (v * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function aggregateReports(reports) {
-    if (!reports.length) return { status: null, wait_estimate: null, report_count: 0 };
-    const votes = { open: 0, closed: 0 };
-    let totalWait = 0, count = 0;
-    reports.forEach(r => {
-        const weight = 1 / (((Date.now() - new Date(r.reported_at).getTime()) / 3600000) + 0.5);
-        if (r.report_type === 'open') votes.open += weight; else if (r.report_type === 'closed') votes.closed += weight;
-        if (r.wait_minutes) { totalWait += r.wait_minutes * weight; count += weight; }
-    });
-    return { status: votes.open > votes.closed * 1.5 ? 'open' : votes.closed > votes.open * 1.5 ? 'closed' : null, wait_estimate: count ? Math.round(totalWait / count) : null, report_count: reports.length };
+  if (!reports.length) return { status: null, wait_estimate: null, report_count: 0 };
+
+  const votes = { open: 0, closed: 0 };
+  let waitWeighted = 0;
+  let waitWeight = 0;
+
+  for (const r of reports) {
+    const reportedAt = new Date(r.reported_at || r._createdDate || Date.now()).getTime();
+    const hoursAgo = (Date.now() - reportedAt) / (60 * 60 * 1000);
+    const weight = 1 / (hoursAgo + 0.5);
+
+    if (r.report_type === 'open') votes.open += weight;
+    if (r.report_type === 'closed') votes.closed += weight;
+
+    if (typeof r.wait_minutes === 'number') {
+      waitWeighted += r.wait_minutes * weight;
+      waitWeight += weight;
+    }
+  }
+
+  const status = votes.open > votes.closed * 1.3 ? 'open' : (votes.closed > votes.open * 1.3 ? 'closed' : null);
+  return {
+    status,
+    wait_estimate: waitWeight ? Math.round(waitWeighted / waitWeight) : null,
+    report_count: reports.length
+  };
+}
+
+function calculateBypassProbability(station, driverServices = {}) {
+  const probs = [];
+  if (driverServices.prepass && station.prepass_enabled) probs.push(station.prepass_bypass_rate || 75);
+  if (driverServices.drivewyze && station.drivewyze_enabled) probs.push(station.drivewyze_bypass_rate || 78);
+  return probs.length ? Math.max(...probs) : 0;
+}
+
+export async function searchWeighStations(lat, lng, radius = 100, options = {}) {
+  try {
+    const cacheKey = `weighstations:${lat.toFixed(2)}:${lng.toFixed(2)}:${radius}:${options.state || 'all'}`;
+
+    const cacheRes = await wixData.query(COLLECTIONS.cache)
+      .eq('cache_key', cacheKey)
+      .gt('expires_at', new Date())
+      .limit(1)
+      .find({ suppressAuth: true });
+
+    if ((cacheRes.items || []).length) {
+      const cachedItems = cacheRes.items[0].data || [];
+      return {
+        success: true,
+        items: cachedItems.map((s) => ({
+          ...s,
+          bypass_probability: calculateBypassProbability(s, options.bypassServices)
+        })),
+        fromCache: true
+      };
+    }
+
+    let query = wixData.query(COLLECTIONS.stations);
+    if (options.state) query = query.eq('state', String(options.state).toUpperCase());
+    const stationRes = await query.limit(500).find({ suppressAuth: true });
+
+    const withinRadius = (stationRes.items || [])
+      .map((s) => ({
+        ...s,
+        distance_miles: Math.round(calculateDistance(lat, lng, s.location?.lat, s.location?.lng) * 10) / 10
+      }))
+      .filter((s) => s.distance_miles <= radius)
+      .sort((a, b) => a.distance_miles - b.distance_miles)
+      .slice(0, 50);
+
+    const enriched = [];
+    for (const station of withinRadius) {
+      const reportsRes = await wixData.query(COLLECTIONS.reports)
+        .eq('station_id', station._id)
+        .gt('reported_at', new Date(Date.now() - 4 * 60 * 60 * 1000))
+        .descending('reported_at')
+        .limit(20)
+        .find({ suppressAuth: true });
+
+      const agg = aggregateReports(reportsRes.items || []);
+      const merged = {
+        ...station,
+        status: (station.status && station.status !== 'unknown') ? station.status : (agg.status || 'unknown'),
+        status_confidence: agg.status ? 'reported' : (station.status_confidence || 'unknown'),
+        wait_estimate: agg.wait_estimate,
+        report_count: agg.report_count,
+        bypass_probability: calculateBypassProbability(station, options.bypassServices)
+      };
+      enriched.push(merged);
+    }
+
+    await wixData.insert(COLLECTIONS.cache, {
+      cache_key: cacheKey,
+      cache_type: 'weighstation',
+      data: enriched,
+      expires_at: new Date(Date.now() + 10 * 60 * 1000)
+    }, { suppressAuth: true }).catch(() => {});
+
+    return { success: true, items: enriched };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+export async function getWeighStationsAlongRoute(routePoints, options = {}) {
+  try {
+    const radius = options.corridorRadius || 50;
+    const unique = new Map();
+
+    for (const point of (routePoints || [])) {
+      const result = await searchWeighStations(point.lat, point.lng, radius, options);
+      for (const station of (result.items || [])) {
+        if (!unique.has(station._id)) unique.set(station._id, station);
+      }
+    }
+
+    return { success: true, items: Array.from(unique.values()) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 export async function getStationStatus(stationId) {
-    if (!stationId) return { success: false, error: 'Required' };
-    const station = await dataAccess.getRecord(COLLECTION_KEYS.weighStations, stationId, { suppressAuth: true });
-    if (!station) return { success: false, error: 'Not found' };
-    const reports = await dataAccess.queryRecords(COLLECTION_KEYS.weighStationReports, { filters: { station_id: stationId }, limit: 5, suppressAuth: true });
-    const agg = aggregateReports(reports.items || []);
-    return { success: true, station: { ...station, wait_estimate: agg.wait_estimate, report_count: agg.report_count, recent_reports: reports.items || [] } };
+  if (!stationId) return { success: false, error: 'Required' };
+
+  const station = await wixData.get(COLLECTIONS.stations, stationId, { suppressAuth: true });
+  if (!station) return { success: false, error: 'Not found' };
+
+  const reportsRes = await wixData.query(COLLECTIONS.reports)
+    .eq('station_id', stationId)
+    .descending('reported_at')
+    .limit(5)
+    .find({ suppressAuth: true });
+
+  const agg = aggregateReports(reportsRes.items || []);
+  return {
+    success: true,
+    station: {
+      ...station,
+      wait_estimate: agg.wait_estimate,
+      report_count: agg.report_count,
+      recent_reports: reportsRes.items || []
+    }
+  };
 }
 
 export async function reportStationStatus(stationId, report) {
-    const oneHourAgo = new Date(Date.now() - 3600000);
-    const recent = await dataAccess.queryRecords(COLLECTION_KEYS.weighStationReports, { filters: { station_id: stationId, driver_id: report.driver_id, reported_at: { gt: oneHourAgo } }, limit: 1, suppressAuth: true });
-    if (recent.items?.length) return { success: false, error: 'Rate limited' };
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  const recent = await wixData.query(COLLECTIONS.reports)
+    .eq('station_id', stationId)
+    .eq('driver_id', report.driver_id)
+    .gt('reported_at', oneHourAgo)
+    .limit(1)
+    .find({ suppressAuth: true });
 
-    const res = await dataAccess.insertRecord(COLLECTION_KEYS.weighStationReports, { station_id: stationId, driver_id: report.driver_id, report_type: report.report_type, wait_minutes: report.wait_minutes, reported_at: new Date() }, { suppressAuth: true });
-    return { success: res.success, reportId: res.record?._id };
+  if ((recent.items || []).length) return { success: false, error: 'Rate limited' };
+
+  const created = await wixData.insert(COLLECTIONS.reports, {
+    station_id: stationId,
+    driver_id: report.driver_id,
+    report_type: report.report_type,
+    wait_minutes: report.wait_minutes,
+    notes: report.notes || '',
+    reported_at: new Date()
+  }, { suppressAuth: true });
+
+  return { success: true, reportId: created?._id };
 }
 
 export async function getStationsByState(state) {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.weighStations, { filters: { state: state.toUpperCase() }, sort: [{ field: 'highway', direction: 'asc' }], limit: 100, suppressAuth: true });
-    return { success: true, items: result.items || [] };
+  const res = await wixData.query(COLLECTIONS.stations)
+    .eq('state', String(state || '').toUpperCase())
+    .limit(100)
+    .find({ suppressAuth: true });
+  return { success: true, items: res.items || [] };
 }
 
 export async function getDriverBypassServices(driverId) {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.driverBypassServices, { filters: { driver_id: driverId }, limit: 1, suppressAuth: true });
-    const s = result.items?.[0] || {};
-    return { success: true, services: { prepass: s.prepass || false, drivewyze: s.drivewyze || false } };
+  const res = await wixData.query(COLLECTIONS.bypass)
+    .eq('driver_id', driverId)
+    .limit(1)
+    .find({ suppressAuth: true });
+  const s = (res.items || [])[0] || {};
+  return { success: true, services: { prepass: !!s.prepass, drivewyze: !!s.drivewyze } };
 }
 
 export async function saveDriverBypassServices(driverId, services) {
-    const existing = await dataAccess.queryRecords(COLLECTION_KEYS.driverBypassServices, { filters: { driver_id: driverId }, limit: 1, suppressAuth: true });
-    const record = { driver_id: driverId, prepass: services.prepass || false, drivewyze: services.drivewyze || false, updated_at: new Date() };
-    if (existing.items?.length) {
-        record._id = existing.items[0]._id;
-        await dataAccess.updateRecord(COLLECTION_KEYS.driverBypassServices, record, { suppressAuth: true });
-    } else await dataAccess.insertRecord(COLLECTION_KEYS.driverBypassServices, record, { suppressAuth: true });
-    return { success: true };
+  const existing = await wixData.query(COLLECTIONS.bypass)
+    .eq('driver_id', driverId)
+    .limit(1)
+    .find({ suppressAuth: true });
+
+  const record = {
+    driver_id: driverId,
+    prepass: !!services.prepass,
+    drivewyze: !!services.drivewyze,
+    updated_at: new Date()
+  };
+
+  if ((existing.items || []).length) {
+    await wixData.update(COLLECTIONS.bypass, { ...existing.items[0], ...record }, { suppressAuth: true });
+  } else {
+    await wixData.insert(COLLECTIONS.bypass, record, { suppressAuth: true });
+  }
+  return { success: true };
 }

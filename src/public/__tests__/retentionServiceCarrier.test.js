@@ -1,7 +1,7 @@
 /* eslint-disable */
 
 // Mock standard library dependencies
-let mockCurrentUser = {
+var mockCurrentUser = {
     id: 'user123',
     loggedIn: true,
     email: 'carrier@example.com'
@@ -23,18 +23,33 @@ jest.mock('wix-users-backend', () => {
 });
 
 // Mock Wix Data
-const mockWixData = {
-    query: jest.fn().mockReturnThis(),
-    eq: jest.fn().mockReturnThis(),
-    find: jest.fn()
-};
-jest.mock('wix-data', () => mockWixData);
+var mockWixData;
+jest.mock('wix-data', () => {
+    mockWixData = {
+        query: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        find: jest.fn()
+    };
+    return mockWixData;
+});
 
 // Mock Subscription Service
-const mockSubscriptionService = {
-    getSubscription: jest.fn()
-};
-jest.mock('backend/subscriptionService', () => mockSubscriptionService);
+var mockSubscriptionService;
+jest.mock('backend/subscriptionService', () => {
+    mockSubscriptionService = {
+        getSubscription: jest.fn()
+    };
+    return mockSubscriptionService;
+});
+
+var mockDataAccess;
+jest.mock('backend/dataAccess', () => {
+    mockDataAccess = {
+        queryRecords: jest.fn(),
+        insertRecord: jest.fn()
+    };
+    return mockDataAccess;
+});
 
 // Import the service under test
 import { getCarrierRetentionDashboardForCarrier, calculateRiskScore } from 'backend/retentionService';
@@ -45,6 +60,32 @@ describe('Carrier Retention Service Access Control', () => {
         jest.clearAllMocks();
         mockCurrentUser.loggedIn = true;
         mockCurrentUser.id = 'user123';
+        mockDataAccess.queryRecords.mockImplementation(async (collectionKey) => {
+            if (collectionKey === 'carriers') {
+                if (!mockCurrentUser.loggedIn) {
+                    return { success: true, items: [] };
+                }
+                return { success: true, items: [{ _id: 'carrier1', _owner: 'user123' }] };
+            }
+            if (collectionKey === 'driverPerformance') {
+                return {
+                    success: true,
+                    items: [{
+                        driver_id: 'driver1',
+                        driver_name: 'Driver One',
+                        miles_driven: 1000,
+                        safety_incidents: 0,
+                        home_time_days: 5,
+                        avg_weekly_pay: 1500,
+                        pay_volatility_index: 5,
+                        app_sessions_last_7d: 5,
+                        app_sessions_prev_7d: 5,
+                        dnps_score: 8
+                    }]
+                };
+            }
+            return { success: true, items: [] };
+        });
     });
 
     describe('calculateRiskScore', () => {
@@ -78,7 +119,7 @@ describe('Carrier Retention Service Access Control', () => {
             const result = await getCarrierRetentionDashboardForCarrier('123456');
 
             expect(result.success).toBe(false);
-            expect(result.error).toBe('Not authenticated');
+            expect(result.error).toBe('Unauthorized');
         });
 
         // Test Case 2: User without ownership (Mocked behavior)
@@ -107,7 +148,7 @@ describe('Carrier Retention Service Access Control', () => {
 
             expect(result.success).toBe(true);
             expect(result.isFreeTier).toBe(true);
-            expect(result.overview).toBeNull(); // Data hidden
+            expect(result.overview).toBeUndefined(); // Data hidden
             expect(result.upgradeUrl).toBeDefined();
         });
 

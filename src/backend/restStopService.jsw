@@ -1,117 +1,139 @@
 import wixUsers from 'wix-users-backend';
-import * as dataAccess from 'backend/dataAccess';
+import wixData from 'wix-data';
 
-// Collection keys for dataAccess routing
-const COLLECTION_KEYS = {
-    restStopReviews: 'restStopReviews',
-    restStopConditionReports: 'restStopConditionReports',
-    parkingLocations: 'parkingLocations'
+const COLLECTIONS = {
+  reviews: 'RestStopReviews',
+  reports: 'RestStopConditionReports',
+  locations: 'ParkingLocations'
 };
 
-// ============================================
-// SERVICE FUNCTIONS
-// ============================================
-
 export async function getLocationReviews(locationId, options = {}) {
-    if (!locationId) return { success: false, error: 'Location ID required' };
-    try {
-        const sort = options.sort || 'recent';
-        const queryOptions = { filters: { location_id: locationId }, limit: options.limit || 20, suppressAuth: true };
-        
-        if (sort === 'helpful') queryOptions.sort = [{ field: 'helpful_votes', direction: 'desc' }];
-        else if (sort === 'rating') queryOptions.sort = [{ field: 'overall_rating', direction: 'desc' }];
-        else queryOptions.sort = [{ field: '_createdDate', direction: 'desc' }];
+  if (!locationId) return { success: false, error: 'Location ID required' };
+  try {
+    let query = wixData.query(COLLECTIONS.reviews).eq('location_id', locationId);
+    const sort = options.sort || 'recent';
 
-        const result = await dataAccess.queryRecords(COLLECTION_KEYS.restStopReviews, queryOptions);
-        const stats = await calculateLocationStats(locationId);
-        return { success: true, reviews: result.items || [], stats };
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
+    if (sort === 'helpful') query = query.descending('helpful_votes');
+    else if (sort === 'rating') query = query.descending('overall_rating');
+    else query = query.descending('_createdDate');
+
+    const listRes = await query.limit(options.limit || 20).find({ suppressAuth: true });
+    const reviews = listRes?.items || [];
+    const stats = await calculateLocationStats(locationId);
+
+    return { success: true, reviews, stats };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 export async function submitReview(locationId, reviewData) {
-    const user = wixUsers.currentUser;
-    if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
-    
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const recentRes = await dataAccess.queryRecords(COLLECTION_KEYS.restStopReviews, {
-        filters: { location_id: locationId, driver_id: user.id, _createdDate: { gt: thirtyDaysAgo } },
-        limit: 1, suppressAuth: true
-    });
+  const user = wixUsers.currentUser;
+  if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
 
-    if (recentRes.items?.length) return { success: false, error: 'Already reviewed recently' };
+  try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const dupRes = await wixData.query(COLLECTIONS.reviews)
+      .eq('location_id', locationId)
+      .eq('driver_id', user.id)
+      .gt('_createdDate', thirtyDaysAgo)
+      .find({ suppressAuth: true });
+
+    if ((dupRes?.items || []).length) {
+      return { success: false, error: 'You already reviewed this location recently.' };
+    }
 
     const record = {
-        location_id: locationId, driver_id: user.id, overall_rating: reviewData.overall_rating,
-        ratings: JSON.stringify(reviewData.ratings || {}), review_text: reviewData.text,
-        photos: JSON.stringify(reviewData.photos || []), helpful_votes: 0, is_verified: false,
-        _createdDate: new Date()
+      location_id: locationId,
+      driver_id: user.id,
+      overall_rating: reviewData.overall_rating,
+      ratings: reviewData.ratings || {},
+      review_text: reviewData.text,
+      photos: reviewData.photos || [],
+      helpful_votes: 0,
+      is_verified: false,
+      _createdDate: new Date()
     };
 
-    const result = await dataAccess.insertRecord(COLLECTION_KEYS.restStopReviews, record, { suppressAuth: true });
-    return { success: result.success, review: result.record };
+    const created = await wixData.insert(COLLECTIONS.reviews, record, { suppressAuth: true });
+    return { success: true, review: created };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 export async function submitConditionReport(locationId, reportData) {
-    const user = wixUsers.currentUser;
-    if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
+  const user = wixUsers.currentUser;
+  if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
 
-    const record = {
-        location_id: locationId, report_type: reportData.type, details: reportData.details,
-        reporter_id: user.id, confirmations: 0,
-        expires_at: new Date(Date.now() + 24 * 3600000).toISOString(), _createdDate: new Date()
-    };
+  const record = {
+    location_id: locationId,
+    report_type: reportData.type,
+    details: reportData.details,
+    reporter_id: user.id,
+    confirmations: 0,
+    expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    _createdDate: new Date()
+  };
 
-    const result = await dataAccess.insertRecord(COLLECTION_KEYS.restStopConditionReports, record, { suppressAuth: true });
-    return { success: result.success, report: result.record };
+  const created = await wixData.insert(COLLECTIONS.reports, record, { suppressAuth: true });
+  return { success: true, report: created };
 }
 
 export async function voteReview(reviewId, isHelpful) {
-    const user = wixUsers.currentUser;
-    if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
+  const user = wixUsers.currentUser;
+  if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
 
-    try {
-        const review = await dataAccess.getRecord(COLLECTION_KEYS.restStopReviews, reviewId, { suppressAuth: true });
-        if (!review) return { success: false, error: 'Not found' };
+  try {
+    const review = await wixData.get(COLLECTIONS.reviews, reviewId, { suppressAuth: true });
+    if (!review) return { success: false, error: 'Not found' };
 
-        const update = { ...review, _id: reviewId, helpful_votes: (review.helpful_votes || 0) + (isHelpful ? 1 : -1) };
-        await dataAccess.updateRecord(COLLECTION_KEYS.restStopReviews, update, { suppressAuth: true });
-        return { success: true, helpful_votes: update.helpful_votes };
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
+    const nextVotes = (review.helpful_votes || 0) + (isHelpful ? 1 : -1);
+    const updated = { ...review, _id: reviewId, helpful_votes: nextVotes };
+    await wixData.update(COLLECTIONS.reviews, updated, { suppressAuth: true });
+
+    return { success: true, helpful_votes: nextVotes };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 export async function getTopRatedStops(lat, lng, radius, filters = {}) {
-    try {
-        const result = await dataAccess.queryRecords(COLLECTION_KEYS.parkingLocations, {
-            filters: { avg_rating: { gt: 4 } }, limit: 50, suppressAuth: true
-        });
-        const locations = result.items || [];
-            
-        const R = 3958.8;
-        const items = locations.filter(loc => {
-            if (!loc.location) return false;
-            const dLat = (loc.location.lat - lat) * Math.PI / 180;
-            const dLon = (loc.location.lng - lng) * Math.PI / 180;
-            const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat * Math.PI / 180) * Math.cos(loc.location.lat * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-            return (R * c) <= radius;
-        });
+  try {
+    const result = await wixData.query(COLLECTIONS.locations)
+      .gt('avg_rating', 4)
+      .limit(50)
+      .find({ suppressAuth: true });
 
-        items.sort((a,b) => (b.avg_rating || 0) - (a.avg_rating || 0));
-        return { success: true, items };
-    } catch (error) {
-        return { success: false, error: error.message };
-    }
+    const locations = result?.items || [];
+    const R = 3958.8;
+
+    const items = locations.filter((loc) => {
+      if (!loc.location) return false;
+      const dLat = (loc.location.lat - lat) * Math.PI / 180;
+      const dLon = (loc.location.lng - lng) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat * Math.PI / 180) * Math.cos(loc.location.lat * Math.PI / 180) *
+        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return (R * c) <= radius;
+    });
+
+    items.sort((a, b) => (b.avg_rating || 0) - (a.avg_rating || 0));
+    return { success: true, items };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 async function calculateLocationStats(locationId) {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.restStopReviews, { filters: { location_id: locationId }, limit: 500, suppressAuth: true });
-    const items = result.items || [];
-    if (!items.length) return { avg_rating: 0, count: 0 };
-    
-    const sum = items.reduce((acc, curr) => acc + (curr.overall_rating || 0), 0);
-    return { avg_rating: (sum / items.length).toFixed(1), count: items.length };
+  const result = await wixData.query(COLLECTIONS.reviews)
+    .eq('location_id', locationId)
+    .find({ suppressAuth: true });
+
+  const items = result?.items || [];
+  if (!items.length) return { avg_rating: 0, count: 0 };
+
+  const sum = items.reduce((acc, curr) => acc + (curr.overall_rating || 0), 0);
+  return { avg_rating: (sum / items.length).toFixed(1), count: items.length };
 }

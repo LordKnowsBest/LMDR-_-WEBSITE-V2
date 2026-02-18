@@ -1,17 +1,14 @@
 import wixUsersBackend from 'wix-users-backend';
+import wixData from 'wix-data';
 import * as dataAccess from 'backend/dataAccess';
-
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
+import { usesAirtable, getAirtableTableName, getWixCollectionName } from 'backend/config';
+import * as airtableClient from 'backend/airtableClient';
 
 const CONFIG = {
-  // Lead status values
   STATUS: {
     NEW: 'new', CONTACTED: 'contacted', QUALIFIED: 'qualified',
     IN_PROGRESS: 'in_progress', CLOSED_WON: 'closed_won', CLOSED_LOST: 'closed_lost'
   },
-  // Staffing type values
   STAFFING_TYPE: { EMERGENCY: 'emergency', STRATEGIC: 'strategic' }
 };
 
@@ -22,9 +19,6 @@ const COLLECTION_KEYS = {
   hiringPreferences: 'carrierHiringPreferences'
 };
 
-/**
- * Parse a driver count range string and extract the max number
- */
 function parseDriverCount(rangeStr) {
   if (!rangeStr) return null;
   if (rangeStr.includes('+')) {
@@ -37,13 +31,50 @@ function parseDriverCount(rangeStr) {
   return plainMatch ? parseInt(plainMatch[1], 10) : null;
 }
 
-// ============================================================================
-// SUBMIT CARRIER STAFFING REQUEST
-// ============================================================================
+function parseDot(dotRaw) {
+  const cleaned = String(dotRaw || '').trim();
+  if (!cleaned) return null;
+  if (!/^\d+$/.test(cleaned)) return null;
+  const dot = parseInt(cleaned, 10);
+  if (Number.isNaN(dot) || dot <= 0 || dot > 99999999) return null;
+  return dot;
+}
 
-/**
- * Submit a new carrier staffing request (lead)
- */
+async function findCarrierByDot(dot) {
+  if (!dot) return null;
+
+  if (usesAirtable(COLLECTION_KEYS.carriers)) {
+    const table = getAirtableTableName(COLLECTION_KEYS.carriers);
+    const result = await airtableClient.queryRecords(table, {
+      filterByFormula: `{DOT_NUMBER} = ${dot}`,
+      maxRecords: 1
+    });
+    const records = result?.records || [];
+    return records[0] || null;
+  }
+
+  const wixCollection = getWixCollectionName(COLLECTION_KEYS.carriers);
+  const result = await wixData.query(wixCollection)
+    .eq('dot_number', dot)
+    .limit(1)
+    .find();
+  return result?.items?.[0] || null;
+}
+
+async function createLeadRecord(leadRecord) {
+  if (usesAirtable(COLLECTION_KEYS.leads)) {
+    const table = getAirtableTableName(COLLECTION_KEYS.leads);
+    const created = await airtableClient.createRecord(table, leadRecord);
+    return { success: true, id: created?._id || created?.id || '' };
+  }
+
+  const result = await dataAccess.insertRecord(COLLECTION_KEYS.leads, leadRecord, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Insert failed' };
+  }
+  return { success: true, id: result.record?._id || result.record?.id || '' };
+}
+
 export async function submitCarrierStaffingRequest(leadData) {
   try {
     if (!leadData.companyName || !leadData.contactName || !leadData.email || !leadData.phone || !leadData.staffingType) {
@@ -53,45 +84,55 @@ export async function submitCarrierStaffingRequest(leadData) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(leadData.email)) return { success: false, error: 'Invalid email' };
 
-    const now = new Date();
+    const dot = parseDot(leadData.dotNumber);
     let linkedCarrierId = null;
 
-    if (leadData.dotNumber?.trim()) {
-      try {
-        const dotNum = parseInt(leadData.dotNumber.trim(), 10);
-        const carrier = await dataAccess.findByField(COLLECTION_KEYS.carriers, 'dot_number', dotNum, { suppressAuth: true });
-        if (carrier) linkedCarrierId = carrier._id;
-      } catch (e) { }
+    if (leadData.dotNumber && !dot) {
+      linkedCarrierId = null;
+    } else if (dot) {
+      const carrier = await findCarrierByDot(dot);
+      linkedCarrierId = carrier?._id || carrier?.id || null;
     }
 
+    const now = new Date();
     const driversNeededNum = parseDriverCount(leadData.driversNeeded);
     const formatDate = (date) => new Date(date).toISOString().split('T')[0];
 
     const leadRecord = {
-      company_name: leadData.companyName.trim(), contact_name: leadData.contactName.trim(),
-      email: leadData.email.trim().toLowerCase(), phone: leadData.phone.trim(),
-      dot_number: leadData.dotNumber ? leadData.dotNumber.trim() : null,
+      company_name: leadData.companyName.trim(),
+      contact_name: leadData.contactName.trim(),
+      email: leadData.email.trim().toLowerCase(),
+      phone: leadData.phone.trim(),
+      dot_number: dot ? String(dot) : null,
       staffing_type: leadData.staffingType ? leadData.staffingType.toLowerCase() : '',
-      drivers_needed: driversNeededNum, driver_types: JSON.stringify(leadData.driverTypes || []),
-      additional_notes: leadData.driversNeeded ? `Drivers needed: ${leadData.driversNeeded}. ${leadData.additionalNotes || ''}`.trim() : (leadData.additionalNotes || ''),
-      linked_carrier_id: linkedCarrierId, status: CONFIG.STATUS.NEW,
-      submitted_date: formatDate(now), last_updated: formatDate(now),
-      source: 'landing_page', source_url: leadData.sourceUrl || '/last-mile-staffing'
+      drivers_needed: driversNeededNum,
+      driver_types: leadData.driverTypes || [],
+      additional_notes: leadData.driversNeeded
+        ? `Drivers needed: ${leadData.driversNeeded}. ${leadData.additionalNotes || ''}`.trim()
+        : (leadData.additionalNotes || ''),
+      linked_carrier_id: linkedCarrierId,
+      status: CONFIG.STATUS.NEW,
+      submitted_date: formatDate(now),
+      last_updated: formatDate(now),
+      source: 'landing_page',
+      source_url: leadData.sourceUrl || '/last-mile-staffing'
     };
 
-    const result = await dataAccess.insertRecord(COLLECTION_KEYS.leads, leadRecord, { suppressAuth: true });
-    if (!result.success) throw new Error(result.error);
+    const created = await createLeadRecord(leadRecord);
+    if (!created.success) {
+      return { success: false, error: created.error || 'Failed to submit request.' };
+    }
 
-    return { success: true, leadId: result.record._id, checkoutToken: result.record._id, message: 'Staffing request submitted.' };
+    return {
+      success: true,
+      leadId: created.id,
+      checkoutToken: created.id,
+      message: 'Staffing request submitted.'
+    };
   } catch (error) {
-    console.error('❌ submitCarrierStaffingRequest error:', error);
-    return { success: false, error: 'Failed to submit request.' };
+    return { success: false, error: error.message || 'Failed to submit request.' };
   }
 }
-
-// ============================================================================
-// GET LEAD STATUS
-// ============================================================================
 
 export async function getLeadStatus(leadId) {
   try {
@@ -100,14 +141,9 @@ export async function getLeadStatus(leadId) {
 
     return { success: true, lead: { id: lead._id, companyName: lead.company_name, status: lead.status, submittedDate: lead.submitted_date, lastUpdated: lead.last_updated } };
   } catch (error) {
-    console.error('❌ getLeadStatus error:', error);
     return { success: false, error: error.message };
   }
 }
-
-// ============================================================================
-// ADMIN: GET ALL LEADS
-// ============================================================================
 
 export async function getCarrierLeads(options = {}) {
   try {
@@ -121,14 +157,9 @@ export async function getCarrierLeads(options = {}) {
 
     return { success: true, leads: result.items || [], totalCount: result.totalCount || (result.items || []).length };
   } catch (error) {
-    console.error('❌ getCarrierLeads error:', error);
     return { success: false, error: error.message, leads: [] };
   }
 }
-
-// ============================================================================
-// SUBMIT CARRIER INTAKE PREFERENCES (Public)
-// ============================================================================
 
 export async function submitCarrierIntakePreferences(prefData) {
   try {
@@ -150,14 +181,9 @@ export async function submitCarrierIntakePreferences(prefData) {
 
     return { success: true, preferenceId: result.record._id, message: 'Preferences saved.' };
   } catch (error) {
-    console.error('❌ submitCarrierIntakePreferences error:', error);
     return { success: false, error: 'Failed to save preferences.' };
   }
 }
-
-// ============================================================================
-// ADMIN: UPDATE LEAD STATUS
-// ============================================================================
 
 export async function updateLeadStatus(leadId, newStatus, notes = '') {
   try {
@@ -165,20 +191,15 @@ export async function updateLeadStatus(leadId, newStatus, notes = '') {
     if (!lead) return { success: false, error: 'Lead not found' };
 
     let statusHistory = [];
-    try { statusHistory = typeof lead.status_history === 'string' ? JSON.parse(lead.status_history) : (lead.status_history || []); } catch (e) { }
+    try { statusHistory = typeof lead.status_history === 'string' ? JSON.parse(lead.status_history) : (lead.status_history || []); } catch (e) {}
     statusHistory.push({ from: lead.status, to: newStatus, timestamp: new Date().toISOString(), notes });
 
     const result = await dataAccess.updateRecord(COLLECTION_KEYS.leads, { ...lead, _id: leadId, status: newStatus, last_updated: new Date(), status_history: JSON.stringify(statusHistory) }, { suppressAuth: true });
     return { success: result.success, lead: result.record, error: result.error };
   } catch (error) {
-    console.error('❌ updateLeadStatus error:', error);
     return { success: false, error: error.message };
   }
 }
-
-// ============================================================================
-// ENSURE CARRIER RECORD
-// ============================================================================
 
 export async function ensureCarrierRecord(leadId = null, fallbackEmail = null) {
   try {
@@ -188,7 +209,6 @@ export async function ensureCarrierRecord(leadId = null, fallbackEmail = null) {
     const userId = user.id;
     const userEmail = await user.getEmail();
 
-    // Check if account exists
     const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.carrierAccounts, {
       filters: { _owner: userId }, limit: 1, suppressAuth: true
     });
@@ -197,7 +217,6 @@ export async function ensureCarrierRecord(leadId = null, fallbackEmail = null) {
       return { success: true, carrier: { id: existingResult.items[0]._id, dotNumber: existingResult.items[0].dot_number, email: userEmail }, created: false };
     }
 
-    // Look up lead
     let lead = null;
     if (leadId) lead = await dataAccess.getRecord(COLLECTION_KEYS.leads, leadId, { suppressAuth: true });
     if (!lead && (fallbackEmail || userEmail)) {
@@ -207,7 +226,6 @@ export async function ensureCarrierRecord(leadId = null, fallbackEmail = null) {
 
     if (!lead) return { success: false, error: 'No lead found' };
 
-    // Enrichment if available
     let fmcsaData = null;
     if (lead.linked_carrier_id) {
       fmcsaData = await dataAccess.getRecord(COLLECTION_KEYS.carriers, lead.linked_carrier_id, { suppressAuth: true });
@@ -227,17 +245,10 @@ export async function ensureCarrierRecord(leadId = null, fallbackEmail = null) {
 
     return { success: true, carrier: { id: createdResult.record._id, dotNumber: dotNum ? String(dotNum) : 'PENDING', email: newCarrier.email_address }, created: true };
   } catch (error) {
-    console.error('❌ ensureCarrierRecord error:', error);
     return { success: false, error: error.message };
   }
 }
 
-/**
- * Get a preview of matching driver count based on criteria
- * PUBLIC FUNCTION - No authentication required
- * 
- * @param {Object} criteria - Search criteria
- */
 export async function getMatchPreview(criteria = {}) {
   try {
     const filters = {
@@ -258,17 +269,14 @@ export async function getMatchPreview(criteria = {}) {
       if (!isNaN(exp)) filters.years_experience = { gte: exp };
     }
 
-    // Use queryRecords with suppressAuth since this is public
-    const result = await dataAccess.queryRecords('driverProfiles', {
+    const result = await airtableClient.queryRecords(getAirtableTableName('driverProfiles'), {
       filters,
-      limit: 1000,
-      suppressAuth: true
+      limit: 1000
     });
 
-    const drivers = result.items || [];
+    const drivers = result.items || result.records || [];
     const totalCount = result.totalCount || drivers.length;
 
-    // Calculate breakdown
     const breakdown = {
       byClass: {},
       withEndorsements: 0,
@@ -289,7 +297,6 @@ export async function getMatchPreview(criteria = {}) {
       ? Math.round((totalExperience / drivers.length) * 10) / 10
       : 0;
 
-    // Build messaging based on count
     let message;
     if (totalCount === 0) {
       message = "We don't have exact matches yet, but our network is growing daily.";
@@ -308,14 +315,13 @@ export async function getMatchPreview(criteria = {}) {
         breakdown,
         message,
         hasMatches: totalCount > 0,
-        exceedsNeed: criteria.driversNeeded 
-          ? totalCount >= parseInt(criteria.driversNeeded, 10) 
+        exceedsNeed: criteria.driversNeeded
+          ? totalCount >= parseInt(criteria.driversNeeded, 10)
           : null
       }
     };
 
   } catch (error) {
-    console.error('❌ getMatchPreview error:', error);
     return {
       success: false,
       error: 'Unable to generate preview',
@@ -334,7 +340,6 @@ export async function getLeadDetails(leadId) {
     if (!lead) return null;
     return { _id: lead._id, companyName: lead.company_name, contactName: lead.contact_name, email: lead.email, phone: lead.phone, driversNeeded: lead.drivers_needed, staffingType: lead.staffing_type };
   } catch (error) {
-    console.error('❌ getLeadDetails error:', error);
     throw error;
   }
 }

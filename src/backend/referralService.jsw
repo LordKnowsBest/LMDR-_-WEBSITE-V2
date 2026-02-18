@@ -50,7 +50,10 @@ export async function generateReferralCode(driverId) {
   try {
     if (!driverId) return { success: false, error: 'Driver ID required' };
     const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: driverId, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
-    if (res.items?.length) return { success: true, referralCode: res.items[0].referral_code, referralLink: buildReferralLink(res.items[0].referral_code), existingCode: true };
+    if (res.items?.length) {
+      const code = getFieldValue(res.items[0], ['referral_code', 'Referral Code']);
+      return { success: true, referralCode: code, referralLink: buildReferralLink(code), existingCode: true };
+    }
 
     const code = generateUniqueCode(driverId), now = new Date().toISOString();
     await dataAccess.insertRecord(COLLECTION_KEYS.driverReferrals, { referrer_id: driverId, referral_code: code, is_referrer_record: 'Yes', total_referrals: 0, successful_hires: 0, total_xp_earned: 0, created_at: now, updated_at: now }, { suppressAuth: true });
@@ -66,11 +69,13 @@ export async function getReferralStats(driverId) {
     const masterRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: driverId, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
     if (!masterRes.items?.length) return { success: true, hasReferralCode: false, stats: { totalReferrals: 0, successfulHires: 0, totalXPEarned: 0 } };
     const master = masterRes.items[0];
+    const referralCode = getFieldValue(master, ['referral_code', 'Referral Code']);
+    const totalXPEarned = getFieldValue(master, ['total_xp_earned', 'Total XP Earned'], 0);
 
     const refsRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: driverId, is_referrer_record: 'No' }, sort: [{ field: 'created_at', direction: 'desc' }], limit: 50, suppressAuth: true });
     const referrals = refsRes.items || [];
 
-    return { success: true, hasReferralCode: true, referralCode: master.referral_code, referralLink: buildReferralLink(master.referral_code), stats: { totalReferrals: referrals.length, pendingSignups: referrals.filter(r => r.status === 'signed_up').length, successfulHires: referrals.filter(r => r.status === 'hired').length, totalXPEarned: master.total_xp_earned || 0 }, recentReferrals: referrals.slice(0, 5).map(r => ({ refereeId: r.referee_id, status: r.status, signupDate: r.signup_date, xpEarned: r.xp_earned_from_referral || 0 })) };
+    return { success: true, hasReferralCode: true, referralCode, referralLink: buildReferralLink(referralCode), stats: { totalReferrals: referrals.length, pendingSignups: referrals.filter(r => getFieldValue(r, ['status', 'Status']) === 'signed_up').length, successfulHires: referrals.filter(r => getFieldValue(r, ['status', 'Status']) === 'hired').length, totalXPEarned }, recentReferrals: referrals.slice(0, 5).map(r => ({ refereeId: getFieldValue(r, ['referee_id', 'Referee ID']), status: getFieldValue(r, ['status', 'Status']), signupDate: getFieldValue(r, ['signup_date', 'Signup Date']), xpEarned: getFieldValue(r, ['xp_earned_from_referral', 'XP Earned From Referral'], 0) })) };
   } catch (error) { return { success: false, error: error.message }; }
 }
 
@@ -81,20 +86,29 @@ export async function trackReferralSignup(referralCode, newUserId, newUserEmail 
   try {
     if (!referralCode || !newUserId) return { success: false, error: 'Required fields missing' };
     const refRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referral_code: referralCode, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
-    if (!refRes.items?.length) return { success: false, error: 'Invalid code' };
+    if (!refRes.items?.length) return { success: false, error: 'Invalid referral code' };
     const referrer = refRes.items[0], now = new Date().toISOString();
+    const referrerId = getFieldValue(referrer, ['referrer_id', 'Referrer ID']);
+    const currentTotalReferrals = getFieldValue(referrer, ['total_referrals', 'Total Referrals'], 0);
 
     const existing = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referee_id: newUserId }, limit: 1, suppressAuth: true });
-    if (existing.items?.length) return { success: false, error: 'Already referred' };
+    if (existing.items?.length) return { success: false, error: 'User already has a referral record' };
 
-    await dataAccess.insertRecord(COLLECTION_KEYS.driverReferrals, { referrer_id: referrer.referrer_id, referee_id: newUserId, referee_email: newUserEmail, referral_code: referralCode, is_referrer_record: 'No', status: 'signed_up', signup_date: now, created_at: now, updated_at: now }, { suppressAuth: true });
-    await dataAccess.updateRecord(COLLECTION_KEYS.driverReferrals, { ...referrer, total_referrals: (referrer.total_referrals || 0) + 1, updated_at: now }, { suppressAuth: true });
+    await dataAccess.insertRecord(COLLECTION_KEYS.driverReferrals, { referrer_id: referrerId, referee_id: newUserId, referee_email: newUserEmail, referral_code: referralCode, is_referrer_record: 'No', status: 'signed_up', signup_date: now, created_at: now, updated_at: now }, { suppressAuth: true });
+    await dataAccess.updateRecord(COLLECTION_KEYS.driverReferrals, { ...referrer, referrer_id: referrerId, total_referrals: currentTotalReferrals + 1, updated_at: now }, { suppressAuth: true });
 
-    awardReferralXP(referrer.referrer_id, 'referrer_on_signup', { refereeId: newUserId });
-    awardReferralXP(newUserId, 'referee_signup_bonus', { referrerId: referrer.referrer_id });
-    createNotification(referrer.referrer_id, 'referral_signup', 'New Referral!', 'Someone signed up! +200 XP', '/driver/referrals').catch(() => {});
+    awardReferralXP(referrerId, 'referrer_on_signup', { refereeId: newUserId });
+    awardReferralXP(newUserId, 'referee_signup_bonus', { referrerId });
+    createNotification(referrerId, 'referral_signup', 'New Referral!', 'Someone signed up! +200 XP', '/driver/referrals').catch(() => {});
 
-    return { success: true, referrerId: referrer.referrer_id };
+    return {
+      success: true,
+      referrerId,
+      bonusAwarded: {
+        referrer: REFERRAL_CONFIG.rewards.referrer_on_signup,
+        referee: REFERRAL_CONFIG.rewards.referee_signup_bonus
+      }
+    };
   } catch (error) { return { success: false, error: error.message }; }
 }
 
@@ -106,23 +120,28 @@ export async function trackReferralConversion(userId, conversionType, metadata =
     const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referee_id: userId, is_referrer_record: 'No' }, limit: 1, suppressAuth: true });
     if (!res.items?.length) return { success: true, wasReferred: false };
     const referral = res.items[0], now = new Date().toISOString();
+    const referrerId = getFieldValue(referral, ['referrer_id', 'Referrer ID']);
+    const currentReferralXP = getFieldValue(referral, ['xp_earned_from_referral', 'XP Earned From Referral'], 0);
 
     let xpReward = conversionType === 'applied' ? 100 : conversionType === 'hired' ? 500 : 0;
     if (xpReward > 0) {
-      const update = { ...referral, status: conversionType, updated_at: now, xp_earned_from_referral: (referral.xp_earned_from_referral || 0) + xpReward };
+      const update = { ...referral, referrer_id: referrerId, status: conversionType, updated_at: now, xp_earned_from_referral: currentReferralXP + xpReward };
       await dataAccess.updateRecord(COLLECTION_KEYS.driverReferrals, update, { suppressAuth: true });
 
-      const masterRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: referral.referrer_id, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
+      const masterRes = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referrer_id: referrerId, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
       if (masterRes.items?.length) {
         const master = masterRes.items[0];
-        const masterUpd = { ...master, total_xp_earned: (master.total_xp_earned || 0) + xpReward, updated_at: now };
-        if (conversionType === 'hired') masterUpd.successful_hires = (master.successful_hires || 0) + 1;
+        const totalXPEarned = getFieldValue(master, ['total_xp_earned', 'Total XP Earned'], 0);
+        const successfulHires = getFieldValue(master, ['successful_hires', 'Successful Hires'], 0);
+        const masterUpd = { ...master, total_xp_earned: totalXPEarned + xpReward, updated_at: now };
+        if (conversionType === 'hired') masterUpd.successful_hires = successfulHires + 1;
         await dataAccess.updateRecord(COLLECTION_KEYS.driverReferrals, masterUpd, { suppressAuth: true });
       }
-      awardReferralXP(referral.referrer_id, `referrer_on_${conversionType}`, { refereeId: userId, ...metadata });
-      createNotification(referral.referrer_id, 'referral_conversion', 'Referral Goal!', `Your referral goal reached: ${conversionType}`, '/driver/referrals').catch(() => {});
+      const rewardType = conversionType === 'applied' ? 'referrer_on_application' : 'referrer_on_hire';
+      awardReferralXP(referrerId, rewardType, { refereeId: userId, ...metadata });
+      createNotification(referrerId, 'referral_conversion', 'Referral Goal!', `Your referral goal reached: ${conversionType}`, '/driver/referrals').catch(() => {});
     }
-    return { success: true, wasReferred: true };
+    return { success: true, wasReferred: true, xpAwarded: xpReward };
   } catch (error) { return { success: false, error: error.message }; }
 }
 
@@ -131,12 +150,12 @@ export async function trackReferralConversion(userId, conversionType, metadata =
  */
 export async function awardMatchQualityBonus(driverId, recruiterId, matchScore, metadata = {}) {
     try {
-        if (!driverId || !recruiterId || matchScore === undefined) return { success: false, error: 'Missing params' };
+        if (!driverId || !recruiterId || matchScore === undefined) return { success: false, error: 'Missing required parameters' };
         let tier = null, dBonus = 0, rBonus = 0;
         if (matchScore >= 90) { tier = 'excellent'; dBonus = 150; rBonus = 200; }
         else if (matchScore >= 80) { tier = 'great'; dBonus = 100; rBonus = 150; }
         else if (matchScore >= 70) { tier = 'good'; dBonus = 50; rBonus = 75; }
-        if (!tier) return { success: true, bonusAwarded: false };
+        if (!tier) return { success: true, bonusAwarded: false, reason: 'Match score below threshold' };
 
         const now = new Date().toISOString();
         await dataAccess.insertRecord(COLLECTION_KEYS.matchQualityBonuses, { driver_id: driverId, recruiter_id: recruiterId, match_score: matchScore, bonus_tier: tier, driver_bonus_xp: dBonus, recruiter_bonus_points: rBonus, carrier_dot: String(metadata.carrierDot || ''), hire_date: now, created_at: now }, { suppressAuth: true });
@@ -148,7 +167,13 @@ export async function awardMatchQualityBonus(driverId, recruiterId, matchScore, 
         createNotification(driverId, 'match_quality_bonus', 'Match Bonus!', `Score ${matchScore}% earned you ${dBonus} XP`, '/driver/achievements').catch(() => {});
         createNotification(recruiterId, 'match_quality_bonus', 'Match Bonus!', `Hire score ${matchScore}% earned you ${rBonus} pts`, '/recruiter/leaderboard').catch(() => {});
 
-        return { success: true, bonusAwarded: true, bonusTier: tier, dBonus, rBonus };
+        return {
+          success: true,
+          bonusAwarded: true,
+          bonusTier: tier,
+          driverBonus: dBonus,
+          recruiterBonus: rBonus
+        };
     } catch (error) { return { success: false, error: error.message }; }
 }
 
@@ -156,9 +181,38 @@ export async function getMatchQualityBonusHistory(userId, userType) {
     try {
         const filterField = userType === 'driver' ? 'driver_id' : 'recruiter_id';
         const result = await dataAccess.queryRecords(COLLECTION_KEYS.matchQualityBonuses, { filters: { [filterField]: userId }, sort: [{ field: 'created_at', direction: 'desc' }], limit: 20, suppressAuth: true });
+        const items = result.items || [];
         const bonusField = userType === 'driver' ? 'driver_bonus_xp' : 'recruiter_bonus_points';
-        return { success: true, totalEarned: (result.items || []).reduce((s, r) => s + (r[bonusField] || 0), 0), recentBonuses: (result.items || []).slice(0, 10) };
+        const bonusByTier = { excellent: 0, great: 0, good: 0 };
+        items.forEach((item) => {
+          const tier = getFieldValue(item, ['bonus_tier', 'Bonus Tier']);
+          if (tier && bonusByTier[tier] !== undefined) {
+            bonusByTier[tier]++;
+          }
+        });
+
+        return {
+          success: true,
+          totalBonuses: items.length,
+          totalEarned: items.reduce((s, r) => s + (getFieldValue(r, [bonusField, userType === 'driver' ? 'Driver Bonus XP' : 'Recruiter Bonus Points'], 0) || 0), 0),
+          bonusByTier,
+          recentBonuses: items.slice(0, 10)
+        };
     } catch (error) { return { success: false, error: error.message }; }
+}
+
+export async function processHireBonus(driverId, recruiterId, matchScore, metadata = {}) {
+  const results = {
+    matchQualityBonus: null,
+    referralConversion: null
+  };
+
+  if (matchScore >= REFERRAL_CONFIG.matchQuality.good.threshold) {
+    results.matchQualityBonus = await awardMatchQualityBonus(driverId, recruiterId, matchScore, metadata);
+  }
+
+  results.referralConversion = await trackReferralConversion(driverId, 'hired', metadata);
+  return { success: true, results };
 }
 
 // =============================================================================
@@ -173,9 +227,21 @@ function buildReferralLink(code) {
     return `https://www.lastmiledr.app/signup?ref=${code}`;
 }
 
+function getFieldValue(record, keys, fallback = undefined) {
+    for (const key of keys) {
+        if (record && record[key] !== undefined && record[key] !== null) {
+            return record[key];
+        }
+    }
+    return fallback;
+}
+
 export async function validateReferralCode(code) {
     const res = await dataAccess.queryRecords(COLLECTION_KEYS.driverReferrals, { filters: { referral_code: code, is_referrer_record: 'Yes' }, limit: 1, suppressAuth: true });
-    return { valid: !!res.items?.length, referrerId: res.items?.[0]?.referrer_id || null };
+    return {
+      valid: !!res.items?.length,
+      referrerId: res.items?.length ? getFieldValue(res.items[0], ['referrer_id', 'Referrer ID']) : null
+    };
 }
 
 async function awardReferralXP(userId, rewardType, metadata = {}) {

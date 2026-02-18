@@ -210,6 +210,35 @@ Form (submit)
 
 ---
 
-## Dependencies
+## 
+## Phase 5: Verification Plan
 
-None - self-contained refactor of existing form.
+### 5.1 Automated Browser Testing (Manual or Scripted)
+- [ ] **Test Case 1: Initial Load**
+    - Verify only "Contact Name", "Email", "Phone", "Drivers Needed" are visible.
+    - Verify "Driver Types", "Equipment", "Company Details" are hidden (`display: none` or `height: 0`).
+- [ ] **Test Case 2: Progressive Reveal**
+    - Select "6-10 drivers" -> Verify "Driver Types" section slides down.
+    - Check "OTR" -> Verify "Equipment" section slides down.
+    - Check "Dry Van" -> Verify "Company Details" section slides down.
+- [ ] **Test Case 3: Validation**
+    - Enter invalid email "test@" -> Verify red border and error message on blur.
+    - Enter valid email "test@example.com" -> Verify green border/checkmark.
+    - Submit empty form -> Verify focus jumps to first invalid field (Name).
+- [ ] **Test Case 4: Phone Formatting**
+    - Type "5551234567" -> Verify input value becomes "(555) 123-4567".
+    - Delete characters -> Verify formatting adjusts correctly.
+
+### 5.2 Code Quality Verification
+- [ ] **Linting**: Run `npm run lint` to ensure no new errors in `Trucking Companies.html` (JS/CSS).
+- [ ] **Performance**: Check Chrome DevTools Performance tab for Main Thread blocking interaction < 100ms during reveals.
+
+### 5.3 Data Integrity
+- [ ] **Submission Test**: Fill out form completely and submit.
+    - Check Network tab for `postMessage` payload.
+    - Verify payload contains all fields:
+        - `contactName`, `email`, `phone`, `driversNeeded`
+        - `driverTypes` (array)
+        - `equipment` (array)
+        - `companyName`, `dotNumber`, `notes`
+

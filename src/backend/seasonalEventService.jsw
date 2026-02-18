@@ -1,492 +1,327 @@
-/**
- * Seasonal Event Service
- *
- * Manages seasonal and promotional events including:
- * - Event lifecycle management (start/end)
- * - XP/Points multipliers during events
- * - Event-specific challenges
- * - Event leaderboards
- *
- * This service uses Airtable-only collections (no Wix fallback).
- * 
- * @module backend/seasonalEventService
- */
-
-import * as dataAccess from 'backend/dataAccess';
+import * as airtableClient from 'backend/airtableClient';
+import { getAirtableTableName } from 'backend/config';
 import { createNotification } from 'backend/memberService';
 import { log } from 'backend/observabilityService';
 
-// Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
-    seasonalEvents: 'seasonalEvents',
-    eventParticipants: 'eventParticipants',
-    eventLeaderboard: 'eventLeaderboard',
-    challengeDefinitions: 'challengeDefinitions'
+  seasonalEvents: 'seasonalEvents',
+  eventParticipants: 'eventParticipants',
+  eventLeaderboard: 'eventLeaderboard',
+  challengeDefinitions: 'challengeDefinitions'
 };
-
-// =============================================================================
-// EVENT STATUS
-// =============================================================================
 
 const EVENT_STATUS = {
-    DRAFT: 'draft',
-    SCHEDULED: 'scheduled',
-    ACTIVE: 'active',
-    ENDED: 'ended',
-    CANCELLED: 'cancelled'
+  DRAFT: 'draft',
+  SCHEDULED: 'scheduled',
+  ACTIVE: 'active',
+  ENDED: 'ended',
+  CANCELLED: 'cancelled'
 };
 
-// =============================================================================
-// GET ACTIVE EVENTS
-// =============================================================================
+function table(key) {
+  return getAirtableTableName(key);
+}
 
-/**
- * Get all currently active events
- */
+function toItems(result) {
+  return result?.records || result?.items || [];
+}
+
+function mapEventRecord(r) {
+  return {
+    _id: r._id || r.id,
+    eventId: r.event_id || r['Event ID'],
+    name: r.name || r['Name'],
+    description: r.description || r['Description'],
+    type: r.event_type || r['Event Type'],
+    status: (r.status || r['Status'] || '').toLowerCase(),
+    startDate: r.start_date || r['Start Date'],
+    endDate: r.end_date || r['End Date'],
+    xpMultiplier: r.xp_multiplier || r['XP Multiplier'] || 1,
+    pointsMultiplier: r.points_multiplier || r['Points Multiplier'] || 1,
+    priority: r.priority || r['Priority'] || 0
+  };
+}
+
+function mapParticipant(r) {
+  return {
+    _id: r._id || r.id,
+    userId: r.user_id || r['User ID'],
+    userType: r.user_type || r['User Type'],
+    eventId: r.event_id || r['Event ID'],
+    eventName: r.event_name || r['Event Name'],
+    xpEarned: r.xp_earned || r['XP Earned'] || 0,
+    pointsEarned: r.points_earned || r['Points Earned'] || 0,
+    challengesCompleted: r.challenges_completed || r['Challenges Completed'] || 0,
+    joinedAt: r.joined_at || r['Joined At']
+  };
+}
+
+async function queryEventsByStatus(status) {
+  const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.seasonalEvents), {
+    filters: { status }
+  });
+  return toItems(result).map(mapEventRecord);
+}
+
 export async function getActiveEvents() {
-    try {
-        const now = new Date().toISOString();
-        const result = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, {
-            filters: { 
-                status: EVENT_STATUS.ACTIVE, 
-                start_date: { le: now }, 
-                end_date: { ge: now } 
-            },
-            sort: [{ field: 'priority', direction: 'desc' }], 
-            limit: 10, 
-            suppressAuth: true
-        });
-        return (result.items || []).map(normalizeEvent);
-    } catch (error) { 
-        return []; 
-    }
+  try {
+    const now = Date.now();
+    const events = await queryEventsByStatus(EVENT_STATUS.ACTIVE);
+    return events.filter((e) => {
+      const start = e.startDate ? new Date(e.startDate).getTime() : 0;
+      const end = e.endDate ? new Date(e.endDate).getTime() : Number.MAX_SAFE_INTEGER;
+      return start <= now && end >= now;
+    });
+  } catch (error) {
+    return [];
+  }
 }
 
-/**
- * Get upcoming events
- */
 export async function getUpcomingEvents(daysAhead = 7) {
-    try {
-        const now = new Date();
-        const futureDate = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
-        const result = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, {
-            filters: { 
-                status: EVENT_STATUS.SCHEDULED, 
-                start_date: { 
-                    gte: now.toISOString(), 
-                    le: futureDate.toISOString() 
-                } 
-            },
-            sort: [{ field: 'start_date', direction: 'asc' }], 
-            limit: 5, 
-            suppressAuth: true
-        });
-        return (result.items || []).map(normalizeEvent);
-    } catch (error) { 
-        return []; 
-    }
+  try {
+    const now = Date.now();
+    const endWindow = now + (daysAhead * 24 * 60 * 60 * 1000);
+    const events = await queryEventsByStatus(EVENT_STATUS.SCHEDULED);
+    return events
+      .filter((e) => {
+        const start = e.startDate ? new Date(e.startDate).getTime() : 0;
+        return start >= now && start <= endWindow;
+      })
+      .sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
+  } catch (error) {
+    return [];
+  }
 }
 
-/**
- * Get a specific event by ID
- */
 export async function getEventById(eventId) {
-    try {
-        const record = await dataAccess.getRecord(COLLECTION_KEYS.seasonalEvents, eventId, { suppressAuth: true });
-        return record ? normalizeEvent(record) : null;
-    } catch (error) { 
-        return null; 
-    }
+  try {
+    const record = await airtableClient.getRecord(table(COLLECTION_KEYS.seasonalEvents), eventId);
+    return record ? mapEventRecord(record) : null;
+  } catch (error) {
+    return null;
+  }
 }
 
-// =============================================================================
-// EVENT PARTICIPATION
-// =============================================================================
-
-/**
- * Join an active event
- */
 export async function joinEvent(userId, userType, eventId) {
-    try {
-        const event = await getEventById(eventId);
-        if (!event || event.status !== EVENT_STATUS.ACTIVE) {
-            return { success: false, error: 'event_not_active' };
-        }
-
-        const existing = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
-            filters: { user_id: userId, event_id: eventId }, 
-            limit: 1, 
-            suppressAuth: true
-        });
-        
-        if (existing.items?.length) {
-            return { 
-                success: true, 
-                already_joined: true, 
-                participant: normalizeParticipant(existing.items[0]) 
-            };
-        }
-
-        const now = new Date().toISOString();
-        const result = await dataAccess.insertRecord(COLLECTION_KEYS.eventParticipants, {
-            user_id: userId, 
-            user_type: userType, 
-            event_id: eventId, 
-            event_name: event.name,
-            points_earned: 0, 
-            xp_earned: 0, 
-            challenges_completed: 0, 
-            joined_at: now, 
-            created_at: now, 
-            updated_at: now
-        }, { suppressAuth: true });
-
-        if (!result.success) {
-            throw new Error(result.error);
-        }
-
-        return { 
-            success: true, 
-            participant: normalizeParticipant(result.record) 
-        };
-    } catch (error) { 
-        console.error('[seasonalEventService] joinEvent error:', error.message);
-        return { success: false, error: error.message }; 
+  try {
+    const event = await getEventById(eventId);
+    if (!event || event.status !== EVENT_STATUS.ACTIVE) {
+      return { success: false, error: 'event_not_active' };
     }
+
+    const existingResult = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
+      filters: { user_id: userId, event_id: eventId },
+      limit: 1
+    });
+    const existing = toItems(existingResult);
+
+    if (existing.length) {
+      return { success: true, already_joined: true, participant: mapParticipant(existing[0]) };
+    }
+
+    const now = new Date().toISOString();
+    const created = await airtableClient.createRecord(table(COLLECTION_KEYS.eventParticipants), {
+      user_id: userId,
+      user_type: userType,
+      event_id: eventId,
+      event_name: event.name,
+      points_earned: 0,
+      xp_earned: 0,
+      challenges_completed: 0,
+      joined_at: now,
+      created_at: now,
+      updated_at: now
+    });
+
+    return { success: true, participant: mapParticipant(created || {}) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
-/**
- * Get user participation details for an event
- */
 export async function getEventParticipation(userId, eventId) {
-    try {
-        const res = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, { 
-            filters: { user_id: userId, event_id: eventId }, 
-            limit: 1, 
-            suppressAuth: true 
-        });
-        
-        return res.items?.length 
-            ? { participating: true, participant: normalizeParticipant(res.items[0]) } 
-            : { participating: false };
-    } catch (error) { 
-        return { participating: false, error: error.message }; 
-    }
+  try {
+    const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
+      filters: { user_id: userId, event_id: eventId },
+      limit: 1
+    });
+    const items = toItems(result);
+    if (!items.length) return { participating: false };
+    return { participating: true, participant: mapParticipant(items[0]) };
+  } catch (error) {
+    return { participating: false, error: error.message };
+  }
 }
 
-/**
- * Update user's event stats
- */
 export async function updateEventStats(userId, eventId, stats) {
-    try {
-        const res = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, { 
-            filters: { user_id: userId, event_id: eventId }, 
-            limit: 1, 
-            suppressAuth: true 
-        });
-        
-        if (!res.items?.length) return;
-        
-        const p = res.items[0];
-        const update = { 
-            ...p, 
-            _id: p._id, // Ensure ID is present for update
-            updated_at: new Date().toISOString() 
-        };
-        
-        if (stats.xpEarned) update.xp_earned = (p.xp_earned || 0) + stats.xpEarned;
-        if (stats.pointsEarned) update.points_earned = (p.points_earned || 0) + stats.pointsEarned;
-        if (stats.challengeCompleted) update.challenges_completed = (p.challenges_completed || 0) + 1;
-        
-        await dataAccess.updateRecord(COLLECTION_KEYS.eventParticipants, update, { suppressAuth: true });
-    } catch (error) { 
-        console.error('[seasonalEventService] updateEventStats error:', error.message);
-    }
+  try {
+    const res = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
+      filters: { user_id: userId, event_id: eventId },
+      limit: 1
+    });
+    const items = toItems(res);
+    if (!items.length) return;
+
+    const p = items[0];
+    const update = {
+      ...p,
+      _id: p._id || p.id,
+      xp_earned: (p.xp_earned || 0) + (stats.xpEarned || 0),
+      points_earned: (p.points_earned || 0) + (stats.pointsEarned || 0),
+      challenges_completed: (p.challenges_completed || 0) + (stats.challengeCompleted ? 1 : 0),
+      updated_at: new Date().toISOString()
+    };
+
+    await airtableClient.updateRecord(table(COLLECTION_KEYS.eventParticipants), update._id, update);
+  } catch (error) {}
 }
 
-// =============================================================================
-// EVENT LEADERBOARD
-// =============================================================================
-
-/**
- * Get leaderboard for an event
- */
 export async function getEventLeaderboard(eventId, userType = 'all', options = {}) {
-    try {
-        const limit = options.limit || 20;
-        const filters = { event_id: eventId };
-        if (userType !== 'all') filters.user_type = userType;
-        
-        const sortField = userType === 'recruiter' ? 'points_earned' : 'xp_earned';
+  try {
+    const limit = options.limit || 20;
+    const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
+      filters: userType === 'all' ? { event_id: eventId } : { event_id: eventId, user_type: userType }
+    });
+    const items = toItems(result).map(mapParticipant);
 
-        const result = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
-            filters, 
-            sort: [{ field: sortField, direction: 'desc' }], 
-            limit: limit + 1, 
-            suppressAuth: true
-        });
-        
-        const items = result.items || [];
-        return { 
-            leaderboard: items.slice(0, limit).map((r, i) => ({ rank: i + 1, ...normalizeParticipant(r) })), 
-            total: result.totalCount || items.length, 
-            hasMore: items.length > limit 
-        };
-    } catch (error) { 
-        return { leaderboard: [], total: 0, error: error.message }; 
-    }
+    const sortField = userType === 'recruiter' ? 'pointsEarned' : 'xpEarned';
+    items.sort((a, b) => (b[sortField] || 0) - (a[sortField] || 0));
+
+    return {
+      leaderboard: items.slice(0, limit).map((item, i) => ({ rank: i + 1, ...item })),
+      total: items.length,
+      hasMore: items.length > limit
+    };
+  } catch (error) {
+    return { leaderboard: [], total: 0, error: error.message };
+  }
 }
 
-/**
- * Get a user's rank in an event
- */
 export async function getUserEventRank(userId, eventId) {
-    try {
-        // Querying all participants for rank calculation - might be expensive for very large events
-        const res = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, { 
-            filters: { event_id: eventId }, 
-            sort: [{ field: 'xp_earned', direction: 'desc' }], 
-            limit: 1000, // Reasonable limit for rank lookup
-            suppressAuth: true 
-        });
-        
-        const items = res.items || [];
-        const idx = items.findIndex(r => r.user_id === userId);
-        
-        if (idx === -1) return { participating: false };
-        
-        const r = items[idx];
-        return { 
-            participating: true, 
-            rank: idx + 1, 
-            totalParticipants: items.length, 
-            xpEarned: r.xp_earned || 0, 
-            pointsEarned: r.points_earned || 0, 
-            challengesCompleted: r.challenges_completed || 0 
-        };
-    } catch (error) { 
-        return { participating: false, error: error.message }; 
-    }
+  try {
+    const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
+      filters: { event_id: eventId }
+    });
+    const items = toItems(result).map(mapParticipant).sort((a, b) => (b.xpEarned || 0) - (a.xpEarned || 0));
+    const idx = items.findIndex((r) => r.userId === userId);
+    if (idx === -1) return { participating: false };
+
+    return {
+      participating: true,
+      rank: idx + 1,
+      totalParticipants: items.length,
+      xpEarned: items[idx].xpEarned,
+      pointsEarned: items[idx].pointsEarned,
+      challengesCompleted: items[idx].challengesCompleted
+    };
+  } catch (error) {
+    return { participating: false, error: error.message };
+  }
 }
 
-// =============================================================================
-// EVENT LIFECYCLE
-// =============================================================================
-
-/**
- * Activate scheduled events that should start now
- */
 export async function startScheduledEvents() {
-    try {
-        const now = new Date().toISOString();
-        const res = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, { 
-            filters: { 
-                status: EVENT_STATUS.SCHEDULED, 
-                start_date: { le: now } 
-            }, 
-            limit: 50, 
-            suppressAuth: true 
-        });
-        
-        for (const r of (res.items || [])) {
-            await dataAccess.updateRecord(COLLECTION_KEYS.seasonalEvents, { 
-                ...r, 
-                _id: r._id,
-                status: EVENT_STATUS.ACTIVE, 
-                activated_at: now, 
-                updated_at: now 
-            }, { suppressAuth: true });
-            
-            await log({
-                level: 'INFO',
-                source: 'seasonal-event-service',
-                message: `Started seasonal event: ${r.name}`,
-                details: { eventId: r.event_id }
-            });
-        }
-        
-        return { started: true, count: res.items?.length || 0 };
-    } catch (error) { 
-        return { started: false, error: error.message }; 
+  try {
+    const now = new Date().toISOString();
+    const events = await queryEventsByStatus(EVENT_STATUS.SCHEDULED);
+    const due = events.filter((e) => new Date(e.startDate).getTime() <= Date.now());
+
+    for (const e of due) {
+      await airtableClient.updateRecord(table(COLLECTION_KEYS.seasonalEvents), e._id, {
+        status: EVENT_STATUS.ACTIVE,
+        activated_at: now,
+        updated_at: now
+      });
     }
+
+    return { started: true, count: due.length };
+  } catch (error) {
+    return { started: false, error: error.message };
+  }
 }
 
-/**
- * Deactivate active events that have reached their end date
- */
 export async function endExpiredEvents() {
-    try {
-        const now = new Date().toISOString();
-        const res = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, { 
-            filters: { 
-                status: EVENT_STATUS.ACTIVE, 
-                end_date: { le: now } 
-            }, 
-            limit: 50, 
-            suppressAuth: true 
-        });
-        
-        for (const r of (res.items || [])) {
-            await dataAccess.updateRecord(COLLECTION_KEYS.seasonalEvents, { 
-                ...r, 
-                _id: r._id,
-                status: EVENT_STATUS.ENDED, 
-                ended_at: now, 
-                updated_at: now 
-            }, { suppressAuth: true });
+  try {
+    const now = new Date().toISOString();
+    const events = await queryEventsByStatus(EVENT_STATUS.ACTIVE);
+    const expired = events.filter((e) => new Date(e.endDate).getTime() <= Date.now());
 
-            await log({
-                level: 'INFO',
-                source: 'seasonal-event-service',
-                message: `Ended seasonal event: ${r.name}`,
-                details: { eventId: r.event_id }
-            });
-        }
-        
-        return { ended: true, count: res.items?.length || 0 };
-    } catch (error) { 
-        return { ended: false, error: error.message }; 
+    for (const e of expired) {
+      await airtableClient.updateRecord(table(COLLECTION_KEYS.seasonalEvents), e._id, {
+        status: EVENT_STATUS.ENDED,
+        ended_at: now,
+        updated_at: now
+      });
     }
+
+    return { ended: true, count: expired.length };
+  } catch (error) {
+    return { ended: false, error: error.message };
+  }
 }
 
-/**
- * Get current highest XP multiplier from active events
- */
 export async function getCurrentXPMultiplier() {
-    try {
-        const events = await getActiveEvents();
-        if (events.length === 0) return 1.0;
-        return Math.max(1.0, ...events.map(e => e.xpMultiplier || 1.0));
-    } catch (error) { 
-        return 1.0; 
-    }
+  const events = await getActiveEvents();
+  if (!events.length) return 1;
+  return Math.max(1, ...events.map((e) => e.xpMultiplier || 1));
 }
 
-/**
- * Get current highest points multiplier from active events
- */
 export async function getCurrentPointsMultiplier() {
-    try {
-        const events = await getActiveEvents();
-        if (events.length === 0) return 1.0;
-        return Math.max(1.0, ...events.map(e => e.pointsMultiplier || 1.0));
-    } catch (error) { 
-        return 1.0; 
-    }
+  const events = await getActiveEvents();
+  if (!events.length) return 1;
+  return Math.max(1, ...events.map((e) => e.pointsMultiplier || 1));
 }
 
-/**
- * Get challenges associated with an event
- */
 export async function getEventChallenges(eventId, userType) {
-    try {
-        const result = await dataAccess.queryRecords(COLLECTION_KEYS.challengeDefinitions, {
-            filters: { 
-                challenge_type: 'event', 
-                event_id: eventId, 
-                user_type: userType, 
-                is_active: 'Yes' 
-            },
-            sort: [{ field: 'display_order', direction: 'asc' }], 
-            limit: 20, 
-            suppressAuth: true
-        });
-        
-        return (result.items || []).map(r => ({ 
-            _id: r._id, 
-            challengeId: r.challenge_id, 
-            name: r.name, 
-            description: r.description, 
-            actionType: r.action_type, 
-            targetValue: r.target_value || 1, 
-            xpReward: r.xp_reward || 0, 
-            pointsReward: r.points_reward || 0, 
-            icon: r.icon, 
-            color: r.color 
-        }));
-    } catch (error) { 
-        return []; 
-    }
+  try {
+    const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.challengeDefinitions), {
+      filters: {
+        challenge_type: 'event',
+        event_id: eventId,
+        user_type: userType,
+        is_active: 'Yes'
+      }
+    });
+    const items = toItems(result);
+    return items.map((r) => ({
+      _id: r._id || r.id,
+      challengeId: r.challenge_id || r['Challenge ID'],
+      name: r.name || r['Name'],
+      description: r.description || r['Description'],
+      actionType: r.action_type || r['Action Type'],
+      targetValue: r.target_value || r['Target Value'] || 1,
+      xpReward: r.xp_reward || r['XP Reward'] || 0,
+      pointsReward: r.points_reward || r['Points Reward'] || 0,
+      icon: r.icon || r['Icon'],
+      color: r.color || r['Color']
+    }));
+  } catch (error) {
+    return [];
+  }
 }
 
-/**
- * Get a comprehensive event summary for a user
- */
 export async function getEventSummary(userId, userType) {
-    try {
-        const [active, upcoming] = await Promise.all([
-            getActiveEvents(), 
-            getUpcomingEvents(7)
-        ]);
-        
-        const participations = await Promise.all(active.map(e => getEventParticipation(userId, e._id)));
-        
-        const activeWithParticipation = active.map((e, i) => ({ 
-            ...e, 
-            participating: participations[i].participating, 
-            stats: participations[i].participant || null 
-        }));
-        
-        const [xpM, ptsM] = await Promise.all([
-            getCurrentXPMultiplier(), 
-            getCurrentPointsMultiplier()
-        ]);
-        
-        return { 
-            activeEvents: activeWithParticipation, 
-            upcomingEvents: upcoming, 
-            multipliers: { 
-                xp: xpM, 
-                points: ptsM, 
-                hasBonus: xpM > 1.0 || ptsM > 1.0 
-            } 
-        };
-    } catch (error) { 
-        return { error: error.message }; 
-    }
-}
+  try {
+    const [active, upcoming] = await Promise.all([getActiveEvents(), getUpcomingEvents(7)]);
+    const participations = await Promise.all(active.map((e) => getEventParticipation(userId, e._id)));
 
-// =============================================================================
-// NORMALIZE FUNCTIONS
-// =============================================================================
+    const activeWithParticipation = active.map((e, i) => ({
+      ...e,
+      participating: participations[i].participating,
+      stats: participations[i].participant || null
+    }));
 
-function normalizeEvent(r) {
-    return { 
-        _id: r._id, 
-        eventId: r.event_id, 
-        name: r.name, 
-        description: r.description, 
-        type: r.event_type, 
-        status: r.status, 
-        startDate: r.start_date, 
-        endDate: r.end_date, 
-        xpMultiplier: r.xp_multiplier || 1.0, 
-        pointsMultiplier: r.points_multiplier || 1.0, 
-        icon: r.icon, 
-        bannerImage: r.banner_image, 
-        color: r.color, 
-        priority: r.priority || 0, 
-        isActive: r.is_active === 'Yes', 
-        createdAt: r.created_at, 
-        updatedAt: r.updated_at 
+    const [xpM, ptsM] = await Promise.all([getCurrentXPMultiplier(), getCurrentPointsMultiplier()]);
+
+    return {
+      activeEvents: activeWithParticipation,
+      upcomingEvents: upcoming,
+      multipliers: { xp: xpM, points: ptsM, hasBonus: xpM > 1 || ptsM > 1 }
     };
+  } catch (error) {
+    return { error: error.message };
+  }
 }
 
-function normalizeParticipant(r) {
-    return { 
-        _id: r._id, 
-        userId: r.user_id, 
-        userType: r.user_type, 
-        eventId: r.event_id, 
-        eventName: r.event_name, 
-        xpEarned: r.xp_earned || 0, 
-        pointsEarned: r.points_earned || 0, 
-        challengesCompleted: r.challenges_completed || 0, 
-        joinedAt: r.joined_at, 
-        createdAt: r.created_at 
-    };
-}
-
-export function getEventStatuses() { 
-    return EVENT_STATUS; 
+export function getEventStatuses() {
+  return EVENT_STATUS;
 }

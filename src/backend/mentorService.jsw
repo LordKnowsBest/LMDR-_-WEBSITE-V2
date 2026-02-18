@@ -1,0 +1,571 @@
+import wixData from 'wix-data';
+import * as dataAccess from 'backend/dataAccess';
+import { DATA_SOURCE, WIX_COLLECTION_NAMES, AIRTABLE_TABLE_NAMES } from 'backend/configData';
+import { currentUser } from 'wix-users-backend';
+import { awardDriverXP } from 'backend/gamificationService';
+import { sendMessageNotification } from 'backend/emailService';
+import { sendMessage } from 'backend/messaging';
+
+const COLLECTION_KEYS = {
+    mentorProfiles: 'mentorProfiles',
+    mentorMatches: 'mentorMatches'
+};
+
+const MENTOR_STATUS = {
+    ACTIVE: 'Active',
+    PAUSED: 'Paused',
+    FULL: 'Full' // Capacity reached
+};
+
+const MATCH_STATUS = {
+    PENDING: 'Pending',
+    ACCEPTED: 'Accepted',
+    DECLINED: 'Declined',
+    COMPLETED: 'Completed',
+    EXPIRED: 'Expired'
+};
+
+const MILESTONE_TEMPLATES = [
+    { title: 'First Week Survival', description: 'Survive the first week on the road solo' },
+    { title: 'Route Master', description: 'Successfully navigate a complex route' },
+    { title: 'Safe Driver', description: 'Complete one month with zero safety incidents' },
+    { title: 'Fuel Efficient', description: 'Achieve above average fuel efficiency for a week' },
+    { title: 'Professional Communication', description: 'Maintain clear and timely communication with dispatch' }
+];
+
+// ============================================
+// HELPERS
+// ============================================
+
+async function getCurrentUserId() {
+    const user = currentUser;
+    if (!user.loggedIn) {
+        throw new Error('User must be logged in');
+    }
+    return user.id;
+}
+
+/**
+ * Internal update helper that doesn't check owner
+ */
+async function updateMentorProfileInternal(profileId, updates) {
+    return await dataAccess.updateRecord(COLLECTION_KEYS.mentorProfiles, {
+        ...updates,
+        _id: profileId,
+        updatedAt: new Date()
+    });
+}
+
+// ============================================
+// MENTOR PROFILES
+// ============================================
+
+/**
+ * Check if a driver can be a mentor
+ */
+export async function canBeMentor(driverId) {
+    try {
+        const result = await dataAccess.queryRecords('driverProfiles', {
+            filters: { _id: driverId },
+            limit: 1
+        });
+        const driver = result.items[0];
+        if (!driver) return false;
+
+        // Requirements: 5+ years experience and verified documents
+        return Number(driver.years_experience || 0) >= 5 && driver.docs_submitted === true;
+    } catch (error) {
+        console.error('Error checking mentor eligibility:', error);
+        return false;
+    }
+}
+
+/**
+ * Temporarily pause mentor profile
+ */
+export async function pauseMentorProfile() {
+    const userId = await getCurrentUserId();
+    const profile = await getMyMentorProfile();
+    if (!profile) throw new Error('Mentor profile not found');
+
+    return await updateMentorProfile({
+        status: MENTOR_STATUS.PAUSED
+    });
+}
+
+/**
+ * Get current user's mentor profile
+ */
+export async function getMyMentorProfile() {
+    const userId = await getCurrentUserId();
+
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.mentorProfiles, {
+            filters: { driverId: userId },
+            limit: 1
+        });
+
+        return result.items[0] || null;
+    } catch (error) {
+        console.error('Error fetching mentor profile:', error);
+        throw new Error('Failed to fetch mentor profile');
+    }
+}
+
+/**
+ * Create a new mentor profile
+ */
+export async function createMentorProfile(profileData) {
+    const userId = await getCurrentUserId();
+
+    // Validation
+    const isEligible = await canBeMentor(userId);
+    if (!isEligible) {
+        throw new Error('You do not meet the requirements to be a mentor (5+ years experience required)');
+    }
+
+    try {
+        // Check if exists
+        const existing = await getMyMentorProfile();
+        if (existing) {
+            throw new Error('Mentor profile already exists');
+        }
+
+        const newProfile = {
+            driverId: userId,
+            status: MENTOR_STATUS.ACTIVE,
+            firstName: profileData.firstName,
+            lastName: profileData.lastName,
+            email: profileData.email,
+            phone: profileData.phone,
+            bio: profileData.bio,
+            yearsExperience: Number(profileData.yearsExperience),
+            specialties: profileData.specialties || [], // Array of strings
+            languages: profileData.languages || ['English'],
+            availability: profileData.availability || [], // e.g. ['Weekends', 'Evenings']
+            maxMentees: Number(profileData.maxMentees) || 2,
+            currentMentees: 0,
+            totalMenteesHelped: 0,
+            rating: 5.0, // Initial rating
+            ratingCount: 0,
+            photoUrl: profileData.photoUrl,
+            badges: [],
+            joinedDate: new Date()
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.mentorProfiles, newProfile);
+        return { success: true, profile: result.record };
+    } catch (error) {
+        console.error('Error creating mentor profile:', error);
+        throw error;
+    }
+}
+
+/**
+ * Update an existing mentor profile
+ */
+export async function updateMentorProfile(profileData) {
+    const userId = await getCurrentUserId();
+
+    try {
+        const existing = await getMyMentorProfile();
+        if (!existing) {
+            throw new Error('Mentor profile not found');
+        }
+
+        const updateData = {
+            ...existing, // Keep ID and other immutable fields
+            ...profileData, // Overwrite with new data
+            updatedAt: new Date()
+        };
+
+        // Prevent ID tampering
+        if (updateData.driverId !== userId) {
+            throw new Error('Unauthorized update');
+        }
+
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.mentorProfiles, updateData);
+        return { success: true, profile: result.record };
+    } catch (error) {
+        console.error('Error updating mentor profile:', error);
+        throw error;
+    }
+}
+
+/**
+ * Search for mentors
+ */
+export async function searchMentors(filters = {}, limit = 20, offset = 0) {
+    try {
+        const queryFilters = {
+            status: MENTOR_STATUS.ACTIVE
+        };
+
+        // For MVP, we'll fetch active mentors and filter in memory if needed
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.mentorProfiles, {
+            filters: queryFilters,
+            limit: 100 
+        });
+
+        let mentors = result.items || [];
+
+        // Javascript filtering for complex array matches
+        if (filters.specialty) {
+            mentors = mentors.filter(m => m.specialties && m.specialties.includes(filters.specialty));
+        }
+
+        if (filters.availability) {
+            mentors = mentors.filter(m => m.availability && m.availability.includes(filters.availability));
+        }
+
+        // Remove mentors who are full
+        mentors = mentors.filter(m => (m.currentMentees || 0) < (m.maxMentees || 2));
+
+        // Pagination
+        const total = mentors.length;
+        const pagedItems = mentors.slice(offset, offset + limit);
+
+        return {
+            items: pagedItems,
+            total,
+            offset,
+            limit
+        };
+
+    } catch (error) {
+        console.error('Error searching mentors:', error);
+        throw new Error('Failed to search mentors');
+    }
+}
+
+/**
+ * Get recommendations for a mentee
+ */
+export async function getMentorRecommendations(menteeId) {
+    // Better logic: Match mentee profile with mentor specialties
+    // For now, fetch top rated active mentors with at least 1 spot open
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.mentorProfiles, {
+            filters: { status: MENTOR_STATUS.ACTIVE },
+            sort: [{ field: 'rating', direction: 'desc' }],
+            limit: 10
+        });
+
+        let candidates = result.items || [];
+        candidates = candidates.filter(m => (m.currentMentees || 0) < (m.maxMentees || 2));
+
+        return candidates.slice(0, 5);
+    } catch (e) {
+        return [];
+    }
+}
+
+/**
+ * Get public stats for a mentor
+ */
+export async function getMentorStats(mentorId) {
+    try {
+        const profile = await dataAccess.getRecord(COLLECTION_KEYS.mentorProfiles, mentorId);
+        if (!profile) return null;
+
+        return {
+            totalMentees: profile.totalMenteesHelped || 0,
+            avgRating: profile.rating || 5.0,
+            yearsExperience: profile.yearsExperience,
+            specialties: profile.specialties || []
+        };
+    } catch (error) {
+        console.error('Error getting mentor stats:', error);
+        return null;
+    }
+}
+
+// ============================================
+// MATCHING
+// ============================================
+
+/**
+ * Request a mentor
+ */
+export async function requestMentor(mentorId, requestData) {
+    const userId = await getCurrentUserId();
+
+    try {
+        // 1. Check if user already has an active mentor
+        const existingMatches = await getMyMatches();
+        const hasActive = existingMatches.active.length > 0;
+        const hasPending = existingMatches.pending.length > 0;
+
+        if (hasActive) throw new Error('You already have an active mentor');
+        if (hasPending) throw new Error('You already have a pending mentorship request');
+
+        // 2. Create request
+        const matchRequest = {
+            menteeId: userId,
+            mentorId: mentorId, // assuming driverId of the mentor
+            status: MATCH_STATUS.PENDING,
+            goals: requestData.goals || [],
+            introMessage: requestData.introMessage,
+            requestedDate: new Date(),
+            lastActivity: new Date(),
+            milestones: []
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.mentorMatches, matchRequest);
+
+        // Award XP to mentee
+        await awardDriverXP(userId, 'mentorship_requested', {
+            matchId: result.record._id,
+            mentorId
+        });
+
+        // Notify mentor
+        await sendMessageNotification(mentorId, {
+            recipientName: 'Mentor',
+            senderName: 'LMDR Program',
+            messagePreview: `New mentorship request from a driver! View your dashboard to respond.`,
+            dashboardUrl: 'https://www.lastmiledr.app/driver/mentor-program'
+        });
+
+        return { success: true, match: result.record };
+
+    } catch (error) {
+        console.error('Error requesting mentor:', error);
+        throw error;
+    }
+}
+
+/**
+ * Respond to a mentorship request (Mentor action)
+ */
+export async function respondToRequest(matchId, status) {
+    const userId = await getCurrentUserId();
+
+    if (![MATCH_STATUS.ACCEPTED, MATCH_STATUS.DECLINED].includes(status)) {
+        throw new Error('Invalid status');
+    }
+
+    try {
+        // 1. Fetch match
+        const match = await dataAccess.getRecord(COLLECTION_KEYS.mentorMatches, matchId);
+        if (!match) throw new Error('Match request not found');
+
+        // 2. Verify current user is the mentor
+        if (match.mentorId !== userId) {
+            throw new Error('Unauthorized: You are not the mentor for this request');
+        }
+
+        // 3. Update status
+        const updateData = {
+            ...match,
+            status: status,
+            responseDate: new Date(),
+            updatedAt: new Date(),
+            lastActivity: new Date()
+        };
+
+        await dataAccess.updateRecord(COLLECTION_KEYS.mentorMatches, updateData);
+
+        // Notify mentee
+        await sendMessageNotification(match.menteeId, {
+            recipientName: 'Mentee',
+            senderName: 'LMDR Program',
+            messagePreview: `Your mentorship request was \${status.toLowerCase()}!`,
+            dashboardUrl: 'https://www.lastmiledr.app/driver/mentor-program'
+        });
+
+        // 4. If accepted, increment mentor's mentee count and award XP
+        if (status === MATCH_STATUS.ACCEPTED) {
+            const mentorProfile = await getMyMentorProfile();
+            if (mentorProfile) {
+                const currentCount = mentorProfile.currentMentees || 0;
+                await updateMentorProfileInternal(mentorProfile._id, {
+                    currentMentees: currentCount + 1
+                });
+            }
+
+            await awardDriverXP(match.menteeId, 'mentorship_accepted', {
+                matchId: match._id,
+                mentorId: userId
+            });
+
+            // Create initial chat message
+            await sendMessage(match._id, "Hello! I've accepted your mentorship request. How can I help you?", match.menteeId, 'driver');
+        }
+
+        return { success: true };
+
+    } catch (error) {
+        console.error('Error responding to request:', error);
+        throw error;
+    }
+}
+
+/**
+ * Get pending mentee applications for a mentor
+ */
+export async function getMenteeApplications() {
+    const userId = await getCurrentUserId();
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.mentorMatches, {
+            filters: { mentorId: userId, status: MATCH_STATUS.PENDING }
+        });
+        return result.items || [];
+    } catch (error) {
+        console.error('Error fetching mentee applications:', error);
+        return [];
+    }
+}
+
+/**
+ * Get matches for current user (as Mentee or Mentor)
+ */
+export async function getMyMatches() {
+    const userId = await getCurrentUserId();
+
+    try {
+        // Fetch where user is mentee
+        const asMentee = await dataAccess.queryRecords(COLLECTION_KEYS.mentorMatches, {
+            filters: { menteeId: userId }
+        });
+
+        // Fetch where user is mentor
+        const asMentor = await dataAccess.queryRecords(COLLECTION_KEYS.mentorMatches, {
+            filters: { mentorId: userId }
+        });
+
+        const all = [...(asMentee.items || []), ...(asMentor.items || [])];
+
+        return {
+            pending: all.filter(m => m.status === MATCH_STATUS.PENDING),
+            active: all.filter(m => m.status === MATCH_STATUS.ACCEPTED),
+            history: all.filter(m => [MATCH_STATUS.COMPLETED, MATCH_STATUS.DECLINED, MATCH_STATUS.EXPIRED].includes(m.status))
+        };
+
+    } catch (error) {
+        console.error('Error fetching matches:', error);
+        throw new Error('Failed to fetch matches');
+    }
+}
+
+// ============================================
+// PROGRESS TRACKING
+// ============================================
+
+/**
+ * Log a milestone for a match
+ */
+export async function logMilestone(matchId, milestone) {
+    const userId = await getCurrentUserId();
+
+    try {
+        const match = await dataAccess.getRecord(COLLECTION_KEYS.mentorMatches, matchId);
+        if (!match) throw new Error('Match not found');
+
+        // verify participant
+        if (match.menteeId !== userId && match.mentorId !== userId) {
+            throw new Error('Unauthorized');
+        }
+
+        const newMilestone = {
+            title: milestone.title,
+            date: new Date(),
+            completedBy: userId
+        };
+
+        const milestones = match.milestones || [];
+        milestones.push(newMilestone);
+
+        await dataAccess.updateRecord(COLLECTION_KEYS.mentorMatches, {
+            ...match,
+            milestones,
+            updatedAt: new Date(),
+            lastActivity: new Date()
+        });
+
+        // Award XP
+        await awardDriverXP(userId, 'mentorship_milestone_completed', {
+            matchId,
+            milestone: milestone.title
+        });
+
+        return { success: true, milestones };
+
+    } catch (error) {
+        console.error('Error logging milestone:', error);
+        throw error;
+    }
+}
+
+/**
+ * Complete a mentorship program
+ */
+export async function completeMatch(matchId, feedback, rating) {
+    const userId = await getCurrentUserId();
+    
+    try {
+        const match = await dataAccess.getRecord(COLLECTION_KEYS.mentorMatches, matchId);
+        if (!match) throw new Error('Match not found');
+        
+        if (match.mentorId !== userId && match.menteeId !== userId) {
+            throw new Error('Unauthorized');
+        }
+        
+        const updateData = {
+            ...match,
+            status: MATCH_STATUS.COMPLETED,
+            completedAt: new Date(),
+            updatedAt: new Date(),
+            lastActivity: new Date()
+        };
+
+        if (userId === match.mentorId) {
+            updateData.feedback_mentor = feedback;
+            updateData.rating_of_mentee = Number(rating);
+        } else {
+            updateData.feedback_mentee = feedback;
+            updateData.rating_of_mentor = Number(rating);
+        }
+        
+        await dataAccess.updateRecord(COLLECTION_KEYS.mentorMatches, updateData);
+        
+        // Award XP
+        await awardDriverXP(match.menteeId, 'mentorship_completed', { matchId });
+        await awardDriverXP(match.mentorId, 'mentor_program_completed', { matchId });
+
+        // Update mentor stats if mentee rated
+        if (userId === match.menteeId) {
+            const mentorResult = await dataAccess.queryRecords(COLLECTION_KEYS.mentorProfiles, {
+                filters: { driverId: match.mentorId },
+                limit: 1
+            });
+            
+            const profile = mentorResult.items?.[0];
+            if (profile) {
+                const currentTotal = profile.totalMenteesHelped || 0;
+                const currentRating = profile.rating || 5.0;
+                const newRating = ((currentRating * currentTotal) + Number(rating)) / (currentTotal + 1);
+                
+                await updateMentorProfileInternal(profile._id, {
+                    totalMenteesHelped: currentTotal + 1,
+                    rating: Number(newRating.toFixed(2)),
+                    currentMentees: Math.max(0, (profile.currentMentees || 0) - 1)
+                });
+            }
+        } else if (userId === match.mentorId) {
+            // Mentor completed, just decrement current count if not already done by mentee
+            const mentorProfile = await getMyMentorProfile();
+            if (mentorProfile) {
+                await updateMentorProfileInternal(mentorProfile._id, {
+                    currentMentees: Math.max(0, (mentorProfile.currentMentees || 0) - 1)
+                });
+            }
+        }
+        
+        return { success: true };
+    } catch (error) {
+        console.error('Error completing match:', error);
+        throw error;
+    }
+}
+

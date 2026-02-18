@@ -49,6 +49,8 @@ const MESSAGE_REGISTRY = {
         'navigateToMyCareer',    // Career nav
         'navigateToProfile',     // Profile nav
         'navigateToForums',      // Forums nav
+        'navigateToMentorship',  // Mentorship nav
+        'navigateToPetFriendly', // Pet-Friendly nav
         'navigateToHealth',      // Health nav
         'ping'
     ],
@@ -248,6 +250,14 @@ async function handleHtmlMessage(msg) {
 
             case 'navigateToForums':
                 wixLocation.to('/driver-community');
+                break;
+
+            case 'navigateToMentorship':
+                wixLocation.to('/mentor-program');
+                break;
+
+            case 'navigateToPetFriendly':
+                wixLocation.to('/pet-friendly-stops');
                 break;
 
             case 'navigateToHealth':

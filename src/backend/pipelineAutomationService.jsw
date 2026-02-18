@@ -1,8 +1,9 @@
 import wixUsersBackend from 'wix-users-backend';
 import * as dataAccess from 'backend/dataAccess';
+import * as airtableClient from 'backend/airtableClient';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 
-// Collection keys for dataAccess
 const COLLECTION_KEYS = {
   pipelineAutomationRules: 'pipelineAutomationRules',
   automationLog: 'automationLog',
@@ -14,37 +15,61 @@ const VALID_TRIGGER_EVENTS = [
   'background_check_clear', 'no_response_7d', 'driver_message'
 ];
 
-const VALID_STAGES = [
-  'interested', 'applied', 'in_review', 'contacted', 'offer', 'hired', 'rejected', 'withdrawn'
-];
-
-// Helper to get current user ID
 async function getCurrentUserId() {
   const currentUser = wixUsersBackend.currentUser;
   return currentUser.loggedIn ? currentUser.id : null;
 }
 
-// ============================================================================
-// GET AUTOMATION RULES
-// ============================================================================
+function toItems(result) {
+  return result?.records || result?.items || [];
+}
+
+function table(key) {
+  return getAirtableTableName(key);
+}
+
+async function queryRecords(key, options) {
+  if (usesAirtable(key)) {
+    return airtableClient.queryRecords(table(key), options || {});
+  }
+  return dataAccess.queryRecords(key, { ...(options || {}), suppressAuth: true });
+}
+
+async function createRecord(key, record) {
+  if (usesAirtable(key)) {
+    return airtableClient.createRecord(table(key), record);
+  }
+  const result = await dataAccess.insertRecord(key, record, { suppressAuth: true });
+  if (!result.success) throw new Error(result.error || 'Insert failed');
+  return result.record;
+}
+
+async function getRecord(key, id) {
+  if (usesAirtable(key)) {
+    return airtableClient.getRecord(table(key), id);
+  }
+  return dataAccess.getRecord(key, id, { suppressAuth: true });
+}
+
+async function updateRecord(key, id, values) {
+  if (usesAirtable(key)) {
+    return airtableClient.updateRecord(table(key), id, values);
+  }
+  return dataAccess.updateRecord(key, { ...values, _id: id }, { suppressAuth: true });
+}
 
 export async function getAutomationRules(carrierDot) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
+    const result = await queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
       filters: { carrier_dot: String(carrierDot), is_active: true },
       sort: [{ field: 'priority', direction: 'asc' }],
-      limit: 50, suppressAuth: true
+      limit: 50
     });
-    return { success: true, rules: result.items || [] };
+    return { success: true, rules: toItems(result) };
   } catch (error) {
-    console.error('getAutomationRules error:', error);
     return { success: false, error: error.message };
   }
 }
-
-// ============================================================================
-// CREATE/UPDATE/DELETE/TOGGLE RULE
-// ============================================================================
 
 export async function createAutomationRule(carrierDot, ruleData) {
   try {
@@ -54,34 +79,50 @@ export async function createAutomationRule(carrierDot, ruleData) {
     const { ruleName, triggerEvent, triggerConditions, fromStage, toStage, autoNote, notifyRecruiter } = ruleData;
     if (!ruleName?.trim() || !VALID_TRIGGER_EVENTS.includes(triggerEvent)) return { success: false, error: 'Invalid data' };
 
-    // Determine priority
-    const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
-      filters: { carrier_dot: String(carrierDot), is_active: true },
-      limit: 100, suppressAuth: true
+    const conflictResult = await queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
+      filters: {
+        carrier_dot: String(carrierDot),
+        trigger_event: triggerEvent,
+        from_stage: fromStage || '',
+        is_active: true
+      },
+      limit: 1
     });
-    const maxPriority = (existingResult.items || []).reduce((max, r) => Math.max(max, r.priority || 0), 0);
+    if (toItems(conflictResult).length) {
+      return { success: false, error: 'A rule with this trigger and stage already exists' };
+    }
+
+    const existingResult = await queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
+      filters: { carrier_dot: String(carrierDot), is_active: true },
+      limit: 100
+    });
+    const maxPriority = toItems(existingResult).reduce((max, r) => Math.max(max, r.priority || 0), 0);
 
     const record = {
-      carrier_dot: String(carrierDot), rule_name: ruleName.trim(), trigger_event: triggerEvent,
-      trigger_conditions_json: JSON.stringify(triggerConditions || {}), from_stage: fromStage || '',
-      to_stage: toStage || '', auto_note: autoNote || '', notify_recruiter: notifyRecruiter !== false,
-      is_active: true, priority: maxPriority + 1, is_default: false
+      carrier_dot: String(carrierDot),
+      rule_name: ruleName.trim(),
+      trigger_event: triggerEvent,
+      trigger_conditions_json: JSON.stringify(triggerConditions || {}),
+      from_stage: fromStage || '',
+      to_stage: toStage || '',
+      auto_note: autoNote || '',
+      notify_recruiter: notifyRecruiter !== false,
+      is_active: true,
+      priority: maxPriority + 1,
+      is_default: false
     };
 
-    const result = await dataAccess.insertRecord(COLLECTION_KEYS.pipelineAutomationRules, record, { suppressAuth: true });
-    if (!result.success) throw new Error(result.error);
-
+    const created = await createRecord(COLLECTION_KEYS.pipelineAutomationRules, record);
     logFeatureInteraction('pipeline_automation', userId, 'create_rule', { carrierDot, triggerEvent }).catch(() => {});
-    return { success: true, rule: result.record };
+    return { success: true, rule: created };
   } catch (error) {
-    console.error('createAutomationRule error:', error);
     return { success: false, error: error.message };
   }
 }
 
 export async function updateAutomationRule(ruleId, updates) {
   try {
-    const existing = await dataAccess.getRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId, { suppressAuth: true });
+    const existing = await getRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId);
     if (!existing) return { success: false, error: 'Rule not found' };
 
     const updatedRecord = {
@@ -95,94 +136,95 @@ export async function updateAutomationRule(ruleId, updates) {
       notify_recruiter: updates.notifyRecruiter !== undefined ? updates.notifyRecruiter : existing.notify_recruiter
     };
 
-    const result = await dataAccess.updateRecord(COLLECTION_KEYS.pipelineAutomationRules, updatedRecord, { suppressAuth: true });
-    if (!result.success) throw new Error(result.error);
-    return { success: true, rule: result.record };
+    const saved = await updateRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId, updatedRecord);
+    return { success: true, rule: saved };
   } catch (error) {
-    console.error('updateAutomationRule error:', error);
     return { success: false, error: error.message };
   }
 }
 
 export async function deleteAutomationRule(ruleId) {
   try {
-    const existing = await dataAccess.getRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId, { suppressAuth: true });
+    const existing = await getRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId);
     if (!existing) return { success: false, error: 'Rule not found' };
-    await dataAccess.updateRecord(COLLECTION_KEYS.pipelineAutomationRules, { ...existing, is_active: false }, { suppressAuth: true });
+    await updateRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId, { ...existing, is_active: false });
     return { success: true };
   } catch (error) {
-    console.error('deleteAutomationRule error:', error);
     return { success: false, error: error.message };
   }
 }
 
 export async function toggleRuleStatus(ruleId, isActive) {
   try {
-    const existing = await dataAccess.getRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId, { suppressAuth: true });
+    const existing = await getRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId);
     if (!existing) return { success: false, error: 'Rule not found' };
-    await dataAccess.updateRecord(COLLECTION_KEYS.pipelineAutomationRules, { ...existing, is_active: !!isActive }, { suppressAuth: true });
+    await updateRecord(COLLECTION_KEYS.pipelineAutomationRules, ruleId, { ...existing, is_active: !!isActive });
     return { success: true, isActive: !!isActive };
   } catch (error) {
-    console.error('toggleRuleStatus error:', error);
     return { success: false, error: error.message };
   }
 }
-
-// ============================================================================
-// PROCESS EVENT
-// ============================================================================
 
 export async function processEvent(carrierDot, eventType, eventData) {
   try {
     if (!VALID_TRIGGER_EVENTS.includes(eventType)) return { success: false, error: 'Invalid event' };
 
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
-      filters: { 
-        carrier_dot: String(carrierDot), trigger_event: eventType, is_active: true,
-        from_stage: eventData.fromStatus ? { in: [eventData.fromStatus, ''] } : undefined
+    const result = await queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
+      filters: {
+        carrier_dot: String(carrierDot),
+        trigger_event: eventType,
+        is_active: true,
+        ...(eventData.fromStatus ? { from_stage: eventData.fromStatus } : {})
       },
-      sort: [{ field: 'priority', direction: 'asc' }], limit: 10, suppressAuth: true
+      sort: [{ field: 'priority', direction: 'asc' }],
+      limit: 10
     });
 
-    if (!result.items?.length) return { success: true, matched: false };
+    const rules = toItems(result);
+    if (!rules.length) return { success: true, matched: false };
 
-    const rule = result.items[0];
-    let executionSuccess = true, errorMessage = '';
+    const rule = rules[0];
+    let executionSuccess = true;
+    let errorMessage = '';
 
     try {
       if (rule.to_stage && eventData.interestId) {
         const { updateCandidateStatus } = await import('backend/recruiter_service');
         await updateCandidateStatus(eventData.interestId, rule.to_stage, rule.auto_note || `Auto-transition: ${rule.rule_name}`);
       }
-    } catch (e) { executionSuccess = false; errorMessage = e.message; }
+    } catch (e) {
+      executionSuccess = false;
+      errorMessage = e.message;
+    }
 
-    await dataAccess.insertRecord(COLLECTION_KEYS.automationLog, {
-      rule_id: rule._id, carrier_dot: String(carrierDot), driver_id: eventData.driverId || '',
-      interest_id: eventData.interestId || '', trigger_event: eventType, from_stage: eventData.fromStatus || '',
-      to_stage: rule.to_stage || '', executed_at: new Date().toISOString(), success: executionSuccess, error_message: errorMessage
-    }, { suppressAuth: true });
+    await createRecord(COLLECTION_KEYS.automationLog, {
+      rule_id: rule._id || rule.id,
+      carrier_dot: String(carrierDot),
+      driver_id: eventData.driverId || '',
+      interest_id: eventData.interestId || '',
+      trigger_event: eventType,
+      from_stage: eventData.fromStatus || '',
+      to_stage: rule.to_stage || '',
+      executed_at: new Date().toISOString(),
+      success: executionSuccess,
+      error_message: errorMessage
+    });
 
     return { success: true, matched: true, ruleName: rule.rule_name, toStage: rule.to_stage, executionSuccess };
   } catch (error) {
-    console.error('processEvent error:', error);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// GET AUTOMATION LOG & PROCESS STALE
-// ============================================================================
-
 export async function getAutomationLog(carrierDot, options = {}) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.automationLog, {
+    const result = await queryRecords(COLLECTION_KEYS.automationLog, {
       filters: { carrier_dot: String(carrierDot) },
       sort: [{ field: 'executed_at', direction: 'desc' }],
-      limit: options.limit || 20, suppressAuth: true
+      limit: options.limit || 20
     });
-    return { success: true, log: result.items || [] };
+    return { success: true, log: toItems(result) };
   } catch (error) {
-    console.error('getAutomationLog error:', error);
     return { success: false, error: error.message };
   }
 }
@@ -190,31 +232,33 @@ export async function getAutomationLog(carrierDot, options = {}) {
 export async function processStaleAutomation() {
   const startTime = Date.now();
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
-      filters: { trigger_event: 'no_response_7d', is_active: true }, limit: 100, suppressAuth: true
+    const result = await queryRecords(COLLECTION_KEYS.pipelineAutomationRules, {
+      filters: { trigger_event: 'no_response_7d', is_active: true }, limit: 100
     });
-    if (!result.items?.length) return { success: true, processed: 0 };
+    const rules = toItems(result);
+    if (!rules.length) return { success: true, processed: 0 };
 
-    const carrierDots = [...new Set(result.items.map(r => r.carrier_dot))];
+    const carrierDots = [...new Set(rules.map((r) => r.carrier_dot))];
     let totalProcessed = 0;
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
     for (const carrierDot of carrierDots) {
-      const staleResult = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
-        filters: { 
-          carrier_dot: String(carrierDot), status: { hasSome: ['contacted', 'in_review'] },
-          action_timestamp: { lt: sevenDaysAgo }
-        }, limit: 50, suppressAuth: true
+      const staleResult = await queryRecords(COLLECTION_KEYS.interests, {
+        filters: { carrier_dot: String(carrierDot) }, limit: 50
       });
 
-      for (const candidate of (staleResult.items || [])) {
-        await processEvent(carrierDot, 'no_response_7d', { driverId: candidate.driver_id, interestId: candidate._id, fromStatus: candidate.status });
+      for (const candidate of toItems(staleResult)) {
+        if (!['contacted', 'in_review'].includes(candidate.status)) continue;
+        await processEvent(carrierDot, 'no_response_7d', {
+          driverId: candidate.driver_id,
+          interestId: candidate._id,
+          fromStatus: candidate.status
+        });
         totalProcessed++;
       }
     }
+
     return { success: true, processed: totalProcessed, durationMs: Date.now() - startTime };
   } catch (error) {
-    console.error('[PipelineAutomation] Stale detection failed:', error);
     return { success: false, error: error.message };
   }
 }
@@ -222,18 +266,24 @@ export async function processStaleAutomation() {
 export async function seedDefaultRules(carrierDot) {
   const defaults = [
     { rule_name: 'Auto-advance on CDL verification', trigger_event: 'cdl_verified', from_stage: 'applied', to_stage: 'in_review', auto_note: 'CDL verified - auto-advanced to review', notify_recruiter: true },
+    { rule_name: 'Auto-advance on doc upload', trigger_event: 'document_uploaded', from_stage: 'interested', to_stage: 'applied', auto_note: 'Required docs uploaded', notify_recruiter: true },
+    { rule_name: 'Auto-advance on background clear', trigger_event: 'background_check_clear', from_stage: 'in_review', to_stage: 'contacted', auto_note: 'Background cleared', notify_recruiter: true },
     { rule_name: 'Flag stale candidates', trigger_event: 'no_response_7d', from_stage: 'contacted', to_stage: '', auto_note: 'No response for 7+ days - needs follow-up', notify_recruiter: true }
   ];
 
   let created = 0;
   for (let i = 0; i < defaults.length; i++) {
     try {
-      await dataAccess.insertRecord(COLLECTION_KEYS.pipelineAutomationRules, {
-        ...defaults[i], carrier_dot: String(carrierDot), trigger_conditions_json: '{}',
-        is_active: true, priority: i + 1, is_default: true
-      }, { suppressAuth: true });
+      await createRecord(COLLECTION_KEYS.pipelineAutomationRules, {
+        ...defaults[i],
+        carrier_dot: String(carrierDot),
+        trigger_conditions_json: '{}',
+        is_active: true,
+        priority: i + 1,
+        is_default: true
+      });
       created++;
-    } catch (err) { }
+    } catch (err) {}
   }
   return { success: true, created, total: defaults.length };
 }

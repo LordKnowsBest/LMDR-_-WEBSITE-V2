@@ -1,8 +1,9 @@
 import wixUsersBackend from 'wix-users-backend';
 import * as dataAccess from 'backend/dataAccess';
+import * as airtableClient from 'backend/airtableClient';
+import { usesAirtable, getAirtableTableName } from 'backend/config';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 
-// Collection keys for dataAccess
 const COLLECTION_KEYS = {
   interventionTemplates: 'interventionTemplates',
   interventionLog: 'interventionLog',
@@ -14,7 +15,6 @@ const VALID_CHANNELS = ['sms', 'email'];
 const VALID_TONES = ['empathetic', 'professional', 'urgent'];
 const VALID_OUTCOMES = ['improved', 'no_change', 'worsened', 'unknown'];
 
-// Helper to get current user ID
 async function getCurrentUserId() {
   const currentUser = wixUsersBackend.currentUser;
   return currentUser.loggedIn ? currentUser.id : null;
@@ -28,61 +28,82 @@ function renderTemplate(template, variables) {
   return rendered;
 }
 
-// ============================================================================
-// GET TEMPLATES
-// ============================================================================
+function table(key) {
+  return getAirtableTableName(key);
+}
+
+function toItems(result) {
+  return result?.records || result?.items || [];
+}
+
+async function queryRecords(key, options) {
+  if (usesAirtable(key)) {
+    return airtableClient.queryRecords(table(key), options || {});
+  }
+  return dataAccess.queryRecords(key, { ...(options || {}), suppressAuth: true });
+}
+
+async function createRecord(key, record) {
+  if (usesAirtable(key)) {
+    return airtableClient.createRecord(table(key), record);
+  }
+  const result = await dataAccess.insertRecord(key, record, { suppressAuth: true });
+  if (!result.success) throw new Error(result.error || 'Insert failed');
+  return result.record;
+}
+
+async function getRecord(key, id) {
+  if (usesAirtable(key)) {
+    return airtableClient.getRecord(table(key), id);
+  }
+  return dataAccess.getRecord(key, id, { suppressAuth: true });
+}
+
+async function updateRecord(key, id, values) {
+  if (usesAirtable(key)) {
+    return airtableClient.updateRecord(table(key), id, values);
+  }
+  return dataAccess.updateRecord(key, { ...values, _id: id }, { suppressAuth: true });
+}
 
 export async function getTemplates(carrierDot, riskType) {
   try {
-    const filters = { is_active: true };
-    // Include system defaults (no carrier_dot) and carrier-specific
-    // dataAccess queryRecords doesn't support complex OR filters directly in this way yet, 
-    // but we'll fetch and filter if necessary or use specialized dataAccess methods.
-    
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interventionTemplates, {
+    const result = await queryRecords(COLLECTION_KEYS.interventionTemplates, {
       filters: { is_active: true },
       sort: [{ field: 'usage_count', direction: 'desc' }],
-      limit: 100, suppressAuth: true
+      limit: 100
     });
 
-    const templates = (result.items || []).filter(t => 
+    const templates = toItems(result).filter((t) =>
       (t.carrier_dot === String(carrierDot) || !t.carrier_dot || t.is_default) &&
       (!riskType || t.risk_type === riskType)
     );
 
     return { success: true, templates };
   } catch (error) {
-    console.error('getTemplates error:', error);
     return { success: false, error: error.message };
   }
 }
 
 export async function getAllTemplates(carrierDot) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interventionTemplates, {
+    const result = await queryRecords(COLLECTION_KEYS.interventionTemplates, {
       filters: { is_active: true },
       sort: [{ field: 'usage_count', direction: 'desc' }],
-      limit: 100, suppressAuth: true
+      limit: 100
     });
 
-    const templates = (result.items || []).filter(t => 
-      t.carrier_dot === String(carrierDot) || !t.carrier_dot || t.is_default
-    );
+    const templates = toItems(result).filter((t) => t.carrier_dot === String(carrierDot) || !t.carrier_dot || t.is_default);
 
     const grouped = {};
-    VALID_RISK_TYPES.forEach(rt => { grouped[rt] = []; });
-    templates.forEach(t => { if (grouped[t.risk_type]) grouped[t.risk_type].push(t); });
+    VALID_RISK_TYPES.forEach((rt) => { grouped[rt] = []; });
+    templates.forEach((t) => { if (grouped[t.risk_type]) grouped[t.risk_type].push(t); });
 
     return { success: true, templatesByRiskType: grouped, total: templates.length };
   } catch (error) {
-    console.error('getAllTemplates error:', error);
     return { success: false, error: error.message };
   }
 }
-
-// ============================================================================
-// CREATE/UPDATE/DELETE TEMPLATE
-// ============================================================================
 
 export async function createTemplate(carrierDot, templateData) {
   try {
@@ -101,18 +122,16 @@ export async function createTemplate(carrierDot, templateData) {
       usage_count: 0, success_rate: 0, is_active: true
     };
 
-    const result = await dataAccess.insertRecord(COLLECTION_KEYS.interventionTemplates, record, { suppressAuth: true });
-    if (!result.success) throw new Error(result.error);
-    return { success: true, template: result.record };
+    const created = await createRecord(COLLECTION_KEYS.interventionTemplates, record);
+    return { success: true, template: created };
   } catch (error) {
-    console.error('createTemplate error:', error);
     return { success: false, error: error.message };
   }
 }
 
 export async function updateTemplate(templateId, updates) {
   try {
-    const existing = await dataAccess.getRecord(COLLECTION_KEYS.interventionTemplates, templateId, { suppressAuth: true });
+    const existing = await getRecord(COLLECTION_KEYS.interventionTemplates, templateId);
     if (!existing) return { success: false, error: 'Template not found' };
     if (existing.is_default) return { success: false, error: 'Cannot edit default' };
 
@@ -125,42 +144,35 @@ export async function updateTemplate(templateId, updates) {
       tone: VALID_TONES.includes(updates.tone) ? updates.tone : existing.tone
     };
 
-    const result = await dataAccess.updateRecord(COLLECTION_KEYS.interventionTemplates, updatedRecord, { suppressAuth: true });
-    if (!result.success) throw new Error(result.error);
-    return { success: true, template: result.record };
+    const saved = await updateRecord(COLLECTION_KEYS.interventionTemplates, templateId, updatedRecord);
+    return { success: true, template: saved };
   } catch (error) {
-    console.error('updateTemplate error:', error);
     return { success: false, error: error.message };
   }
 }
 
 export async function deleteTemplate(templateId) {
   try {
-    const existing = await dataAccess.getRecord(COLLECTION_KEYS.interventionTemplates, templateId, { suppressAuth: true });
+    const existing = await getRecord(COLLECTION_KEYS.interventionTemplates, templateId);
     if (!existing) return { success: false, error: 'Template not found' };
     if (existing.is_default) return { success: false, error: 'Cannot delete default' };
 
-    await dataAccess.updateRecord(COLLECTION_KEYS.interventionTemplates, { ...existing, is_active: false }, { suppressAuth: true });
+    await updateRecord(COLLECTION_KEYS.interventionTemplates, templateId, { ...existing, is_active: false });
     return { success: true };
   } catch (error) {
-    console.error('deleteTemplate error:', error);
     return { success: false, error: error.message };
   }
 }
-
-// ============================================================================
-// SEND INTERVENTION
-// ============================================================================
 
 export async function sendIntervention(templateId, driverId, overrides = {}) {
   try {
     const userId = await getCurrentUserId();
     if (!userId) return { success: false, error: 'Not authenticated' };
 
-    const template = await dataAccess.getRecord(COLLECTION_KEYS.interventionTemplates, templateId, { suppressAuth: true });
+    const template = await getRecord(COLLECTION_KEYS.interventionTemplates, templateId);
     if (!template) return { success: false, error: 'Template not found' };
 
-    const driverProfile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
+    const driverProfile = await getRecord(COLLECTION_KEYS.driverProfiles, driverId);
 
     const variables = {
       firstName: overrides.firstName || driverProfile?.first_name || 'Driver',
@@ -171,111 +183,119 @@ export async function sendIntervention(templateId, driverId, overrides = {}) {
       lastPayAmount: overrides.lastPayAmount || ''
     };
 
-    const renderedSubject = renderTemplate(overrides.subjectLine || template.subject_line, variables);
-    const renderedBody = renderTemplate(overrides.bodyTemplate || template.body_template, variables);
+    const renderedSubject = renderTemplate(overrides.subjectLine || template.subject_line || '', variables);
+    const renderedBody = renderTemplate(overrides.bodyTemplate || template.body_template || '', variables);
 
     const channel = overrides.channel || template.channel;
     if (channel === 'email' && driverProfile?._owner) {
       try {
         const emailService = await import('backend/emailService');
         await emailService.sendInterventionEmail(driverProfile._owner, renderedSubject, renderedBody);
-      } catch (e) { }
+      } catch (e) {}
     }
 
-    const logRecord = {
-      template_id: templateId, driver_id: driverId, recruiter_id: userId,
+    const created = await createRecord(COLLECTION_KEYS.interventionLog, {
+      template_id: templateId,
+      driver_id: driverId,
+      recruiter_id: userId,
       carrier_dot: template.carrier_dot || overrides.carrierDot || '',
-      sent_at: new Date().toISOString(), channel_used: channel,
-      message_sent: renderedBody, outcome: 'unknown', outcome_date: null, is_active: true
-    };
+      sent_at: new Date().toISOString(),
+      channel_used: channel,
+      message_sent: renderedBody,
+      outcome: 'unknown',
+      outcome_date: null,
+      is_active: true
+    });
 
-    const result = await dataAccess.insertRecord(COLLECTION_KEYS.interventionLog, logRecord, { suppressAuth: true });
-    if (!result.success) throw new Error(result.error);
-
-    await dataAccess.updateRecord(COLLECTION_KEYS.interventionTemplates, {
-      ...template, usage_count: (template.usage_count || 0) + 1
-    }, { suppressAuth: true });
+    await updateRecord(COLLECTION_KEYS.interventionTemplates, templateId, {
+      ...template,
+      usage_count: (template.usage_count || 0) + 1
+    });
 
     logFeatureInteraction('intervention', userId, 'send', { channel, riskType: template.risk_type }).catch(() => {});
 
-    return { success: true, interventionId: result.record._id, channelUsed: channel, messageSent: renderedBody };
+    return { success: true, interventionId: created?._id || created?.id, channelUsed: channel, messageSent: renderedBody };
   } catch (error) {
-    console.error('sendIntervention error:', error);
     return { success: false, error: error.message };
   }
 }
-
-// ============================================================================
-// LOG INTERVENTION OUTCOME
-// ============================================================================
 
 export async function logInterventionOutcome(interventionId, outcome) {
   try {
     if (!VALID_OUTCOMES.includes(outcome)) return { success: false, error: 'Invalid outcome' };
 
-    const existing = await dataAccess.getRecord(COLLECTION_KEYS.interventionLog, interventionId, { suppressAuth: true });
+    const existing = await getRecord(COLLECTION_KEYS.interventionLog, interventionId);
     if (!existing) return { success: false, error: 'Not found' };
 
-    await dataAccess.updateRecord(COLLECTION_KEYS.interventionLog, {
-      ...existing, outcome, outcome_date: new Date().toISOString()
-    }, { suppressAuth: true });
+    await updateRecord(COLLECTION_KEYS.interventionLog, interventionId, {
+      ...existing,
+      outcome,
+      outcome_date: new Date().toISOString()
+    });
 
     if (existing.template_id) {
       try {
-        const result = await dataAccess.queryRecords(COLLECTION_KEYS.interventionLog, {
-          filters: { template_id: existing.template_id, outcome: { ne: 'unknown' } },
-          limit: 500, suppressAuth: true
+        const result = await queryRecords(COLLECTION_KEYS.interventionLog, {
+          filters: { template_id: existing.template_id },
+          limit: 500
         });
-        const allLogs = result.items || [];
-        const improved = allLogs.filter(l => l.outcome === 'improved').length;
+        const allLogs = toItems(result).filter((l) => l.outcome && l.outcome !== 'unknown');
+        const improved = allLogs.filter((l) => l.outcome === 'improved').length;
         const successRate = allLogs.length > 0 ? Math.round((improved / allLogs.length) * 100) : 0;
 
-        const template = await dataAccess.getRecord(COLLECTION_KEYS.interventionTemplates, existing.template_id, { suppressAuth: true });
+        const template = await getRecord(COLLECTION_KEYS.interventionTemplates, existing.template_id);
         if (template) {
-          await dataAccess.updateRecord(COLLECTION_KEYS.interventionTemplates, { ...template, success_rate: successRate }, { suppressAuth: true });
+          await updateRecord(COLLECTION_KEYS.interventionTemplates, existing.template_id, { ...template, success_rate: successRate });
         }
-      } catch (err) { }
+      } catch (err) {}
     }
 
     return { success: true };
   } catch (error) {
-    console.error('logInterventionOutcome error:', error);
     return { success: false, error: error.message };
   }
 }
 
 export async function getDriverInterventions(driverId) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.interventionLog, {
+    const result = await queryRecords(COLLECTION_KEYS.interventionLog, {
       filters: { driver_id: driverId, is_active: true },
       sort: [{ field: 'sent_at', direction: 'desc' }],
-      limit: 50, suppressAuth: true
+      limit: 50
     });
-    return { success: true, interventions: result.items || [] };
+    return { success: true, interventions: toItems(result) };
   } catch (error) {
-    console.error('getDriverInterventions error:', error);
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================================
-// SEED DEFAULT TEMPLATES
-// ============================================================================
-
 export async function seedDefaultTemplates() {
   const defaults = [
     { risk_type: 'SILENCE_SIGNAL', channel: 'sms', tone: 'empathetic', template_name: 'Silence Signal - SMS', subject_line: '', body_template: 'Hey {{firstName}}, {{recruiterName}} from {{carrierName}} here. Just checking in. Call me at {{recruiterPhone}}.' },
-    { risk_type: 'DETRACTOR_NPS', channel: 'sms', tone: 'empathetic', template_name: 'Detractor NPS - SMS', subject_line: '', body_template: 'Hi {{firstName}}, {{recruiterName}} at {{carrierName}}. We value your feedback. Let\'s talk about how to improve things.' }
+    { risk_type: 'SILENCE_SIGNAL', channel: 'email', tone: 'empathetic', template_name: 'Silence Signal - Email', subject_line: 'Checking in, {{firstName}}', body_template: 'Hi {{firstName}},\n\nWanted to check in and see how things are going.\n\n- {{recruiterName}}' },
+    { risk_type: 'DETRACTOR_NPS', channel: 'sms', tone: 'empathetic', template_name: 'Detractor NPS - SMS', subject_line: '', body_template: 'Hi {{firstName}}, {{recruiterName}} at {{carrierName}}. We value your feedback. Let\'s talk about how to improve things.' },
+    { risk_type: 'DETRACTOR_NPS', channel: 'email', tone: 'professional', template_name: 'Detractor NPS - Email', subject_line: 'We want to improve your experience', body_template: 'Hi {{firstName}}, we heard your feedback and want to help.' },
+    { risk_type: 'PAY_VOLATILITY', channel: 'sms', tone: 'professional', template_name: 'Pay Volatility - SMS', subject_line: '', body_template: 'Hi {{firstName}}, noticed recent pay changes. Let\'s review your lanes and opportunities.' },
+    { risk_type: 'PAY_VOLATILITY', channel: 'email', tone: 'professional', template_name: 'Pay Volatility - Email', subject_line: 'Let\'s stabilize your earnings', body_template: 'Hi {{firstName}}, let\'s align on routes that fit your goals.' },
+    { risk_type: 'BURNOUT_RISK', channel: 'sms', tone: 'empathetic', template_name: 'Burnout Risk - SMS', subject_line: '', body_template: 'Hey {{firstName}}, checking in. We can adjust schedule/home time if needed.' },
+    { risk_type: 'BURNOUT_RISK', channel: 'email', tone: 'empathetic', template_name: 'Burnout Risk - Email', subject_line: 'Support check-in', body_template: 'Hi {{firstName}}, we\'re here to support your workload and schedule.' },
+    { risk_type: 'SAFETY_INCIDENT', channel: 'sms', tone: 'urgent', template_name: 'Safety Incident - SMS', subject_line: '', body_template: 'Hi {{firstName}}, safety team would like a quick follow-up today.' },
+    { risk_type: 'SAFETY_INCIDENT', channel: 'email', tone: 'urgent', template_name: 'Safety Incident - Email', subject_line: 'Safety follow-up required', body_template: 'Hi {{firstName}}, please connect with us about a recent safety event.' }
   ];
 
   let created = 0;
   for (const tmpl of defaults) {
     try {
-      await dataAccess.insertRecord(COLLECTION_KEYS.interventionTemplates, {
-        ...tmpl, carrier_dot: '', is_default: true, usage_count: 0, success_rate: 0, is_active: true
-      }, { suppressAuth: true });
+      await createRecord(COLLECTION_KEYS.interventionTemplates, {
+        ...tmpl,
+        carrier_dot: '',
+        is_default: true,
+        usage_count: 0,
+        success_rate: 0,
+        is_active: true
+      });
       created++;
-    } catch (err) { }
+    } catch (err) {}
   }
   return { success: true, created, total: defaults.length };
 }

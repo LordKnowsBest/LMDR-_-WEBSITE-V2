@@ -5,6 +5,11 @@ import wixData from 'wix-data';
 import * as driverProfiles from 'backend/driverProfiles';
 import { currentUser } from 'wix-users-backend';
 
+jest.mock('backend/configData', () => ({
+    usesAirtable: jest.fn(() => false),
+    getWixCollectionName: jest.fn((key) => key === 'carrierHiringPreferences' ? 'CarrierHiringPreferences' : key)
+}));
+
 // Mock driverProfiles
 jest.mock('backend/driverProfiles', () => ({
     getDriverProfile: jest.fn()
