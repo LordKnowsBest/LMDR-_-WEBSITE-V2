@@ -4,7 +4,15 @@ import {
     getTrace,
     getHealthMetrics,
     getAIAnalytics,
-    getLogMetadata
+    getLogMetadata,
+    getActiveAnomalies,
+    acknowledgeAnomaly,
+    resolveAnomaly,
+    getAnomalyRules,
+    updateAnomalyRule,
+    createAnomalyRule,
+    deleteAnomalyRule,
+    getAnomalyHistory
 } from 'backend/observabilityService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -101,6 +109,30 @@ async function handleMessage(component, message) {
             case 'getAIAnalytics':
                 await handleGetAIAnalytics(component, message.period);
                 break;
+            case 'getActiveAnomalies':
+                await handleGetActiveAnomalies(component, message.options);
+                break;
+            case 'acknowledgeAnomaly':
+                await handleAcknowledgeAnomaly(component, message.alertId);
+                break;
+            case 'resolveAnomaly':
+                await handleResolveAnomaly(component, message.alertId, message.notes);
+                break;
+            case 'getAnomalyRules':
+                await handleGetAnomalyRules(component);
+                break;
+            case 'updateAnomalyRule':
+                await handleUpdateAnomalyRule(component, message.ruleId, message.updates);
+                break;
+            case 'createAnomalyRule':
+                await handleCreateAnomalyRule(component, message.rule);
+                break;
+            case 'deleteAnomalyRule':
+                await handleDeleteAnomalyRule(component, message.ruleId);
+                break;
+            case 'getAnomalyHistory':
+                await handleGetAnomalyHistory(component, message.period);
+                break;
 
             default:
                 console.warn('[ADMIN_OBSERVABILITY] Unknown action:', message.action);
@@ -149,6 +181,62 @@ async function handleGetHealthMetrics(component, period) {
 async function handleGetAIAnalytics(component, period) {
     const data = await getAIAnalytics(period || 'day');
     postToComponent(component, { action: 'aiAnalyticsLoaded', payload: data });
+}
+
+async function handleGetActiveAnomalies(component, options) {
+    const data = await getActiveAnomalies(options || {});
+    postToComponent(component, { action: 'activeAnomaliesLoaded', payload: data });
+}
+
+async function handleAcknowledgeAnomaly(component, alertId) {
+    if (!alertId) {
+        postToComponent(component, { action: 'actionError', message: 'Alert ID is required' });
+        return;
+    }
+    await acknowledgeAnomaly(alertId);
+    postToComponent(component, { action: 'actionSuccess', message: 'Anomaly acknowledged' });
+}
+
+async function handleResolveAnomaly(component, alertId, notes) {
+    if (!alertId) {
+        postToComponent(component, { action: 'actionError', message: 'Alert ID is required' });
+        return;
+    }
+    await resolveAnomaly(alertId, notes || '');
+    postToComponent(component, { action: 'actionSuccess', message: 'Anomaly resolved' });
+}
+
+async function handleGetAnomalyRules(component) {
+    const data = await getAnomalyRules();
+    postToComponent(component, { action: 'anomalyRulesLoaded', payload: data });
+}
+
+async function handleUpdateAnomalyRule(component, ruleId, updates) {
+    if (!ruleId) {
+        postToComponent(component, { action: 'actionError', message: 'Rule ID is required' });
+        return;
+    }
+    const data = await updateAnomalyRule(ruleId, updates || {});
+    postToComponent(component, { action: 'anomalyRuleUpdated', payload: data });
+}
+
+async function handleCreateAnomalyRule(component, rule) {
+    const data = await createAnomalyRule(rule || {});
+    postToComponent(component, { action: 'anomalyRuleCreated', payload: data });
+}
+
+async function handleDeleteAnomalyRule(component, ruleId) {
+    if (!ruleId) {
+        postToComponent(component, { action: 'actionError', message: 'Rule ID is required' });
+        return;
+    }
+    await deleteAnomalyRule(ruleId);
+    postToComponent(component, { action: 'actionSuccess', message: 'Anomaly rule deleted' });
+}
+
+async function handleGetAnomalyHistory(component, period) {
+    const data = await getAnomalyHistory(period || 'week');
+    postToComponent(component, { action: 'anomalyHistoryLoaded', payload: data });
 }
 
 // ============================================

@@ -127,6 +127,10 @@ async function routeMessage(component, message) {
                 await handleGetVoiceConfig(component);
                 break;
 
+            case 'getAgentKpis':
+                await handleGetAgentKpis(component, message);
+                break;
+
             default:
                 console.warn('ADMIN_DASHBOARD: Unknown action:', action);
         }
@@ -255,6 +259,17 @@ async function handleResolveApprovalGate(component, message) {
 async function handleGetVoiceConfig(component) {
     const config = await getVoiceConfig();
     safeSend(component, { action: 'voiceReady', payload: config });
+}
+
+async function handleGetAgentKpis(component, message) {
+    try {
+        const { getOutcomeStats } = await import('backend/agentOutcomeService');
+        const days = message.days || 7;
+        const stats = await getOutcomeStats('all', days);
+        safeSend(component, { action: 'agentKpisLoaded', payload: stats });
+    } catch (err) {
+        safeSend(component, { action: 'agentKpisLoaded', payload: { total_runs: 0, success_rate: 0, avg_quality_score: 0, partial_rate: 0, failure_rate: 0, period_days: 7, role: 'all', error: err.message } });
+    }
 }
 
 // ============================================

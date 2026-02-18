@@ -25,7 +25,8 @@ import * as dataAccess from 'backend/dataAccess';
 // ============================================
 
 const CONFIG = {
-    cacheExpiry: 5 * 60 * 1000 // 5 minutes cache for config
+    cacheExpiry: 5 * 60 * 1000, // 5 minutes cache for config
+    providerCostMetricsCacheExpiry: 5 * 60 * 1000
 };
 
 // Collection keys for dataAccess routing
@@ -33,13 +34,15 @@ const COLLECTION_KEYS = {
     routerConfig: 'aiRouterConfig',
     usageLog: 'aiUsageLog',
     auditLog: 'auditLog',
-    providerCosts: 'AIProviderCosts',
-    optimizerConfig: 'CostOptimizerConfig'
+    providerCosts: 'aiProviderCosts',
+    optimizerConfig: 'costOptimizerConfig'
 };
 
 // In-memory cache for router config
 let configCache = null;
 let configCacheTime = 0;
+let providerCostMetricsCache = null;
+let providerCostMetricsCacheTime = 0;
 
 // ============================================
 // PROVIDER REGISTRY
@@ -81,7 +84,7 @@ const PROVIDER_REGISTRY = {
             { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', tier: 'premium', speed: 'medium', quality: 'high' },
             { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo', tier: 'economy', speed: 'fast', quality: 'standard' }
         ],
-        capabilities: ['synthesis', 'reasoning', 'chat', 'code', 'embeddings', 'vision'],
+        capabilities: ['synthesis', 'reasoning', 'chat', 'code', 'embeddings', 'vision', 'analysis'],
         characteristics: {
             latency: 'medium',
             costTier: 'standard',
@@ -101,7 +104,7 @@ const PROVIDER_REGISTRY = {
             { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B', tier: 'standard', speed: 'ultra-fast', quality: 'high' },
             { id: 'gemma2-9b-it', name: 'Gemma 2 9B', tier: 'fast', speed: 'ultra-fast', quality: 'good' }
         ],
-        capabilities: ['chat', 'reasoning', 'analysis', 'real-time'],
+        capabilities: ['chat', 'reasoning', 'analysis', 'real-time', 'synthesis'],
         characteristics: {
             latency: 'ultra-low',
             costTier: 'economy',
@@ -120,7 +123,7 @@ const PROVIDER_REGISTRY = {
             { id: 'sonar', name: 'Sonar', tier: 'standard', speed: 'fast', quality: 'good' },
             { id: 'sonar-reasoning', name: 'Sonar Reasoning', tier: 'premium', speed: 'slow', quality: 'highest' }
         ],
-        capabilities: ['research', 'web-search', 'real-time-info', 'citations'],
+        capabilities: ['research', 'web-search', 'real-time-info', 'citations', 'synthesis', 'analysis'],
         characteristics: {
             latency: 'medium',
             costTier: 'standard',
@@ -139,7 +142,7 @@ const PROVIDER_REGISTRY = {
             { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', tier: 'premium', speed: 'medium', quality: 'high' },
             { id: 'gemini-2.5-flash-preview-05-20', name: 'Gemini 2.5 Flash', tier: 'standard', speed: 'fast', quality: 'high' }
         ],
-        capabilities: ['ocr', 'vision', 'multimodal', 'reasoning', 'code'],
+        capabilities: ['ocr', 'vision', 'multimodal', 'reasoning', 'code', 'synthesis', 'analysis'],
         characteristics: {
             latency: 'low',
             costTier: 'economy',
@@ -714,6 +717,7 @@ export async function routeAIRequest(functionId, request, traceId = null) {
     // ----------------------------------------------------
     let isOptimized = false;
     let savingsEstimate = 0;
+    let optimizerFallbackQueue = [];
 
     try {
         // Query optimizer config (with simple in-memory check to avoid DB spam if possible, 
@@ -721,7 +725,9 @@ export async function routeAIRequest(functionId, request, traceId = null) {
         const optimizerConfig = await getCostOptimizerConfig();
 
         if (optimizerConfig.enabled) {
-            const optimal = await selectOptimalProvider(functionId, request, optimizerConfig);
+            const optimalCandidates = await getOptimalProviderCandidates(functionId, request, optimizerConfig);
+            const optimal = optimalCandidates[0] || null;
+            optimizerFallbackQueue = optimalCandidates.slice(1);
 
             if (optimal && (optimal.provider !== config.provider || optimal.model !== config.model)) {
 
@@ -772,6 +778,37 @@ export async function routeAIRequest(functionId, request, traceId = null) {
         console.error(`Primary provider ${config.provider} failed:`, primaryError.message);
         await log({ level: 'WARN', source: 'ai-router', message: `Primary provider ${config.provider} failed`, traceId: localTraceId, details: { error: primaryError.message } });
 
+        // If optimizer is enabled, try next cheapest eligible candidates first
+        if (optimizerFallbackQueue.length > 0) {
+            for (const candidate of optimizerFallbackQueue) {
+                try {
+                    await log({
+                        level: 'INFO',
+                        source: 'ai-router',
+                        message: `Optimizer fallback attempt ${candidate.provider}/${candidate.model}`,
+                        traceId: localTraceId
+                    });
+                    response = await callProvider(candidate.provider, candidate.model, request, localTraceId);
+                    config.provider = candidate.provider;
+                    config.model = candidate.model;
+                    usedFallback = true;
+                    error = null;
+                    break;
+                } catch (candidateError) {
+                    await log({
+                        level: 'WARN',
+                        source: 'ai-router',
+                        message: `Optimizer fallback failed ${candidate.provider}/${candidate.model}`,
+                        traceId: localTraceId,
+                        details: { error: candidateError.message }
+                    });
+                }
+            }
+        }
+
+        if (response) {
+            // Recovered by optimizer fallback queue
+        } else
         // Try fallback if configured
         if (config.fallbackProvider && config.fallbackModel) {
             try {
@@ -832,8 +869,13 @@ export async function routeAIRequest(functionId, request, traceId = null) {
 /**
  * Selects the optimal provider based on configuration
  */
-async function selectOptimalProvider(functionId, request, optimizerConfig) {
-    if (!optimizerConfig.enabled) return null;
+export async function selectOptimalProvider(functionId, request, optimizerConfig) {
+    const candidates = await getOptimalProviderCandidates(functionId, request, optimizerConfig);
+    return candidates[0] || null;
+}
+
+async function getOptimalProviderCandidates(functionId, request, optimizerConfig) {
+    if (!optimizerConfig?.enabled) return [];
 
     try {
         // 1. Get requirements for function
@@ -877,7 +919,7 @@ async function selectOptimalProvider(functionId, request, optimizerConfig) {
             return true;
         });
 
-        if (candidates.length === 0) return null;
+        if (candidates.length === 0) return [];
 
         // 4. Sort by cost (Cheapest first)
         // Weight preferred providers?
@@ -896,14 +938,14 @@ async function selectOptimalProvider(functionId, request, optimizerConfig) {
         });
 
         // Return top candidate
-        return {
-            provider: candidates[0].providerId,
-            model: candidates[0].modelId
-        };
+        return candidates.map((candidate) => ({
+            provider: candidate.providerId,
+            model: candidate.modelId
+        }));
 
     } catch (e) {
         console.error('Error in selectOptimalProvider:', e);
-        return null; // Fallback to default
+        return []; // Fallback to default
     }
 }
 
@@ -1317,13 +1359,22 @@ export async function getProviderCostMetrics() {
     await requireAdmin();
 
     try {
+        if (
+            providerCostMetricsCache &&
+            (Date.now() - providerCostMetricsCacheTime) < CONFIG.providerCostMetricsCacheExpiry
+        ) {
+            return providerCostMetricsCache;
+        }
+
         const result = await dataAccess.queryRecords(COLLECTION_KEYS.providerCosts, {
             limit: 100, // Should cover all models
-            sort: [{ fieldName: 'providerId', direction: 'asc' }],
+            sort: [{ field: 'providerId', direction: 'asc' }],
             suppressAuth: true
         });
 
-        return result.items || [];
+        providerCostMetricsCache = result.items || [];
+        providerCostMetricsCacheTime = Date.now();
+        return providerCostMetricsCache;
     } catch (error) {
         console.error('Error fetching provider cost metrics:', error);
         throw new Error('Failed to fetch provider cost metrics');
@@ -1367,6 +1418,8 @@ export async function updateProviderCostData(providerId, costData) {
         } else {
             result = await dataAccess.insertRecord(COLLECTION_KEYS.providerCosts, record, { suppressAuth: true });
         }
+        providerCostMetricsCache = null;
+        providerCostMetricsCacheTime = 0;
 
         return { success: true, data: result };
 

@@ -9,6 +9,21 @@ import { createConversation, addTurn, getRecentContext } from 'backend/agentConv
 import * as dataAccess from 'backend/dataAccess';
 import { startRun, logStep, createGate, completeRun } from 'backend/agentRunLedgerService';
 
+// ── Cost Control Configuration ──
+const COST_CONTROLS = {
+  maxTokensPerRun: {
+    driver: 10000,
+    recruiter: 15000,
+    admin: 20000,
+    carrier: 10000
+  },
+  maxRunTimeMs: 30000,
+  maxDailyRunsPerUser: 100,
+  costAlertThreshold: 0.50
+};
+
+const _dailyRunCounts = new Map();
+
 // Tool definitions mapped to existing backend services
 const TOOL_DEFINITIONS = {
   // Driver tools
@@ -622,6 +637,21 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
     console.error('Run ledger start failed (non-blocking):', err);
   }
 
+  // Daily run limit check
+  const dateKey = `${userId}:${new Date().toISOString().split('T')[0]}`;
+  const dailyCount = (_dailyRunCounts.get(dateKey) || 0) + 1;
+  _dailyRunCounts.set(dateKey, dailyCount);
+  if (dailyCount > COST_CONTROLS.maxDailyRunsPerUser) {
+    if (runId) completeRun(runId, 'rate_limited', 0, 0).catch(() => {});
+    return {
+      conversationId,
+      runId,
+      response: 'You\'ve reached your daily limit for AI assistant requests. Please try again tomorrow.',
+      toolsUsed: false,
+      role
+    };
+  }
+
   // Get recent context
   const recentTurns = await getRecentContext(conversationId, 20);
 
@@ -642,8 +672,33 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
   let currentMessages = [...messages];
   const maxIterations = 5;
   let totalTokens = 0;
+  const runStartTime = Date.now();
 
   for (let i = 0; i < maxIterations; i++) {
+    // Token cap check
+    const roleTokenCap = COST_CONTROLS.maxTokensPerRun[role] || 10000;
+    if (totalTokens >= roleTokenCap) {
+      const capText = 'I\'ve reached the processing limit for this request. Here\'s what I have so far.';
+      await addTurn(conversationId, 'assistant', capText);
+      if (runId) {
+        completeRun(runId, 'token_cap', totalTokens, 0)
+          .then(() => _evaluateCompletedRun(runId))
+          .catch(err => console.error('Run completion failed:', err));
+      }
+      return { conversationId, runId, response: capText, toolsUsed: true, role };
+    }
+
+    // Time cap check
+    if (Date.now() - runStartTime > COST_CONTROLS.maxRunTimeMs) {
+      const timeText = 'This request is taking longer than expected. Here\'s what I have so far.';
+      await addTurn(conversationId, 'assistant', timeText);
+      if (runId) {
+        completeRun(runId, 'time_cap', totalTokens, 0)
+          .then(() => _evaluateCompletedRun(runId))
+          .catch(err => console.error('Run completion failed:', err));
+      }
+      return { conversationId, runId, response: timeText, toolsUsed: true, role };
+    }
     const aiResponse = await routeAIRequest('agent_orchestration', {
       system: ROLE_SYSTEM_PROMPTS[role],
       messages: currentMessages,
@@ -744,6 +799,13 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
  */
 export async function getAvailableTools(role) {
   return getToolsForRole(role);
+}
+
+/**
+ * Get cost control configuration (for tests and admin display)
+ */
+export function getCostControls() {
+  return { ...COST_CONTROLS };
 }
 
 /**

@@ -270,6 +270,11 @@ export const DATA_SOURCE = {
   // -------------------------------------------------------------------------
   // Admin Platform Configuration
   // -------------------------------------------------------------------------
+  aiProviderCosts: 'airtable',
+  costOptimizerConfig: 'airtable',
+  anomalyAlerts: 'airtable',
+  anomalyRules: 'airtable',
+  baselineMetrics: 'airtable',
   featureFlags: 'airtable',
   flagEvaluationLogs: 'airtable',
   emailTemplates: 'airtable',
@@ -568,6 +573,11 @@ export const WIX_COLLECTION_NAMES = {
   driverLocations: 'DriverLocations',
 
   // Admin Platform Configuration
+  aiProviderCosts: 'AIProviderCosts',
+  costOptimizerConfig: 'CostOptimizerConfig',
+  anomalyAlerts: 'AnomalyAlerts',
+  anomalyRules: 'AnomalyRules',
+  baselineMetrics: 'BaselineMetrics',
   featureFlags: 'FeatureFlags',
   flagEvaluationLogs: 'FlagEvaluationLogs',
   emailTemplates: 'EmailTemplates',
@@ -826,6 +836,11 @@ export const AIRTABLE_TABLE_NAMES = {
   driverLocations: 'v2_Driver Locations',
 
   // Admin Platform Configuration
+  aiProviderCosts: 'v2_AI Provider Costs',
+  costOptimizerConfig: 'v2_Cost Optimizer Config',
+  anomalyAlerts: 'v2_Anomaly Alerts',
+  anomalyRules: 'v2_Anomaly Rules',
+  baselineMetrics: 'v2_Baseline Metrics',
   featureFlags: 'v2_Feature Flags',
   flagEvaluationLogs: 'v2_Flag Evaluation Logs',
   emailTemplates: 'v2_Email Templates',

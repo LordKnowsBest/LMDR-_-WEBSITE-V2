@@ -12,7 +12,7 @@ This track implements three features to maximize the utility of existing admin t
 ## Phase 1: Cost Optimizer Mode
 
 ### 1.1 Data Model & Collection Setup
-- [ ] Task: Create `AIProviderCosts` collection with schema (providerId, modelId, costPer1kInputTokens, costPer1kOutputTokens, qualityScore, avgLatencyMs, availabilityRate, lastUpdated, isActive)
+- [~] Task: Create `AIProviderCosts` collection with schema (providerId, modelId, costPer1kInputTokens, costPer1kOutputTokens, qualityScore, avgLatencyMs, availabilityRate, lastUpdated, isActive)
 - [ ] Task: Create `CostOptimizerConfig` collection (singleton pattern) with schema (enabled, qualityThreshold, maxCostPerRequest, preferredProviders, excludedProviders)
 - [ ] Task: Seed initial provider cost data for Claude, Gemini, Perplexity, OpenAI, Groq, Mistral
 - [ ] Task: Set default config values (enabled: false, qualityThreshold: 0.80, maxCostPerRequest: 0.10)

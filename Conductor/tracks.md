@@ -198,7 +198,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 - *Carrier Lead Forms (Added Live Match Estimate section with debounced real-time updates to _TEMPLATE_Carrier_Staffing_Form.html and primary landing pages)*
 - *Page Code Bridges (Updated CARRIER_WEIGHT_PREFERENCES.kvkff.js, Carrier Welcome.gnhma.js, Home.c1dmp.js, and Last Mile staffing page code)*
 
-## [ ] Track: Admin Utility Expansion
+## [~] Track: Admin Utility Expansion
 *Link: [./tracks/admin_utility_expansion_20260120/](./tracks/admin_utility_expansion_20260120/)*
 *Depends on: admin_portal_20251224, observability_gaps_20260112*
 *Priority: Medium*
