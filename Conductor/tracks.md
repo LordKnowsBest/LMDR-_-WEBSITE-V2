@@ -422,10 +422,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 ## [/] Track: Agentic Orchestration (Cross-Role)
 *Link: [./conductor/tracks/agentic_orchestration_20260218/](./conductor/tracks/agentic_orchestration_20260218/)*
 *Priority: Critical*
-*Status: In Progress — Execution Plane Delivered, Control Plane Phase 1A Next*
+*Status: In Progress — Phase 1 Complete, Phase 2 Next*
 *Goal: Deliver fully orchestrated multi-agent execution across recruiter, carrier, driver, admin, and development operations with recursive compendium memory and policy-guarded autonomy.*
-*Completed (Execution Plane):*
-- *agentService.jsw (22 tools, 4 role scopes, tool_use iteration loop, dynamic dispatch)*
+*Completed (Execution Plane — 2026-02-17):*
+- *agentService.jsw (23 tools, 4 role scopes, tool_use iteration loop, dynamic dispatch)*
 - *agentConversationService.jsw (Airtable-backed conversation persistence)*
 - *voiceService.jsw (VAPI REST wrapper — create assistants, outbound calls, transcripts)*
 - *voiceCampaignService.jsw (chunked parallel outbound campaigns)*
@@ -436,5 +436,14 @@ This file tracks all major tracks for the project. Each track has its own detail
 - *Recruiter: ros-chat.js NLU-enabled, ros-voice.js, ros-view-campaigns.js*
 - *6 Airtable tables (Agent Conversations/Turns, Voice Call Logs/Assistants/Campaigns/Contacts)*
 - *6 Claude Code agents (deploy, test-bridge, seed-data, audit-schema, purge-cdn, create-page)*
-- *7 test suites (46 tests) + 1 e2e test*
-*Next: Phase 1A — Outcome Verification Spine (policy tags, run ledger, approval gates, outcome evaluator)*
+*Completed (Control Plane Phase 1A — 2026-02-18):*
+- *Policy-tagged tool registry (all 23 tools with risk_level, requires_approval, rate_limit, success_metric)*
+- *Run ledger: agentRunLedgerService.jsw (startRun, logStep, createGate, resolveGate, completeRun)*
+- *4 Airtable tables (Agent Runs, Agent Steps, Approval Gates, Run Outcomes)*
+- *Approval gate system on all 4 surfaces (confirmation cards, approve/reject flow)*
+- *Outcome evaluator: agentOutcomeService.jsw (heuristic scoring 0-100, KPI aggregation)*
+*Completed (Control Plane Phase 1B — 2026-02-18):*
+- *Cost controls (per-role token caps, 30s time cap, 100 daily runs, $0.50 cost alert)*
+- *E2E tests rewritten (26 tests: role-specific flows, approval gates, policy tags)*
+- *Agent KPI dashboard card on Admin Dashboard (5 metrics: total runs, success rate, quality score, partial rate, failure rate)*
+*Next: Phase 2 — Cross-Role Intelligence Mesh (carrier↔recruiter signal sharing, admin run monitor)*

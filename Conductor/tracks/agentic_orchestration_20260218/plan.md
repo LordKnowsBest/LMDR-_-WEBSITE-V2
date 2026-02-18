@@ -1,8 +1,8 @@
 # Plan — Agentic Orchestration (Cross-Role)
 
-## Status: Phase 1 In Progress
+## Status: Phase 1 COMPLETE — Phase 2 Next
 
-**Execution Plane delivered 2026-02-17.** Agent orchestration, voice integration, and 4-surface UI are live. What follows is the Control Plane + Knowledge Plane buildout — the layers that ensure we automate toward *correct outcomes*, not just activity.
+**Execution Plane delivered 2026-02-17.** Agent orchestration, voice integration, and 4-surface UI are live. **Control Plane Phase 1A+1B delivered 2026-02-18.** Policy-tagged tools, run ledger, approval gates, outcome evaluator, cost controls, E2E tests, and KPI dashboard are live. Phase 2 (Cross-Role Intelligence Mesh) is next.
 
 ---
 
@@ -43,7 +43,7 @@ The execution plane works — agents can call tools and return responses. But no
 
 ---
 
-## Phase 1A — Outcome Verification Spine (NEXT — Weeks 1-2)
+## Phase 1A — Outcome Verification Spine (COMPLETE — 2026-02-18)
 
 **Goal:** Every agent action is classified, tracked, outcome-scored, and approval-gated.
 
@@ -211,7 +211,7 @@ Wire measurable metrics into existing observability:
 
 ---
 
-## Phase 1B — Foundation Completion (Week 3)
+## Phase 1B — Foundation Completion (COMPLETE — 2026-02-18)
 
 ### 1B.1 Runtime E2E Tests (1 per role)
 
