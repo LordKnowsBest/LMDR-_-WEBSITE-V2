@@ -1,0 +1,427 @@
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+
+// ============================================
+// CONFIGURATION & CONSTANTS
+// ============================================
+
+const COLLECTION_KEYS = {
+    articles: 'knowledgeArticles',
+    categories: 'articleCategories',
+    versions: 'articleVersions',
+    auditLog: 'auditLog'
+};
+
+const ARTICLE_STATUS = {
+    DRAFT: 'draft',
+    PUBLISHED: 'published',
+    ARCHIVED: 'archived'
+};
+
+const VISIBILITY = {
+    PUBLIC: 'public',
+    LOGGED_IN: 'logged_in',
+    ADMIN_ONLY: 'admin_only'
+};
+
+// ============================================
+// AUTHORIZATION HELPERS
+// ============================================
+
+async function getContext() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return { isAuthenticated: false };
+        
+        const role = (member.contactDetails?.customFields?.role || 'user').toLowerCase();
+        const isAdmin = ['admin', 'super_admin', 'ops_admin'].includes(role);
+        
+        return {
+            isAuthenticated: true,
+            userId: member._id,
+            email: member.loginEmail,
+            role,
+            isAdmin
+        };
+    } catch (error) {
+        return { isAuthenticated: false };
+    }
+}
+
+async function requireAdmin() {
+    const context = await getContext();
+    if (!context.isAdmin) throw new Error('Unauthorized: Admin access required');
+    return context;
+}
+
+// ============================================
+// UTILITY HELPERS
+// ============================================
+
+function generateSlug(title) {
+    return title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
+async function auditAction(action, targetId, details, context) {
+    try {
+        const auditEntry = {
+            timestamp: new Date(),
+            action,
+            targetType: 'article',
+            targetId,
+            adminId: context.userId,
+            adminEmail: context.email,
+            details
+        };
+        await dataAccess.insertRecord(COLLECTION_KEYS.auditLog, auditEntry, { suppressAuth: true });
+    } catch (error) {
+        console.error('[knowledgeBaseService] Audit log failure:', error.message);
+    }
+}
+
+// ============================================
+// ARTICLE METHODS
+// ============================================
+
+/**
+ * Creates a new article
+ */
+export async function createArticle(articleData) {
+    const context = await requireAdmin();
+
+    try {
+        const slug = articleData.slug || generateSlug(articleData.title);
+        
+        // Ensure slug is unique
+        const existingBySlug = await dataAccess.findByField(COLLECTION_KEYS.articles, 'slug', slug);
+        const finalSlug = existingBySlug ? `${slug}-${Date.now().toString().slice(-4)}` : slug;
+
+        const newArticle = {
+            title: articleData.title,
+            slug: finalSlug,
+            content: articleData.content,
+            category_id: articleData.category_id,
+            subcategory_id: articleData.subcategory_id || null,
+            status: articleData.status || ARTICLE_STATUS.DRAFT,
+            visibility: articleData.visibility || VISIBILITY.PUBLIC,
+            author_id: context.userId,
+            author_email: context.email,
+            tags: articleData.tags || [],
+            view_count: 0,
+            helpful_votes: 0,
+            not_helpful_votes: 0,
+            meta_title: articleData.meta_title || articleData.title,
+            meta_description: articleData.meta_description || '',
+            related_articles: articleData.related_articles || [],
+            created_at: new Date(),
+            updated_at: new Date(),
+            published_at: articleData.status === ARTICLE_STATUS.PUBLISHED ? new Date() : null,
+            version: 1
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.articles, newArticle, { suppressAuth: true });
+        
+        if (result.success) {
+            // Save initial version
+            await dataAccess.insertRecord(COLLECTION_KEYS.versions, {
+                article_id: result.record._id,
+                content: articleData.content,
+                title: articleData.title,
+                version_number: 1,
+                created_by: context.userId,
+                created_at: new Date(),
+                change_summary: 'Initial version'
+            }, { suppressAuth: true });
+
+            await auditAction('createArticle', result.record._id, { title: articleData.title }, context);
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[knowledgeBaseService] createArticle error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets an article by ID
+ */
+export async function getArticle(articleId) {
+    const context = await getContext();
+
+    try {
+        const article = await dataAccess.getRecord(COLLECTION_KEYS.articles, articleId, { suppressAuth: true });
+        if (!article) return { success: false, error: 'Article not found' };
+
+        // Visibility checks
+        if (!context.isAdmin) {
+            if (article.status !== ARTICLE_STATUS.PUBLISHED) throw new Error('Unauthorized');
+            if (article.visibility === VISIBILITY.ADMIN_ONLY) throw new Error('Unauthorized');
+            if (article.visibility === VISIBILITY.LOGGED_IN && !context.isAuthenticated) throw new Error('Authentication required');
+        }
+
+        return { success: true, article };
+    } catch (error) {
+        console.error('[knowledgeBaseService] getArticle error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets an article by slug for public access
+ */
+export async function getArticleBySlug(slug) {
+    const context = await getContext();
+
+    try {
+        const article = await dataAccess.findByField(COLLECTION_KEYS.articles, 'slug', slug);
+        if (!article) return { success: false, error: 'Article not found' };
+
+        // Visibility checks
+        if (!context.isAdmin) {
+            if (article.status !== ARTICLE_STATUS.PUBLISHED) throw new Error('Unauthorized');
+            if (article.visibility === VISIBILITY.ADMIN_ONLY) throw new Error('Unauthorized');
+            if (article.visibility === VISIBILITY.LOGGED_IN && !context.isAuthenticated) throw new Error('Authentication required');
+        }
+
+        return { success: true, article };
+    } catch (error) {
+        console.error('[knowledgeBaseService] getArticleBySlug error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Updates an article and creates a new version
+ */
+export async function updateArticle(articleId, updates, changeSummary = '') {
+    const context = await requireAdmin();
+
+    try {
+        const existing = await dataAccess.getRecord(COLLECTION_KEYS.articles, articleId, { suppressAuth: true });
+        if (!existing) throw new Error('Article not found');
+
+        const nextVersion = (existing.version || 1) + 1;
+        const updatedData = {
+            ...existing,
+            ...updates,
+            version: nextVersion,
+            updated_at: new Date()
+        };
+
+        if (updates.status === ARTICLE_STATUS.PUBLISHED && existing.status !== ARTICLE_STATUS.PUBLISHED) {
+            updatedData.published_at = new Date();
+        }
+
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.articles, updatedData, { suppressAuth: true });
+        
+        if (result.success) {
+            // Save new version
+            await dataAccess.insertRecord(COLLECTION_KEYS.versions, {
+                article_id: articleId,
+                content: updates.content || existing.content,
+                title: updates.title || existing.title,
+                version_number: nextVersion,
+                created_by: context.userId,
+                created_at: new Date(),
+                change_summary: changeSummary
+            }, { suppressAuth: true });
+
+            await auditAction('updateArticle', articleId, { title: updates.title, version: nextVersion }, context);
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[knowledgeBaseService] updateArticle error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Publishes an article
+ */
+export async function publishArticle(articleId) {
+    return await updateArticle(articleId, { status: ARTICLE_STATUS.PUBLISHED }, 'Published article');
+}
+
+/**
+ * Archives an article
+ */
+export async function archiveArticle(articleId) {
+    return await updateArticle(articleId, { status: ARTICLE_STATUS.ARCHIVED }, 'Archived article');
+}
+
+/**
+ * Searches articles with filters
+ */
+export async function searchArticles(query, filters = {}) {
+    const context = await getContext();
+
+    try {
+        const queryFilters = {};
+        
+        // Base visibility filters for non-admins
+        if (!context.isAdmin) {
+            queryFilters.status = ARTICLE_STATUS.PUBLISHED;
+            queryFilters.visibility = { hasSome: [VISIBILITY.PUBLIC, context.isAuthenticated ? VISIBILITY.LOGGED_IN : VISIBILITY.PUBLIC] };
+        } else {
+            if (filters.status && filters.status !== 'all') queryFilters.status = filters.status;
+            if (filters.visibility && filters.visibility !== 'all') queryFilters.visibility = filters.visibility;
+        }
+
+        if (filters.category_id) queryFilters.category_id = filters.category_id;
+        
+        // Simple content/title search
+        if (query) {
+            // In a real system we'd use more complex query logic or a search service
+            queryFilters.title = { contains: query };
+        }
+
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.articles, {
+            filters: queryFilters,
+            sort: [{ field: 'updated_at', direction: 'desc' }],
+            limit: 50,
+            suppressAuth: true
+        });
+
+        return result;
+    } catch (error) {
+        console.error('[knowledgeBaseService] searchArticles error:', error.message);
+        return { success: false, error: error.message, items: [] };
+    }
+}
+
+// ============================================
+// CATEGORY METHODS
+// ============================================
+
+/**
+ * Gets categories with hierarchy
+ */
+export async function getCategories() {
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.categories, {
+            sort: [{ field: 'display_order', direction: 'asc' }],
+            suppressAuth: true
+        });
+
+        return { success: true, items: result.items || [] };
+    } catch (error) {
+        console.error('[knowledgeBaseService] getCategories error:', error.message);
+        return { success: false, error: error.message, items: [] };
+    }
+}
+
+/**
+ * Creates a new category
+ */
+export async function createCategory(categoryData) {
+    const context = await requireAdmin();
+
+    try {
+        const newCategory = {
+            name: categoryData.name,
+            slug: categoryData.slug || generateSlug(categoryData.name),
+            description: categoryData.description || '',
+            parent_id: categoryData.parent_id || null,
+            display_order: categoryData.display_order || 0,
+            icon: categoryData.icon || '',
+            created_at: new Date(),
+            updated_at: new Date()
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.categories, newCategory, { suppressAuth: true });
+        if (result.success) {
+            await auditAction('createCategory', result.record._id, { name: categoryData.name }, context);
+        }
+        return result;
+    } catch (error) {
+        console.error('[knowledgeBaseService] createCategory error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// ANALYTICS & FEEDBACK
+// ============================================
+
+/**
+ * Records an article view
+ */
+export async function recordArticleView(articleId) {
+    try {
+        // Find existing article
+        const article = await dataAccess.getRecord(COLLECTION_KEYS.articles, articleId, { suppressAuth: true });
+        if (!article) return { success: false };
+
+        const currentViews = article.view_count || 0;
+        await dataAccess.updateRecord(COLLECTION_KEYS.articles, {
+            _id: articleId,
+            view_count: currentViews + 1
+        }, { suppressAuth: true });
+
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Records a helpfulness vote
+ */
+export async function recordHelpfulVote(articleId, isHelpful) {
+    try {
+        const article = await dataAccess.getRecord(COLLECTION_KEYS.articles, articleId, { suppressAuth: true });
+        if (!article) return { success: false };
+
+        const updates = { _id: articleId };
+        if (isHelpful) {
+            updates.helpful_votes = (article.helpful_votes || 0) + 1;
+        } else {
+            updates.not_helpful_votes = (article.not_helpful_votes || 0) + 1;
+        }
+
+        await dataAccess.updateRecord(COLLECTION_KEYS.articles, updates, { suppressAuth: true });
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets KB overview metrics
+ */
+export async function getKBOverviewMetrics() {
+    await requireAdmin();
+
+    try {
+        const allArticles = await dataAccess.getAllRecords(COLLECTION_KEYS.articles, { suppressAuth: true });
+        
+        const totalViews = allArticles.reduce((acc, a) => acc + (a.view_count || 0), 0);
+        const topArticles = [...allArticles].sort((a, b) => (b.view_count || 0) - (a.view_count || 0)).slice(0, 5);
+        
+        const metrics = {
+            totalArticles: allArticles.length,
+            publishedArticles: allArticles.filter(a => a.status === ARTICLE_STATUS.PUBLISHED).length,
+            totalViews,
+            topArticles: topArticles.map(a => ({ title: a.title, slug: a.slug, views: a.view_count })),
+            avgHelpfulness: 0
+        };
+
+        const totalVotes = allArticles.reduce((acc, a) => acc + (a.helpful_votes || 0) + (a.not_helpful_votes || 0), 0);
+        const totalHelpful = allArticles.reduce((acc, a) => acc + (a.helpful_votes || 0), 0);
+        
+        if (totalVotes > 0) {
+            metrics.avgHelpfulness = (totalHelpful / totalVotes) * 100;
+        }
+
+        return { success: true, metrics };
+    } catch (error) {
+        console.error('[knowledgeBaseService] getKBOverviewMetrics error:', error.message);
+        return { success: false, error: error.message };
+    }
+}

@@ -71,6 +71,27 @@
     requestFlags: function(userId, context) {
       sendToWix('getFeatureFlags', { userId: userId, context: context });
     },
+
+    evaluateFlag: function(flagKey, userId, context) {
+      sendToWix('evaluateFeatureFlag', { flagKey: flagKey, userId: userId, context: context || {} });
+    },
+
+    getExperimentVariant: function(testKey, userId, context) {
+      sendToWix('getExperimentVariant', { testKey: testKey, userId: userId, context: context || {} });
+    },
+
+    getExperimentConfig: function(testKey, userId, context) {
+      sendToWix('getExperimentConfig', { testKey: testKey, userId: userId, context: context || {} });
+    },
+
+    trackExperimentConversion: function(testKey, userId, metric, value) {
+      sendToWix('trackExperimentConversion', {
+        testKey: testKey,
+        userId: userId,
+        metric: metric,
+        value: value
+      });
+    },
     
     /**
      * Helper for navigation
@@ -124,5 +145,73 @@
       }
     };
   }
+
+  global.lmdrEvaluateFlag = function(flagKey, userId, context) {
+    return new Promise(function(resolve) {
+      var originalHandler = _handlers['featureFlagEvaluated'];
+      _handlers['featureFlagEvaluated'] = function(payload) {
+        if (originalHandler) _handlers['featureFlagEvaluated'] = originalHandler;
+        resolve(!!payload);
+      };
+      global.LMDRBridge.evaluateFlag(flagKey, userId, context || {});
+      setTimeout(function() {
+        if (_handlers['featureFlagEvaluated'] !== originalHandler) {
+          _handlers['featureFlagEvaluated'] = originalHandler;
+          resolve(false);
+        }
+      }, 5000);
+    });
+  };
+
+  global.lmdrGetExperimentVariant = function(testKey, userId, context) {
+    return new Promise(function(resolve) {
+      var originalHandler = _handlers['experimentVariantLoaded'];
+      _handlers['experimentVariantLoaded'] = function(payload) {
+        if (originalHandler) _handlers['experimentVariantLoaded'] = originalHandler;
+        resolve(payload || 'control');
+      };
+      global.LMDRBridge.getExperimentVariant(testKey, userId, context || {});
+      setTimeout(function() {
+        if (_handlers['experimentVariantLoaded'] !== originalHandler) {
+          _handlers['experimentVariantLoaded'] = originalHandler;
+          resolve('control');
+        }
+      }, 5000);
+    });
+  };
+
+  global.lmdrGetExperimentConfig = function(testKey, userId, context) {
+    return new Promise(function(resolve) {
+      var originalHandler = _handlers['experimentConfigLoaded'];
+      _handlers['experimentConfigLoaded'] = function(payload) {
+        if (originalHandler) _handlers['experimentConfigLoaded'] = originalHandler;
+        resolve(payload || { variantId: 'control' });
+      };
+      global.LMDRBridge.getExperimentConfig(testKey, userId, context || {});
+      setTimeout(function() {
+        if (_handlers['experimentConfigLoaded'] !== originalHandler) {
+          _handlers['experimentConfigLoaded'] = originalHandler;
+          resolve({ variantId: 'control' });
+        }
+      }, 5000);
+    });
+  };
+
+  global.lmdrTrackExperimentConversion = function(testKey, userId, metric, value) {
+    return new Promise(function(resolve) {
+      var originalHandler = _handlers['experimentConversionTracked'];
+      _handlers['experimentConversionTracked'] = function(payload) {
+        if (originalHandler) _handlers['experimentConversionTracked'] = originalHandler;
+        resolve(payload || { success: true });
+      };
+      global.LMDRBridge.trackExperimentConversion(testKey, userId, metric, value);
+      setTimeout(function() {
+        if (_handlers['experimentConversionTracked'] !== originalHandler) {
+          _handlers['experimentConversionTracked'] = originalHandler;
+          resolve({ success: false, timeout: true });
+        }
+      }, 5000);
+    });
+  };
 
 })(window);

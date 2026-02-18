@@ -27,19 +27,26 @@ export async function getTest(testKey) {
 }
 
 /**
- * Assign a user to a test and return their variant
+ * Get one user's existing assignment.
+ */
+export async function getUserAssignment(testKey, userId) {
+  const result = await dataAccess.queryRecords(ASSIGNMENTS_COLLECTION, {
+    filters: { testKey, userId },
+    limit: 1,
+    suppressAuth: true
+  });
+  return result.success && result.items.length ? result.items[0] : null;
+}
+
+/**
+ * Assign a user to a test and return their variant.
  */
 export async function assignUserToTest(testKey, userId, userContext = {}) {
   try {
     // 1. Check existing assignment
-    const existing = await dataAccess.queryRecords(ASSIGNMENTS_COLLECTION, {
-      filters: { testKey, userId },
-      limit: 1,
-      suppressAuth: true
-    });
-
-    if (existing.success && existing.items.length > 0) {
-      return existing.items[0].variantId;
+    const existing = await getUserAssignment(testKey, userId);
+    if (existing) {
+      return existing.variantId;
     }
 
     // 2. Get test definition
@@ -47,7 +54,7 @@ export async function assignUserToTest(testKey, userId, userContext = {}) {
     if (!test || test.status !== 'running') return 'control';
 
     // 3. Check targeting rules
-    if (!evaluateConditions(test.targetAudience?.conditions, userContext)) {
+    if (!evaluateConditions(test.targetAudience?.conditions || [], userContext)) {
       return 'control';
     }
 
@@ -63,7 +70,7 @@ export async function assignUserToTest(testKey, userId, userContext = {}) {
     let cumulative = 0;
     
     for (const variant of (test.variants || [])) {
-      cumulative += variant.allocation;
+      cumulative += Number(variant.allocation || 0);
       if (variantBucket < cumulative) {
         variantId = variant.id;
         break;
@@ -76,7 +83,8 @@ export async function assignUserToTest(testKey, userId, userContext = {}) {
       userId,
       variantId,
       assignedAt: new Date(),
-      converted: false
+      converted: false,
+      conversionEvents: []
     }, { suppressAuth: true });
 
     return variantId;
@@ -92,16 +100,22 @@ export async function assignUserToTest(testKey, userId, userContext = {}) {
 export async function recordConversion(testKey, userId, metricName, value = 1) {
   try {
     // 1. Verify assignment
-    const assignment = await dataAccess.queryRecords(ASSIGNMENTS_COLLECTION, {
-      filters: { testKey, userId },
+    const userAssignment = await getUserAssignment(testKey, userId);
+    if (!userAssignment) {
+      return { success: false, error: 'User not assigned to test' };
+    }
+
+    // 2. De-duplicate on test+user+metric for conversion metrics.
+    const duplicate = await dataAccess.queryRecords(EVENTS_COLLECTION, {
+      filters: { testKey, userId, eventName: metricName },
       limit: 1,
       suppressAuth: true
     });
+    if (duplicate.success && duplicate.items.length) {
+      return { success: true, deduped: true };
+    }
 
-    if (!assignment.success || !assignment.items.length) return { success: false, error: 'User not assigned to test' };
-    const userAssignment = assignment.items[0];
-
-    // 2. Log event
+    // 3. Log event
     await dataAccess.insertRecord(EVENTS_COLLECTION, {
       testKey,
       userId,
@@ -111,15 +125,24 @@ export async function recordConversion(testKey, userId, metricName, value = 1) {
       timestamp: new Date()
     }, { suppressAuth: true });
 
-    // 3. Update assignment conversion state if it's the primary metric
+    // 4. Update assignment conversion state if it's the primary metric.
     const test = await getTest(testKey);
     if (test && test.primaryMetric?.name === metricName) {
+      const existingEvents = Array.isArray(userAssignment.conversionEvents) ? userAssignment.conversionEvents : [];
+      existingEvents.push({
+        metric: metricName,
+        value,
+        timestamp: new Date()
+      });
       await dataAccess.updateRecord(ASSIGNMENTS_COLLECTION, {
+        ...userAssignment,
         _id: userAssignment._id,
-        converted: true
+        converted: true,
+        conversionEvents: existingEvents
       }, { suppressAuth: true });
     }
 
+    await updateTestResults(testKey);
     return { success: true };
   } catch (error) {
     console.error(`[experimentService] recordConversion error (${testKey}):`, error.message);
@@ -132,9 +155,16 @@ export async function recordConversion(testKey, userId, metricName, value = 1) {
 // ============================================================================
 
 export async function createTest(testData) {
+  const existing = await getTest(testData.key);
+  if (existing) {
+    throw new Error(`Test '${testData.key}' already exists`);
+  }
   return await dataAccess.insertRecord(TESTS_COLLECTION, {
     ...testData,
     status: 'draft',
+    confidenceLevel: testData.confidenceLevel || 95,
+    trafficAllocation: testData.trafficAllocation || 100,
+    minSampleSize: testData.minSampleSize || 100,
     createdAt: new Date(),
     updatedAt: new Date()
   }, { suppressAuth: true });
@@ -145,6 +175,7 @@ export async function updateTest(testKey, updates) {
   if (!existing) throw new Error(`Test '${testKey}' not found`);
 
   return await dataAccess.updateRecord(TESTS_COLLECTION, {
+    ...existing,
     _id: existing._id,
     ...updates,
     updatedAt: new Date()
@@ -165,4 +196,206 @@ export async function endTest(testKey, winnerId) {
     endDate: new Date(),
     winnerId
   });
+}
+
+/**
+ * Get aggregate test results.
+ */
+export async function getTestResults(testKey) {
+  const test = await getTest(testKey);
+  if (!test) {
+    throw new Error(`Test '${testKey}' not found`);
+  }
+  return await calculateAndPersistResults(test);
+}
+
+/**
+ * Refresh and persist results for one test.
+ */
+export async function updateTestResults(testKey) {
+  const test = await getTest(testKey);
+  if (!test) {
+    return null;
+  }
+  return await calculateAndPersistResults(test);
+}
+
+/**
+ * Scheduled job entrypoint for running tests.
+ */
+export async function refreshRunningTestResults() {
+  const running = await getAllTests('running');
+  const updates = [];
+  for (const test of running) {
+    try {
+      const results = await calculateAndPersistResults(test);
+      updates.push({ key: test.key, success: true, participants: results.participants });
+    } catch (error) {
+      updates.push({ key: test.key, success: false, error: error.message });
+    }
+  }
+  return {
+    processed: updates.length,
+    updates
+  };
+}
+
+async function calculateAndPersistResults(test) {
+  const assignments = await dataAccess.queryRecords(ASSIGNMENTS_COLLECTION, {
+    filters: { testKey: test.key },
+    limit: 10000,
+    suppressAuth: true
+  });
+
+  const events = await dataAccess.queryRecords(EVENTS_COLLECTION, {
+    filters: { testKey: test.key },
+    limit: 10000,
+    suppressAuth: true
+  });
+
+  const assignmentsByVariant = {};
+  (test.variants || []).forEach((variant) => {
+    assignmentsByVariant[variant.id] = {
+      variantId: variant.id,
+      name: variant.name || variant.id,
+      participants: 0,
+      conversions: 0,
+      conversionRate: 0
+    };
+  });
+  if (!assignmentsByVariant.control) {
+    assignmentsByVariant.control = {
+      variantId: 'control',
+      name: 'Control',
+      participants: 0,
+      conversions: 0,
+      conversionRate: 0
+    };
+  }
+
+  (assignments.items || []).forEach((assignment) => {
+    const bucket = assignmentsByVariant[assignment.variantId] || assignmentsByVariant.control;
+    bucket.participants += 1;
+    if (assignment.converted) {
+      bucket.conversions += 1;
+    }
+  });
+
+  Object.values(assignmentsByVariant).forEach((bucket) => {
+    bucket.conversionRate = bucket.participants > 0
+      ? bucket.conversions / bucket.participants
+      : 0;
+  });
+
+  const control = assignmentsByVariant.control;
+  const comparisons = [];
+  Object.values(assignmentsByVariant).forEach((variant) => {
+    if (variant.variantId === 'control') {
+      return;
+    }
+    comparisons.push({
+      variantId: variant.variantId,
+      ...calculateSignificance(control, variant, test.confidenceLevel || 95)
+    });
+  });
+
+  const primaryEvent = test.primaryMetric?.name || null;
+  const eventCount = primaryEvent
+    ? (events.items || []).filter((event) => event.eventName === primaryEvent).length
+    : (events.items || []).length;
+
+  const bestVariant = findBestVariant(assignmentsByVariant, control);
+  const results = {
+    computedAt: new Date(),
+    metric: test.primaryMetric || null,
+    participants: (assignments.items || []).length,
+    events: eventCount,
+    variants: Object.values(assignmentsByVariant),
+    comparisons,
+    leadingVariant: bestVariant,
+    significantWinner: comparisons.find((cmp) => cmp.significant)?.variantId || null
+  };
+
+  await dataAccess.updateRecord(TESTS_COLLECTION, {
+    ...test,
+    _id: test._id,
+    results,
+    updatedAt: new Date()
+  }, { suppressAuth: true });
+
+  return results;
+}
+
+function calculateSignificance(control, variant, confidenceLevel = 95) {
+  const n1 = control.participants || 0;
+  const n2 = variant.participants || 0;
+  const c1 = control.conversions || 0;
+  const c2 = variant.conversions || 0;
+  if (!n1 || !n2) {
+    return {
+      controlRate: 0,
+      variantRate: 0,
+      liftPct: 0,
+      zScore: 0,
+      pValue: 1,
+      confidence: 0,
+      significant: false
+    };
+  }
+
+  const p1 = c1 / n1;
+  const p2 = c2 / n2;
+  const pooled = (c1 + c2) / (n1 + n2);
+  const se = Math.sqrt(Math.max(pooled * (1 - pooled) * ((1 / n1) + (1 / n2)), 1e-12));
+  const zScore = (p2 - p1) / se;
+  const pValue = 2 * (1 - normalCdf(Math.abs(zScore)));
+  const confidence = Math.max(0, (1 - pValue) * 100);
+  const liftPct = p1 > 0 ? ((p2 - p1) / p1) * 100 : 0;
+  return {
+    controlRate: p1,
+    variantRate: p2,
+    liftPct: roundTo(liftPct, 2),
+    zScore: roundTo(zScore, 4),
+    pValue: roundTo(pValue, 6),
+    confidence: roundTo(confidence, 2),
+    significant: confidence >= confidenceLevel
+  };
+}
+
+function normalCdf(value) {
+  // Abramowitz and Stegun approximation.
+  const x = Math.abs(value);
+  const t = 1 / (1 + 0.2316419 * x);
+  const d = 0.3989423 * Math.exp((-x * x) / 2);
+  let prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  prob = 1 - prob;
+  return value < 0 ? 1 - prob : prob;
+}
+
+function findBestVariant(variantsById, control) {
+  let best = null;
+  Object.values(variantsById).forEach((variant) => {
+    if (!best) {
+      best = variant;
+      return;
+    }
+    if (variant.conversionRate > best.conversionRate) {
+      best = variant;
+    }
+  });
+  if (!best) {
+    return null;
+  }
+  return {
+    variantId: best.variantId,
+    conversionRate: best.conversionRate,
+    liftPct: control && control.conversionRate > 0
+      ? roundTo(((best.conversionRate - control.conversionRate) / control.conversionRate) * 100, 2)
+      : 0
+  };
+}
+
+function roundTo(value, digits) {
+  const factor = Math.pow(10, digits);
+  return Math.round(value * factor) / factor;
 }

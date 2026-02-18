@@ -8,7 +8,7 @@
 | Base | Last Mile Driver recruiting |
 | Base ID | `app9N1YCJ3gdhExA0` |
 
-## Fields
+## Fields (Expected by Current Backend)
 
 | Field Name | Type | Field ID | Description |
 |------------|------|----------|-------------|
@@ -27,10 +27,17 @@
 | Confidence Level | Number (precision: 0) | TBD | Required significance (default 95) |
 | Created By | Single Line Text | TBD | Admin ID who created |
 | Results | Long Text / Multiline | TBD | JSON calculated results |
-| Created Date | Date | TBD | Creation timestamp |
-| Updated Date | Date | TBD | Last modification |
+| Winner ID | Single Line Text | TBD | Declared winner variant ID |
+| Created At | Date with time | TBD | Creation timestamp |
+| Updated At | Date with time | TBD | Last modification |
 
-## Backend Field Mapping (snake_case)
+## Suggested Views / Indexes
+
+- Unique Key: `Key`
+- Views by `Status` (`draft`, `running`, `paused`, `completed`)
+- Sort by `Updated At desc`
+
+## Backend Field Mapping (camelCase used in code)
 
 Use these mappings in `airtableClient.jsw` FIELD_MAPPINGS:
 
@@ -41,22 +48,23 @@ Use these mappings in `airtableClient.jsw` FIELD_MAPPINGS:
   'description': 'Description',
   'status': 'Status',
   'variants': 'Variants',
-  'traffic_allocation': 'Traffic Allocation',
-  'target_audience': 'Target Audience',
-  'primary_metric': 'Primary Metric',
-  'secondary_metrics': 'Secondary Metrics',
-  'start_date': 'Start Date',
-  'end_date': 'End Date',
-  'min_sample_size': 'Min Sample Size',
-  'confidence_level': 'Confidence Level',
-  'created_by': 'Created By',
+  'trafficAllocation': 'Traffic Allocation',
+  'targetAudience': 'Target Audience',
+  'primaryMetric': 'Primary Metric',
+  'secondaryMetrics': 'Secondary Metrics',
+  'startDate': 'Start Date',
+  'endDate': 'End Date',
+  'minSampleSize': 'Min Sample Size',
+  'confidenceLevel': 'Confidence Level',
+  'createdBy': 'Created By',
   'results': 'Results',
-  'created_date': 'Created Date',
-  'updated_date': 'Updated Date',
+  'winnerId': 'Winner ID',
+  'createdAt': 'Created At',
+  'updatedAt': 'Updated At',
 },
 ```
 
 ## Notes
 
-- Auto-generated schema documentation
-- Generated: 2026-02-04
+- Updated for `admin_platform_config_20260120` implementation
+- Updated: 2026-02-18

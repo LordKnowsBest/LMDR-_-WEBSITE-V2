@@ -293,6 +293,22 @@ export const DATA_SOURCE = {
   commissionRules: 'airtable',
 
   // -------------------------------------------------------------------------
+  // Support & Operations (Tickets, KB, NPS, Chat)
+  // -------------------------------------------------------------------------
+  supportTickets: 'airtable',
+  ticketComments: 'airtable',
+  ticketTags: 'airtable',
+  knowledgeArticles: 'airtable',
+  articleCategories: 'airtable',
+  articleVersions: 'airtable',
+  npsResponses: 'airtable',
+  surveyConfig: 'airtable',
+  npsTrends: 'airtable',
+  chatSessions: 'airtable',
+  chatMessages: 'airtable',
+  cannedResponses: 'airtable',
+
+  // -------------------------------------------------------------------------
   // Agent & Voice Platform
   // -------------------------------------------------------------------------
   agentConversations: 'airtable',
@@ -300,7 +316,11 @@ export const DATA_SOURCE = {
   voiceCallLogs: 'airtable',
   voiceAssistants: 'airtable',
   voiceCampaigns: 'airtable',
-  voiceCampaignContacts: 'airtable'
+  voiceCampaignContacts: 'airtable',
+  agentRuns: 'airtable',
+  agentSteps: 'airtable',
+  approvalGates: 'airtable',
+  runOutcomes: 'airtable'
 };
 
 // =============================================================================
@@ -568,13 +588,31 @@ export const WIX_COLLECTION_NAMES = {
   salesReps: 'SalesReps',
   commissionRules: 'CommissionRules',
 
+  // Support & Operations
+  supportTickets: 'SupportTickets',
+  ticketComments: 'TicketComments',
+  ticketTags: 'TicketTags',
+  knowledgeArticles: 'KnowledgeArticles',
+  articleCategories: 'ArticleCategories',
+  articleVersions: 'ArticleVersions',
+  npsResponses: 'NPSResponses',
+  surveyConfig: 'SurveyConfig',
+  npsTrends: 'NPSTrends',
+  chatSessions: 'ChatSessions',
+  chatMessages: 'ChatMessages',
+  cannedResponses: 'CannedResponses',
+
   // Agent & Voice Platform
   agentConversations: 'AgentConversations',
   agentTurns: 'AgentTurns',
   voiceCallLogs: 'VoiceCallLogs',
   voiceAssistants: 'VoiceAssistants',
   voiceCampaigns: 'VoiceCampaigns',
-  voiceCampaignContacts: 'VoiceCampaignContacts'
+  voiceCampaignContacts: 'VoiceCampaignContacts',
+  agentRuns: 'AgentRuns',
+  agentSteps: 'AgentSteps',
+  approvalGates: 'ApprovalGates',
+  runOutcomes: 'RunOutcomes'
 };
 
 // =============================================================================
@@ -808,13 +846,31 @@ export const AIRTABLE_TABLE_NAMES = {
   salesReps: 'v2_Sales Reps',
   commissionRules: 'v2_Commission Rules',
 
+  // Support & Operations
+  supportTickets: 'v2_Support Tickets',
+  ticketComments: 'v2_Ticket Comments',
+  ticketTags: 'v2_Ticket Tags',
+  knowledgeArticles: 'v2_Knowledge Articles',
+  articleCategories: 'v2_Article Categories',
+  articleVersions: 'v2_Article Versions',
+  npsResponses: 'v2_NPS Responses',
+  surveyConfig: 'v2_Survey Config',
+  npsTrends: 'v2_NPS Trends',
+  chatSessions: 'v2_Chat Sessions',
+  chatMessages: 'v2_Chat Messages',
+  cannedResponses: 'v2_Canned Responses',
+
   // Agent & Voice Platform
   agentConversations: 'v2_Agent Conversations',
   agentTurns: 'v2_Agent Turns',
   voiceCallLogs: 'v2_Voice Call Logs',
   voiceAssistants: 'v2_Voice Assistants',
   voiceCampaigns: 'v2_Voice Campaigns',
-  voiceCampaignContacts: 'v2_Voice Campaign Contacts'
+  voiceCampaignContacts: 'v2_Voice Campaign Contacts',
+  agentRuns: 'v2_Agent Runs',
+  agentSteps: 'v2_Agent Steps',
+  approvalGates: 'v2_Approval Gates',
+  runOutcomes: 'v2_Run Outcomes'
 };
 
 // =============================================================================

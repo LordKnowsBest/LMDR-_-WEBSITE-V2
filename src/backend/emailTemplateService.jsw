@@ -34,8 +34,9 @@ export async function createTemplate(templateData) {
     throw new Error(`Template with key '${templateData.templateKey}' already exists`);
   }
 
+  const sanitized = sanitizeTemplateInput(templateData);
   return await dataAccess.insertRecord(COLLECTION_KEY, {
-    ...templateData,
+    ...sanitized,
     version: 1,
     isActive: templateData.isActive ?? false,
     createdAt: new Date(),
@@ -52,12 +53,14 @@ export async function updateTemplate(templateKey, updates) {
     throw new Error(`Template '${templateKey}' not found`);
   }
 
+  const sanitizedUpdates = sanitizeTemplateInput(updates);
+
   // Handle versioning if content changed
   let newVersion = existing.version || 1;
   const previousVersions = existing.previousVersions || [];
   
-  const hasContentChange = updates.htmlContent !== existing.htmlContent || 
-                           updates.subject !== existing.subject;
+  const hasContentChange = sanitizedUpdates.htmlContent !== existing.htmlContent || 
+                           sanitizedUpdates.subject !== existing.subject;
 
   if (hasContentChange) {
     newVersion++;
@@ -78,7 +81,7 @@ export async function updateTemplate(templateKey, updates) {
 
   return await dataAccess.updateRecord(COLLECTION_KEY, {
     ...existing,
-    ...updates,
+    ...sanitizedUpdates,
     version: newVersion,
     previousVersions,
     updatedAt: new Date()
@@ -90,6 +93,29 @@ export async function updateTemplate(templateKey, updates) {
  */
 export async function activateTemplate(templateKey) {
   return await updateTemplate(templateKey, { isActive: true });
+}
+
+/**
+ * Get version history.
+ */
+export async function getTemplateVersions(templateKey) {
+  const template = await getTemplate(templateKey);
+  if (!template) {
+    throw new Error(`Template '${templateKey}' not found`);
+  }
+  const history = Array.isArray(template.previousVersions) ? template.previousVersions : [];
+  return [
+    {
+      version: template.version || 1,
+      subject: template.subject || '',
+      updatedAt: template.updatedAt || template.createdAt || null,
+      isActive: !!template.isActive
+    },
+    ...history.slice().reverse().map((version) => ({
+      ...version,
+      isActive: false
+    }))
+  ];
 }
 
 /**
@@ -116,27 +142,24 @@ export async function renderEmail(templateKey, variables) {
   const template = await getTemplate(templateKey);
   if (!template) throw new Error(`Template '${templateKey}' not found`);
 
-  let html = template.htmlContent || '';
-  let subject = template.subject || '';
-  let preheader = template.preheader || '';
+  const safeTemplate = sanitizeTemplateInput(template);
+  let html = safeTemplate.htmlContent || '';
+  let subject = safeTemplate.subject || '';
+  let preheader = safeTemplate.preheader || '';
 
-  // Standard substitutions
+  // Standard substitutions.
   const allVars = {
     ...variables,
     'platform.url': 'https://www.lastmiledr.app',
     'date.today': new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
   };
 
-  for (const [key, value] of Object.entries(allVars)) {
-    // Basic {{key}} or {{nested.key}} replacement
-    // Note: variables should be flattened or accessed via dot notation in caller
-    const regex = new RegExp(`{{${key.replace(/\./g, '\.')}}}`, 'g');
-    const displayValue = value === null || value === undefined ? '' : String(value);
-    
-    html = html.replace(regex, displayValue);
-    subject = subject.replace(regex, displayValue);
-    preheader = preheader.replace(regex, displayValue);
-  }
+  validateRequiredVariables(safeTemplate, allVars);
+
+  const replaceToken = (input) => replaceTemplateVariables(input, allVars);
+  html = replaceToken(html);
+  subject = replaceToken(subject);
+  preheader = replaceToken(preheader);
 
   return {
     subject,
@@ -152,7 +175,7 @@ export async function renderEmail(templateKey, variables) {
 export async function sendTestEmail(templateKey, recipientEmail, sampleData = {}) {
   const rendered = await renderEmail(templateKey, sampleData);
   
-  // LOG the attempt
+  // LOG the attempt.
   await log({
     level: 'INFO',
     source: 'email-template-service',
@@ -160,8 +183,18 @@ export async function sendTestEmail(templateKey, recipientEmail, sampleData = {}
     details: { templateKey, recipientEmail }
   });
 
-  // For now, we'll use a placeholder or integrate with emailService.jsw
-  // Actually, let's call a generic send function we'll add to emailService
+  await dataAccess.insertRecord(LOG_COLLECTION_KEY, {
+    templateKey,
+    recipientId: recipientEmail,
+    recipientEmail,
+    sentAt: new Date(),
+    opened: false,
+    clicked: false,
+    bounced: false,
+    isTest: true
+  }, { suppressAuth: true });
+
+  // Placeholder for email provider dispatch.
   return { 
     success: true, 
     message: 'Test email rendered and simulated (Integration pending)',
@@ -177,7 +210,61 @@ function stripHtml(html) {
   return html
     .replace(/<style([\s\S]*?)<\/style>/gi, '')
     .replace(/<script([\s\S]*?)<\/script>/gi, '')
+    .replace(/<\/(p|div|h1|h2|h3|li|br)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function sanitizeTemplateInput(templateData = {}) {
+  const sanitized = { ...templateData };
+  if (Object.prototype.hasOwnProperty.call(sanitized, 'htmlContent')) {
+    sanitized.htmlContent = sanitizeHtml(sanitized.htmlContent || '');
+  }
+  if (Object.prototype.hasOwnProperty.call(sanitized, 'subject')) {
+    sanitized.subject = String(sanitized.subject || '').trim();
+  }
+  if (Object.prototype.hasOwnProperty.call(sanitized, 'preheader')) {
+    sanitized.preheader = String(sanitized.preheader || '').trim();
+  }
+  return sanitized;
+}
+
+function sanitizeHtml(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/\son\w+="[^"]*"/gi, '')
+    .replace(/\son\w+='[^']*'/gi, '')
+    .replace(/javascript:/gi, '');
+}
+
+function replaceTemplateVariables(input, variables = {}) {
+  return String(input || '').replace(/{{\s*([\w.]+)\s*}}/g, (_, keyPath) => {
+    const value = getPathValue(variables, keyPath);
+    return value === undefined || value === null ? '' : String(value);
+  });
+}
+
+function getPathValue(source, keyPath) {
+  if (!source || !keyPath) return undefined;
+  if (Object.prototype.hasOwnProperty.call(source, keyPath)) {
+    return source[keyPath];
+  }
+  return String(keyPath).split('.').reduce((acc, key) => {
+    if (!acc || typeof acc !== 'object') {
+      return undefined;
+    }
+    return acc[key];
+  }, source);
+}
+
+function validateRequiredVariables(template, variables) {
+  const configuredVars = Array.isArray(template.variables) ? template.variables : [];
+  const missing = configuredVars
+    .filter((item) => item && item.required)
+    .map((item) => item.key || item.name)
+    .filter((key) => key && getPathValue(variables, key) === undefined);
+  if (missing.length > 0) {
+    throw new Error(`Missing required variables: ${missing.join(', ')}`);
+  }
 }

@@ -164,7 +164,56 @@
       const text = payload.error || payload.response || payload.content || 'Done.';
       addBotMessage(text);
     }
+
+    if (action === 'agentApprovalRequired' && payload) {
+      onApprovalRequired(payload);
+    }
   });
+
+  function onApprovalRequired(payload) {
+    removeTyping();
+    const { toolName, toolDescription, args, riskLevel } = payload;
+    const container = document.getElementById('vm-b2b-agent-messages');
+    if (!container) return;
+
+    const argsSummary = Object.entries(args || {})
+      .map(([k, v]) => `<span style="color:#64748b">${k}:</span> ${String(v).substring(0, 60)}`)
+      .join('<br>');
+
+    const cardDiv = document.createElement('div');
+    cardDiv.style.cssText = 'display:flex;gap:8px';
+    cardDiv.innerHTML = `
+      <div style="width:24px;height:24px;border-radius:8px;background:linear-gradient(135deg,#2563eb,#1e40af);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px">
+        <span style="font-size:9px;font-weight:700;color:#fff">VM</span>
+      </div>
+      <div style="border:2px solid rgba(96,165,250,0.4);background:rgba(239,246,255,0.05);padding:12px 14px;border-radius:14px 14px 14px 4px;font-size:12px;max-width:85%;line-height:1.5;color:#e2e8f0;">
+        <div style="font-weight:600;color:#60a5fa;margin-bottom:6px;">Approval Required</div>
+        <div style="margin-bottom:4px;font-weight:500;">${escapeHtml(toolDescription || toolName)}</div>
+        <div style="font-size:11px;margin-bottom:8px;opacity:0.7;line-height:1.6;">${argsSummary}</div>
+        <div style="font-size:10px;color:#93c5fd;margin-bottom:8px;">Risk: ${escapeHtml(riskLevel)} &middot; Tool: ${escapeHtml(toolName)}</div>
+        <div style="display:flex;gap:8px;">
+          <button data-gate-decision="rejected"
+            style="padding:5px 12px;border-radius:8px;background:#7f1d1d;color:#fca5a5;font-size:11px;font-weight:500;border:none;cursor:pointer;">Reject</button>
+          <button data-gate-decision="approved"
+            style="padding:5px 12px;border-radius:8px;background:#14532d;color:#86efac;font-size:11px;font-weight:500;border:none;cursor:pointer;">Approve</button>
+        </div>
+      </div>`;
+
+    cardDiv.querySelectorAll('button[data-gate-decision]').forEach(btn => {
+      btn.addEventListener('click', function() {
+        const decision = this.getAttribute('data-gate-decision');
+        cardDiv.querySelectorAll('button').forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
+        showTyping();
+        window.parent.postMessage({
+          action: 'resolveApprovalGate',
+          payload: { approvalContext: payload, decision, decidedBy: 'user' }
+        }, '*');
+      });
+    });
+
+    container.appendChild(cardDiv);
+    container.scrollTop = container.scrollHeight;
+  }
 
   // Inject typing animation
   const style = document.createElement('style');

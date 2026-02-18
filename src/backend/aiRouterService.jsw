@@ -32,7 +32,9 @@ const CONFIG = {
 const COLLECTION_KEYS = {
     routerConfig: 'aiRouterConfig',
     usageLog: 'aiUsageLog',
-    auditLog: 'auditLog'
+    auditLog: 'auditLog',
+    providerCosts: 'AIProviderCosts',
+    optimizerConfig: 'CostOptimizerConfig'
 };
 
 // In-memory cache for router config
@@ -707,6 +709,49 @@ export async function routeAIRequest(functionId, request, traceId = null) {
         config = FUNCTION_REGISTRY[functionId];
     }
 
+    // ----------------------------------------------------
+    // COST OPTIMIZER LOGIC (Phase 1)
+    // ----------------------------------------------------
+    let isOptimized = false;
+    let savingsEstimate = 0;
+
+    try {
+        // Query optimizer config (with simple in-memory check to avoid DB spam if possible, 
+        // but for now we query as per plan. Optimization in Phase 4)
+        const optimizerConfig = await getCostOptimizerConfig();
+
+        if (optimizerConfig.enabled) {
+            const optimal = await selectOptimalProvider(functionId, request, optimizerConfig);
+
+            if (optimal && (optimal.provider !== config.provider || optimal.model !== config.model)) {
+
+                // Calculate estimated savings (per 1k tokens)
+                const originalCost = await estimateRequestCost(config.provider, config.model);
+                const optimalCost = await estimateRequestCost(optimal.provider, optimal.model);
+
+                savingsEstimate = Math.max(0, originalCost - optimalCost);
+                isOptimized = true;
+
+                // Override configuration
+                await log({
+                    level: 'INFO',
+                    source: 'ai-router',
+                    message: `Optimizer: Switching ${functionId} from ${config.provider}/${config.model} to ${optimal.provider}/${optimal.model}`,
+                    traceId: localTraceId,
+                    details: { savingsEstimate, original: `${config.provider}/${config.model}` }
+                });
+
+                config.provider = optimal.provider;
+                config.model = optimal.model;
+                // Keep original custom settings unless we want to override them
+            }
+        }
+    } catch (optError) {
+        console.warn('Cost optimizer failed, using default routing:', optError);
+        // Fail open - continue with default config
+    }
+    // ----------------------------------------------------
+
     if (!config.enabled) {
         await log({ level: 'WARN', source: 'ai-router', message: `Function ${functionId} is disabled`, traceId: localTraceId });
         throw new Error(`Function ${functionId} is disabled`);
@@ -747,9 +792,24 @@ export async function routeAIRequest(functionId, request, traceId = null) {
         }
     }
 
-    // Log usage
+    // Log usage with optimizer metadata
     const latency = Date.now() - startTime;
-    await logUsage(functionId, config.provider, config.model, latency, response?.tokensUsed, error, usedFallback);
+    await logUsage(functionId, config.provider, config.model, latency, response?.tokensUsed, error, usedFallback, isOptimized, savingsEstimate);
+
+    // Log savings if applicable (custom log for analysis)
+    if (isOptimized && !error) {
+        // Approximate actual savings: (tokens / 1000) * savingsEstimate
+        const actualSavings = (response?.tokensUsed ? (response.tokensUsed / 1000) * savingsEstimate : 0);
+        if (actualSavings > 0) {
+            await logAIOperation({
+                source: 'cost-optimizer',
+                operation: 'savings',
+                functionId,
+                totalTokens: response?.tokensUsed,
+                details: { savings: actualSavings, provider: config.provider, model: config.model }
+            });
+        }
+    }
 
     // Log successful AI operation to observability
     await logAIOperation({
@@ -767,6 +827,100 @@ export async function routeAIRequest(functionId, request, traceId = null) {
     if (traceCreated) await endTrace(localTraceId, 'completed', { provider: config.provider, latency, usedFallback });
 
     return response;
+}
+
+/**
+ * Selects the optimal provider based on configuration
+ */
+async function selectOptimalProvider(functionId, request, optimizerConfig) {
+    if (!optimizerConfig.enabled) return null;
+
+    try {
+        // 1. Get requirements for function
+        const funcDef = FUNCTION_REGISTRY[functionId];
+        if (!funcDef) return null;
+
+        const requirements = funcDef.requirements || [];
+
+        // 2. Get all provider metrics
+        const metrics = await getProviderCostMetrics();
+        if (!metrics || metrics.length === 0) return null;
+
+        // 3. Filter candidates
+        const candidates = metrics.filter(m => {
+            // Must be active and available
+            if (!m.isActive) return false;
+
+            // Must satisfy quality threshold
+            if ((m.qualityScore || 0) < optimizerConfig.qualityThreshold) return false;
+
+            // Must not be excluded
+            if (optimizerConfig.excludedProviders?.includes(m.providerId)) return false;
+
+            // Must support requirements
+            const providerDef = PROVIDER_REGISTRY[m.providerId];
+            if (!providerDef) return false;
+
+            const hasCapabilities = requirements.every(req => providerDef.capabilities?.includes(req));
+            if (!hasCapabilities) return false;
+
+            // Must check max cost if set
+            if (optimizerConfig.maxCostPerRequest > 0) {
+                // Estimate cost: (1k input + 1k output) as rough baseline or use request tokens
+                // Here using per-1k unit cost
+                const estimatedUnitCost = (m.costInput || 0) + (m.costOutput || 0);
+                // Assume avg request 2k tokens? 
+                // Using 1 unit cost as filter proxy
+                if (estimatedUnitCost > optimizerConfig.maxCostPerRequest) return false;
+            }
+
+            return true;
+        });
+
+        if (candidates.length === 0) return null;
+
+        // 4. Sort by cost (Cheapest first)
+        // Weight preferred providers?
+        candidates.sort((a, b) => {
+            const costA = (a.costInput || 0) + (a.costOutput || 0);
+            const costB = (b.costInput || 0) + (b.costOutput || 0);
+
+            // If preferred, artificially lower cost for sorting
+            const isPrefA = optimizerConfig.preferredProviders?.includes(a.providerId);
+            const isPrefB = optimizerConfig.preferredProviders?.includes(b.providerId);
+
+            const adjCostA = isPrefA ? costA * 0.8 : costA;
+            const adjCostB = isPrefB ? costB * 0.8 : costB;
+
+            return adjCostA - adjCostB;
+        });
+
+        // Return top candidate
+        return {
+            provider: candidates[0].providerId,
+            model: candidates[0].modelId
+        };
+
+    } catch (e) {
+        console.error('Error in selectOptimalProvider:', e);
+        return null; // Fallback to default
+    }
+}
+
+/**
+ * Estimate cost for a specific provider/model (per 1k tokens proxy)
+ */
+async function estimateRequestCost(providerId, modelId) {
+    try {
+        const metrics = await getProviderCostMetrics();
+        const metric = metrics.find(m => m.providerId === providerId && m.modelId === modelId);
+        if (metric) {
+            return (metric.costInput || 0) + (metric.costOutput || 0);
+        }
+        return 0;
+    } catch (e) {
+        return 0;
+    }
 }
 
 /**
@@ -987,11 +1141,11 @@ async function callCohere(apiKey, model, request) {
 // LOGGING
 // ============================================
 
-async function logUsage(functionId, provider, model, latencyMs, tokensUsed, error, usedFallback) {
+async function logUsage(functionId, provider, model, latencyMs, tokensUsed, error, usedFallback, isOptimized = false, savings = 0) {
     try {
         await dataAccess.insertRecord(COLLECTION_KEYS.usageLog, {
             functionId, provider, model, latencyMs, tokensUsed: tokensUsed || 0,
-            error: error || null, usedFallback, timestamp: new Date()
+            error: error || null, usedFallback, isOptimized, savings, timestamp: new Date()
         }, { suppressAuth: true });
     } catch (e) {
         console.error('Failed to log AI usage:', e);
@@ -1075,3 +1229,290 @@ export async function testAllProviders() {
 }
 
 
+
+// ============================================
+// COST OPTIMIZER CONFIGURATION (Phase 1)
+// ============================================
+
+/**
+ * Get current cost optimizer configuration
+ */
+export async function getCostOptimizerConfig() {
+    await requireAdmin();
+
+    try {
+        // Singleton pattern - always ID 'global'
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.optimizerConfig, {
+            filters: { configId: 'global' },
+            limit: 1,
+            suppressAuth: true
+        });
+
+        if (result.items && result.items.length > 0) {
+            return result.items[0];
+        }
+
+        // Return default if not initialized
+        return {
+            configId: 'global',
+            enabled: false,
+            qualityThreshold: 0.80,
+            maxCostPerRequest: 0.10,
+            preferredProviders: [],
+            excludedProviders: []
+        };
+    } catch (error) {
+        console.error('Error fetching cost optimizer config:', error);
+        throw new Error('Failed to fetch cost optimizer config');
+    }
+}
+
+/**
+ * Update cost optimizer configuration
+ */
+export async function updateCostOptimizerConfig(config) {
+    await requireAdmin();
+
+    try {
+        // Check if exists
+        const existing = await getCostOptimizerConfig();
+        const member = await currentMember.getMember();
+
+        const configData = {
+            ...existing,
+            ...config,
+            configId: 'global', // Enforce singleton
+            updatedAt: new Date(),
+            updatedBy: member?.loginEmail || 'admin'
+        };
+
+        let result;
+        if (existing._id) {
+            result = await dataAccess.updateRecord(COLLECTION_KEYS.optimizerConfig, configData, { suppressAuth: true });
+        } else {
+            result = await dataAccess.insertRecord(COLLECTION_KEYS.optimizerConfig, configData, { suppressAuth: true });
+        }
+
+        await logAuditEntry('updateCostOptimizerConfig', 'global', {
+            enabled: config.enabled,
+            qualityThreshold: config.qualityThreshold
+        });
+
+        return { success: true, config: result };
+
+    } catch (error) {
+        console.error('Error updating cost optimizer config:', error);
+        throw new Error('Failed to update cost optimizer config');
+    }
+}
+
+// ============================================
+// PROVIDER COST METRICS
+// ============================================
+
+/**
+ * Get all provider cost and quality metrics
+ */
+export async function getProviderCostMetrics() {
+    await requireAdmin();
+
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.providerCosts, {
+            limit: 100, // Should cover all models
+            sort: [{ fieldName: 'providerId', direction: 'asc' }],
+            suppressAuth: true
+        });
+
+        return result.items || [];
+    } catch (error) {
+        console.error('Error fetching provider cost metrics:', error);
+        throw new Error('Failed to fetch provider cost metrics');
+    }
+}
+
+/**
+ * Update cost data for a specific provider/model
+ * Used by scheduled jobs or manual overrides
+ */
+export async function updateProviderCostData(providerId, costData) {
+    await requireAdmin(); // Or system auth
+
+    try {
+        // Find existing record
+        const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.providerCosts, {
+            filters: { providerId, modelId: costData.modelId },
+            limit: 1,
+            suppressAuth: true
+        });
+
+        let record = {};
+        if (existingResult.items && existingResult.items.length > 0) {
+            record = existingResult.items[0];
+        }
+
+        // Update fields
+        record.providerId = providerId;
+        record.modelId = costData.modelId;
+        if (costData.costInput !== undefined) record.costInput = costData.costInput;
+        if (costData.costOutput !== undefined) record.costOutput = costData.costOutput;
+        if (costData.qualityScore !== undefined) record.qualityScore = costData.qualityScore;
+        if (costData.avgLatencyMs !== undefined) record.avgLatencyMs = costData.avgLatencyMs;
+        if (costData.availabilityRate !== undefined) record.availabilityRate = costData.availabilityRate;
+        if (costData.isActive !== undefined) record.isActive = costData.isActive;
+        record.lastUpdated = new Date();
+
+        let result;
+        if (record._id) {
+            result = await dataAccess.updateRecord(COLLECTION_KEYS.providerCosts, record, { suppressAuth: true });
+        } else {
+            result = await dataAccess.insertRecord(COLLECTION_KEYS.providerCosts, record, { suppressAuth: true });
+        }
+
+        return { success: true, data: result };
+
+    } catch (error) {
+        console.error('Error updating provider cost data:', error);
+        throw new Error('Failed to update provider cost data');
+    }
+}
+
+/**
+ * Helper to calculate quality score based on metrics
+ */
+export function calculateQualityScore(successRate, latencyMs) {
+    // Baseline is 1.0
+    // Success rate penalty: direct proportional
+    // Latency penalty: -0.1 for every 2s above 1s
+
+    let score = 1.0;
+
+    if (successRate < 1.0) {
+        score -= (1.0 - successRate);
+    }
+
+    if (latencyMs > 1000) {
+        const latencyPenalty = Math.min(0.3, (latencyMs - 1000) / 20000); // Gentle slope
+        score -= latencyPenalty;
+    }
+
+    return Math.max(0.1, Math.min(1.0, score));
+}
+
+// ============================================
+// SAVINGS REPORTING & JOBS (Phase 1)
+// ============================================
+
+/**
+ * Generate cost savings report for a period
+ */
+export async function getCostSavingsReport(period = 'month') {
+    await requireAdmin();
+
+    const endDate = new Date();
+    let startDate = new Date();
+    if (period === 'week') startDate.setDate(endDate.getDate() - 7);
+    else if (period === 'month') startDate.setDate(endDate.getDate() - 30);
+    else if (period === 'day') startDate.setDate(endDate.getDate() - 1);
+
+    try {
+        // Query logs
+        const logs = await dataAccess.queryRecords(COLLECTION_KEYS.usageLog, {
+            filters: { timestamp: { gte: startDate } },
+            limit: 1000,
+            suppressAuth: true
+        });
+
+        let totalRequests = 0;
+        let optimizedRequests = 0;
+        let totalSavings = 0;
+        let totalCost = 0;
+
+        for (const log of (logs.items || [])) {
+            totalRequests++;
+            if (log.isOptimized) {
+                optimizedRequests++;
+                // Savings is stored as 'savingsEstimate' per 1k tokens? 
+                // In routeAIRequest: savingsEstimate = cost - optimalCost (per 1k)
+                // logUsage called with savingsEstimate.
+                // Actual savings = (tokens / 1000) * savingsEstimate.
+
+                // If log.savings is unit savings:
+                // cost = (log.tokensUsed / 1000) * unitCost
+
+                const unitSavings = log.savings || 0;
+                const actualSavings = (log.tokensUsed / 1000) * unitSavings;
+                totalSavings += actualSavings;
+            }
+
+            // Estimate total cost (approx)
+            // Ideally we'd store actual cost in log too.
+            const unitCost = await estimateRequestCost(log.provider, log.model);
+            totalCost += (log.tokensUsed / 1000) * unitCost;
+        }
+
+        return {
+            period,
+            totalRequests,
+            optimizedRequests,
+            totalCost: parseFloat(totalCost.toFixed(4)),
+            totalSavings: parseFloat(totalSavings.toFixed(4)),
+            savingsRate: totalRequests > 0 ? (optimizedRequests / totalRequests) : 0,
+            avgSavingsPerRequest: optimizedRequests > 0 ? (totalSavings / optimizedRequests) : 0
+        };
+
+    } catch (error) {
+        console.error('Error generating savings report:', error);
+        return { period, error: error.message, totalSavings: 0 };
+    }
+}
+
+/**
+ * Scheduler Job: Update Provider Costs
+ * Runs hourly to refresh quality scores or fetch external prices if available
+ */
+export async function updateProviderCostsJob() {
+    console.log('[JOB] Starting updateProviderCostsJob...');
+    try {
+        // 1. Fetch current metrics
+        const metrics = await getProviderCostMetrics();
+
+        // 2. Recalculate quality scores based on recent usage
+        // Query recent usage for each provider
+        const startDate = new Date();
+        startDate.setHours(startDate.getHours() - 24); // Last 24h
+
+        for (const metric of metrics) {
+            const usage = await dataAccess.queryRecords(COLLECTION_KEYS.usageLog, {
+                filters: {
+                    provider: metric.providerId,
+                    model: metric.modelId,
+                    timestamp: { gte: startDate }
+                },
+                limit: 100, // Sample
+                suppressAuth: true
+            });
+
+            if (usage.items && usage.items.length > 0) {
+                const items = usage.items;
+                const successCount = items.filter(i => !i.error).length;
+                const successRate = successCount / items.length;
+                const avgLatency = items.reduce((acc, i) => acc + (i.latencyMs || 0), 0) / items.length;
+
+                // Update metric
+                const qualityScore = calculateQualityScore(successRate, avgLatency);
+
+                await updateProviderCostData(metric.providerId, {
+                    modelId: metric.modelId,
+                    qualityScore: parseFloat(qualityScore.toFixed(2)),
+                    avgLatencyMs: Math.round(avgLatency),
+                    availabilityRate: parseFloat(successRate.toFixed(2))
+                });
+            }
+        }
+
+        return { success: true };
+    } catch (error) {
+        console.error('[JOB] updateProviderCostsJob failed:', error);
+        return { success: false, error: error.message };
+    }
+}

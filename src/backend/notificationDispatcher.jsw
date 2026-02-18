@@ -1,5 +1,4 @@
 import * as dataAccess from 'backend/dataAccess';
-import { log } from 'backend/observabilityService';
 import { evaluateConditions } from 'backend/utils/conditionEvaluator';
 import { renderEmail } from 'backend/emailTemplateService.jsw';
 
@@ -17,7 +16,7 @@ const THROTTLE_COLLECTION = 'userThrottleState';
 export async function dispatchNotification(event, data) {
   if (!data.userId) {
     console.warn(`[notificationDispatcher] Event '${event}' missing userId`);
-    return;
+    return { queued: 0, skipped: 0, reason: 'missing_userId' };
   }
 
   try {
@@ -27,20 +26,32 @@ export async function dispatchNotification(event, data) {
       suppressAuth: true
     });
 
-    if (!rules.success || !rules.items.length) return;
+    if (!rules.success || !rules.items.length) {
+      return { queued: 0, skipped: 0 };
+    }
 
+    let queued = 0;
+    let skipped = 0;
     for (const rule of rules.items) {
       // 2. Evaluate conditions
-      if (!evaluateConditions(rule.conditions, data)) continue;
+      if (!evaluateConditions(rule.conditions || [], data)) {
+        skipped++;
+        continue;
+      }
 
       // 3. Check throttling
       if (await isThrottled(rule, data.userId)) {
         await logDispatch(rule._id, data.userId, 'throttled');
+        skipped++;
         continue;
       }
 
-      // 4. Check scheduling (simplified for now - immediate or next day if quiet hours)
-      const scheduledFor = calculateScheduledTime(rule, data.userId);
+      // 4. Check schedule and compute send time
+      const scheduledFor = calculateScheduledTime(rule, data);
+      if (!scheduledFor) {
+        skipped++;
+        continue;
+      }
 
       // 5. Queue for each channel
       const channels = rule.channels || [];
@@ -55,12 +66,23 @@ export async function dispatchNotification(event, data) {
           priority: rule.priority || 'medium',
           status: 'pending',
           eventData: JSON.stringify(data),
-          channelConfig: JSON.stringify(channel)
+          channelConfig: JSON.stringify(channel),
+          attempts: 0,
+          maxAttempts: 3,
+          createdAt: new Date(),
+          updatedAt: new Date()
         });
+        queued++;
       }
+
+      await bumpThrottleState(rule, data.userId);
+      await logDispatch(rule._id, data.userId, 'queued');
     }
+
+    return { queued, skipped };
   } catch (error) {
     console.error(`[notificationDispatcher] dispatch error (${event}):`, error.message);
+    return { queued: 0, skipped: 0, error: error.message };
   }
 }
 
@@ -71,7 +93,7 @@ export async function processNotificationQueue() {
   try {
     const now = new Date();
     const result = await dataAccess.queryRecords(QUEUE_COLLECTION, {
-      filters: { 
+      filters: {
         status: 'pending',
         scheduledFor: { le: now } 
       },
@@ -83,20 +105,41 @@ export async function processNotificationQueue() {
     if (!result.success || !result.items.length) return { processed: 0 };
 
     let processed = 0;
+    let failed = 0;
     for (const item of result.items) {
       const success = await deliverNotification(item);
-      
-      await dataAccess.updateRecord(QUEUE_COLLECTION, {
-        _id: item._id,
-        status: success ? 'sent' : 'failed',
-        sentAt: success ? new Date() : null,
-        error: success ? null : 'Delivery failed'
-      }, { suppressAuth: true });
-      
-      processed++;
+
+      if (success) {
+        await dataAccess.updateRecord(QUEUE_COLLECTION, {
+          ...item,
+          _id: item._id,
+          status: 'sent',
+          sentAt: new Date(),
+          updatedAt: new Date(),
+          error: null
+        }, { suppressAuth: true });
+        await logDispatch(item.ruleId, item.userId, 'sent', { channel: item.channel, queueId: item._id });
+        processed++;
+      } else {
+        const attempts = (item.attempts || 0) + 1;
+        const maxAttempts = item.maxAttempts || 3;
+        const status = attempts >= maxAttempts ? 'failed' : 'pending';
+        const nextRetryAt = attempts >= maxAttempts ? null : new Date(Date.now() + (attempts * 5 * 60000));
+        await dataAccess.updateRecord(QUEUE_COLLECTION, {
+          ...item,
+          _id: item._id,
+          attempts,
+          status,
+          scheduledFor: nextRetryAt || item.scheduledFor,
+          updatedAt: new Date(),
+          error: 'Delivery failed'
+        }, { suppressAuth: true });
+        await logDispatch(item.ruleId, item.userId, status, { channel: item.channel, queueId: item._id });
+        failed++;
+      }
     }
 
-    return { processed };
+    return { processed, failed };
   } catch (error) {
     console.error('[notificationDispatcher] processQueue error:', error.message);
     return { error: error.message };
@@ -149,16 +192,14 @@ async function deliverEmail(userId, config, data) {
 async function deliverInApp(userId, config, data) {
   try {
     // Basic variable replacement for simple message strings
-    let message = config.template || '';
-    Object.entries(data).forEach(([key, val]) => {
-      message = message.replace(`{{${key}}}`, val);
-    });
+    let message = renderInlineTemplate(config.template || '', data);
 
     await dataAccess.insertRecord('memberNotifications', {
       userId,
       message,
       read: false,
-      timestamp: new Date()
+      timestamp: new Date(),
+      createdAt: new Date()
     }, { suppressAuth: true });
     
     return true;
@@ -184,7 +225,8 @@ async function isThrottled(rule, userId) {
   const throttle = rule.throttling;
   if (!throttle || !throttle.enabled) return false;
 
-  const state = await dataAccess.findByField(THROTTLE_COLLECTION, 'userId_ruleId', `${userId}_${rule._id}`, { suppressAuth: true });
+  const key = `${userId}_${rule._id}`;
+  const state = await dataAccess.findByField(THROTTLE_COLLECTION, 'userId_ruleId', key, { suppressAuth: true });
   if (!state) return false;
 
   const now = Date.now();
@@ -196,26 +238,155 @@ async function isThrottled(rule, userId) {
   }
 
   // Hourly limit
-  if (throttle.maxPerHour && state.countThisHour >= throttle.maxPerHour) {
-    // Check if hour has passed
-    const hourAgo = now - 3600000;
-    if (lastSent > hourAgo) return true;
+  if (throttle.maxPerHour) {
+    const currentHour = getHourKey(new Date());
+    if (state.hourKey === currentHour && (state.countThisHour || 0) >= throttle.maxPerHour) {
+      return true;
+    }
+  }
+
+  // Daily limit
+  if (throttle.maxPerDay) {
+    const currentDay = getDayKey(new Date());
+    if (state.dayKey === currentDay && (state.countToday || 0) >= throttle.maxPerDay) {
+      return true;
+    }
   }
 
   return false;
 }
 
-function calculateScheduledTime(rule, userId) {
-  // Simple: Immediate unless quiet hours (not implemented yet)
-  return new Date();
+function calculateScheduledTime(rule, data) {
+  const scheduling = rule.scheduling || {};
+  const now = new Date();
+  const weekday = now.getDay();
+  const allowedDays = Array.isArray(scheduling.daysOfWeek) ? scheduling.daysOfWeek : [0, 1, 2, 3, 4, 5, 6];
+  if (!allowedDays.includes(weekday)) {
+    return null;
+  }
+
+  let scheduled = new Date(now.getTime() + ((scheduling.delayMinutes || 0) * 60000));
+  if (scheduling.respectQuietHours) {
+    scheduled = adjustForQuietHours(
+      scheduled,
+      scheduling.quietHoursStart || '22:00',
+      scheduling.quietHoursEnd || '08:00'
+    );
+  }
+  return scheduled;
 }
 
 async function queueNotification(item) {
   return await dataAccess.insertRecord(QUEUE_COLLECTION, item, { suppressAuth: true });
 }
 
-async function logDispatch(ruleId, userId, status) {
+async function logDispatch(ruleId, userId, status, details = {}) {
   await dataAccess.insertRecord(LOG_COLLECTION, {
-    ruleId, userId, status, timestamp: new Date()
+    ruleId,
+    userId,
+    status,
+    ...details,
+    timestamp: new Date()
   }, { suppressAuth: true });
+}
+
+async function bumpThrottleState(rule, userId) {
+  const throttle = rule.throttling || {};
+  if (!throttle.enabled) return;
+
+  const now = new Date();
+  const hourKey = getHourKey(now);
+  const dayKey = getDayKey(now);
+  const key = `${userId}_${rule._id}`;
+
+  const state = await dataAccess.findByField(THROTTLE_COLLECTION, 'userId_ruleId', key, { suppressAuth: true });
+  if (!state) {
+    await dataAccess.insertRecord(THROTTLE_COLLECTION, {
+      userId,
+      ruleId: rule._id,
+      userId_ruleId: key,
+      hourKey,
+      dayKey,
+      countThisHour: 1,
+      countToday: 1,
+      lastSent: now,
+      updatedAt: now
+    }, { suppressAuth: true });
+    return;
+  }
+
+  const countThisHour = state.hourKey === hourKey ? (state.countThisHour || 0) + 1 : 1;
+  const countToday = state.dayKey === dayKey ? (state.countToday || 0) + 1 : 1;
+  await dataAccess.updateRecord(THROTTLE_COLLECTION, {
+    ...state,
+    _id: state._id,
+    hourKey,
+    dayKey,
+    countThisHour,
+    countToday,
+    lastSent: now,
+    updatedAt: now
+  }, { suppressAuth: true });
+}
+
+function getHourKey(date) {
+  return `${date.getUTCFullYear()}-${date.getUTCMonth() + 1}-${date.getUTCDate()}-${date.getUTCHours()}`;
+}
+
+function getDayKey(date) {
+  return `${date.getUTCFullYear()}-${date.getUTCMonth() + 1}-${date.getUTCDate()}`;
+}
+
+function renderInlineTemplate(template, data) {
+  if (!template) return '';
+  return String(template).replace(/{{\s*([\w.]+)\s*}}/g, (_, keyPath) => {
+    const value = getByPath(data, keyPath);
+    return value === undefined || value === null ? '' : String(value);
+  });
+}
+
+function getByPath(source, path) {
+  if (!source || !path) return undefined;
+  return String(path).split('.').reduce((acc, part) => {
+    if (acc && typeof acc === 'object') {
+      return acc[part];
+    }
+    return undefined;
+  }, source);
+}
+
+function adjustForQuietHours(date, startTime, endTime) {
+  const [startHour, startMinute] = splitTime(startTime);
+  const [endHour, endMinute] = splitTime(endTime);
+  const minutes = (date.getHours() * 60) + date.getMinutes();
+  const startMinutes = (startHour * 60) + startMinute;
+  const endMinutes = (endHour * 60) + endMinute;
+  const spansMidnight = startMinutes > endMinutes;
+
+  const inQuietHours = spansMidnight
+    ? (minutes >= startMinutes || minutes < endMinutes)
+    : (minutes >= startMinutes && minutes < endMinutes);
+
+  if (!inQuietHours) {
+    return date;
+  }
+
+  const next = new Date(date);
+  if (spansMidnight && minutes >= startMinutes) {
+    next.setDate(next.getDate() + 1);
+  }
+  next.setHours(endHour, endMinute, 0, 0);
+  return next;
+}
+
+function splitTime(value) {
+  const [h, m] = String(value || '00:00').split(':');
+  return [Number(h || 0), Number(m || 0)];
+}
+
+/**
+ * Helper hook for other services.
+ */
+export async function triggerNotificationEvent(event, data) {
+  return await dispatchNotification(event, data);
 }

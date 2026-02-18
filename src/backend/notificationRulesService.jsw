@@ -1,9 +1,29 @@
 import * as dataAccess from 'backend/dataAccess';
+import { evaluateConditions } from 'backend/utils/conditionEvaluator';
 
 const COLLECTION_KEY = 'notificationRules';
+const LOGS_COLLECTION_KEY = 'notificationLogs';
+const QUEUE_COLLECTION_KEY = 'notificationQueue';
+
+const DEFAULT_THROTTLING = {
+  enabled: false,
+  maxPerHour: 5,
+  maxPerDay: 20,
+  cooldownMinutes: 30,
+  groupSimilar: false
+};
+
+const DEFAULT_SCHEDULING = {
+  delayMinutes: 0,
+  respectQuietHours: false,
+  quietHoursStart: '22:00',
+  quietHoursEnd: '08:00',
+  quietHoursTimezone: 'user',
+  daysOfWeek: [0, 1, 2, 3, 4, 5, 6]
+};
 
 /**
- * Get all notification rules
+ * Get all notification rules.
  */
 export async function getAllRules(triggerEvent = null) {
   const filters = triggerEvent ? { triggerEvent } : {};
@@ -16,56 +36,242 @@ export async function getAllRules(triggerEvent = null) {
 }
 
 /**
- * Get a single rule by ID
+ * Get a single rule by ID.
  */
 export async function getRule(ruleId) {
   return await dataAccess.getRecord(COLLECTION_KEY, ruleId, { suppressAuth: true });
 }
 
 /**
- * Create a new notification rule
+ * Create a new notification rule.
  */
 export async function createRule(ruleData) {
+  const normalized = normalizeRule(ruleData);
   return await dataAccess.insertRecord(COLLECTION_KEY, {
-    ...ruleData,
-    isActive: ruleData.isActive ?? true,
+    ...normalized,
     createdAt: new Date(),
     updatedAt: new Date()
   }, { suppressAuth: true });
 }
 
 /**
- * Update a notification rule
+ * Update a notification rule.
  */
 export async function updateRule(ruleId, updates) {
+  const existing = await getRule(ruleId);
+  if (!existing) {
+    throw new Error(`Rule '${ruleId}' not found`);
+  }
+  const merged = normalizeRule({ ...existing, ...updates });
   return await dataAccess.updateRecord(COLLECTION_KEY, {
+    ...existing,
+    ...merged,
     _id: ruleId,
-    ...updates,
     updatedAt: new Date()
   }, { suppressAuth: true });
 }
 
 /**
- * Enable/disable a rule
+ * Enable/disable a rule.
  */
 export async function toggleRule(ruleId, isActive) {
   return await updateRule(ruleId, { isActive });
 }
 
 /**
- * Delete a rule
+ * Delete a rule.
  */
 export async function deleteRule(ruleId) {
   return await dataAccess.deleteRecord(COLLECTION_KEY, ruleId, { suppressAuth: true });
 }
 
 /**
- * Get analytics for a rule (Placeholder)
+ * Aggregate notification stats for a rule.
  */
-export async function getRuleStats(ruleId) {
-  return {
-    sent24h: 0,
-    delivered24h: 0,
-    opened24h: 0
+export async function getRuleStats(ruleId, dateRange = {}) {
+  const { startDate, endDate } = normalizeDateRange(dateRange);
+  const result = await dataAccess.queryRecords(LOGS_COLLECTION_KEY, {
+    filters: {
+      ruleId,
+      timestamp: { gte: startDate, lte: endDate }
+    },
+    limit: 5000,
+    suppressAuth: true
+  });
+
+  const logs = result.items || [];
+  const counters = {
+    queued: 0,
+    throttled: 0,
+    sent: 0,
+    failed: 0,
+    delivered: 0,
+    opened: 0,
+    clicked: 0
   };
+
+  logs.forEach((item) => {
+    const key = String(item.status || '').toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(counters, key)) {
+      counters[key] += 1;
+    }
+  });
+
+  const sent = counters.sent || 0;
+  return {
+    range: { startDate, endDate },
+    totals: counters,
+    deliveryRate: sent > 0 ? roundTo((counters.delivered / sent) * 100, 2) : 0,
+    openRate: sent > 0 ? roundTo((counters.opened / sent) * 100, 2) : 0,
+    clickRate: sent > 0 ? roundTo((counters.clicked / sent) * 100, 2) : 0
+  };
+}
+
+/**
+ * Get raw notification logs for rule analytics view.
+ */
+export async function getNotificationLogs(ruleId, dateRange = {}) {
+  const { startDate, endDate } = normalizeDateRange(dateRange);
+  const result = await dataAccess.queryRecords(LOGS_COLLECTION_KEY, {
+    filters: {
+      ruleId,
+      timestamp: { gte: startDate, lte: endDate }
+    },
+    sort: [{ field: 'timestamp', direction: 'desc' }],
+    limit: 500,
+    suppressAuth: true
+  });
+  return result.items || [];
+}
+
+/**
+ * Test a rule against sample event data without queueing real notifications.
+ */
+export async function testRule(ruleId, sampleData = {}) {
+  const rule = await getRule(ruleId);
+  if (!rule) {
+    throw new Error(`Rule '${ruleId}' not found`);
+  }
+
+  const conditionsMet = evaluateConditions(rule.conditions || [], sampleData);
+  const channelPreviews = (rule.channels || [])
+    .filter((channel) => channel && channel.enabled)
+    .map((channel) => ({
+      type: channel.type,
+      preview: renderTemplateString(
+        channel.template || channel.body || rule.content?.[channel.type] || '',
+        sampleData
+      ),
+      title: renderTemplateString(channel.title || '', sampleData)
+    }));
+
+  const now = new Date();
+  const scheduledFor = new Date(now.getTime() + (((rule.scheduling || {}).delayMinutes || 0) * 60000));
+
+  return {
+    ruleId,
+    ruleName: rule.name,
+    triggerEvent: rule.triggerEvent,
+    conditionsMet,
+    wouldDispatch: Boolean(rule.isActive && conditionsMet && channelPreviews.length),
+    evaluation: {
+      isActive: Boolean(rule.isActive),
+      channelCount: channelPreviews.length,
+      scheduledFor,
+      throttlingEnabled: Boolean((rule.throttling || {}).enabled)
+    },
+    channels: channelPreviews
+  };
+}
+
+/**
+ * Preview rendered content for one channel of a rule.
+ */
+export async function previewNotification(ruleId, channelType, sampleData = {}) {
+  const rule = await getRule(ruleId);
+  if (!rule) {
+    throw new Error(`Rule '${ruleId}' not found`);
+  }
+
+  const channel = (rule.channels || []).find((item) => item.type === channelType);
+  if (!channel) {
+    throw new Error(`Rule '${ruleId}' does not have channel '${channelType}'`);
+  }
+
+  return {
+    ruleId,
+    channel: channelType,
+    title: renderTemplateString(channel.title || '', sampleData),
+    body: renderTemplateString(channel.template || channel.body || '', sampleData),
+    templateKey: channel.templateKey || null
+  };
+}
+
+/**
+ * Queue lookup helper for admin visibility.
+ */
+export async function getQueuedNotifications(ruleId, status = 'pending') {
+  const filters = { ruleId };
+  if (status) {
+    filters.status = status;
+  }
+  const result = await dataAccess.queryRecords(QUEUE_COLLECTION_KEY, {
+    filters,
+    sort: [{ field: 'scheduledFor', direction: 'asc' }],
+    limit: 200,
+    suppressAuth: true
+  });
+  return result.items || [];
+}
+
+function normalizeRule(ruleData = {}) {
+  const channels = Array.isArray(ruleData.channels) ? ruleData.channels : [];
+  const conditions = Array.isArray(ruleData.conditions) ? ruleData.conditions : [];
+  return {
+    ...ruleData,
+    name: String(ruleData.name || '').trim(),
+    description: String(ruleData.description || '').trim(),
+    triggerEvent: String(ruleData.triggerEvent || '').trim(),
+    priority: ruleData.priority || 'medium',
+    isActive: ruleData.isActive !== false,
+    conditions,
+    channels,
+    throttling: { ...DEFAULT_THROTTLING, ...(ruleData.throttling || {}) },
+    scheduling: { ...DEFAULT_SCHEDULING, ...(ruleData.scheduling || {}) },
+    content: ruleData.content || {}
+  };
+}
+
+function normalizeDateRange(range = {}) {
+  const endDate = range.endDate ? new Date(range.endDate) : new Date();
+  const startDate = range.startDate
+    ? new Date(range.startDate)
+    : new Date(endDate.getTime() - (24 * 60 * 60 * 1000));
+  return { startDate, endDate };
+}
+
+function renderTemplateString(template, data) {
+  if (!template) return '';
+  return String(template).replace(/{{\s*([\w.]+)\s*}}/g, (_, keyPath) => {
+    const value = getPathValue(data, keyPath);
+    return value === undefined || value === null ? '' : String(value);
+  });
+}
+
+function getPathValue(source, path) {
+  if (!source || !path) return undefined;
+  const parts = String(path).split('.');
+  let current = source;
+  for (const part of parts) {
+    if (!current || typeof current !== 'object') {
+      return undefined;
+    }
+    current = current[part];
+  }
+  return current;
+}
+
+function roundTo(value, digits) {
+  const factor = Math.pow(10, digits);
+  return Math.round(value * factor) / factor;
 }

@@ -1,0 +1,187 @@
+// ============================================================================
+// AGENT RUN LEDGER SERVICE — Immutable event log for agent orchestration
+// Tracks runs, steps, approval gates, and enables outcome evaluation
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  runs: 'agentRuns',
+  steps: 'agentSteps',
+  gates: 'approvalGates',
+  outcomes: 'runOutcomes'
+};
+
+function generateId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+/**
+ * Start a new agent run — creates the immutable run record
+ */
+export async function startRun(conversationId, role, userId, goalText) {
+  const runId = generateId('run');
+  await dataAccess.insertRecord(COLLECTIONS.runs, {
+    run_id: runId,
+    conversation_id: conversationId || '',
+    initiator_id: userId || '',
+    role: role || '',
+    goal_text: goalText || '',
+    status: 'running',
+    total_tokens: 0,
+    total_cost_usd: 0,
+    steps_count: 0,
+    started_at: new Date().toISOString(),
+    completed_at: '',
+    sla_ms: 0
+  }, { suppressAuth: true });
+  return { runId };
+}
+
+/**
+ * Log a single tool execution step within a run
+ */
+export async function logStep(runId, toolName, riskLevel, args, result, latencyMs, status) {
+  const stepId = generateId('step');
+  // Hash args for storage (avoid storing full PII)
+  const argsHash = typeof args === 'object' ? JSON.stringify(Object.keys(args || {})) : '';
+  // Summarize result (first 200 chars)
+  let resultSummary = '';
+  try {
+    const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+    resultSummary = resultStr.substring(0, 200);
+  } catch (e) {
+    resultSummary = 'error_serializing';
+  }
+
+  await dataAccess.insertRecord(COLLECTIONS.steps, {
+    step_id: stepId,
+    run_id: runId || '',
+    tool_name: toolName || '',
+    risk_level: riskLevel || '',
+    args_hash: argsHash,
+    result_summary: result && result.error ? 'error' : resultSummary,
+    latency_ms: latencyMs || 0,
+    retries: 0,
+    status: status || 'executed',
+    approval_gate_id: '',
+    created_at: new Date().toISOString()
+  }, { suppressAuth: true });
+  return { stepId };
+}
+
+/**
+ * Create an approval gate — pauses execution until resolved
+ */
+export async function createGate(runId, stepId, toolName, reason, riskLevel) {
+  const gateId = generateId('gate');
+  await dataAccess.insertRecord(COLLECTIONS.gates, {
+    gate_id: gateId,
+    run_id: runId || '',
+    step_id: stepId || '',
+    tool_name: toolName || '',
+    reason: reason || `Tool ${toolName} requires approval (risk: ${riskLevel})`,
+    risk_level: riskLevel || '',
+    presented_at: new Date().toISOString(),
+    decision: 'pending',
+    decided_by: '',
+    decided_at: ''
+  }, { suppressAuth: true });
+  return { gateId };
+}
+
+/**
+ * Resolve an approval gate — records the decision
+ */
+export async function resolveGate(gateId, decision, decidedBy) {
+  // Find the gate record
+  const gates = await dataAccess.queryRecords(COLLECTIONS.gates, {
+    filters: { gate_id: gateId },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!gates || !gates.items || gates.items.length === 0) {
+    throw new Error(`Gate not found: ${gateId}`);
+  }
+  const gate = gates.items[0];
+  const recordId = gate._id || gate.id;
+  await dataAccess.updateRecord(COLLECTIONS.gates, recordId, {
+    decision: decision || 'unknown',
+    decided_by: decidedBy || '',
+    decided_at: new Date().toISOString()
+  }, { suppressAuth: true });
+  return { gateId, decision };
+}
+
+/**
+ * Complete a run — updates final stats
+ */
+export async function completeRun(runId, status, totalTokens, totalCost) {
+  const runs = await dataAccess.queryRecords(COLLECTIONS.runs, {
+    filters: { run_id: runId },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!runs || !runs.items || runs.items.length === 0) {
+    throw new Error(`Run not found: ${runId}`);
+  }
+  const run = runs.items[0];
+  const recordId = run._id || run.id;
+  const startedAt = run.started_at ? new Date(run.started_at).getTime() : Date.now();
+  await dataAccess.updateRecord(COLLECTIONS.runs, recordId, {
+    status: status || 'completed',
+    total_tokens: totalTokens || 0,
+    total_cost_usd: totalCost || 0,
+    completed_at: new Date().toISOString(),
+    sla_ms: Date.now() - startedAt
+  }, { suppressAuth: true });
+}
+
+/**
+ * Get a run by run_id
+ */
+export async function getRun(runId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.runs, {
+    filters: { run_id: runId },
+    limit: 1,
+    suppressAuth: true
+  });
+  return (result && result.items && result.items[0]) || null;
+}
+
+/**
+ * Get all steps for a run
+ */
+export async function getSteps(runId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.steps, {
+    filters: { run_id: runId },
+    limit: 100,
+    suppressAuth: true
+  });
+  return (result && result.items) || [];
+}
+
+/**
+ * Get all approval gates for a run
+ */
+export async function getGatesForRun(runId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.gates, {
+    filters: { run_id: runId },
+    limit: 50,
+    suppressAuth: true
+  });
+  return (result && result.items) || [];
+}
+
+/**
+ * Get recent runs for a user
+ */
+export async function getRunsByUser(userId, limit = 20) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.runs, {
+    filters: { initiator_id: userId },
+    limit,
+    sort: [{ fieldName: 'started_at', order: 'desc' }],
+    suppressAuth: true
+  });
+  return (result && result.items) || [];
+}

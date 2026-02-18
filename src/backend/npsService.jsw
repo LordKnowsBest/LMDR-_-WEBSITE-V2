@@ -1,0 +1,311 @@
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+
+// ============================================
+// CONFIGURATION & CONSTANTS
+// ============================================
+
+const COLLECTION_KEYS = {
+    responses: 'npsResponses',
+    config: 'surveyConfig',
+    trends: 'npsTrends',
+    auditLog: 'auditLog'
+};
+
+const SURVEY_TYPE = {
+    NPS: 'nps', // 0-10
+    CSAT: 'csat', // 1-5 stars
+    CES: 'ces' // Customer Effort Score
+};
+
+const TRIGGER_TYPE = {
+    TICKET_RESOLVED: 'ticket_resolved',
+    CHAT_ENDED: 'chat_ended',
+    HIRE_CONFIRMED: 'hire_confirmed',
+    PERIODIC: 'periodic'
+};
+
+// ============================================
+// AUTHORIZATION HELPERS
+// ============================================
+
+async function getContext() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return { isAuthenticated: false };
+        
+        const role = (member.contactDetails?.customFields?.role || 'user').toLowerCase();
+        const isAdmin = ['admin', 'super_admin', 'ops_admin'].includes(role);
+        
+        return {
+            isAuthenticated: true,
+            userId: member._id,
+            email: member.loginEmail,
+            role,
+            isAdmin
+        };
+    } catch (error) {
+        return { isAuthenticated: false };
+    }
+}
+
+async function requireAdmin() {
+    const context = await getContext();
+    if (!context.isAdmin) throw new Error('Unauthorized: Admin access required');
+    return context;
+}
+
+// ============================================
+// SURVEY LOGIC METHODS
+// ============================================
+
+/**
+ * Checks if a survey should be shown to a user
+ */
+export async function shouldShowSurvey(userId, triggerType) {
+    try {
+        const configResult = await dataAccess.queryRecords(COLLECTION_KEYS.config, {
+            filters: { trigger_type: triggerType, is_active: true },
+            limit: 1,
+            suppressAuth: true
+        });
+
+        const config = configResult.items?.[0];
+        if (!config) return { show: false };
+
+        // Cooldown check: when was the last time the user responded or saw a survey?
+        const lastResponseResult = await dataAccess.queryRecords(COLLECTION_KEYS.responses, {
+            filters: { user_id: userId },
+            sort: [{ field: 'created_at', direction: 'desc' }],
+            limit: 1,
+            suppressAuth: true
+        });
+
+        const lastResponse = lastResponseResult.items?.[0];
+        if (lastResponse) {
+            const cooldownDays = config.cooldown_days || 30;
+            const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
+            const diffMs = Date.now() - new Date(lastResponse.created_at).getTime();
+            
+            if (diffMs < cooldownMs) {
+                return { show: false, reason: 'cooldown' };
+            }
+        }
+
+        // Sample rate check
+        const sampleRate = config.sample_rate || 100; // default to 100%
+        if (Math.random() * 100 > sampleRate) {
+            return { show: false, reason: 'sampling' };
+        }
+
+        return { show: true, configId: config._id, surveyType: config.survey_type };
+    } catch (error) {
+        console.error('[npsService] shouldShowSurvey error:', error.message);
+        return { show: false, error: error.message };
+    }
+}
+
+/**
+ * Submits a survey response
+ */
+export async function submitNPSResponse(responseData) {
+    const context = await getContext();
+    if (!context.isAuthenticated) throw new Error('Authentication required');
+
+    try {
+        const { score, comment, surveyType, triggerType, metadata } = responseData;
+        
+        // Calculate category for NPS
+        let category = 'neutral';
+        if (surveyType === SURVEY_TYPE.NPS) {
+            if (score >= 9) category = 'promoter';
+            else if (score <= 6) category = 'detractor';
+            else category = 'passive';
+        }
+
+        const newResponse = {
+            user_id: context.userId,
+            user_email: context.email,
+            user_role: context.role,
+            score: Number(score),
+            comment: comment || '',
+            category,
+            survey_type: surveyType || SURVEY_TYPE.NPS,
+            trigger_type: triggerType || TRIGGER_TYPE.PERIODIC,
+            created_at: new Date(),
+            metadata: metadata || {}
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.responses, newResponse, { suppressAuth: true });
+        
+        if (result.success) {
+            // Trigger alerts for detractors if needed
+            if (category === 'detractor') {
+                log({
+                    level: 'WARN',
+                    source: 'nps-service',
+                    message: `Detractor feedback received from ${context.email}`,
+                    details: { score, comment, userId: context.userId }
+                }).catch(() => {});
+            }
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[npsService] submitNPSResponse error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// ADMIN ANALYTICS METHODS
+// ============================================
+
+/**
+ * Calculates NPS score for a date range and optional segment
+ */
+export async function getNPSScore(dateRange = { start: null, end: null }, segment = null) {
+    await requireAdmin();
+
+    try {
+        const filters = { survey_type: SURVEY_TYPE.NPS };
+        if (dateRange.start) filters.created_at = { gte: dateRange.start };
+        if (dateRange.end) filters.created_at = { ...filters.created_at, lte: dateRange.end };
+        if (segment) {
+            if (segment.role) filters.user_role = segment.role;
+            if (segment.trigger) filters.trigger_type = segment.trigger;
+        }
+
+        const responses = await dataAccess.getAllRecords(COLLECTION_KEYS.responses, { filters });
+        
+        if (responses.length === 0) {
+            return { success: true, score: 0, total: 0, promoters: 0, detractors: 0, passives: 0 };
+        }
+
+        const promoters = responses.filter(r => r.category === 'promoter').length;
+        const detractors = responses.filter(r => r.category === 'detractor').length;
+        const passives = responses.filter(r => r.category === 'passive').length;
+        const total = responses.length;
+
+        // NPS Formula: (% Promoters) - (% Detractors)
+        const score = Math.round(((promoters / total) * 100) - ((detractors / total) * 100));
+
+        return {
+            success: true,
+            score,
+            total,
+            promoters,
+            detractors,
+            passives,
+            promoterPct: Math.round((promoters / total) * 100),
+            detractorPct: Math.round((detractors / total) * 100),
+            passivePct: Math.round((passives / total) * 100)
+        };
+    } catch (error) {
+        console.error('[npsService] getNPSScore error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets NPS trend over time
+ */
+export async function getNPSTrend(dateRange = { start: null, end: null }, granularity = 'weekly') {
+    await requireAdmin();
+    // This could also fetch from aggregated NPSTrends collection for speed,
+    // but here we'll calculate it from raw responses for precision.
+    try {
+        const filters = { survey_type: SURVEY_TYPE.NPS };
+        if (dateRange.start) filters.created_at = { gte: dateRange.start };
+        if (dateRange.end) filters.created_at = { ...filters.created_at, lte: dateRange.end };
+
+        const responses = await dataAccess.getAllRecords(COLLECTION_KEYS.responses, { filters, sort: [{ field: 'created_at', direction: 'asc' }] });
+        
+        if (responses.length === 0) return { success: true, trend: [] };
+
+        // Group by day/week/month
+        const groups = {};
+        responses.forEach(r => {
+            const date = new Date(r.created_at);
+            let key = '';
+            if (granularity === 'daily') key = date.toISOString().split('T')[0];
+            else if (granularity === 'weekly') {
+                const day = date.getDay();
+                const diff = date.getDate() - day + (day === 0 ? -6 : 1); // Monday
+                const monday = new Date(date.setDate(diff));
+                key = monday.toISOString().split('T')[0];
+            } else { // monthly
+                key = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}`;
+            }
+
+            if (!groups[key]) groups[key] = [];
+            groups[key].push(r);
+        });
+
+        const trend = Object.entries(groups).map(([date, group]) => {
+            const promoters = group.filter(r => r.category === 'promoter').length;
+            const detractors = group.filter(r => r.category === 'detractor').length;
+            const total = group.length;
+            const score = Math.round(((promoters / total) * 100) - ((detractors / total) * 100));
+            
+            return { date, score, total };
+        });
+
+        return { success: true, trend };
+    } catch (error) {
+        console.error('[npsService] getNPSTrend error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets survey configuration for admin settings
+ */
+export async function getSurveyConfig() {
+    await requireAdmin();
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.config, { suppressAuth: true });
+        return { success: true, items: result.items || [] };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Updates survey configuration
+ */
+export async function updateSurveyConfig(configId, updates) {
+    const context = await requireAdmin();
+    try {
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.config, {
+            _id: configId,
+            ...updates,
+            updated_at: new Date()
+        }, { suppressAuth: true });
+
+        if (result.success) {
+            await auditAction('updateSurveyConfig', configId, { updates }, context);
+        }
+        return result;
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function auditAction(action, targetId, details, context) {
+    try {
+        const auditEntry = {
+            timestamp: new Date(),
+            action,
+            targetType: 'nps_config',
+            targetId,
+            adminId: context.userId,
+            adminEmail: context.email,
+            details
+        };
+        await dataAccess.insertRecord(COLLECTION_KEYS.auditLog, auditEntry, { suppressAuth: true });
+    } catch (error) {
+        console.error('[npsService] Audit log failure:', error.message);
+    }
+}

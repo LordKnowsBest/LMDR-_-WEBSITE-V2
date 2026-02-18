@@ -58,6 +58,19 @@ class LMDRFlagsManager {
   }
 
   /**
+   * Fetch a fresh value for one flag from host page code.
+   */
+  async isEnabledAsync(flagKey) {
+    if (typeof window !== 'undefined' && typeof window.lmdrEvaluateFlag === 'function') {
+      const value = await window.lmdrEvaluateFlag(flagKey, this.userId, this.context);
+      this.flags[flagKey] = !!value;
+      this._saveToCache();
+      return !!value;
+    }
+    return this.isEnabled(flagKey);
+  }
+
+  /**
    * Get variant for a flag (for now returns 'on'/'off')
    */
   getVariant(flagKey) {

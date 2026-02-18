@@ -6,7 +6,7 @@ import { submitApplication, getDriverApplications } from 'backend/applicationSer
 import { extractDocumentForAutoFill } from 'backend/ocrService.jsw';
 import { getMatchExplanationForDriver } from 'backend/matchExplanationService.jsw';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
-import { handleAgentTurn } from 'backend/agentService';
+import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
 import wixLocation from 'wix-location';
 import wixWindow from 'wix-window';
@@ -70,6 +70,7 @@ const MESSAGE_REGISTRY = {
     'getMutualInterest', // Phase 1: Fetch mutual interests
     'loginForApplication', // Trigger Wix login from application submit
     'agentMessage', // Send message to AI agent
+    'resolveApprovalGate', // Resolve an approval gate (approve/reject)
     'startVoiceCall', // Initiate voice call
     'endVoiceCall', // End voice call
     'getVoiceConfig', // Request voice configuration
@@ -98,6 +99,7 @@ const MESSAGE_REGISTRY = {
     'agentResponse', // Agent orchestration response
     'agentTyping', // Agent is processing
     'agentToolResult', // Tool execution result
+    'agentApprovalRequired', // Agent requires user approval to proceed
     'voiceReady', // Voice configuration ready
     'pong' // Health check response
   ]
@@ -382,7 +384,23 @@ async function handleHtmlMessage(msg) {
       sendToHtml('agentTyping', {});
       try {
         const agentResult = await handleAgentTurn('driver', userId, agentText, agentContext);
-        sendToHtml('agentResponse', agentResult);
+        if (agentResult.type === 'approval_required') {
+          sendToHtml('agentApprovalRequired', agentResult);
+        } else {
+          sendToHtml('agentResponse', agentResult);
+        }
+      } catch (err) {
+        sendToHtml('agentResponse', { error: err.message });
+      }
+      break;
+    }
+
+    case 'resolveApprovalGate': {
+      const { approvalContext, decision, decidedBy } = msg.data || {};
+      sendToHtml('agentTyping', {});
+      try {
+        const result = await resumeAfterApproval(approvalContext, decision, decidedBy || 'user');
+        sendToHtml('agentResponse', result);
       } catch (err) {
         sendToHtml('agentResponse', { error: err.message });
       }

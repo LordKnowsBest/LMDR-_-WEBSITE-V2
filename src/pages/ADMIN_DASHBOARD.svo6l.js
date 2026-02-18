@@ -14,7 +14,7 @@ import {
     getFunnelConversion,
     updateFeatureStatus
 } from 'backend/featureAdoptionService';
-import { handleAgentTurn } from 'backend/agentService';
+import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -117,6 +117,10 @@ async function routeMessage(component, message) {
 
             case 'agentMessage':
                 await handleAgentMessage(component, message);
+                break;
+
+            case 'resolveApprovalGate':
+                await handleResolveApprovalGate(component, message);
                 break;
 
             case 'getVoiceConfig':
@@ -230,7 +234,22 @@ async function handleAgentMessage(component, message) {
         return;
     }
     const result = await handleAgentTurn('admin', 'admin-user', text, context);
-    safeSend(component, { action: 'agentResponse', payload: result });
+    if (result.type === 'approval_required') {
+        safeSend(component, { action: 'agentApprovalRequired', payload: result });
+    } else {
+        safeSend(component, { action: 'agentResponse', payload: result });
+    }
+}
+
+async function handleResolveApprovalGate(component, message) {
+    const { approvalContext, decision, decidedBy } = message.data || message.payload || {};
+    safeSend(component, { action: 'agentTyping', payload: {} });
+    try {
+        const result = await resumeAfterApproval(approvalContext, decision, decidedBy || 'admin');
+        safeSend(component, { action: 'agentResponse', payload: result });
+    } catch (err) {
+        safeSend(component, { action: 'agentResponse', payload: { error: err.message } });
+    }
 }
 
 async function handleGetVoiceConfig(component) {

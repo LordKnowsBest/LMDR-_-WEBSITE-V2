@@ -1,0 +1,366 @@
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+import { createTicket, addTicketComment } from 'backend/supportTicketService.jsw';
+
+// ============================================
+// CONFIGURATION & CONSTANTS
+// ============================================
+
+const COLLECTION_KEYS = {
+    sessions: 'chatSessions',
+    messages: 'chatMessages',
+    responses: 'cannedResponses',
+    auditLog: 'auditLog',
+    users: 'adminUsers'
+};
+
+const SESSION_STATUS = {
+    QUEUED: 'queued',
+    ACTIVE: 'active',
+    ENDED: 'ended',
+    CONVERTED: 'converted'
+};
+
+const SENDER_TYPE = {
+    USER: 'user',
+    AGENT: 'agent',
+    SYSTEM: 'system'
+};
+
+// ============================================
+// AUTHORIZATION HELPERS
+// ============================================
+
+async function getContext() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return { isAuthenticated: false };
+        
+        const role = (member.contactDetails?.customFields?.role || 'user').toLowerCase();
+        const isAdmin = ['admin', 'super_admin', 'ops_admin'].includes(role);
+        
+        return {
+            isAuthenticated: true,
+            userId: member._id,
+            email: member.loginEmail,
+            role,
+            isAdmin
+        };
+    } catch (error) {
+        return { isAuthenticated: false };
+    }
+}
+
+async function requireAdmin() {
+    const context = await getContext();
+    if (!context.isAdmin) throw new Error('Unauthorized: Admin access required');
+    return context;
+}
+
+// ============================================
+// CHAT SESSION METHODS
+// ============================================
+
+/**
+ * Starts a new chat session for a user
+ */
+export async function startChatSession(userData, topic = 'general') {
+    const context = await getContext();
+    if (!context.isAuthenticated) throw new Error('Authentication required');
+
+    try {
+        // Find existing active session for user if any
+        const existingSession = await dataAccess.queryRecords(COLLECTION_KEYS.sessions, {
+            filters: { user_id: context.userId, status: { hasSome: [SESSION_STATUS.QUEUED, SESSION_STATUS.ACTIVE] } },
+            limit: 1,
+            suppressAuth: true
+        });
+
+        if (existingSession.items && existingSession.items.length > 0) {
+            return { success: true, session: existingSession.items[0], isNew: false };
+        }
+
+        const newSession = {
+            user_id: context.userId,
+            user_email: context.email,
+            user_role: context.role,
+            topic,
+            status: SESSION_STATUS.QUEUED,
+            assigned_to: null,
+            created_at: new Date(),
+            updated_at: new Date(),
+            queue_start_at: new Date(),
+            metadata: userData || {}
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.sessions, newSession, { suppressAuth: true });
+        
+        if (result.success) {
+            // Log entry for initial message
+            await sendChatMessage(result.record._id, `Topic: ${topic}`, SENDER_TYPE.SYSTEM);
+        }
+
+        return { ...result, isNew: true };
+    } catch (error) {
+        console.error('[chatSupportService] startChatSession error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Assigns a chat session to an agent
+ */
+export async function assignChatToAgent(sessionId, agentId) {
+    const context = await requireAdmin();
+
+    try {
+        const session = await dataAccess.getRecord(COLLECTION_KEYS.sessions, sessionId, { suppressAuth: true });
+        if (!session) throw new Error('Session not found');
+
+        const updates = {
+            _id: sessionId,
+            assigned_to: agentId,
+            status: SESSION_STATUS.ACTIVE,
+            updated_at: new Date(),
+            active_since: new Date()
+        };
+
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.sessions, updates, { suppressAuth: true });
+
+        if (result.success) {
+            await sendChatMessage(sessionId, `Agent connected: ${context.email}`, SENDER_TYPE.SYSTEM);
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[chatSupportService] assignChatToAgent error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Sends a message in a chat session
+ */
+export async function sendChatMessage(sessionId, content, senderType = SENDER_TYPE.USER) {
+    const context = await getContext();
+    if (!context.isAuthenticated && senderType !== SENDER_TYPE.SYSTEM) throw new Error('Authentication required');
+
+    try {
+        const session = await dataAccess.getRecord(COLLECTION_KEYS.sessions, sessionId, { suppressAuth: true });
+        if (!session) throw new Error('Session not found');
+
+        // Logic check: agents can't message ended sessions, etc.
+        if (session.status === SESSION_STATUS.ENDED) throw new Error('Chat session already ended');
+
+        const newMessage = {
+            session_id: sessionId,
+            sender_id: context.userId || 'system',
+            sender_email: context.email || 'system',
+            sender_type: senderType,
+            content,
+            created_at: new Date()
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.messages, newMessage, { suppressAuth: true });
+        
+        if (result.success) {
+            await dataAccess.updateRecord(COLLECTION_KEYS.sessions, {
+                _id: sessionId,
+                updated_at: new Date()
+            }, { suppressAuth: true });
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[chatSupportService] sendChatMessage error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets messages for a session since a certain timestamp
+ */
+export async function getChatMessagesSince(sessionId, lastTimestamp) {
+    const context = await getContext();
+    if (!context.isAuthenticated) throw new Error('Authentication required');
+
+    try {
+        const filters = { session_id: sessionId };
+        if (lastTimestamp) {
+            filters.created_at = { gt: new Date(lastTimestamp) };
+        }
+
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.messages, {
+            filters,
+            sort: [{ field: 'created_at', direction: 'asc' }],
+            suppressAuth: true
+        });
+
+        return result;
+    } catch (error) {
+        console.error('[chatSupportService] getChatMessagesSince error:', error.message);
+        return { success: false, error: error.message, items: [] };
+    }
+}
+
+/**
+ * Ends a chat session
+ */
+export async function endChatSession(sessionId, rating = null) {
+    const context = await getContext();
+
+    try {
+        const updates = {
+            _id: sessionId,
+            status: SESSION_STATUS.ENDED,
+            ended_at: new Date(),
+            updated_at: new Date()
+        };
+        if (rating) updates.rating = Number(rating);
+
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.sessions, updates, { suppressAuth: true });
+
+        if (result.success) {
+            await sendChatMessage(sessionId, 'Chat session ended.', SENDER_TYPE.SYSTEM);
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[chatSupportService] endChatSession error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Converts a chat session into a support ticket
+ */
+export async function convertChatToTicket(sessionId) {
+    const context = await requireAdmin();
+
+    try {
+        const session = await dataAccess.getRecord(COLLECTION_KEYS.sessions, sessionId, { suppressAuth: true });
+        if (!session) throw new Error('Session not found');
+
+        // Fetch all messages for transcript
+        const messages = await dataAccess.queryRecords(COLLECTION_KEYS.messages, {
+            filters: { session_id: sessionId },
+            sort: [{ field: 'created_at', direction: 'asc' }],
+            suppressAuth: true
+        });
+
+        const transcript = (messages.items || []).map(m => 
+            `[${new Date(m.created_at).toLocaleTimeString()}] ${m.sender_email} (${m.sender_type}): ${m.content}`
+        ).join('
+');
+
+        // Create the ticket
+        const ticketResult = await createTicket({
+            subject: `Chat Escalation: ${session.topic}`,
+            description: `Chat session started at ${new Date(session.created_at).toLocaleString()}
+
+Full Transcript:
+${transcript}`,
+            category: session.topic,
+            metadata: { chat_session_id: sessionId }
+        });
+
+        if (ticketResult.success) {
+            await dataAccess.updateRecord(COLLECTION_KEYS.sessions, {
+                _id: sessionId,
+                status: SESSION_STATUS.CONVERTED,
+                ticket_id: ticketResult.record._id,
+                updated_at: new Date()
+            }, { suppressAuth: true });
+
+            await sendChatMessage(sessionId, `Converted to ticket: ${ticketResult.record.ticket_number}`, SENDER_TYPE.SYSTEM);
+        }
+
+        return ticketResult;
+    } catch (error) {
+        console.error('[chatSupportService] convertChatToTicket error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================
+// ADMIN QUEUE METHODS
+// ============================================
+
+/**
+ * Gets the current chat queue for admins
+ */
+export async function getChatQueue() {
+    await requireAdmin();
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.sessions, {
+            filters: { status: SESSION_STATUS.QUEUED },
+            sort: [{ field: 'queue_start_at', direction: 'asc' }],
+            suppressAuth: true
+        });
+
+        return result;
+    } catch (error) {
+        return { success: false, error: error.message, items: [] };
+    }
+}
+
+/**
+ * Gets an agent's active chats
+ */
+export async function getAgentActiveChats(agentId) {
+    await requireAdmin();
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.sessions, {
+            filters: { assigned_to: agentId, status: SESSION_STATUS.ACTIVE },
+            sort: [{ field: 'updated_at', direction: 'desc' }],
+            suppressAuth: true
+        });
+
+        return result;
+    } catch (error) {
+        return { success: false, error: error.message, items: [] };
+    }
+}
+
+// ============================================
+// CANNED RESPONSES METHODS
+// ============================================
+
+/**
+ * Gets canned responses by category
+ */
+export async function getCannedResponses(category = null) {
+    await requireAdmin();
+    try {
+        const filters = {};
+        if (category) filters.category = category;
+
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.responses, {
+            filters,
+            sort: [{ field: 'title', direction: 'asc' }],
+            suppressAuth: true
+        });
+
+        return result;
+    } catch (error) {
+        return { success: false, error: error.message, items: [] };
+    }
+}
+
+/**
+ * Creates a new canned response
+ */
+export async function createCannedResponse(responseData) {
+    await requireAdmin();
+    try {
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.responses, {
+            ...responseData,
+            created_at: new Date(),
+            updated_at: new Date()
+        }, { suppressAuth: true });
+        return result;
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}

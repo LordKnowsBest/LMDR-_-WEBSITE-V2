@@ -1,0 +1,482 @@
+import { currentMember } from 'wix-members-backend';
+import * as dataAccess from 'backend/dataAccess';
+import { log } from 'backend/observabilityService';
+import { sendMessageNotification } from 'backend/emailService.jsw';
+
+// ============================================
+// CONFIGURATION & CONSTANTS
+// ============================================
+
+const COLLECTION_KEYS = {
+    tickets: 'supportTickets',
+    comments: 'ticketComments',
+    tags: 'ticketTags',
+    auditLog: 'auditLog',
+    users: 'adminUsers',
+    drivers: 'driverProfiles',
+    carriers: 'carrierAccounts'
+};
+
+const TICKET_STATUS = {
+    OPEN: 'open',
+    PENDING: 'pending',
+    RESOLVED: 'resolved',
+    CLOSED: 'closed'
+};
+
+const TICKET_PRIORITY = {
+    LOW: 'low',
+    MEDIUM: 'medium',
+    HIGH: 'high',
+    URGENT: 'urgent'
+};
+
+const SLA_CONFIG = {
+    [TICKET_PRIORITY.LOW]: { responseHours: 48, resolutionHours: 120 },
+    [TICKET_PRIORITY.MEDIUM]: { responseHours: 24, resolutionHours: 72 },
+    [TICKET_PRIORITY.HIGH]: { responseHours: 4, resolutionHours: 24 },
+    [TICKET_PRIORITY.URGENT]: { responseHours: 1, resolutionHours: 8 }
+};
+
+// ============================================
+// AUTHORIZATION HELPERS
+// ============================================
+
+async function getContext() {
+    try {
+        const member = await currentMember.getMember({ fieldsets: ['FULL'] });
+        if (!member) return { isAuthenticated: false };
+        
+        const role = (member.contactDetails?.customFields?.role || 'user').toLowerCase();
+        const isAdmin = ['admin', 'super_admin', 'ops_admin'].includes(role);
+        
+        return {
+            isAuthenticated: true,
+            userId: member._id,
+            email: member.loginEmail,
+            role,
+            isAdmin
+        };
+    } catch (error) {
+        return { isAuthenticated: false };
+    }
+}
+
+async function requireAdmin() {
+    const context = await getContext();
+    if (!context.isAdmin) throw new Error('Unauthorized: Admin access required');
+    return context;
+}
+
+// ============================================
+// AUDIT LOGGING HELPER
+// ============================================
+
+async function auditAction(action, targetId, details, context) {
+    try {
+        const auditEntry = {
+            timestamp: new Date(),
+            action,
+            targetType: 'ticket',
+            targetId,
+            adminId: context.userId,
+            adminEmail: context.email,
+            details
+        };
+        await dataAccess.insertRecord(COLLECTION_KEYS.auditLog, auditEntry, { suppressAuth: true });
+    } catch (error) {
+        console.error('[supportTicketService] Audit log failure:', error.message);
+    }
+}
+
+// ============================================
+// SLA CALCULATION HELPERS
+// ============================================
+
+function calculateSLADeadlines(priority) {
+    const config = SLA_CONFIG[priority] || SLA_CONFIG[TICKET_PRIORITY.LOW];
+    const now = new Date();
+    
+    const responseDue = new Date(now.getTime() + (config.responseHours * 60 * 60 * 1000));
+    const resolutionDue = new Date(now.getTime() + (config.resolutionHours * 60 * 60 * 1000));
+    
+    return {
+        response_due: responseDue,
+        resolution_due: resolutionDue
+    };
+}
+
+// ============================================
+// PUBLIC TICKET METHODS
+// ============================================
+
+/**
+ * Creates a new support ticket
+ */
+export async function createTicket(ticketData) {
+    const context = await getContext();
+    if (!context.isAuthenticated) throw new Error('Authentication required to create a ticket');
+
+    try {
+        const priority = ticketData.priority || TICKET_PRIORITY.MEDIUM;
+        const slaDeadlines = calculateSLADeadlines(priority);
+        
+        // Generate a ticket number (simple timestamp-based for now, can be replaced with a counter hook)
+        const ticketNumber = `TKT-${Date.now().toString().slice(-8)}`;
+
+        const newTicket = {
+            ticket_number: ticketNumber,
+            subject: ticketData.subject,
+            description: ticketData.description,
+            status: TICKET_STATUS.OPEN,
+            priority: priority,
+            category: ticketData.category || 'general',
+            user_id: context.userId,
+            user_email: context.email,
+            user_role: context.role,
+            assigned_to: null,
+            created_at: new Date(),
+            updated_at: new Date(),
+            ...slaDeadlines,
+            metadata: ticketData.metadata || {}
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.tickets, newTicket, { suppressAuth: true });
+        
+        if (result.success) {
+            await auditAction('createTicket', result.record._id, { ticketNumber }, context);
+            
+            // Log for observability
+            log({
+                level: 'INFO',
+                source: 'support-ticket-service',
+                message: `New ticket created: ${ticketNumber}`,
+                details: { ticketId: result.record._id, userId: context.userId }
+            }).catch(() => {});
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[supportTicketService] createTicket error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets a ticket by ID with its comments and history
+ */
+export async function getTicket(ticketId) {
+    const context = await getContext();
+    if (!context.isAuthenticated) throw new Error('Authentication required');
+
+    try {
+        const ticket = await dataAccess.getRecord(COLLECTION_KEYS.tickets, ticketId, { suppressAuth: true });
+        if (!ticket) return { success: false, error: 'Ticket not found' };
+
+        // Security check: only admins or the ticket owner can view the ticket
+        if (!context.isAdmin && ticket.user_id !== context.userId) {
+            throw new Error('Unauthorized access to ticket');
+        }
+
+        // Fetch comments
+        const commentsResult = await dataAccess.queryRecords(COLLECTION_KEYS.comments, {
+            filters: { ticket_id: ticketId },
+            sort: [{ field: 'created_at', direction: 'asc' }],
+            suppressAuth: true
+        });
+
+        // Fetch history from audit logs
+        const historyResult = await dataAccess.queryRecords(COLLECTION_KEYS.auditLog, {
+            filters: { targetType: 'ticket', targetId: ticketId },
+            sort: [{ field: 'timestamp', direction: 'desc' }],
+            suppressAuth: true
+        });
+
+        return {
+            success: true,
+            ticket,
+            comments: commentsResult.items || [],
+            history: historyResult.items || []
+        };
+    } catch (error) {
+        console.error('[supportTicketService] getTicket error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Updates a ticket's basic information
+ */
+export async function updateTicket(ticketId, updates) {
+    const context = await requireAdmin();
+
+    try {
+        const existing = await dataAccess.getRecord(COLLECTION_KEYS.tickets, ticketId, { suppressAuth: true });
+        if (!existing) throw new Error('Ticket not found');
+
+        const updatedData = {
+            ...existing,
+            ...updates,
+            updated_at: new Date()
+        };
+
+        // If priority changed, recalculate SLA (optional behavior, depending on policy)
+        if (updates.priority && updates.priority !== existing.priority) {
+            const newSla = calculateSLADeadlines(updates.priority);
+            Object.assign(updatedData, newSla);
+        }
+
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.tickets, updatedData, { suppressAuth: true });
+        
+        if (result.success) {
+            await auditAction('updateTicket', ticketId, { updates }, context);
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[supportTicketService] updateTicket error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets a list of tickets with filtering and pagination
+ */
+export async function getTicketsList(options = {}) {
+    const context = await requireAdmin();
+    const { filters = {}, pagination = { page: 1, pageSize: 25 }, sort = [{ field: 'created_at', direction: 'desc' }] } = options;
+
+    try {
+        const queryFilters = {};
+        if (filters.status && filters.status !== 'all') queryFilters.status = filters.status;
+        if (filters.priority && filters.priority !== 'all') queryFilters.priority = filters.priority;
+        if (filters.category && filters.category !== 'all') queryFilters.category = filters.category;
+        if (filters.assigned_to) queryFilters.assigned_to = filters.assigned_to;
+        if (filters.search) {
+            queryFilters.subject = { contains: filters.search };
+            // Note: Airtable buildFilterFormula handles OR logic if needed, 
+            // but simple search here for now
+        }
+
+        const skip = (pagination.page - 1) * pagination.pageSize;
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.tickets, {
+            filters: queryFilters,
+            limit: pagination.pageSize,
+            skip,
+            sort,
+            suppressAuth: true
+        });
+
+        return result;
+    } catch (error) {
+        console.error('[supportTicketService] getTicketsList error:', error.message);
+        return { success: false, error: error.message, items: [] };
+    }
+}
+
+/**
+ * Assigns a ticket to an agent
+ */
+export async function assignTicket(ticketId, agentId) {
+    const context = await requireAdmin();
+
+    try {
+        const ticket = await dataAccess.getRecord(COLLECTION_KEYS.tickets, ticketId, { suppressAuth: true });
+        if (!ticket) throw new Error('Ticket not found');
+
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.tickets, {
+            _id: ticketId,
+            assigned_to: agentId,
+            updated_at: new Date()
+        }, { suppressAuth: true });
+
+        if (result.success) {
+            await auditAction('assignTicket', ticketId, { agentId }, context);
+            
+            // Potentially notify the agent (can be implemented with memberNotifications)
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[supportTicketService] assignTicket error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Changes a ticket's status
+ */
+export async function changeTicketStatus(ticketId, status, reason = '') {
+    const context = await requireAdmin();
+
+    try {
+        const ticket = await dataAccess.getRecord(COLLECTION_KEYS.tickets, ticketId, { suppressAuth: true });
+        if (!ticket) throw new Error('Ticket not found');
+
+        const updates = {
+            _id: ticketId,
+            status: status,
+            updated_at: new Date()
+        };
+
+        // If resolving/closing, record completion time
+        if ([TICKET_STATUS.RESOLVED, TICKET_STATUS.CLOSED].includes(status)) {
+            updates.resolved_at = new Date();
+        }
+
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.tickets, updates, { suppressAuth: true });
+
+        if (result.success) {
+            await auditAction('changeStatus', ticketId, { status, reason }, context);
+            
+            // Notify user of status change
+            sendMessageNotification(ticket.user_id, {
+                recipientName: 'User',
+                senderName: 'LMDR Support',
+                messagePreview: `Your ticket ${ticket.ticket_number} has been updated to ${status}.`,
+                isDriver: ticket.user_role === 'driver'
+            }).catch(e => console.warn('Notification failed:', e.message));
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[supportTicketService] changeTicketStatus error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Adds a comment to a ticket
+ */
+export async function addTicketComment(ticketId, content, isInternal = false) {
+    const context = await getContext();
+    if (!context.isAuthenticated) throw new Error('Authentication required');
+
+    try {
+        const ticket = await dataAccess.getRecord(COLLECTION_KEYS.tickets, ticketId, { suppressAuth: true });
+        if (!ticket) throw new Error('Ticket not found');
+
+        // Security: only admin or owner can comment
+        if (!context.isAdmin && ticket.user_id !== context.userId) {
+            throw new Error('Unauthorized');
+        }
+
+        // Only admins can make internal notes
+        const internal = context.isAdmin ? isInternal : false;
+
+        const newComment = {
+            ticket_id: ticketId,
+            user_id: context.userId,
+            user_email: context.email,
+            user_role: context.role,
+            content,
+            is_internal: internal,
+            created_at: new Date()
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTION_KEYS.comments, newComment, { suppressAuth: true });
+
+        if (result.success) {
+            // Update ticket's updated_at
+            await dataAccess.updateRecord(COLLECTION_KEYS.tickets, {
+                _id: ticketId,
+                updated_at: new Date()
+            }, { suppressAuth: true });
+
+            // If it's a public reply from an admin, notify the user
+            if (context.isAdmin && !internal) {
+                sendMessageNotification(ticket.user_id, {
+                    recipientName: 'User',
+                    senderName: 'LMDR Support',
+                    messagePreview: `New reply on your ticket ${ticket.ticket_number}: ${content.substring(0, 50)}...`,
+                    isDriver: ticket.user_role === 'driver'
+                }).catch(e => console.warn('Notification failed:', e.message));
+            }
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[supportTicketService] addTicketComment error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Escalates a ticket to a higher priority or supervisor
+ */
+export async function escalateTicket(ticketId, reason) {
+    const context = await requireAdmin();
+
+    try {
+        const ticket = await dataAccess.getRecord(COLLECTION_KEYS.tickets, ticketId, { suppressAuth: true });
+        if (!ticket) throw new Error('Ticket not found');
+
+        const updates = {
+            _id: ticketId,
+            priority: TICKET_PRIORITY.URGENT,
+            is_escalated: true,
+            escalation_reason: reason,
+            updated_at: new Date()
+        };
+
+        // Recalculate SLA for urgent priority
+        const newSla = calculateSLADeadlines(TICKET_PRIORITY.URGENT);
+        Object.assign(updates, newSla);
+
+        const result = await dataAccess.updateRecord(COLLECTION_KEYS.tickets, updates, { suppressAuth: true });
+
+        if (result.success) {
+            await auditAction('escalateTicket', ticketId, { reason }, context);
+            
+            // Internal note about escalation
+            await addTicketComment(ticketId, `TICKET ESCALATED: ${reason}`, true);
+        }
+
+        return result;
+    } catch (error) {
+        console.error('[supportTicketService] escalateTicket error:', error.message);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Gets high-level metrics for the ticket system
+ */
+export async function getTicketMetrics(dateRange = { start: null, end: null }) {
+    await requireAdmin();
+
+    try {
+        const filters = {};
+        if (dateRange.start) filters.created_at = { gte: dateRange.start };
+        if (dateRange.end) filters.created_at = { ...filters.created_at, lte: dateRange.end };
+
+        const allTickets = await dataAccess.getAllRecords(COLLECTION_KEYS.tickets, { filters });
+        
+        const metrics = {
+            total: allTickets.length,
+            open: allTickets.filter(t => t.status === TICKET_STATUS.OPEN).length,
+            pending: allTickets.filter(t => t.status === TICKET_STATUS.PENDING).length,
+            resolved: allTickets.filter(t => t.status === TICKET_STATUS.RESOLVED).length,
+            closed: allTickets.filter(t => t.status === TICKET_STATUS.CLOSED).length,
+            urgent: allTickets.filter(t => t.priority === TICKET_PRIORITY.URGENT).length,
+            avgResolutionTimeMs: 0,
+            slaComplianceRate: 0
+        };
+
+        const resolvedTickets = allTickets.filter(t => t.resolved_at && t.created_at);
+        if (resolvedTickets.length > 0) {
+            const totalTime = resolvedTickets.reduce((acc, t) => {
+                return acc + (new Date(t.resolved_at) - new Date(t.created_at));
+            }, 0);
+            metrics.avgResolutionTimeMs = totalTime / resolvedTickets.length;
+            
+            const metSla = resolvedTickets.filter(t => new Date(t.resolved_at) <= new Date(t.resolution_due)).length;
+            metrics.slaComplianceRate = (metSla / resolvedTickets.length) * 100;
+        }
+
+        return { success: true, metrics };
+    } catch (error) {
+        console.error('[supportTicketService] getTicketMetrics error:', error.message);
+        return { success: false, error: error.message };
+    }
+}

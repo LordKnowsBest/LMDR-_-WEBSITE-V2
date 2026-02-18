@@ -234,6 +234,9 @@
         case 'agentToolResult':
           // Could display tool results in-line
           break;
+        case 'agentApprovalRequired':
+          onApprovalRequired(msg.payload || msg.data || {});
+          break;
         case 'voiceReady':
           if (window.VoiceAgent && msg.payload) {
             VoiceAgent.init({
@@ -244,6 +247,71 @@
           }
           break;
       }
+    });
+  }
+
+  function onApprovalRequired(payload) {
+    isWaiting = false;
+    hideTyping();
+
+    if (payload.conversationId) conversationId = payload.conversationId;
+
+    const { gateId, toolName, toolDescription, args, riskLevel } = payload;
+    const msgs = document.getElementById('agent-messages');
+    if (!msgs) return;
+
+    const argsSummary = Object.entries(args || {})
+      .map(([k, v]) => `<span style="color:#64748b">${k}:</span> ${String(v).substring(0, 60)}`)
+      .join('<br>');
+
+    const cardDiv = document.createElement('div');
+    cardDiv.style.cssText = 'display:flex;gap:8px;animation:agentMsgIn .3s ease;';
+    cardDiv.innerHTML = `
+      <div style="width:24px;height:24px;border-radius:6px;background:linear-gradient(135deg,#f59e0b,#d97706);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      </div>
+      <div style="padding:12px 14px;border-radius:12px;border-bottom-left-radius:4px;border:2px solid rgba(245,158,11,0.4);background:rgba(255,251,235,0.9);font-size:12px;color:#1e293b;line-height:1.5;max-width:90%;width:100%;">
+        <div style="font-weight:600;color:#b45309;margin-bottom:6px;display:flex;align-items:center;gap:4px;">
+          Approval Required
+        </div>
+        <div style="margin-bottom:4px;font-weight:500;">${escapeHtml(toolDescription || toolName)}</div>
+        <div style="font-size:11px;margin-bottom:8px;opacity:0.7;line-height:1.6;">${argsSummary}</div>
+        <div style="font-size:10px;color:#d97706;margin-bottom:8px;">Risk: ${escapeHtml(riskLevel)} &middot; Tool: ${escapeHtml(toolName)}</div>
+        <div style="display:flex;gap:8px;">
+          <button data-gate-id="${escapeHtml(gateId)}" data-decision="rejected"
+            style="padding:5px 12px;border-radius:8px;background:#fee2e2;color:#dc2626;font-size:11px;font-weight:500;border:none;cursor:pointer;">Reject</button>
+          <button data-gate-id="${escapeHtml(gateId)}" data-decision="approved"
+            style="padding:5px 12px;border-radius:8px;background:#dcfce7;color:#16a34a;font-size:11px;font-weight:500;border:none;cursor:pointer;">Approve</button>
+        </div>
+      </div>`;
+
+    // Wire button clicks
+    cardDiv.querySelectorAll('button[data-gate-id]').forEach(btn => {
+      btn.addEventListener('click', function() {
+        const decision = this.getAttribute('data-decision');
+        // Disable all buttons in this card
+        cardDiv.querySelectorAll('button').forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
+        resolveGate(decision, payload);
+      });
+    });
+
+    msgs.appendChild(cardDiv);
+    msgs.scrollTop = msgs.scrollHeight;
+
+    // Store pending approval context
+    window._lmdrPendingApproval = payload;
+  }
+
+  function resolveGate(decision, ctx) {
+    const approvalContext = ctx || window._lmdrPendingApproval;
+    if (!approvalContext) return;
+    window._lmdrPendingApproval = null;
+    isWaiting = true;
+    showTyping();
+    sendToWix('resolveApprovalGate', {
+      approvalContext,
+      decision,
+      decidedBy: 'user'
     });
   }
 

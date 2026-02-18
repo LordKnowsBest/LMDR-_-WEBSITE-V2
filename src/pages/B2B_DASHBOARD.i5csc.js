@@ -39,7 +39,7 @@
 
 import wixLocation from 'wix-location';
 import { handleB2BAction } from 'backend/b2bBridgeService';
-import { handleAgentTurn } from 'backend/agentService';
+import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -125,6 +125,28 @@ async function routeMessage(component, message) {
       const text = message.data?.text || message.payload?.text || '';
       const context = message.data?.context || message.payload?.context || {};
       const result = await handleAgentTurn('carrier', 'b2b-user', text, context);
+      if (typeof component.postMessage === 'function') {
+        if (result.type === 'approval_required') {
+          component.postMessage({ action: 'agentApprovalRequired', payload: result });
+        } else {
+          component.postMessage({ action: 'agentResponse', payload: result });
+        }
+      }
+    } catch (error) {
+      if (typeof component.postMessage === 'function') {
+        component.postMessage({ action: 'agentResponse', payload: { error: error.message } });
+      }
+    }
+    return;
+  }
+
+  if (action === 'resolveApprovalGate') {
+    try {
+      const { approvalContext, decision, decidedBy } = message.data || message.payload || {};
+      if (typeof component.postMessage === 'function') {
+        component.postMessage({ action: 'agentTyping', payload: {} });
+      }
+      const result = await resumeAfterApproval(approvalContext, decision, decidedBy || 'user');
       if (typeof component.postMessage === 'function') {
         component.postMessage({ action: 'agentResponse', payload: result });
       }

@@ -196,3 +196,100 @@ export async function deleteFlag(flagKey) {
 export async function toggleFlag(flagKey, enabled) {
   return await updateFlag(flagKey, { enabled });
 }
+
+/**
+ * Aggregate usage stats from evaluation logs.
+ */
+export async function getFlagUsageStats(flagKey, dateRange = {}) {
+  const endDate = dateRange.endDate ? new Date(dateRange.endDate) : new Date();
+  const startDate = dateRange.startDate
+    ? new Date(dateRange.startDate)
+    : new Date(endDate.getTime() - (24 * 60 * 60 * 1000));
+
+  const result = await dataAccess.queryRecords(LOG_COLLECTION_KEY, {
+    filters: {
+      flagKey,
+      evaluatedAt: { gte: startDate, lte: endDate }
+    },
+    limit: 5000,
+    suppressAuth: true
+  });
+
+  const items = result.items || [];
+  let enabledCount = 0;
+  let disabledCount = 0;
+  const rules = {};
+
+  items.forEach((item) => {
+    if (item.result) {
+      enabledCount += 1;
+    } else {
+      disabledCount += 1;
+    }
+    const ruleId = item.ruleId || 'global';
+    rules[ruleId] = (rules[ruleId] || 0) + 1;
+  });
+
+  return {
+    flagKey,
+    range: { startDate, endDate },
+    total: items.length,
+    enabledCount,
+    disabledCount,
+    enabledRate: items.length ? Math.round((enabledCount / items.length) * 10000) / 100 : 0,
+    byRule: rules
+  };
+}
+
+/**
+ * Export flags as JSON payload.
+ */
+export async function exportFlags(environment = null) {
+  const flags = await getAllFlags(environment);
+  return {
+    exportedAt: new Date(),
+    environment: environment || 'all',
+    count: flags.length,
+    flags
+  };
+}
+
+/**
+ * Import flags from JSON payload.
+ */
+export async function importFlags(flagsData, environment = null) {
+  const items = Array.isArray(flagsData) ? flagsData : (flagsData?.flags || []);
+  const results = [];
+
+  for (const incoming of items) {
+    try {
+      const payload = {
+        ...incoming,
+        environment: environment || incoming.environment || 'production'
+      };
+      const existing = await getFlag(payload.key);
+      if (!existing) {
+        await createFlag(payload);
+        results.push({ key: payload.key, status: 'created' });
+      } else {
+        await updateFlag(payload.key, payload);
+        results.push({ key: payload.key, status: 'updated' });
+      }
+    } catch (error) {
+      results.push({
+        key: incoming?.key || 'unknown',
+        status: 'error',
+        error: error.message
+      });
+    }
+  }
+
+  return {
+    success: true,
+    total: results.length,
+    created: results.filter((x) => x.status === 'created').length,
+    updated: results.filter((x) => x.status === 'updated').length,
+    errors: results.filter((x) => x.status === 'error'),
+    results
+  };
+}

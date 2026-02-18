@@ -147,6 +147,7 @@
   // Listen for agent responses from page code
   window.addEventListener('message', function (event) {
     if (!event.data || event.source !== window.parent) return;
+
     if (event.data.action === 'agentResponse' && event.data.payload) {
       const payload = event.data.payload;
       const text = payload.error || payload.response || payload.content || 'I couldn\'t process that request.';
@@ -166,7 +167,59 @@
       msgs.appendChild(aiDiv);
       msgs.scrollTop = msgs.scrollHeight;
     }
+
+    if (event.data.action === 'agentApprovalRequired' && event.data.payload) {
+      onApprovalRequired(event.data.payload);
+    }
   });
+
+  function onApprovalRequired(payload) {
+    const tp = document.getElementById('ros-tp');
+    if (tp) tp.remove();
+
+    const { toolName, toolDescription, args, riskLevel } = payload;
+    const msgs = document.getElementById('chatMsgs');
+    if (!msgs) return;
+
+    const argsSummary = Object.entries(args || {})
+      .map(([k, v]) => `<span class="text-lmdr-dark/50">${k}:</span> ${String(v).substring(0, 60)}`)
+      .join('<br>');
+
+    const cardDiv = document.createElement('div');
+    cardDiv.className = 'flex gap-2.5';
+    cardDiv.style.animation = 'msgIn .3s ease';
+    cardDiv.innerHTML = `
+      <div class="w-6 h-6 rounded-lg bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shrink-0 mt-0.5">
+        <span class="material-symbols-outlined text-white text-[12px]">shield</span>
+      </div>
+      <div class="p-3 rounded-2xl rounded-tl-sm border-2 border-amber-400/50 bg-amber-50/80 text-[12px] text-lmdr-dark/80 leading-relaxed max-w-[90%] w-full">
+        <div class="font-semibold text-amber-700 mb-1.5">Approval Required</div>
+        <div class="mb-1 font-medium">${escapeHtml(toolDescription || toolName)}</div>
+        <div class="text-[11px] mb-2 opacity-70">${argsSummary}</div>
+        <div class="text-[10px] text-amber-600 mb-2">Risk: ${escapeHtml(riskLevel)} &middot; Tool: ${escapeHtml(toolName)}</div>
+        <div style="display:flex;gap:8px;">
+          <button data-gate-decision="rejected"
+            style="padding:4px 12px;border-radius:8px;background:#fee2e2;color:#dc2626;font-size:11px;font-weight:500;border:none;cursor:pointer;">Reject</button>
+          <button data-gate-decision="approved"
+            style="padding:4px 12px;border-radius:8px;background:#dcfce7;color:#16a34a;font-size:11px;font-weight:500;border:none;cursor:pointer;">Approve</button>
+        </div>
+      </div>`;
+
+    cardDiv.querySelectorAll('button[data-gate-decision]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var decision = this.getAttribute('data-gate-decision');
+        cardDiv.querySelectorAll('button').forEach(function(b) { b.disabled = true; b.style.opacity = '0.5'; });
+        window.parent.postMessage({
+          type: 'recruiterOS',
+          action: 'resolveApprovalGate',
+          data: { approvalContext: payload, decision: decision, decidedBy: 'user' }
+        }, '*');
+      });
+    });
+
+    msgs.appendChild(cardDiv);
+    msgs.scrollTop = msgs.scrollHeight;
+  }
 
   function getFallbackResponse(text) {
     const l = text.toLowerCase();

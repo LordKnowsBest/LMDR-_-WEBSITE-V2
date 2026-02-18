@@ -8,25 +8,31 @@
 | Base | Last Mile Driver recruiting |
 | Base ID | `app9N1YCJ3gdhExA0` |
 
-## Fields
+## Fields (Expected by Current Backend)
 
 | Field Name | Type | Field ID | Description |
 |------------|------|----------|-------------|
-| Key | Single Line Text | TBD | Unique flag identifier, snake_case (e.g., new_driver_dashboard) |
+| Key | Single Line Text | TBD | Unique flag identifier, snake_case (e.g. `new_driver_dashboard`) |
 | Name | Single Line Text | TBD | Human-readable display name |
 | Description | Long Text / Multiline | TBD | Flag purpose and usage notes |
 | Enabled | Checkbox | TBD | Master on/off switch |
-| Rollout Percentage | Number (precision: 0) | TBD | 0-100, percentage of users who see feature |
-| Target Rules | Long Text / Multiline | TBD | JSON array of targeting conditions |
-| Default Value | Checkbox | TBD | Value when no rules match |
+| Rollout Percentage | Number (precision: 0) | TBD | 0-100 global rollout |
+| Target Rules | Long Text / Multiline | TBD | JSON array of ordered targeting rules |
+| Default Value | Checkbox | TBD | Fallback value when no rules match |
 | Environment | Single Select (`production`, `staging`, `development`) | TBD | Deployment environment |
 | Category | Single Select (`ui`, `backend`, `experiment`, `killswitch`) | TBD | Flag category |
-| Created By | Single Line Text | TBD | Admin ID who created |
 | Expires At | Date | TBD | Optional auto-disable date |
-| Created Date | Date | TBD | Creation timestamp |
-| Updated Date | Date | TBD | Last modification |
+| Created At | Date with time | TBD | Creation timestamp |
+| Updated At | Date with time | TBD | Last modification timestamp |
+| Created By | Single Line Text | TBD | Admin/member identifier |
 
-## Backend Field Mapping (snake_case)
+## Suggested Views / Indexes
+
+- Unique Key: `Key`
+- Filtered views by `Environment`, `Category`, `Enabled`
+- Sort by `Updated At desc`
+
+## Backend Field Mapping (camelCase used in code)
 
 Use these mappings in `airtableClient.jsw` FIELD_MAPPINGS:
 
@@ -36,19 +42,19 @@ Use these mappings in `airtableClient.jsw` FIELD_MAPPINGS:
   'name': 'Name',
   'description': 'Description',
   'enabled': 'Enabled',
-  'rollout_percentage': 'Rollout Percentage',
-  'target_rules': 'Target Rules',
-  'default_value': 'Default Value',
+  'rolloutPercentage': 'Rollout Percentage',
+  'targetRules': 'Target Rules',
+  'defaultValue': 'Default Value',
   'environment': 'Environment',
   'category': 'Category',
-  'created_by': 'Created By',
-  'expires_at': 'Expires At',
-  'created_date': 'Created Date',
-  'updated_date': 'Updated Date',
+  'expiresAt': 'Expires At',
+  'createdAt': 'Created At',
+  'updatedAt': 'Updated At',
+  'createdBy': 'Created By',
 },
 ```
 
 ## Notes
 
-- Auto-generated schema documentation
-- Generated: 2026-02-04
+- Updated for `admin_platform_config_20260120` implementation
+- Updated: 2026-02-18

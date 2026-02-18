@@ -6,7 +6,11 @@ import {
     updateFunctionConfig,
     resetFunctionConfig,
     testProvider,
-    testAllProviders
+    testAllProviders,
+    getCostOptimizerConfig,
+    updateCostOptimizerConfig,
+    getCostSavingsReport,
+    getProviderCostMetrics
 } from 'backend/aiRouterService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -109,8 +113,8 @@ async function routeMessage(component, message) {
                     safeSend(component, { action: 'actionError', message: 'Function ID and config are required' });
                     return;
                 }
-                await updateFunctionConfig(functionId, config);
-                safeSend(component, { action: 'configUpdated' });
+                const result = await updateFunctionConfig(functionId, config);
+                safeSend(component, { action: 'configUpdated', payload: result });
                 break;
             }
 
@@ -143,6 +147,39 @@ async function routeMessage(component, message) {
                 safeSend(component, { action: 'allProvidersTestResult', payload: results });
                 break;
             }
+
+            // --- Cost Optimizer Handlers ---
+
+            case 'getOptimizerConfig': {
+                const config = await getCostOptimizerConfig();
+                safeSend(component, { action: 'optimizerConfigLoaded', payload: config });
+                break;
+            }
+
+            case 'updateOptimizerConfig': {
+                const config = message.config;
+                if (!config) {
+                    safeSend(component, { action: 'actionError', message: 'Config is required' });
+                    return;
+                }
+                const result = await updateCostOptimizerConfig(config);
+                safeSend(component, { action: 'optimizerConfigUpdated', payload: result });
+                break;
+            }
+
+            case 'getSavingsReport': {
+                const period = message.period || 'month';
+                const report = await getCostSavingsReport(period);
+                safeSend(component, { action: 'savingsReportLoaded', payload: report });
+                break;
+            }
+
+            case 'getProviderMetrics': {
+                const metrics = await getProviderCostMetrics();
+                safeSend(component, { action: 'providerMetricsLoaded', payload: metrics });
+                break;
+            }
+
 
             default:
                 console.warn('AI Router: Unknown action received:', action);

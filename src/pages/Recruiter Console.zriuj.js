@@ -76,7 +76,7 @@ import {
 
 import { getRecruiterHealthStatus } from 'backend/recruiterHealthService.jsw';
 import { routeAIRequest } from 'backend/aiRouterService';
-import { handleAgentTurn } from 'backend/agentService';
+import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
 import { getCampaigns, createCampaign, startCampaign, getCampaignStatus } from 'backend/voiceCampaignService';
 
@@ -602,7 +602,23 @@ async function handleHtmlMessage(msg, component) {
             ...agentCtx,
             carrierDot: currentCarrierDOT
           });
-          sendToHtml(component, 'agentResponse', agentResult);
+          if (agentResult.type === 'approval_required') {
+            sendToHtml(component, 'agentApprovalRequired', agentResult);
+          } else {
+            sendToHtml(component, 'agentResponse', agentResult);
+          }
+        } catch (err) {
+          sendToHtml(component, 'agentResponse', { error: err.message });
+        }
+        break;
+      }
+
+      case 'resolveApprovalGate': {
+        const { approvalContext, decision, decidedBy } = msg.data || {};
+        sendToHtml(component, 'agentTyping', {});
+        try {
+          const result = await resumeAfterApproval(approvalContext, decision, decidedBy || 'user');
+          sendToHtml(component, 'agentResponse', result);
         } catch (err) {
           sendToHtml(component, 'agentResponse', { error: err.message });
         }

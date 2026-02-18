@@ -1,0 +1,231 @@
+// ============================================================================
+// AGENT OUTCOME SERVICE — Post-run evaluation and KPI measurement
+// Scores agent runs, tracks quality metrics, generates follow-up suggestions
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+import { getRun, getSteps, getGatesForRun } from 'backend/agentRunLedgerService';
+
+const COLLECTIONS = {
+  outcomes: 'runOutcomes',
+  turns: 'agentTurns'
+};
+
+function generateId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+/**
+ * Evaluate a completed agent run — heuristic scoring v1
+ * Called automatically after every completed agent turn
+ */
+export async function evaluateRun(runId) {
+  if (!runId) return null;
+
+  const run = await getRun(runId);
+  if (!run) {
+    console.warn(`evaluateRun: Run not found: ${runId}`);
+    return null;
+  }
+
+  const steps = await getSteps(runId);
+  const gates = await getGatesForRun(runId);
+
+  // Heuristic scoring — start at 50
+  let score = 50;
+
+  // Penalty: tool errors (-15 each)
+  const errorSteps = steps.filter(s => s.status === 'error' || s.result_summary === 'error');
+  score -= errorSteps.length * 15;
+
+  // Bonus: user follow-up message (+20) — engagement signal
+  const hasFollowUp = await checkFollowUpMessage(run.conversation_id, run.completed_at || run.started_at);
+  if (hasFollowUp) score += 20;
+
+  // Penalty: approval gate timeouts/bypasses (-25 each)
+  const bypasses = gates.filter(g => g.decision === 'timeout' || g.decision === 'bypass');
+  score -= bypasses.length * 25;
+
+  // Penalty: approval rejections (-10 each, less severe than bypass)
+  const rejections = gates.filter(g => g.decision === 'rejected');
+  score -= rejections.length * 10;
+
+  // Bonus: productive tool executions (+10 each, max +30)
+  const productiveSteps = steps.filter(s =>
+    s.status === 'executed' && s.result_summary !== 'error' && s.result_summary !== 'empty'
+  );
+  score += Math.min(30, productiveSteps.length * 10);
+
+  // Clamp to 0-100
+  score = Math.max(0, Math.min(100, score));
+
+  // Determine objective met
+  let objectiveMet = 'unknown';
+  if (run.status === 'completed') {
+    objectiveMet = score >= 60 ? 'yes' : score >= 30 ? 'partial' : 'no';
+  } else if (run.status === 'failed' || run.status === 'aborted') {
+    objectiveMet = 'no';
+  }
+
+  // Generate outcome deltas
+  const outcomeDeltas = summarizeDeltas(steps, gates);
+
+  // Generate follow-up suggestions
+  const followUpTasks = generateFollowUps(run, steps, score);
+
+  // Persist
+  await createOutcome(runId, {
+    quality_score: score,
+    objective_met: objectiveMet,
+    outcome_deltas: outcomeDeltas,
+    follow_up_tasks: followUpTasks
+  });
+
+  return { runId, quality_score: score, objective_met: objectiveMet };
+}
+
+/**
+ * Check if user sent a follow-up message after the run completed
+ */
+export async function checkFollowUpMessage(conversationId, afterTimestamp) {
+  if (!conversationId || !afterTimestamp) return false;
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.turns, {
+      filters: { conversation_id: conversationId },
+      limit: 5,
+      suppressAuth: true
+    });
+    if (!result || !result.items) return false;
+    // Check if any user message was sent after the given timestamp
+    const afterTime = new Date(afterTimestamp).getTime();
+    return result.items.some(t =>
+      t.role === 'user' && new Date(t.created_at).getTime() > afterTime
+    );
+  } catch (err) {
+    console.warn('checkFollowUpMessage error:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Summarize what happened in the run
+ */
+function summarizeDeltas(steps, gates) {
+  const toolsUsed = steps.map(s => s.tool_name).filter(Boolean);
+  const errors = steps.filter(s => s.status === 'error').length;
+  const approvals = gates.filter(g => g.decision === 'approved').length;
+  const rejections = gates.filter(g => g.decision === 'rejected').length;
+
+  return JSON.stringify({
+    tools_called: toolsUsed,
+    total_steps: steps.length,
+    errors,
+    approval_gates: gates.length,
+    approvals,
+    rejections
+  });
+}
+
+/**
+ * Generate follow-up task suggestions based on run quality
+ */
+function generateFollowUps(run, steps, score) {
+  const suggestions = [];
+
+  if (score < 30) {
+    suggestions.push('Run failed — consider retrying with different parameters or escalating to human operator');
+  }
+  if (score < 60 && score >= 30) {
+    suggestions.push('Partial success — review tool results and consider manual follow-up');
+  }
+
+  const errorTools = steps.filter(s => s.status === 'error').map(s => s.tool_name);
+  if (errorTools.length > 0) {
+    suggestions.push(`Tool errors in: ${errorTools.join(', ')} — check service availability`);
+  }
+
+  if (run.status === 'max_iterations') {
+    suggestions.push('Hit iteration limit — user goal may be too complex for single turn');
+  }
+
+  return JSON.stringify(suggestions);
+}
+
+/**
+ * Persist a run outcome record
+ */
+export async function createOutcome(runId, data) {
+  const outcomeId = generateId('outcome');
+  await dataAccess.insertRecord(COLLECTIONS.outcomes, {
+    outcome_id: outcomeId,
+    run_id: runId || '',
+    objective_met: data.objective_met || 'unknown',
+    quality_score: data.quality_score || 0,
+    user_feedback: data.user_feedback || '',
+    follow_up_tasks: data.follow_up_tasks || '',
+    outcome_deltas: data.outcome_deltas || '',
+    evaluated_at: new Date().toISOString()
+  }, { suppressAuth: true });
+  return { outcomeId };
+}
+
+/**
+ * Get a single run outcome
+ */
+export async function getRunOutcome(runId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.outcomes, {
+    filters: { run_id: runId },
+    limit: 1,
+    suppressAuth: true
+  });
+  return (result && result.items && result.items[0]) || null;
+}
+
+/**
+ * Get aggregated outcome stats for KPI dashboard
+ */
+export async function getOutcomeStats(role, days = 7) {
+  // Query recent outcomes
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+
+  const outcomes = await dataAccess.queryRecords(COLLECTIONS.outcomes, {
+    limit: 500,
+    suppressAuth: true
+  });
+
+  const items = (outcomes && outcomes.items) || [];
+  // Filter by date
+  const cutoffTime = cutoff.getTime();
+  const recent = items.filter(o => {
+    const evalTime = new Date(o.evaluated_at).getTime();
+    return evalTime >= cutoffTime;
+  });
+
+  if (recent.length === 0) {
+    return {
+      total_runs: 0,
+      success_rate: 0,
+      avg_quality_score: 0,
+      partial_rate: 0,
+      failure_rate: 0,
+      period_days: days,
+      role: role || 'all'
+    };
+  }
+
+  const succeeded = recent.filter(o => o.objective_met === 'yes').length;
+  const partial = recent.filter(o => o.objective_met === 'partial').length;
+  const failed = recent.filter(o => o.objective_met === 'no').length;
+  const avgScore = recent.reduce((sum, o) => sum + (o.quality_score || 0), 0) / recent.length;
+
+  return {
+    total_runs: recent.length,
+    success_rate: Math.round((succeeded / recent.length) * 100),
+    avg_quality_score: Math.round(avgScore),
+    partial_rate: Math.round((partial / recent.length) * 100),
+    failure_rate: Math.round((failed / recent.length) * 100),
+    period_days: days,
+    role: role || 'all'
+  };
+}
