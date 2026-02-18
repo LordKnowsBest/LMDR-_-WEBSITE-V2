@@ -1,0 +1,488 @@
+// ============================================================================
+// PIPELINE EXECUTION AGENT - Rule-based decision engine
+// Runs the full outreach cadence and stage progression with minimal recruiter touch.
+// No AI calls — pure rules for speed (< 5 min contact SLA target).
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+import { isTCPACompliant, getNextAllowedWindow } from 'backend/utils/tcpaGuard';
+
+const COLLECTIONS = {
+  events: 'pipelineEvents',
+  interests: 'driverCarrierInterests',
+  driverProfiles: 'driverProfiles'
+};
+
+// Contact SLA: 5 minutes from event to first outreach attempt
+const CONTACT_SLA_MS = 5 * 60 * 1000;
+
+// Channel escalation order
+const ESCALATION_CHAIN = ['sms', 'email', 'voice', 'recruiter_queue'];
+
+// ============================================================================
+// PRIMARY EXPORT: decide()
+// ============================================================================
+
+/**
+ * Make a decision based on a pipeline event. Returns actions to execute.
+ * @param {Object} event - { event_type, candidate_id, carrier_dot, stage_from, stage_to, channel, metadata }
+ * @returns {{ actions: Array, reasoning: string }}
+ */
+export async function decide(event) {
+  const { event_type, stage_to, stage_from, candidate_id, carrier_dot } = event;
+
+  switch (event_type) {
+    case 'stage_change':
+    case 'status_change':
+      return handleStageChange(event);
+
+    case 'no_response':
+      return handleNoResponse(event);
+
+    case 'call_completed':
+      return handleCallCompleted(event);
+
+    case 'document_received':
+      return handleDocumentReceived(event);
+
+    case 'application_submitted':
+      return handleApplicationSubmitted(event);
+
+    default:
+      return {
+        actions: [],
+        reasoning: `No automation rules for event_type: ${event_type}`
+      };
+  }
+}
+
+/**
+ * Check contact SLA compliance for a candidate
+ * @param {string} candidateId - Driver/candidate record ID
+ * @returns {{ inSLA: boolean, elapsed_ms: number, action_needed: string|null }}
+ */
+export async function enforceContactSLA(candidateId) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.events, {
+      filters: {
+        candidate_id: candidateId,
+        event_type: 'stage_change'
+      },
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (!result.items || result.items.length === 0) {
+      return { inSLA: true, elapsed_ms: 0, action_needed: null };
+    }
+
+    const lastEvent = result.items[0];
+    const eventTime = new Date(lastEvent.created_at).getTime();
+    const elapsed = Date.now() - eventTime;
+    const inSLA = elapsed <= CONTACT_SLA_MS;
+
+    let actionNeeded = null;
+    if (!inSLA && lastEvent.processed !== 'Yes') {
+      actionNeeded = 'urgent_outreach';
+    }
+
+    return { inSLA, elapsed_ms: elapsed, action_needed: actionNeeded };
+  } catch (error) {
+    console.error('[pipelineExecutionAgent] enforceContactSLA error:', error.message);
+    return { inSLA: true, elapsed_ms: 0, action_needed: null, error: error.message };
+  }
+}
+
+/**
+ * Get full stage progression timeline for a candidate
+ * @param {string} candidateId
+ * @returns {Array} Event timeline sorted chronologically
+ */
+export async function getStageProgression(candidateId) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.events, {
+      filters: { candidate_id: candidateId },
+      sort: [{ field: 'created_at', direction: 'asc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    return (result.items || []).map(e => ({
+      event_id: e.event_id,
+      event_type: e.event_type,
+      stage_from: e.stage_from,
+      stage_to: e.stage_to,
+      channel: e.channel,
+      processed: e.processed,
+      decision: e.decision,
+      created_at: e.created_at,
+      processed_at: e.processed_at
+    }));
+  } catch (error) {
+    console.error('[pipelineExecutionAgent] getStageProgression error:', error.message);
+    return [];
+  }
+}
+
+/**
+ * Get pipeline health metrics for a recruiter
+ * @param {string} recruiterId
+ * @param {number} days - Look-back period (default 7)
+ * @returns {{ sla_compliance_pct: number, total_events: number, conversion_rates: Object, avg_time_to_contact_ms: number }}
+ */
+export async function getPipelineHealth(recruiterId, days = 7) {
+  try {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.events, {
+      filters: { recruiter_id: recruiterId },
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: 500,
+      suppressAuth: true
+    });
+
+    const events = (result.items || []).filter(e => e.created_at >= cutoff);
+    const totalEvents = events.length;
+
+    // SLA compliance
+    let slaCompliant = 0;
+    let contactTimes = [];
+    const stageChanges = events.filter(e => e.event_type === 'stage_change' || e.event_type === 'status_change');
+
+    for (const evt of stageChanges) {
+      if (evt.processed === 'Yes' && evt.created_at && evt.processed_at) {
+        const elapsed = new Date(evt.processed_at).getTime() - new Date(evt.created_at).getTime();
+        contactTimes.push(elapsed);
+        if (elapsed <= CONTACT_SLA_MS) slaCompliant++;
+      }
+    }
+
+    // Conversion rates by stage
+    const stageChangeCounts = {};
+    for (const evt of stageChanges) {
+      const key = `${evt.stage_from || 'unknown'} -> ${evt.stage_to || 'unknown'}`;
+      stageChangeCounts[key] = (stageChangeCounts[key] || 0) + 1;
+    }
+
+    const avgContactTime = contactTimes.length > 0
+      ? contactTimes.reduce((a, b) => a + b, 0) / contactTimes.length
+      : 0;
+
+    return {
+      sla_compliance_pct: stageChanges.length > 0 ? Math.round((slaCompliant / stageChanges.length) * 100) : 100,
+      total_events: totalEvents,
+      stage_changes: stageChanges.length,
+      conversion_rates: stageChangeCounts,
+      avg_time_to_contact_ms: Math.round(avgContactTime),
+      period_days: days
+    };
+  } catch (error) {
+    console.error('[pipelineExecutionAgent] getPipelineHealth error:', error.message);
+    return { sla_compliance_pct: 0, total_events: 0, error: error.message };
+  }
+}
+
+// ============================================================================
+// DECISION HANDLERS
+// ============================================================================
+
+function handleStageChange(event) {
+  const { stage_to, stage_from, candidate_id, carrier_dot } = event;
+  const tcpaOk = isTCPACompliant();
+
+  switch (stage_to) {
+    case 'interested':
+      return {
+        actions: [
+          ...(tcpaOk ? [{
+            type: 'send_sms',
+            to: candidate_id,
+            message: `Thanks for your interest! A recruiter will be in touch shortly. Reply STOP to opt out.`,
+            priority: 'high'
+          }] : []),
+          {
+            type: 'schedule_voice_call',
+            candidate_id,
+            carrier_dot,
+            template_id: 'vat_warm_lead',
+            delay_minutes: tcpaOk ? 30 : getDelayUntilWindow(),
+            priority: 'high'
+          }
+        ],
+        reasoning: 'New interest → immediate SMS confirmation + schedule voice follow-up in 30 min'
+      };
+
+    case 'applied':
+      return {
+        actions: [
+          ...(tcpaOk ? [{
+            type: 'send_sms',
+            to: candidate_id,
+            message: `Application received! We'll review your qualifications and reach out soon.`,
+            priority: 'high'
+          }] : []),
+          {
+            type: 'schedule_voice_call',
+            candidate_id,
+            carrier_dot,
+            template_id: 'vat_qualification',
+            delay_minutes: tcpaOk ? 60 : getDelayUntilWindow(),
+            priority: 'medium'
+          }
+        ],
+        reasoning: 'Application submitted → confirmation SMS + schedule qualification screen'
+      };
+
+    case 'contacted':
+      return {
+        actions: [{
+          type: 'schedule_voice_call',
+          candidate_id,
+          carrier_dot,
+          template_id: 'vat_warm_lead',
+          delay_minutes: 24 * 60, // 24h no-response escalation
+          priority: 'low',
+          condition: 'no_response_after_24h'
+        }],
+        reasoning: 'Contacted → schedule voice escalation if no response in 24h'
+      };
+
+    case 'in_review':
+      return {
+        actions: [
+          {
+            type: 'schedule_voice_call',
+            candidate_id,
+            carrier_dot,
+            template_id: 'vat_background',
+            delay_minutes: tcpaOk ? 15 : getDelayUntilWindow(),
+            priority: 'medium'
+          },
+          {
+            type: 'schedule_voice_call',
+            candidate_id,
+            carrier_dot,
+            template_id: 'vat_technical',
+            delay_minutes: tcpaOk ? 120 : getDelayUntilWindow() + 120,
+            priority: 'medium'
+          }
+        ],
+        reasoning: 'In review → schedule background + technical screening calls'
+      };
+
+    case 'offer':
+      return {
+        actions: [
+          {
+            type: 'send_email',
+            to: candidate_id,
+            template: 'offer_letter',
+            data: { carrier_dot },
+            priority: 'high'
+          },
+          {
+            type: 'schedule_voice_call',
+            candidate_id,
+            carrier_dot,
+            template_id: 'vat_orientation',
+            delay_minutes: tcpaOk ? 60 : getDelayUntilWindow(),
+            priority: 'high'
+          }
+        ],
+        reasoning: 'Offer extended → send offer email + schedule orientation call'
+      };
+
+    case 'hired':
+      return {
+        actions: [
+          {
+            type: 'send_email',
+            to: candidate_id,
+            template: 'welcome_onboarding',
+            data: { carrier_dot },
+            priority: 'high'
+          },
+          {
+            type: 'schedule_voice_call',
+            candidate_id,
+            carrier_dot,
+            template_id: 'vat_first_day',
+            delay_minutes: 24 * 60, // Day before start
+            priority: 'medium'
+          }
+        ],
+        reasoning: 'Hired → trigger onboarding sequence + schedule first-day call'
+      };
+
+    default:
+      return {
+        actions: [],
+        reasoning: `No automation for stage transition to: ${stage_to}`
+      };
+  }
+}
+
+function handleNoResponse(event) {
+  const { candidate_id, carrier_dot, channel } = event;
+  const meta = typeof event.metadata === 'string' ? JSON.parse(event.metadata) : (event.metadata || {});
+  const attemptCount = meta.attempt_count || 0;
+  const tcpaOk = isTCPACompliant();
+
+  // Channel escalation: SMS → email → voice → recruiter queue
+  const nextChannel = ESCALATION_CHAIN[Math.min(attemptCount, ESCALATION_CHAIN.length - 1)];
+
+  if (nextChannel === 'recruiter_queue') {
+    return {
+      actions: [{
+        type: 'queue_recruiter',
+        candidate_id,
+        carrier_dot,
+        reason: 'All automated outreach exhausted — manual follow-up needed'
+      }],
+      reasoning: `No response after ${attemptCount} attempts across all channels → escalating to recruiter queue`
+    };
+  }
+
+  const actions = [];
+  if (nextChannel === 'sms' && tcpaOk) {
+    actions.push({
+      type: 'send_sms',
+      to: candidate_id,
+      message: 'Hi, we tried reaching you about a driving opportunity. Reply YES if you\'re still interested!',
+      priority: 'medium'
+    });
+  } else if (nextChannel === 'email') {
+    actions.push({
+      type: 'send_email',
+      to: candidate_id,
+      template: 'follow_up_no_response',
+      data: { carrier_dot, attempt: attemptCount },
+      priority: 'medium'
+    });
+  } else if (nextChannel === 'voice' && tcpaOk) {
+    actions.push({
+      type: 'schedule_voice_call',
+      candidate_id,
+      carrier_dot,
+      template_id: 'vat_warm_lead',
+      delay_minutes: 0,
+      priority: 'high'
+    });
+  }
+
+  return {
+    actions,
+    reasoning: `No response attempt #${attemptCount + 1} → escalating to ${nextChannel}`
+  };
+}
+
+function handleCallCompleted(event) {
+  const meta = typeof event.metadata === 'string' ? JSON.parse(event.metadata) : (event.metadata || {});
+  const outcome = meta.outcome || meta.call_outcome || '';
+  const { candidate_id, carrier_dot } = event;
+
+  switch (outcome) {
+    case 'interested':
+    case 'qualified':
+      return {
+        actions: [{
+          type: 'advance_stage',
+          interest_id: candidate_id,
+          new_stage: 'in_review',
+          notes: `Voice screen completed — outcome: ${outcome}`
+        }],
+        reasoning: `Call outcome: ${outcome} → advancing to in_review`
+      };
+
+    case 'not_qualified':
+    case 'wrong_fit':
+      return {
+        actions: [{
+          type: 'advance_stage',
+          interest_id: candidate_id,
+          new_stage: 'rejected',
+          notes: `Voice screen completed — outcome: ${outcome}`
+        }],
+        reasoning: `Call outcome: ${outcome} → marking as rejected`
+      };
+
+    case 'callback':
+    case 'voicemail':
+      return {
+        actions: [{
+          type: 'schedule_voice_call',
+          candidate_id,
+          carrier_dot,
+          template_id: 'vat_warm_lead',
+          delay_minutes: outcome === 'callback' ? 120 : 24 * 60,
+          priority: 'medium'
+        }],
+        reasoning: `Call outcome: ${outcome} → scheduling follow-up call`
+      };
+
+    default:
+      return { actions: [], reasoning: `Call completed with unhandled outcome: ${outcome}` };
+  }
+}
+
+function handleDocumentReceived(event) {
+  const meta = typeof event.metadata === 'string' ? JSON.parse(event.metadata) : (event.metadata || {});
+  const allDocsComplete = meta.all_documents_received || false;
+  const { candidate_id, carrier_dot } = event;
+
+  if (allDocsComplete) {
+    return {
+      actions: [{
+        type: 'advance_stage',
+        interest_id: candidate_id,
+        new_stage: 'offer',
+        notes: 'All required documents received — advancing to offer stage'
+      }],
+      reasoning: 'All documents received → auto-advance to offer'
+    };
+  }
+
+  return {
+    actions: [{
+      type: 'send_sms',
+      to: candidate_id,
+      message: `Document received! You still have outstanding items. Check your portal for details.`,
+      priority: 'low'
+    }],
+    reasoning: 'Partial documents received → acknowledgment SMS'
+  };
+}
+
+function handleApplicationSubmitted(event) {
+  const { candidate_id, carrier_dot } = event;
+  const tcpaOk = isTCPACompliant();
+
+  return {
+    actions: [
+      ...(tcpaOk ? [{
+        type: 'send_sms',
+        to: candidate_id,
+        message: `Your application has been submitted! A recruiter will review it shortly.`,
+        priority: 'high'
+      }] : []),
+      {
+        type: 'schedule_voice_call',
+        candidate_id,
+        carrier_dot,
+        template_id: 'vat_qualification',
+        delay_minutes: tcpaOk ? 30 : getDelayUntilWindow(),
+        priority: 'high'
+      }
+    ],
+    reasoning: 'Application submitted → auto-qualify + route to screening'
+  };
+}
+
+// ── Helpers ──
+
+function getDelayUntilWindow() {
+  const window = getNextAllowedWindow();
+  const delayMs = new Date(window.canSendAt).getTime() - Date.now();
+  return Math.max(Math.ceil(delayMs / 60000), 1);
+}

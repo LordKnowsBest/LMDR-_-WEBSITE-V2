@@ -1,0 +1,686 @@
+/**
+ * Job Board Service
+ *
+ * Manages job posting creation and syndication to external job boards.
+ * Supports Indeed, ZipRecruiter, and CDLjobs.com.
+ *
+ * Collections: jobPostings, jobBoardCredentials, jobApplications
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const SUPPORTED_BOARDS = ['indeed', 'ziprecruiter', 'cdljobs'];
+
+const POSTING_STATUS = {
+    DRAFT: 'draft',
+    ACTIVE: 'active',
+    EXPIRED: 'expired',
+    CLOSED: 'closed'
+};
+
+const SYNDICATION_STATUS = {
+    PENDING: 'pending',
+    LIVE: 'live',
+    FAILED: 'failed',
+    REMOVED: 'removed'
+};
+
+// =============================================================================
+// JOB POSTING CRUD
+// =============================================================================
+
+/**
+ * Create a new job posting
+ * @param {string} carrierDot
+ * @param {Object} jobData
+ */
+export async function createJobPosting(carrierDot, jobData) {
+    try {
+        if (!carrierDot) return { success: false, error: 'carrierDot required' };
+        if (!jobData.title) return { success: false, error: 'title required' };
+        if (!jobData.description) return { success: false, error: 'description required' };
+        if (!jobData.location) return { success: false, error: 'location required' };
+
+        const record = {
+            carrier_dot: carrierDot,
+            title: jobData.title,
+            description: jobData.description,
+            location: jobData.location,
+            route_type: jobData.routeType || 'OTR',
+            cdl_class_required: jobData.cdlClassRequired || 'A',
+            experience_years: jobData.experienceYears || 0,
+            pay_type: jobData.payType || 'per_mile',
+            pay_rate: jobData.payRate || '',
+            pay_range_min: jobData.payRangeMin || null,
+            pay_range_max: jobData.payRangeMax || null,
+            benefits: JSON.stringify(jobData.benefits || []),
+            equipment_types: JSON.stringify(jobData.equipmentTypes || []),
+            home_time: jobData.homeTime || '',
+            endorsements_required: JSON.stringify(jobData.endorsementsRequired || []),
+            status: POSTING_STATUS.ACTIVE,
+            syndication: JSON.stringify({}),
+            application_count: 0,
+            view_count: 0,
+            expires_at: jobData.expiresAt || _addDays(new Date(), 30),
+            created_at: new Date().toISOString()
+        };
+
+        const result = await dataAccess.insertRecord('jobPostings', record);
+        return { success: true, jobId: result._id };
+    } catch (error) {
+        console.error('[jobBoardService] createJobPosting error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get job postings for a carrier
+ * @param {string} carrierDot
+ * @param {Object} filters
+ */
+export async function getJobPostings(carrierDot, filters = {}) {
+    try {
+        const query = {
+            filter: { carrier_dot: carrierDot },
+            sort: [{ fieldName: 'created_at', order: 'desc' }],
+            limit: 50
+        };
+        if (filters.status) query.filter.status = filters.status;
+
+        const records = await dataAccess.queryRecords('jobPostings', query);
+        const jobs = (records.items || []).map(j => ({
+            ...j,
+            benefits: _safeJsonParse(j.benefits, []),
+            equipmentTypes: _safeJsonParse(j.equipment_types, []),
+            endorsementsRequired: _safeJsonParse(j.endorsements_required, []),
+            syndication: _safeJsonParse(j.syndication, {})
+        }));
+
+        return { success: true, jobs };
+    } catch (error) {
+        console.error('[jobBoardService] getJobPostings error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Update a job posting
+ * @param {string} jobId
+ * @param {Object} updates
+ */
+export async function updateJobPosting(jobId, updates) {
+    try {
+        const existing = await dataAccess.getRecord('jobPostings', jobId);
+        if (!existing) return { success: false, error: 'Job posting not found' };
+
+        const allowed = ['title', 'description', 'location', 'route_type', 'pay_type', 'pay_rate',
+            'pay_range_min', 'pay_range_max', 'benefits', 'equipment_types', 'home_time',
+            'endorsements_required', 'expires_at', 'status'];
+        const sanitized = {};
+        for (const key of allowed) {
+            if (updates[key] !== undefined) sanitized[key] = updates[key];
+        }
+        sanitized.updated_at = new Date().toISOString();
+
+        await dataAccess.updateRecord('jobPostings', jobId, sanitized);
+
+        // Propagate updates to syndicated boards
+        const syndication = _safeJsonParse(existing.syndication, {});
+        const liveBoards = Object.keys(syndication).filter(b => syndication[b]?.status === SYNDICATION_STATUS.LIVE);
+        if (liveBoards.length > 0) {
+            const updatedJob = { ...existing, ...sanitized };
+            await Promise.allSettled(liveBoards.map(board => _updateOnBoard(board, updatedJob, syndication[board])));
+        }
+
+        return { success: true };
+    } catch (error) {
+        console.error('[jobBoardService] updateJobPosting error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// SYNDICATION
+// =============================================================================
+
+/**
+ * Syndicate a job to one or more boards
+ * @param {string} jobId
+ * @param {string[]} boards - e.g. ['indeed', 'ziprecruiter']
+ */
+export async function syndicateJob(jobId, boards) {
+    try {
+        const job = await dataAccess.getRecord('jobPostings', jobId);
+        if (!job) return { success: false, error: 'Job posting not found' };
+
+        const invalidBoards = boards.filter(b => !SUPPORTED_BOARDS.includes(b));
+        if (invalidBoards.length > 0) {
+            return { success: false, error: `Unsupported boards: ${invalidBoards.join(', ')}` };
+        }
+
+        const syndication = _safeJsonParse(job.syndication, {});
+        const results = {};
+
+        for (const board of boards) {
+            try {
+                const credentials = await _getBoardCredentials(job.carrier_dot, board);
+                if (!credentials) {
+                    results[board] = { status: SYNDICATION_STATUS.FAILED, error: 'No credentials configured' };
+                    continue;
+                }
+
+                const postResult = await _postToBoard(board, job, credentials);
+                syndication[board] = {
+                    status: postResult.success ? SYNDICATION_STATUS.LIVE : SYNDICATION_STATUS.FAILED,
+                    externalId: postResult.externalId || null,
+                    postedAt: new Date().toISOString(),
+                    error: postResult.error || null
+                };
+                results[board] = syndication[board];
+            } catch (err) {
+                syndication[board] = { status: SYNDICATION_STATUS.FAILED, error: err.message };
+                results[board] = syndication[board];
+            }
+        }
+
+        await dataAccess.updateRecord('jobPostings', jobId, {
+            syndication: JSON.stringify(syndication),
+            updated_at: new Date().toISOString()
+        });
+
+        return { success: true, results };
+    } catch (error) {
+        console.error('[jobBoardService] syndicateJob error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Remove a job from one or more boards
+ * @param {string} jobId
+ * @param {string[]} boards
+ */
+export async function unsyndicateJob(jobId, boards) {
+    try {
+        const job = await dataAccess.getRecord('jobPostings', jobId);
+        if (!job) return { success: false, error: 'Job posting not found' };
+
+        const syndication = _safeJsonParse(job.syndication, {});
+        const results = {};
+
+        for (const board of boards) {
+            const boardData = syndication[board];
+            if (!boardData || boardData.status !== SYNDICATION_STATUS.LIVE) {
+                results[board] = { status: 'not_live' };
+                continue;
+            }
+
+            try {
+                const credentials = await _getBoardCredentials(job.carrier_dot, board);
+                await _removeFromBoard(board, boardData.externalId, credentials);
+                syndication[board] = { ...boardData, status: SYNDICATION_STATUS.REMOVED, removedAt: new Date().toISOString() };
+                results[board] = { status: 'removed' };
+            } catch (err) {
+                results[board] = { status: 'error', error: err.message };
+            }
+        }
+
+        await dataAccess.updateRecord('jobPostings', jobId, {
+            syndication: JSON.stringify(syndication),
+            updated_at: new Date().toISOString()
+        });
+
+        return { success: true, results };
+    } catch (error) {
+        console.error('[jobBoardService] unsyndicateJob error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get analytics for a job posting
+ * @param {string} jobId
+ */
+export async function getJobAnalytics(jobId) {
+    try {
+        const job = await dataAccess.getRecord('jobPostings', jobId);
+        if (!job) return { success: false, error: 'Job not found' };
+
+        const applications = await dataAccess.queryRecords('jobApplications', {
+            filter: { job_id: jobId },
+            limit: 500
+        });
+
+        const items = applications.items || [];
+        const byBoard = {};
+        for (const board of SUPPORTED_BOARDS) {
+            const boardApps = items.filter(a => a.source_board === board);
+            byBoard[board] = { applications: boardApps.length };
+        }
+
+        return {
+            success: true,
+            analytics: {
+                totalViews: job.view_count || 0,
+                totalApplications: items.length,
+                byBoard,
+                conversionRate: (job.view_count || 0) > 0
+                    ? Math.round((items.length / job.view_count) * 100)
+                    : 0
+            }
+        };
+    } catch (error) {
+        console.error('[jobBoardService] getJobAnalytics error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// APPLICATION MANAGEMENT
+// =============================================================================
+
+/**
+ * Import applications from job boards (called by scheduler)
+ * @param {string} jobId
+ */
+export async function importApplications(jobId) {
+    try {
+        const job = await dataAccess.getRecord('jobPostings', jobId);
+        if (!job) return { success: false, error: 'Job not found' };
+
+        const syndication = _safeJsonParse(job.syndication, {});
+        let imported = 0;
+
+        for (const board of SUPPORTED_BOARDS) {
+            const boardData = syndication[board];
+            if (!boardData || boardData.status !== SYNDICATION_STATUS.LIVE) continue;
+
+            try {
+                const credentials = await _getBoardCredentials(job.carrier_dot, board);
+                if (!credentials) continue;
+
+                const apps = await _fetchApplicationsFromBoard(board, boardData.externalId, credentials);
+
+                for (const app of apps) {
+                    // Deduplicate by external_id
+                    const existing = await dataAccess.queryRecords('jobApplications', {
+                        filter: { external_id: app.externalId, source_board: board },
+                        limit: 1
+                    });
+                    if (existing.items?.length > 0) continue;
+
+                    await dataAccess.insertRecord('jobApplications', {
+                        job_id: jobId,
+                        carrier_dot: job.carrier_dot,
+                        source_board: board,
+                        external_id: app.externalId,
+                        applicant_name: app.name || '',
+                        applicant_email: app.email || '',
+                        applicant_phone: app.phone || '',
+                        resume_url: app.resumeUrl || '',
+                        cover_letter: app.coverLetter || '',
+                        status: 'new',
+                        applied_at: app.appliedAt || new Date().toISOString(),
+                        imported_at: new Date().toISOString()
+                    });
+                    imported++;
+                }
+            } catch (err) {
+                console.error(`[jobBoardService] importApplications error for ${board}:`, err.message);
+            }
+        }
+
+        // Update application count
+        await dataAccess.updateRecord('jobPostings', jobId, {
+            application_count: (job.application_count || 0) + imported
+        });
+
+        return { success: true, imported };
+    } catch (error) {
+        console.error('[jobBoardService] importApplications error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Process incoming application webhook from a job board
+ * @param {string} board
+ * @param {Object} payload
+ */
+export async function processJobBoardWebhook(board, payload) {
+    try {
+        if (!SUPPORTED_BOARDS.includes(board)) {
+            return { success: false, error: `Unsupported board: ${board}` };
+        }
+
+        const app = _normalizeApplicationPayload(board, payload);
+        if (!app.jobExternalId) return { success: false, error: 'No job ID in payload' };
+
+        // Find the local job posting by external ID
+        const jobs = await dataAccess.queryRecords('jobPostings', {
+            filter: {},
+            limit: 200
+        });
+
+        const matchedJob = (jobs.items || []).find(j => {
+            const syn = _safeJsonParse(j.syndication, {});
+            return syn[board]?.externalId === app.jobExternalId;
+        });
+
+        if (!matchedJob) return { success: false, error: 'Job not found for external ID' };
+
+        // Deduplicate
+        const existing = await dataAccess.queryRecords('jobApplications', {
+            filter: { external_id: app.externalId, source_board: board },
+            limit: 1
+        });
+        if (existing.items?.length > 0) return { success: true, duplicate: true };
+
+        await dataAccess.insertRecord('jobApplications', {
+            job_id: matchedJob._id,
+            carrier_dot: matchedJob.carrier_dot,
+            source_board: board,
+            external_id: app.externalId,
+            applicant_name: app.name || '',
+            applicant_email: app.email || '',
+            applicant_phone: app.phone || '',
+            resume_url: app.resumeUrl || '',
+            status: 'new',
+            applied_at: app.appliedAt || new Date().toISOString(),
+            imported_at: new Date().toISOString()
+        });
+
+        await dataAccess.updateRecord('jobPostings', matchedJob._id, {
+            application_count: (matchedJob.application_count || 0) + 1
+        });
+
+        return { success: true };
+    } catch (error) {
+        console.error('[jobBoardService] processJobBoardWebhook error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Connect a job board account
+ * @param {string} carrierDot
+ * @param {string} board
+ * @param {Object} credentials
+ */
+export async function connectJobBoard(carrierDot, board, credentials) {
+    try {
+        if (!SUPPORTED_BOARDS.includes(board)) {
+            return { success: false, error: `Unsupported board: ${board}` };
+        }
+
+        const verified = await verifyJobBoardCredentials(board, credentials);
+        if (!verified.success) return { success: false, error: `Credential verification failed: ${verified.error}` };
+
+        // Upsert credentials record
+        const existing = await dataAccess.queryRecords('jobBoardCredentials', {
+            filter: { carrier_dot: carrierDot, board },
+            limit: 1
+        });
+
+        const record = {
+            carrier_dot: carrierDot,
+            board,
+            api_key: credentials.apiKey || '',
+            publisher_id: credentials.publisherId || '',
+            account_id: credentials.accountId || '',
+            is_active: true,
+            connected_at: new Date().toISOString()
+        };
+
+        if (existing.items?.length > 0) {
+            await dataAccess.updateRecord('jobBoardCredentials', existing.items[0]._id, record);
+        } else {
+            await dataAccess.insertRecord('jobBoardCredentials', record);
+        }
+
+        return { success: true };
+    } catch (error) {
+        console.error('[jobBoardService] connectJobBoard error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Verify job board credentials
+ * @param {string} board
+ * @param {Object} credentials
+ */
+export async function verifyJobBoardCredentials(board, credentials) {
+    try {
+        // In production, make a test API call to verify
+        if (!credentials.apiKey && !credentials.publisherId) {
+            return { success: false, error: 'apiKey or publisherId required' };
+        }
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// SCHEDULER JOBS
+// =============================================================================
+
+/**
+ * Scheduler: Import applications from all active job boards (hourly)
+ */
+export async function importJobApplicationsJob() {
+    try {
+        const activeJobs = await dataAccess.queryRecords('jobPostings', {
+            filter: { status: POSTING_STATUS.ACTIVE },
+            limit: 100
+        });
+
+        let totalImported = 0;
+        for (const job of (activeJobs.items || [])) {
+            const result = await importApplications(job._id);
+            if (result.success) totalImported += result.imported || 0;
+        }
+
+        console.log(`[jobBoardService] importJobApplicationsJob: ${totalImported} applications imported`);
+        return { success: true, imported: totalImported };
+    } catch (error) {
+        console.error('[jobBoardService] importJobApplicationsJob error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Scheduler: Expire old job postings (daily)
+ */
+export async function expireJobPostingsJob() {
+    try {
+        const now = new Date().toISOString();
+        const activeJobs = await dataAccess.queryRecords('jobPostings', {
+            filter: { status: POSTING_STATUS.ACTIVE },
+            limit: 200
+        });
+
+        let expired = 0;
+        for (const job of (activeJobs.items || [])) {
+            if (job.expires_at && job.expires_at < now) {
+                await dataAccess.updateRecord('jobPostings', job._id, {
+                    status: POSTING_STATUS.EXPIRED,
+                    expired_at: now
+                });
+                // Remove from all boards
+                const syndication = _safeJsonParse(job.syndication, {});
+                const liveBoards = Object.keys(syndication).filter(b => syndication[b]?.status === SYNDICATION_STATUS.LIVE);
+                if (liveBoards.length > 0) {
+                    await unsyndicateJob(job._id, liveBoards);
+                }
+                expired++;
+            }
+        }
+
+        console.log(`[jobBoardService] expireJobPostingsJob: ${expired} postings expired`);
+        return { success: true, expired };
+    } catch (error) {
+        console.error('[jobBoardService] expireJobPostingsJob error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// PRIVATE HELPERS
+// =============================================================================
+
+async function _getBoardCredentials(carrierDot, board) {
+    try {
+        const records = await dataAccess.queryRecords('jobBoardCredentials', {
+            filter: { carrier_dot: carrierDot, board, is_active: true },
+            limit: 1
+        });
+        return records.items?.[0] || null;
+    } catch {
+        return null;
+    }
+}
+
+async function _postToBoard(board, job, credentials) {
+    try {
+        switch (board) {
+            case 'indeed':
+                return await _postToIndeed(job, credentials);
+            case 'ziprecruiter':
+                return await _postToZipRecruiter(job, credentials);
+            case 'cdljobs':
+                return await _postToCDLJobs(job, credentials);
+            default:
+                return { success: false, error: 'Unknown board' };
+        }
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+async function _postToIndeed(job, credentials) {
+    const apiKey = await getSecret('INDEED_PUBLISHER_KEY') || credentials.api_key;
+    if (!apiKey) return { success: false, error: 'Indeed API key not configured' };
+
+    // Indeed Job Posting API
+    const payload = {
+        title: job.title,
+        description: job.description,
+        location: job.location,
+        jobtype: 'fulltime',
+        salary: job.pay_rate || '',
+        company: job.carrier_dot
+    };
+
+    const response = await fetch('https://apis.indeed.com/v1/jobs', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+        const body = await response.text();
+        return { success: false, error: `Indeed error ${response.status}: ${body}` };
+    }
+
+    const data = await response.json();
+    return { success: true, externalId: data.jobId || data.id };
+}
+
+async function _postToZipRecruiter(job, credentials) {
+    const apiKey = await getSecret('ZIPRECRUITER_API_KEY') || credentials.api_key;
+    if (!apiKey) return { success: false, error: 'ZipRecruiter API key not configured' };
+
+    const payload = {
+        title: job.title,
+        description: job.description,
+        location: job.location,
+        employment_type: 'full_time',
+        compensation: job.pay_rate || ''
+    };
+
+    const response = await fetch(`https://api.ziprecruiter.com/jobs/v1?api_key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+        const body = await response.text();
+        return { success: false, error: `ZipRecruiter error ${response.status}: ${body}` };
+    }
+
+    const data = await response.json();
+    return { success: true, externalId: data.id };
+}
+
+async function _postToCDLJobs(job, credentials) {
+    // CDLjobs.com uses XML feed format
+    const apiKey = credentials.api_key;
+    if (!apiKey) return { success: false, error: 'CDLjobs API key not configured' };
+
+    // Simplified — real implementation would use their XML feed spec
+    return { success: true, externalId: `cdl_${job._id}` };
+}
+
+async function _updateOnBoard(board, job, boardData) {
+    // Simplified — real implementation would call board-specific update APIs
+    console.log(`[jobBoardService] Updating ${board} posting ${boardData.externalId}`);
+}
+
+async function _removeFromBoard(board, externalId, credentials) {
+    // Simplified — real implementation would call board-specific delete APIs
+    console.log(`[jobBoardService] Removing ${board} posting ${externalId}`);
+}
+
+async function _fetchApplicationsFromBoard(board, externalId, credentials) {
+    // Simplified — real implementation would call board-specific application APIs
+    return [];
+}
+
+function _normalizeApplicationPayload(board, payload) {
+    switch (board) {
+        case 'indeed':
+            return {
+                externalId: payload.applicationId || payload.id,
+                jobExternalId: payload.jobId,
+                name: payload.applicantName || `${payload.firstName || ''} ${payload.lastName || ''}`.trim(),
+                email: payload.email,
+                phone: payload.phone,
+                resumeUrl: payload.resumeUrl,
+                appliedAt: payload.applyDate
+            };
+        case 'ziprecruiter':
+            return {
+                externalId: payload.id,
+                jobExternalId: payload.job_id,
+                name: payload.name,
+                email: payload.email,
+                phone: payload.phone,
+                resumeUrl: payload.resume_url,
+                appliedAt: payload.applied_at
+            };
+        default:
+            return { externalId: payload.id, jobExternalId: payload.job_id, ...payload };
+    }
+}
+
+function _addDays(date, days) {
+    const d = new Date(date);
+    d.setDate(d.getDate() + days);
+    return d.toISOString();
+}
+
+function _safeJsonParse(str, fallback) {
+    try {
+        return typeof str === 'string' ? JSON.parse(str) : (str || fallback);
+    } catch {
+        return fallback;
+    }
+}

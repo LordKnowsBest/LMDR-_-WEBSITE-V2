@@ -1,0 +1,742 @@
+/**
+ * Email Campaign Service
+ *
+ * Manages email drip campaigns and automated sequences for recruiters.
+ * Uses SendGrid for transactional/bulk email delivery.
+ *
+ * Collections: emailCampaigns, emailSequences, emailSequenceEnrollments, emailMessages
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const SENDGRID_API_URL = 'https://api.sendgrid.com/v3';
+
+const CAMPAIGN_STATUS = {
+    DRAFT: 'draft',
+    SCHEDULED: 'scheduled',
+    SENDING: 'sending',
+    SENT: 'sent',
+    PAUSED: 'paused',
+    CANCELLED: 'cancelled'
+};
+
+const SEQUENCE_STATUS = {
+    ACTIVE: 'active',
+    PAUSED: 'paused',
+    ARCHIVED: 'archived'
+};
+
+const ENROLLMENT_STATUS = {
+    ACTIVE: 'active',
+    COMPLETED: 'completed',
+    EXITED: 'exited',
+    UNSUBSCRIBED: 'unsubscribed'
+};
+
+// =============================================================================
+// EMAIL CAMPAIGN CRUD
+// =============================================================================
+
+/**
+ * Create a new email campaign
+ * @param {string} carrierDot
+ * @param {Object} campaignData
+ */
+export async function createEmailCampaign(carrierDot, campaignData) {
+    try {
+        if (!carrierDot) return { success: false, error: 'carrierDot required' };
+        if (!campaignData.campaignName) return { success: false, error: 'campaignName required' };
+        if (!campaignData.subjectLine) return { success: false, error: 'subjectLine required' };
+        if (!campaignData.fromEmail) return { success: false, error: 'fromEmail required' };
+
+        const audienceCount = await _calculateAudienceCount(carrierDot, campaignData.audienceFilter);
+
+        const record = {
+            carrier_dot: carrierDot,
+            campaign_name: campaignData.campaignName,
+            campaign_type: campaignData.campaignType || 'one_time',
+            status: CAMPAIGN_STATUS.DRAFT,
+            from_name: campaignData.fromName || 'LMDR Recruiting',
+            from_email: campaignData.fromEmail,
+            reply_to: campaignData.replyTo || campaignData.fromEmail,
+            subject_line: campaignData.subjectLine,
+            subject_variants: JSON.stringify(campaignData.subjectVariants || []),
+            preheader: campaignData.preheader || '',
+            html_content: campaignData.htmlContent || '',
+            audience_filter: JSON.stringify(campaignData.audienceFilter || {}),
+            audience_count: audienceCount,
+            schedule_type: campaignData.scheduleType || 'immediate',
+            scheduled_time: campaignData.scheduledTime || null,
+            send_window: JSON.stringify(campaignData.sendWindow || { start: '09:00', end: '17:00' }),
+            tracking: JSON.stringify({ opens: true, clicks: true }),
+            created_at: new Date().toISOString()
+        };
+
+        const result = await dataAccess.insertRecord('emailCampaigns', record);
+        return { success: true, campaignId: result._id, audienceCount };
+    } catch (error) {
+        console.error('[emailCampaignService] createEmailCampaign error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get email campaigns for a carrier
+ * @param {string} carrierDot
+ * @param {Object} filters - { status, dateFrom, dateTo }
+ */
+export async function getEmailCampaigns(carrierDot, filters = {}) {
+    try {
+        const records = await dataAccess.queryRecords('emailCampaigns', {
+            filter: { carrier_dot: carrierDot, ...(filters.status ? { status: filters.status } : {}) },
+            sort: [{ fieldName: 'created_at', order: 'desc' }],
+            limit: 50
+        });
+
+        const campaigns = (records.items || []).map(c => ({
+            ...c,
+            audienceFilter: _safeJsonParse(c.audience_filter, {}),
+            subjectVariants: _safeJsonParse(c.subject_variants, []),
+            sendWindow: _safeJsonParse(c.send_window, {}),
+            tracking: _safeJsonParse(c.tracking, {})
+        }));
+
+        return { success: true, campaigns };
+    } catch (error) {
+        console.error('[emailCampaignService] getEmailCampaigns error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Update an email campaign (only allowed in draft/scheduled state)
+ * @param {string} campaignId
+ * @param {Object} updates
+ */
+export async function updateEmailCampaign(campaignId, updates) {
+    try {
+        const existing = await dataAccess.getRecord('emailCampaigns', campaignId);
+        if (!existing) return { success: false, error: 'Campaign not found' };
+        if ([CAMPAIGN_STATUS.SENDING, CAMPAIGN_STATUS.SENT].includes(existing.status)) {
+            return { success: false, error: 'Cannot update a campaign that has been sent or is sending' };
+        }
+
+        const allowed = ['campaign_name', 'from_name', 'from_email', 'reply_to', 'subject_line',
+            'preheader', 'html_content', 'audience_filter', 'schedule_type', 'scheduled_time',
+            'send_window', 'subject_variants'];
+        const sanitized = {};
+        for (const key of allowed) {
+            if (updates[key] !== undefined) sanitized[key] = updates[key];
+        }
+        sanitized.updated_at = new Date().toISOString();
+
+        await dataAccess.updateRecord('emailCampaigns', campaignId, sanitized);
+        return { success: true };
+    } catch (error) {
+        console.error('[emailCampaignService] updateEmailCampaign error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Send an email campaign immediately
+ * @param {string} campaignId
+ */
+export async function sendEmailCampaign(campaignId) {
+    try {
+        const campaign = await dataAccess.getRecord('emailCampaigns', campaignId);
+        if (!campaign) return { success: false, error: 'Campaign not found' };
+        if (campaign.status === CAMPAIGN_STATUS.SENT) {
+            return { success: false, error: 'Campaign already sent' };
+        }
+
+        // Mark as sending
+        await dataAccess.updateRecord('emailCampaigns', campaignId, {
+            status: CAMPAIGN_STATUS.SENDING,
+            send_started_at: new Date().toISOString()
+        });
+
+        // Build recipient list
+        const recipients = await _buildRecipientList(campaign.carrier_dot,
+            _safeJsonParse(campaign.audience_filter, {}));
+
+        if (recipients.length === 0) {
+            await dataAccess.updateRecord('emailCampaigns', campaignId, { status: CAMPAIGN_STATUS.SENT });
+            return { success: true, sent: 0, message: 'No recipients matched filter' };
+        }
+
+        // Send via SendGrid
+        const sendResult = await _sendViaSendGrid(campaign, recipients);
+
+        // Create EmailMessages records
+        const messageRecords = recipients.map(r => ({
+            campaign_id: campaignId,
+            driver_id: r.driverId,
+            email_address: r.email,
+            subject: campaign.subject_line,
+            status: 'queued',
+            sent_at: new Date().toISOString()
+        }));
+        await Promise.allSettled(messageRecords.map(m => dataAccess.insertRecord('emailMessages', m)));
+
+        // Mark campaign as sent
+        await dataAccess.updateRecord('emailCampaigns', campaignId, {
+            status: CAMPAIGN_STATUS.SENT,
+            sent_count: recipients.length,
+            sent_at: new Date().toISOString()
+        });
+
+        return { success: true, sent: recipients.length, sendgridResult: sendResult };
+    } catch (error) {
+        console.error('[emailCampaignService] sendEmailCampaign error:', error);
+        await dataAccess.updateRecord('emailCampaigns', campaignId, {
+            status: CAMPAIGN_STATUS.DRAFT,
+            send_error: error.message
+        }).catch(() => { });
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get analytics for a campaign
+ * @param {string} campaignId
+ */
+export async function getEmailCampaignAnalytics(campaignId) {
+    try {
+        const messages = await dataAccess.queryRecords('emailMessages', {
+            filter: { campaign_id: campaignId },
+            limit: 1000
+        });
+
+        const items = messages.items || [];
+        const total = items.length;
+        const delivered = items.filter(m => m.status === 'delivered').length;
+        const opened = items.filter(m => m.opened).length;
+        const clicked = items.filter(m => m.clicked).length;
+        const bounced = items.filter(m => m.status === 'bounced').length;
+        const unsubscribed = items.filter(m => m.unsubscribed).length;
+
+        return {
+            success: true,
+            analytics: {
+                total,
+                delivered,
+                opened,
+                clicked,
+                bounced,
+                unsubscribed,
+                openRate: total > 0 ? Math.round((opened / Math.max(delivered, 1)) * 100) : 0,
+                clickRate: total > 0 ? Math.round((clicked / Math.max(opened, 1)) * 100) : 0,
+                bounceRate: total > 0 ? Math.round((bounced / total) * 100) : 0
+            }
+        };
+    } catch (error) {
+        console.error('[emailCampaignService] getEmailCampaignAnalytics error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// EMAIL SEQUENCES (DRIP CAMPAIGNS)
+// =============================================================================
+
+/**
+ * Create an email sequence (drip campaign definition)
+ * @param {string} carrierDot
+ * @param {Object} sequenceData
+ */
+export async function createEmailSequence(carrierDot, sequenceData) {
+    try {
+        if (!sequenceData.sequenceName) return { success: false, error: 'sequenceName required' };
+        if (!sequenceData.steps || sequenceData.steps.length === 0) {
+            return { success: false, error: 'At least one step required' };
+        }
+
+        // Validate step structure
+        for (const step of sequenceData.steps) {
+            if (!['email', 'wait', 'condition'].includes(step.type)) {
+                return { success: false, error: `Invalid step type: ${step.type}` };
+            }
+            if (step.type === 'email' && !step.subjectLine) {
+                return { success: false, error: 'Email step requires subjectLine' };
+            }
+        }
+
+        const record = {
+            carrier_dot: carrierDot,
+            sequence_name: sequenceData.sequenceName,
+            description: sequenceData.description || '',
+            status: SEQUENCE_STATUS.ACTIVE,
+            trigger_type: sequenceData.triggerType || 'manual',
+            trigger_conditions: JSON.stringify(sequenceData.triggerConditions || {}),
+            steps: JSON.stringify(sequenceData.steps),
+            exit_conditions: JSON.stringify(sequenceData.exitConditions || {}),
+            enrollment_count: 0,
+            active_count: 0,
+            completed_count: 0,
+            conversion_count: 0,
+            created_at: new Date().toISOString()
+        };
+
+        const result = await dataAccess.insertRecord('emailSequences', record);
+        return { success: true, sequenceId: result._id };
+    } catch (error) {
+        console.error('[emailCampaignService] createEmailSequence error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get sequences for a carrier
+ * @param {string} carrierDot
+ */
+export async function getEmailSequences(carrierDot) {
+    try {
+        const records = await dataAccess.queryRecords('emailSequences', {
+            filter: { carrier_dot: carrierDot },
+            sort: [{ fieldName: 'created_at', order: 'desc' }],
+            limit: 50
+        });
+
+        const sequences = (records.items || []).map(s => ({
+            ...s,
+            steps: _safeJsonParse(s.steps, []),
+            triggerConditions: _safeJsonParse(s.trigger_conditions, {}),
+            exitConditions: _safeJsonParse(s.exit_conditions, {})
+        }));
+
+        return { success: true, sequences };
+    } catch (error) {
+        console.error('[emailCampaignService] getEmailSequences error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Enroll a driver in a sequence
+ * @param {string} sequenceId
+ * @param {string} driverId
+ */
+export async function enrollInSequence(sequenceId, driverId) {
+    try {
+        // Check not already enrolled
+        const existing = await dataAccess.queryRecords('emailSequenceEnrollments', {
+            filter: { sequence_id: sequenceId, driver_id: driverId, status: ENROLLMENT_STATUS.ACTIVE },
+            limit: 1
+        });
+        if (existing.items && existing.items.length > 0) {
+            return { success: false, error: 'Driver already enrolled in this sequence' };
+        }
+
+        const sequence = await dataAccess.getRecord('emailSequences', sequenceId);
+        if (!sequence) return { success: false, error: 'Sequence not found' };
+
+        const steps = _safeJsonParse(sequence.steps, []);
+        const firstStep = steps[0];
+        const nextStepAt = firstStep?.type === 'wait'
+            ? _addDelay(new Date(), firstStep.delayMinutes || 0)
+            : new Date().toISOString();
+
+        const record = {
+            sequence_id: sequenceId,
+            driver_id: driverId,
+            carrier_dot: sequence.carrier_dot,
+            current_step: 0,
+            status: ENROLLMENT_STATUS.ACTIVE,
+            enrolled_at: new Date().toISOString(),
+            next_step_at: nextStepAt,
+            step_history: JSON.stringify([])
+        };
+
+        const result = await dataAccess.insertRecord('emailSequenceEnrollments', record);
+
+        // Increment enrollment count
+        await dataAccess.updateRecord('emailSequences', sequenceId, {
+            enrollment_count: (sequence.enrollment_count || 0) + 1,
+            active_count: (sequence.active_count || 0) + 1
+        });
+
+        return { success: true, enrollmentId: result._id };
+    } catch (error) {
+        console.error('[emailCampaignService] enrollInSequence error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Remove a driver from a sequence
+ * @param {string} enrollmentId
+ * @param {string} reason
+ */
+export async function removeFromSequence(enrollmentId, reason = 'manual') {
+    try {
+        const enrollment = await dataAccess.getRecord('emailSequenceEnrollments', enrollmentId);
+        if (!enrollment) return { success: false, error: 'Enrollment not found' };
+
+        await dataAccess.updateRecord('emailSequenceEnrollments', enrollmentId, {
+            status: ENROLLMENT_STATUS.EXITED,
+            exit_reason: reason,
+            exited_at: new Date().toISOString()
+        });
+
+        // Decrement active count
+        const sequence = await dataAccess.getRecord('emailSequences', enrollment.sequence_id);
+        if (sequence) {
+            await dataAccess.updateRecord('emailSequences', enrollment.sequence_id, {
+                active_count: Math.max(0, (sequence.active_count || 1) - 1)
+            });
+        }
+
+        return { success: true };
+    } catch (error) {
+        console.error('[emailCampaignService] removeFromSequence error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Scheduler: Process due sequence steps (runs every 15 min)
+ */
+export async function processSequenceSteps() {
+    try {
+        const now = new Date().toISOString();
+
+        // Find enrollments with a due step
+        const dueEnrollments = await dataAccess.queryRecords('emailSequenceEnrollments', {
+            filter: { status: ENROLLMENT_STATUS.ACTIVE },
+            limit: 50
+        });
+
+        let processed = 0;
+        let errors = 0;
+
+        for (const enrollment of (dueEnrollments.items || [])) {
+            if (!enrollment.next_step_at || enrollment.next_step_at > now) continue;
+
+            try {
+                const sequence = await dataAccess.getRecord('emailSequences', enrollment.sequence_id);
+                if (!sequence || sequence.status !== SEQUENCE_STATUS.ACTIVE) continue;
+
+                const steps = _safeJsonParse(sequence.steps, []);
+                const currentStepIndex = enrollment.current_step || 0;
+
+                if (currentStepIndex >= steps.length) {
+                    // Sequence complete
+                    await dataAccess.updateRecord('emailSequenceEnrollments', enrollment._id, {
+                        status: ENROLLMENT_STATUS.COMPLETED,
+                        completed_at: new Date().toISOString()
+                    });
+                    await dataAccess.updateRecord('emailSequences', sequence._id, {
+                        active_count: Math.max(0, (sequence.active_count || 1) - 1),
+                        completed_count: (sequence.completed_count || 0) + 1
+                    });
+                    continue;
+                }
+
+                const step = steps[currentStepIndex];
+                let nextStepAt = null;
+
+                if (step.type === 'email') {
+                    // Send the email for this step
+                    await _sendSequenceEmail(enrollment, sequence, step);
+                }
+                // 'wait' and 'condition' steps just advance the pointer
+
+                // Calculate next step timing
+                const nextIndex = currentStepIndex + 1;
+                if (nextIndex < steps.length) {
+                    const nextStep = steps[nextIndex];
+                    nextStepAt = nextStep.type === 'wait'
+                        ? _addDelay(new Date(), nextStep.delayMinutes || 60)
+                        : new Date().toISOString();
+                }
+
+                // Update enrollment progress
+                const stepHistory = _safeJsonParse(enrollment.step_history, []);
+                stepHistory.push({ step: currentStepIndex, type: step.type, executedAt: now });
+
+                await dataAccess.updateRecord('emailSequenceEnrollments', enrollment._id, {
+                    current_step: nextIndex,
+                    last_step_at: now,
+                    next_step_at: nextStepAt,
+                    step_history: JSON.stringify(stepHistory)
+                });
+
+                processed++;
+            } catch (stepError) {
+                console.error(`[emailCampaignService] Error processing enrollment ${enrollment._id}:`, stepError);
+                errors++;
+            }
+        }
+
+        console.log(`[emailCampaignService] processSequenceSteps: ${processed} processed, ${errors} errors`);
+        return { success: true, processed, errors };
+    } catch (error) {
+        console.error('[emailCampaignService] processSequenceSteps error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get analytics for a sequence (funnel by step)
+ * @param {string} sequenceId
+ */
+export async function getSequenceAnalytics(sequenceId) {
+    try {
+        const sequence = await dataAccess.getRecord('emailSequences', sequenceId);
+        if (!sequence) return { success: false, error: 'Sequence not found' };
+
+        const enrollments = await dataAccess.queryRecords('emailSequenceEnrollments', {
+            filter: { sequence_id: sequenceId },
+            limit: 500
+        });
+
+        const steps = _safeJsonParse(sequence.steps, []);
+        const items = enrollments.items || [];
+
+        const funnel = steps.map((step, i) => ({
+            stepIndex: i,
+            stepType: step.type,
+            label: step.label || `Step ${i + 1}`,
+            reached: items.filter(e => (e.current_step || 0) > i || e.status === ENROLLMENT_STATUS.COMPLETED).length
+        }));
+
+        return {
+            success: true,
+            analytics: {
+                totalEnrolled: sequence.enrollment_count || 0,
+                active: sequence.active_count || 0,
+                completed: sequence.completed_count || 0,
+                exited: items.filter(e => e.status === ENROLLMENT_STATUS.EXITED).length,
+                conversionRate: sequence.enrollment_count > 0
+                    ? Math.round(((sequence.conversion_count || 0) / sequence.enrollment_count) * 100)
+                    : 0,
+                funnel
+            }
+        };
+    } catch (error) {
+        console.error('[emailCampaignService] getSequenceAnalytics error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// SENDGRID WEBHOOK HANDLER
+// =============================================================================
+
+/**
+ * Process SendGrid event webhook (called from http-functions.js)
+ * @param {Array} events - Array of SendGrid event objects
+ */
+export async function processSendGridWebhook(events) {
+    if (!Array.isArray(events)) return { success: false, error: 'events must be an array' };
+
+    let processed = 0;
+    let errors = 0;
+
+    for (const event of events) {
+        try {
+            const { email, event: eventType, sg_message_id } = event;
+            if (!email) continue;
+
+            // Find the EmailMessages record by email + sendgrid_id or email alone
+            const messages = await dataAccess.queryRecords('emailMessages', {
+                filter: sg_message_id ? { sendgrid_id: sg_message_id } : { email_address: email },
+                limit: 1
+            });
+
+            const message = messages.items?.[0];
+            if (!message) { errors++; continue; }
+
+            const updates = { updated_at: new Date().toISOString() };
+
+            switch (eventType) {
+                case 'delivered':
+                    updates.status = 'delivered';
+                    updates.delivered_at = new Date(event.timestamp * 1000).toISOString();
+                    break;
+                case 'open':
+                    updates.opened = true;
+                    updates.opened_at = updates.opened_at || new Date(event.timestamp * 1000).toISOString();
+                    updates.open_count = (message.open_count || 0) + 1;
+                    break;
+                case 'click':
+                    updates.clicked = true;
+                    updates.clicked_at = updates.clicked_at || new Date(event.timestamp * 1000).toISOString();
+                    updates.click_count = (message.click_count || 0) + 1;
+                    break;
+                case 'bounce':
+                    updates.status = 'bounced';
+                    updates.bounce_type = event.type;
+                    updates.bounce_reason = event.reason;
+                    break;
+                case 'unsubscribe':
+                    updates.unsubscribed = true;
+                    updates.status = 'unsubscribed';
+                    break;
+                case 'spamreport':
+                    updates.spam_reported = true;
+                    break;
+                default:
+                    break;
+            }
+
+            await dataAccess.updateRecord('emailMessages', message._id, updates);
+            processed++;
+        } catch (err) {
+            console.error('[emailCampaignService] processSendGridWebhook event error:', err);
+            errors++;
+        }
+    }
+
+    return { success: true, processed, errors };
+}
+
+// =============================================================================
+// PRIVATE HELPERS
+// =============================================================================
+
+async function _sendViaSendGrid(campaign, recipients) {
+    try {
+        const apiKey = await getSecret('SENDGRID_API_KEY');
+        if (!apiKey) {
+            console.warn('[emailCampaignService] SENDGRID_API_KEY not configured — skipping send');
+            return { skipped: true, reason: 'no_api_key' };
+        }
+
+        const personalizations = recipients.map(r => ({
+            to: [{ email: r.email, name: r.name || '' }],
+            dynamic_template_data: {
+                firstName: r.firstName || 'Driver',
+                carrierName: campaign.from_name,
+                unsubscribeUrl: `https://www.lastmiledr.app/unsubscribe?email=${encodeURIComponent(r.email)}`
+            }
+        }));
+
+        const payload = {
+            personalizations,
+            from: { email: campaign.from_email, name: campaign.from_name },
+            reply_to: { email: campaign.reply_to },
+            subject: campaign.subject_line,
+            content: [{ type: 'text/html', value: campaign.html_content || '<p>No content</p>' }],
+            tracking_settings: {
+                click_tracking: { enable: true },
+                open_tracking: { enable: true }
+            }
+        };
+
+        const response = await fetch(`${SENDGRID_API_URL}/mail/send`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const body = await response.text();
+            throw new Error(`SendGrid error ${response.status}: ${body}`);
+        }
+
+        return { success: true, recipientCount: recipients.length };
+    } catch (error) {
+        console.error('[emailCampaignService] _sendViaSendGrid error:', error);
+        throw error;
+    }
+}
+
+async function _sendSequenceEmail(enrollment, sequence, step) {
+    try {
+        const apiKey = await getSecret('SENDGRID_API_KEY');
+        if (!apiKey) {
+            console.warn('[emailCampaignService] SENDGRID_API_KEY not configured — skipping sequence email');
+            return;
+        }
+
+        // Get driver email
+        const driver = await dataAccess.getRecord('driverProfiles', enrollment.driver_id);
+        if (!driver || !driver.email) return;
+
+        const payload = {
+            personalizations: [{
+                to: [{ email: driver.email, name: driver.full_name || 'Driver' }],
+                dynamic_template_data: {
+                    firstName: driver.first_name || 'Driver',
+                    carrierName: sequence.carrier_dot
+                }
+            }],
+            from: { email: step.fromEmail || 'recruiting@lastmiledr.app', name: step.fromName || 'LMDR Recruiting' },
+            subject: step.subjectLine,
+            content: [{ type: 'text/html', value: step.htmlContent || '<p>No content</p>' }]
+        };
+
+        await fetch(`${SENDGRID_API_URL}/mail/send`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        // Log the message
+        await dataAccess.insertRecord('emailMessages', {
+            sequence_id: sequence._id,
+            enrollment_id: enrollment._id,
+            driver_id: enrollment.driver_id,
+            email_address: driver.email,
+            subject: step.subjectLine,
+            status: 'sent',
+            sent_at: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('[emailCampaignService] _sendSequenceEmail error:', error);
+    }
+}
+
+async function _buildRecipientList(carrierDot, audienceFilter) {
+    try {
+        const query = { filter: { is_searchable: true }, limit: 200 };
+        if (audienceFilter.cdlClass) query.filter.cdl_class = audienceFilter.cdlClass;
+        if (audienceFilter.state) query.filter.state = audienceFilter.state;
+
+        const drivers = await dataAccess.queryRecords('driverProfiles', query);
+        return (drivers.items || [])
+            .filter(d => d.email)
+            .map(d => ({
+                driverId: d._id,
+                email: d.email,
+                name: d.full_name || '',
+                firstName: d.first_name || ''
+            }));
+    } catch (error) {
+        console.error('[emailCampaignService] _buildRecipientList error:', error);
+        return [];
+    }
+}
+
+async function _calculateAudienceCount(carrierDot, audienceFilter) {
+    try {
+        const recipients = await _buildRecipientList(carrierDot, audienceFilter || {});
+        return recipients.length;
+    } catch {
+        return 0;
+    }
+}
+
+function _addDelay(date, minutes) {
+    const d = new Date(date);
+    d.setMinutes(d.getMinutes() + (minutes || 0));
+    return d.toISOString();
+}
+
+function _safeJsonParse(str, fallback) {
+    try {
+        return typeof str === 'string' ? JSON.parse(str) : (str || fallback);
+    } catch {
+        return fallback;
+    }
+}

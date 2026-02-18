@@ -342,7 +342,37 @@ export const DATA_SOURCE = {
   // Self-Healing Pipeline
   // -------------------------------------------------------------------------
   remediationPlans: 'airtable',
-  incidentLog: 'airtable'
+  incidentLog: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Recruiter Outreach — Multi-Channel Campaign Management
+  // -------------------------------------------------------------------------
+  // Phase 1: Email Drip Campaigns
+  emailCampaigns: 'airtable',
+  emailSequences: 'airtable',
+  emailSequenceEnrollments: 'airtable',
+  emailMessages: 'airtable',
+  // Phase 2: SMS Campaign Manager
+  smsCampaigns: 'airtable',
+  smsMessages: 'airtable',
+  smsOptOuts: 'airtable',
+  // Phase 3: Job Board Distribution
+  jobBoardCredentials: 'airtable',
+  jobApplications: 'airtable',
+  // Phase 4: Social Posting
+  socialPosts: 'airtable',
+  socialAccounts: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Agent Evaluations
+  // -------------------------------------------------------------------------
+  agentEvaluations: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Pipeline Execution Agent
+  // -------------------------------------------------------------------------
+  pipelineEvents: 'airtable',
+  voiceAgentTemplates: 'airtable'
 };
 
 // =============================================================================
@@ -652,7 +682,14 @@ export const WIX_COLLECTION_NAMES = {
 
   // Self-Healing Pipeline
   remediationPlans: 'RemediationPlans',
-  incidentLog: 'IncidentLog'
+  incidentLog: 'IncidentLog',
+
+  // Agent Evaluations
+  agentEvaluations: 'AgentEvaluations',
+
+  // Pipeline Execution Agent
+  pipelineEvents: 'PipelineEvents',
+  voiceAgentTemplates: 'VoiceAgentTemplates'
 };
 
 // =============================================================================
@@ -928,7 +965,27 @@ export const AIRTABLE_TABLE_NAMES = {
 
   // Self-Healing Pipeline
   remediationPlans: 'v2_Remediation Plans',
-  incidentLog: 'v2_Incident Log'
+  incidentLog: 'v2_Incident Log',
+
+  // Agent Evaluations
+  agentEvaluations: 'v2_Agent Evaluations',
+
+  // Recruiter Outreach — Multi-Channel Campaign Management
+  emailCampaigns: 'v2_Email Campaigns',
+  emailSequences: 'v2_Email Sequences',
+  emailSequenceEnrollments: 'v2_Email Sequence Enrollments',
+  emailMessages: 'v2_Email Messages',
+  smsCampaigns: 'v2_SMS Campaigns',
+  smsMessages: 'v2_SMS Messages',
+  smsOptOuts: 'v2_SMS Opt Outs',
+  jobBoardCredentials: 'v2_Job Board Credentials',
+  jobApplications: 'v2_Job Applications',
+  socialPosts: 'v2_Social Posts',
+  socialAccounts: 'v2_Social Accounts',
+
+  // Pipeline Execution Agent
+  pipelineEvents: 'v2_Pipeline Events',
+  voiceAgentTemplates: 'v2_Voice Agent Templates'
 };
 
 // =============================================================================

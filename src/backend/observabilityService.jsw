@@ -26,6 +26,15 @@ const COLLECTION_KEYS = {
     aiUsageLog: 'aiUsageLog'
 };
 
+const AGENT_SOURCES = [
+    'agent-orchestrator',
+    'agent-run-ledger',
+    'agent-outcome',
+    'b2b-research-agent',
+    'self-healing',
+    'ai-router'
+];
+
 // ============================================
 // CONFIGURATION
 // ============================================
@@ -44,15 +53,29 @@ const CONFIG = {
         'ai-enrichment',
         'ai-router',
         'carrier-matching',
+        'driver-matching',
         'social-scanner',
         'ocr-service',
+        'b2b-research-agent',
+        'agent-orchestrator',
+        'agent-run-ledger',
+        'agent-outcome',
+        'self-healing',
         'scheduler',
         'auth',
         'api',
         'database',
         'external-api',
         'system'
-    ]
+    ],
+    logSampling: {
+        minPersistLevel: 'DEBUG',
+        maxDetailsLength: 12000
+    },
+    metricsSampling: {
+        minPersistMs: 100,
+        forcePersistSources: ['database', 'external-api', 'ai-router', 'agent-orchestrator']
+    }
 };
 
 // ============================================
@@ -79,11 +102,11 @@ async function requireSuperAdmin() {
 // ============================================
 // AIRTABLE WRITE THROTTLE
 // ============================================
-// Only CRITICAL-level events get persisted to Airtable.
-// Everything else is console-only to stay within the 50k record limit.
-const PERSIST_THRESHOLD = 4; // CRITICAL = 4, ERROR = 3
+const PERSIST_THRESHOLD = CONFIG.levels[CONFIG.logSampling.minPersistLevel] || 0;
 let __logFailCount = 0;
 const LOG_FAIL_THRESHOLD = 3;
+let __metricWriteGuard = 0;
+const ACTIVE_TRACES = new Map();
 
 // ============================================
 // LOGGING FUNCTIONS
@@ -93,13 +116,14 @@ const LOG_FAIL_THRESHOLD = 3;
  * Log an event to the system
  */
 export async function log(logEntry) {
+    const level = String(logEntry.level || 'INFO').toUpperCase();
     const entry = {
         timestamp: new Date().toISOString(),
-        level: logEntry.level || 'INFO',
-        level_num: CONFIG.levels[logEntry.level] || 1,
+        level,
+        level_num: CONFIG.levels[level] ?? CONFIG.levels.INFO,
         source: logEntry.source || 'system',
-        message: logEntry.message || '',
-        details: logEntry.details || {},
+        message: String(logEntry.message || ''),
+        details: sanitizeForStorage(logEntry.details || {}),
         trace_id: logEntry.traceId || generateTraceId(),
         span_id: logEntry.spanId || generateSpanId(),
         parent_span_id: logEntry.parentSpanId || null,
@@ -109,43 +133,71 @@ export async function log(logEntry) {
         tags: Array.isArray(logEntry.tags) ? logEntry.tags.join(', ') : (logEntry.tags || '')
     };
 
-    // Below CRITICAL threshold → console only, no Airtable write
     if (entry.level_num < PERSIST_THRESHOLD || __logFailCount >= LOG_FAIL_THRESHOLD) {
         return entry;
     }
 
     try {
-        const errorRecord = {
-            timestamp: entry.timestamp,
-            level: entry.level,
-            level_num: entry.level_num,
-            source: entry.source,
+        const detailsJson = safeJson(entry.details);
+        await dataAccess.insertRecord(COLLECTION_KEYS.logs, {
+            log_id: entry.span_id || generateSpanId(),
+            level: entry.level.toLowerCase(),
+            service: entry.source,
             message: entry.message,
-            details: typeof entry.details === 'object' ? JSON.stringify(entry.details) : String(entry.details),
-            trace_id: entry.trace_id,
-            span_id: entry.span_id,
-            parent_span_id: entry.parent_span_id,
-            user_id: entry.user_id,
-            session_id: entry.session_id,
-            duration: entry.duration,
-            tags: entry.tags
-        };
-        await dataAccess.insertRecord(COLLECTION_KEYS.errors, errorRecord, { suppressAuth: true });
+            log_date: entry.timestamp,
+            legacy_wix_id: null
+        }, { suppressAuth: true, traceId: entry.trace_id });
+
+        if (entry.level_num >= CONFIG.levels.ERROR) {
+            const errorRecord = {
+                timestamp: entry.timestamp,
+                level: entry.level,
+                level_num: entry.level_num,
+                source: entry.source,
+                message: entry.message,
+                details: detailsJson,
+                trace_id: entry.trace_id,
+                span_id: entry.span_id,
+                parent_span_id: entry.parent_span_id,
+                user_id: entry.user_id,
+                session_id: entry.session_id,
+                duration: entry.duration,
+                tags: entry.tags
+            };
+            await dataAccess.insertRecord(COLLECTION_KEYS.errors, errorRecord, { suppressAuth: true, traceId: entry.trace_id });
+        }
         __logFailCount = 0;
     } catch (error) {
         __logFailCount++;
         if (__logFailCount === LOG_FAIL_THRESHOLD) {
-            console.warn('[Observability] Circuit breaker tripped — logging disabled');
+            console.warn('[Observability] Circuit breaker tripped - logging disabled');
         }
     }
 
     return entry;
 }
-
 /**
  * Log an AI operation
  */
 export async function logAIOperation(aiLog) {
+    const latencyMs = Number(aiLog.latencyMs || 0);
+    const tokensUsed = Number(aiLog.tokensUsed || aiLog.tokens || 0);
+    const inputTokens = Number(aiLog.inputTokens || aiLog.promptTokens || 0);
+    const outputTokens = Number(aiLog.outputTokens || aiLog.completionTokens || 0);
+
+    await dataAccess.insertRecord(COLLECTION_KEYS.aiUsageLog, {
+        functionId: aiLog.functionId || aiLog.operation || 'unknown',
+        provider: aiLog.provider || 'unknown',
+        model: aiLog.model || aiLog.modelId || 'unknown',
+        latencyMs,
+        tokensUsed,
+        inputTokens,
+        outputTokens,
+        error: aiLog.error ? String(aiLog.error) : null,
+        usedFallback: !!aiLog.usedFallback,
+        timestamp: aiLog.timestamp || new Date().toISOString()
+    }, { suppressAuth: true, traceId: aiLog.traceId }).catch(() => {});
+
     return log({
         level: aiLog.error ? 'ERROR' : 'INFO',
         source: aiLog.source || 'ai-router',
@@ -178,8 +230,43 @@ export async function logExternalAPI(apiLog) {
  * Log a database operation
  */
 export async function logDatabase(dbLog) {
-    // Console-only — database ops are too frequent to persist
-    return { timestamp: new Date().toISOString(), level: 'DEBUG', source: 'database' };
+    const latencyMs = Number(dbLog.latencyMs || 0);
+    const source = dbLog.source || 'database';
+    const forcePersist = CONFIG.metricsSampling.forcePersistSources.includes(source);
+    if (!forcePersist && latencyMs < CONFIG.metricsSampling.minPersistMs) {
+        return { timestamp: new Date().toISOString(), level: 'DEBUG', source };
+    }
+
+    if (__metricWriteGuard > 0) {
+        return { timestamp: new Date().toISOString(), level: 'DEBUG', source };
+    }
+
+    __metricWriteGuard++;
+    try {
+        await dataAccess.insertRecord(COLLECTION_KEYS.metrics, {
+            timestamp: new Date().toISOString(),
+            metric_name: `db.${dbLog.operation || 'unknown'}.latency_ms`,
+            value: latencyMs,
+            source,
+            tags: toTagString([
+                'database',
+                dbLog.collection ? `collection:${dbLog.collection}` : null,
+                dbLog.success === false ? 'status:error' : 'status:ok'
+            ]),
+            metadata: safeJson({
+                operation: dbLog.operation || 'unknown',
+                collection: dbLog.collection || 'unknown',
+                affectedRows: Number(dbLog.affectedRows || 0),
+                success: dbLog.success !== false
+            })
+        }, { suppressAuth: true, traceId: dbLog.traceId });
+    } catch (error) {
+        // Best effort only.
+    } finally {
+        __metricWriteGuard--;
+    }
+
+    return { timestamp: new Date().toISOString(), level: 'DEBUG', source };
 }
 
 // ============================================
@@ -190,11 +277,35 @@ export async function logDatabase(dbLog) {
  * Start a new trace
  */
 export async function startTrace(name, metadata = {}) {
-    // In-memory only — no Airtable write (saves record quota)
     const traceId = generateTraceId();
+    const startTime = new Date();
+    const tags = Array.isArray(metadata.tags) ? metadata.tags : [];
+    const state = {
+        traceId,
+        name,
+        startTime,
+        metadata: sanitizeForStorage(metadata),
+        tags,
+        spans: []
+    };
+    ACTIVE_TRACES.set(traceId, state);
+
+    await dataAccess.insertRecord(COLLECTION_KEYS.traces, {
+        trace_id: traceId,
+        name: String(name || 'operation'),
+        start_time: startTime.toISOString(),
+        end_time: null,
+        status: 'in_progress',
+        spans: safeJson([]),
+        metadata: safeJson(state.metadata),
+        tags: tags.join(', '),
+        duration: null,
+        summary: ''
+    }, { suppressAuth: true, traceId }).catch(() => {});
+
     return {
         traceId,
-        startSpan: (spanName) => startSpan(traceId, spanName)
+        startSpan: (spanName, parentSpanId = null) => startSpan(traceId, spanName, parentSpanId)
     };
 }
 
@@ -204,6 +315,19 @@ export async function startTrace(name, metadata = {}) {
 export function startSpan(traceId, name, parentSpanId = null) {
     const spanId = generateSpanId();
     const startTime = Date.now();
+    const traceState = ACTIVE_TRACES.get(traceId);
+    if (traceState) {
+        traceState.spans.push({
+            spanId,
+            parentSpanId,
+            name: String(name || 'span'),
+            startTime: new Date(startTime).toISOString(),
+            endTime: null,
+            status: 'running',
+            duration: null,
+            metadata: {}
+        });
+    }
 
     return {
         traceId,
@@ -213,6 +337,19 @@ export function startSpan(traceId, name, parentSpanId = null) {
         startTime,
         end: async (status = 'success', metadata = {}) => {
             const duration = Date.now() - startTime;
+            const trace = ACTIVE_TRACES.get(traceId);
+            if (trace) {
+                const idx = trace.spans.findIndex((span) => span.spanId === spanId);
+                if (idx >= 0) {
+                    trace.spans[idx] = {
+                        ...trace.spans[idx],
+                        endTime: new Date().toISOString(),
+                        status,
+                        duration,
+                        metadata: sanitizeForStorage(metadata || {})
+                    };
+                }
+            }
             await log({
                 level: status === 'error' ? 'ERROR' : 'DEBUG',
                 source: 'trace',
@@ -232,8 +369,36 @@ export function startSpan(traceId, name, parentSpanId = null) {
  * End a trace
  */
 export async function endTrace(traceId, status = 'completed', summary = {}) {
-    // No-op — traces are in-memory only (saves record quota)
-    return null;
+    const endTime = new Date();
+    const trace = ACTIVE_TRACES.get(traceId);
+    const startTime = trace?.startTime ? new Date(trace.startTime) : endTime;
+    const duration = Math.max(0, endTime.getTime() - startTime.getTime());
+    const traceRecord = await dataAccess.queryRecords(COLLECTION_KEYS.traces, {
+        filters: { trace_id: traceId },
+        limit: 1,
+        suppressAuth: true,
+        traceId
+    }).catch(() => ({ items: [] }));
+    const existing = traceRecord?.items?.[0];
+
+    if (existing?._id) {
+        await dataAccess.updateRecord(COLLECTION_KEYS.traces, {
+            _id: existing._id,
+            trace_id: traceId,
+            name: trace?.name || existing.name || 'operation',
+            start_time: trace?.startTime ? new Date(trace.startTime).toISOString() : (existing.start_time || startTime.toISOString()),
+            end_time: endTime.toISOString(),
+            status: String(status || 'completed'),
+            spans: safeJson(trace?.spans || []),
+            metadata: safeJson(trace?.metadata || {}),
+            tags: toTagString(trace?.tags || []),
+            duration,
+            summary: safeJson(sanitizeForStorage(summary || {}))
+        }, { suppressAuth: true, traceId }).catch(() => {});
+    }
+
+    ACTIVE_TRACES.delete(traceId);
+    return { traceId, status, duration };
 }
 
 // ============================================
@@ -245,7 +410,7 @@ export async function getLogs(options = {}) {
 
     try {
         const filters = {};
-        if (options.level) filters.level = options.level;
+        if (options.level) filters.level = String(options.level).toLowerCase();
         if (options.source) filters.service = options.source;
         
         const result = await dataAccess.queryRecords(COLLECTION_KEYS.logs, {
@@ -256,10 +421,11 @@ export async function getLogs(options = {}) {
             suppressAuth: true
         });
 
+        const items = (result.items || []).map(normalizeLogRecord);
         return {
-            items: result.items,
-            totalCount: result.totalCount || result.items.length,
-            hasMore: result.items.length === (options.limit || 50),
+            items,
+            totalCount: result.totalCount || items.length,
+            hasMore: items.length === (options.limit || 50),
             page: Math.floor((options.skip || 0) / (options.limit || 50)) + 1,
             pageSize: options.limit || 50
         };
@@ -290,18 +456,10 @@ export async function getTrace(traceId) {
             suppressAuth: true
         });
 
-        return {
-            trace: traceRes.items[0],
-            logs: errorLogs.items || [],
-            timeline: (errorLogs.items || []).map(l => ({
-                timestamp: l.timestamp,
-                spanId: l.span_id,
-                parentSpanId: l.parent_span_id,
-                message: l.message,
-                duration: l.duration,
-                level: l.level
-            }))
-        };
+        const trace = normalizeTraceRecord(traceRes.items[0]);
+        const logs = (errorLogs.items || []).map(normalizeErrorRecord);
+        const timeline = buildTraceTimeline(trace, logs);
+        return { trace, logs, timeline };
     } catch (error) {
         console.error('[Observability] Error fetching trace:', error.message);
         throw new Error('Failed to fetch trace');
@@ -325,7 +483,7 @@ export async function getErrors(options = {}) {
         suppressAuth: true
     });
 
-    const items = result.items || [];
+    const items = (result.items || []).map(normalizeErrorRecord);
     const bySource = items.reduce((acc, item) => {
         const key = item.source || 'unknown';
         acc[key] = (acc[key] || 0) + 1;
@@ -358,14 +516,14 @@ export async function getHealthMetrics(period = 'hour') {
             suppressAuth: true
         }),
         dataAccess.queryRecords(COLLECTION_KEYS.traces, {
-            filters: { timestamp: { gte: start } },
+            filters: { start_time: { gte: start.toISOString() } },
             limit: 500,
             suppressAuth: true
         })
     ]);
 
-    const errors = errorsResult.items || [];
-    const traces = tracesResult.items || [];
+    const errors = (errorsResult.items || []).map(normalizeErrorRecord);
+    const traces = (tracesResult.items || []).map(normalizeTraceRecord);
     const totalRequests = traces.length;
     const totalErrors = errors.length;
     const avgLatencyMs = traces.length ? Math.round(traces.reduce((sum, t) => sum + Number(t.duration || 0), 0) / traces.length) : 0;
@@ -471,6 +629,194 @@ export async function getAIAnalytics(period = 'day') {
         },
         byProvider,
         byFunction
+    };
+}
+
+export async function getMetrics(options = {}) {
+    await requireSuperAdmin();
+    const period = options.period || 'hour';
+    const [health, anomalies] = await Promise.all([
+        getHealthMetrics(period),
+        getActiveAnomalies({ limit: 25 }).catch(() => [])
+    ]);
+
+    return {
+        period,
+        status: health.status,
+        summary: {
+            totalRequests: health.totalRequests,
+            totalErrors: health.totalErrors,
+            errorRate: health.errorRate,
+            avgLatencyMs: health.avgLatencyMs,
+            activeAnomalies: anomalies.length
+        },
+        services: health.services,
+        anomalies
+    };
+}
+
+export async function getAgentBehavior(options = {}) {
+    await requireSuperAdmin();
+    const period = options.period || 'day';
+    const limit = Number(options.limit || 200);
+    const now = new Date();
+    const start = new Date(now);
+    if (period === 'hour') start.setHours(now.getHours() - 1);
+    else if (period === 'week') start.setDate(now.getDate() - 7);
+    else if (period === 'month') start.setDate(now.getDate() - 30);
+    else start.setDate(now.getDate() - 1);
+
+    const [rawLogs, rawErrors, rawTraces, rawAiUsage] = await Promise.all([
+        dataAccess.queryRecords(COLLECTION_KEYS.logs, {
+            sort: [{ field: 'log_date', direction: 'desc' }],
+            limit: Math.max(limit, 300),
+            suppressAuth: true
+        }),
+        dataAccess.queryRecords(COLLECTION_KEYS.errors, {
+            filters: { timestamp: { gte: start } },
+            sort: [{ field: 'timestamp', direction: 'desc' }],
+            limit: Math.max(limit, 300),
+            suppressAuth: true
+        }),
+        dataAccess.queryRecords(COLLECTION_KEYS.traces, {
+            filters: { start_time: { gte: start.toISOString() } },
+            sort: [{ field: 'start_time', direction: 'desc' }],
+            limit: Math.max(limit, 300),
+            suppressAuth: true
+        }),
+        dataAccess.queryRecords(COLLECTION_KEYS.aiUsageLog, {
+            filters: { timestamp: { gte: start } },
+            limit: 1000,
+            suppressAuth: true
+        })
+    ]);
+
+    const logs = (rawLogs.items || [])
+        .map(normalizeLogRecord)
+        .filter((item) => new Date(item.timestamp || 0) >= start)
+        .filter((item) => isAgentSource(item.source));
+    const errors = (rawErrors.items || [])
+        .map(normalizeErrorRecord)
+        .filter((item) => isAgentSource(item.source));
+    const traces = (rawTraces.items || [])
+        .map(normalizeTraceRecord)
+        .filter((item) => isAgentSource(item.source));
+    const aiUsage = (rawAiUsage.items || []).filter((item) => isAgentUsage(item));
+
+    const bySourceMap = {};
+    [...logs, ...errors, ...traces].forEach((item) => {
+        const source = item.source || 'unknown';
+        if (!bySourceMap[source]) {
+            bySourceMap[source] = { source, events: 0, errors: 0, runs: 0 };
+        }
+        bySourceMap[source].events += 1;
+        if (String(item.level || '').toUpperCase() === 'ERROR' || String(item.level || '').toUpperCase() === 'CRITICAL') {
+            bySourceMap[source].errors += 1;
+        }
+    });
+    traces.forEach((trace) => {
+        const source = trace.source || 'unknown';
+        if (!bySourceMap[source]) {
+            bySourceMap[source] = { source, events: 0, errors: 0, runs: 0 };
+        }
+        bySourceMap[source].runs += 1;
+    });
+    const bySource = Object.values(bySourceMap)
+        .map((row) => ({
+            ...row,
+            errorRate: row.events > 0 ? Number(((row.errors / row.events) * 100).toFixed(2)) : 0
+        }))
+        .sort((a, b) => b.events - a.events);
+
+    const runsByTrace = new Map();
+    traces.forEach((trace) => {
+        if (!trace.traceId) return;
+        runsByTrace.set(trace.traceId, {
+            traceId: trace.traceId,
+            source: trace.source || 'system',
+            status: trace.status || 'unknown',
+            startedAt: trace.startTime || null,
+            lastEventAt: trace.endTime || trace.startTime || null,
+            durationMs: Number(trace.duration || 0),
+            eventCount: 0,
+            errorCount: 0,
+            latestMessage: trace.name || 'trace',
+            aiCalls: 0,
+            aiTokens: 0
+        });
+    });
+
+    [...logs, ...errors].forEach((evt) => {
+        if (!evt.traceId) return;
+        const row = runsByTrace.get(evt.traceId) || {
+            traceId: evt.traceId,
+            source: evt.source || 'system',
+            status: 'in_progress',
+            startedAt: evt.timestamp || null,
+            lastEventAt: evt.timestamp || null,
+            durationMs: Number(evt.duration || 0),
+            eventCount: 0,
+            errorCount: 0,
+            latestMessage: evt.message || 'event',
+            aiCalls: 0,
+            aiTokens: 0
+        };
+        row.eventCount += 1;
+        if (String(evt.level || '').toUpperCase() === 'ERROR' || String(evt.level || '').toUpperCase() === 'CRITICAL') {
+            row.errorCount += 1;
+            row.status = 'error';
+        }
+        if (!row.lastEventAt || new Date(evt.timestamp || 0) > new Date(row.lastEventAt || 0)) {
+            row.lastEventAt = evt.timestamp || row.lastEventAt;
+            row.latestMessage = evt.message || row.latestMessage;
+        }
+        runsByTrace.set(evt.traceId, row);
+    });
+
+    aiUsage.forEach((usage) => {
+        const traceId = usage.traceId || usage.trace_id || null;
+        if (!traceId) return;
+        const row = runsByTrace.get(traceId);
+        if (!row) return;
+        row.aiCalls += 1;
+        row.aiTokens += Number(usage.tokensUsed || 0);
+        runsByTrace.set(traceId, row);
+    });
+
+    const recentRuns = Array.from(runsByTrace.values())
+        .sort((a, b) => new Date(b.lastEventAt || 0).getTime() - new Date(a.lastEventAt || 0).getTime())
+        .slice(0, Math.min(50, limit));
+
+    const recentEvents = [...logs, ...errors]
+        .sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime())
+        .slice(0, Math.min(100, limit))
+        .map((event) => ({
+            traceId: event.traceId || null,
+            source: event.source || 'system',
+            level: String(event.level || 'INFO').toUpperCase(),
+            message: event.message || '',
+            timestamp: event.timestamp || null
+        }));
+
+    const avgRunDurationMs = recentRuns.length > 0
+        ? Math.round(recentRuns.reduce((sum, row) => sum + Number(row.durationMs || 0), 0) / recentRuns.length)
+        : 0;
+    const aiTokens = aiUsage.reduce((sum, row) => sum + Number(row.tokensUsed || 0), 0);
+
+    return {
+        period,
+        summary: {
+            totalRuns: recentRuns.length,
+            totalEvents: logs.length + errors.length,
+            totalErrors: errors.length,
+            errorRate: (logs.length + errors.length) > 0 ? Number(((errors.length / (logs.length + errors.length)) * 100).toFixed(2)) : 0,
+            avgRunDurationMs,
+            aiCalls: aiUsage.length,
+            aiTokens
+        },
+        bySource,
+        recentRuns,
+        recentEvents
     };
 }
 
@@ -590,8 +936,11 @@ export async function calculateBaseline(metric, windowDays = 14) {
     const sourceKey = metric === 'latency' ? COLLECTION_KEYS.traces : COLLECTION_KEYS.errors;
     const fieldName = metric === 'latency' ? 'duration' : '_id';
 
+    const filters = metric === 'latency'
+        ? { start_time: { gte: start.toISOString() } }
+        : { timestamp: { gte: start } };
     const result = await dataAccess.queryRecords(sourceKey, {
-        filters: { timestamp: { gte: start } },
+        filters,
         limit: 2000,
         suppressAuth: true
     });
@@ -662,7 +1011,7 @@ export async function runAnomalyDetection() {
         } else if (rule.type === 'latency_drift') {
             const baseline = await calculateBaseline('latency', 14);
             const traces = await dataAccess.queryRecords(COLLECTION_KEYS.traces, {
-                filters: { timestamp: { gte: windowStart } },
+                filters: { start_time: { gte: windowStart.toISOString() } },
                 limit: 1000,
                 suppressAuth: true
             });
@@ -672,14 +1021,14 @@ export async function runAnomalyDetection() {
             triggered = actualValue > expectedValue && expectedValue > 0;
         } else if (rule.type === 'traffic_drop') {
             const traces = await dataAccess.queryRecords(COLLECTION_KEYS.traces, {
-                filters: { timestamp: { gte: windowStart } },
+                filters: { start_time: { gte: windowStart.toISOString() } },
                 limit: 1000,
                 suppressAuth: true
             });
             const priorStart = new Date(windowStart);
             priorStart.setMinutes(priorStart.getMinutes() - Number(rule.windowMinutes || 30));
             const prior = await dataAccess.queryRecords(COLLECTION_KEYS.traces, {
-                filters: { timestamp: { gte: priorStart, lt: windowStart } },
+                filters: { start_time: { gte: priorStart.toISOString(), lt: windowStart.toISOString() } },
                 limit: 1000,
                 suppressAuth: true
             });
@@ -784,4 +1133,117 @@ function generateTraceId() {
 
 function generateSpanId() {
     return 'sp_' + Math.random().toString(36).substr(2, 12);
+}
+
+function safeJson(value) {
+    try {
+        return JSON.stringify(value ?? {});
+    } catch (error) {
+        return JSON.stringify({ serializeError: true });
+    }
+}
+
+function sanitizeForStorage(value) {
+    if (value === null || value === undefined) return {};
+    const serialized = typeof value === 'string' ? value : safeJson(value);
+    if (serialized.length > CONFIG.logSampling.maxDetailsLength) {
+        return serialized.slice(0, CONFIG.logSampling.maxDetailsLength);
+    }
+    return typeof value === 'string' ? value : value;
+}
+
+function toTagString(tags) {
+    return (tags || [])
+        .filter(Boolean)
+        .map((tag) => String(tag).trim())
+        .filter(Boolean)
+        .join(', ');
+}
+
+function parseMaybeJson(value) {
+    if (typeof value !== 'string') return value;
+    try {
+        return JSON.parse(value);
+    } catch (error) {
+        return value;
+    }
+}
+
+function normalizeLogRecord(item) {
+    return {
+        _id: item._id || item.id || item.log_id || generateSpanId(),
+        level: String(item.level || 'INFO').toUpperCase(),
+        source: item.source || item.service || 'system',
+        message: item.message || '',
+        timestamp: item.timestamp || item.log_date || null,
+        duration: item.duration || null,
+        traceId: item.trace_id || item.traceId || null,
+        tags: item.tags ? String(item.tags).split(',').map((tag) => tag.trim()).filter(Boolean) : [],
+        details: parseMaybeJson(item.details || item.metadata || null)
+    };
+}
+
+function normalizeErrorRecord(item) {
+    return {
+        ...item,
+        _id: item._id || item.id || item.wix_id || generateSpanId(),
+        level: String(item.level || 'ERROR').toUpperCase(),
+        source: item.source || item.service || 'system',
+        message: item.message || '',
+        timestamp: item.timestamp || item.log_date || null,
+        traceId: item.trace_id || item.traceId || null,
+        duration: item.duration || null,
+        details: parseMaybeJson(item.details || null)
+    };
+}
+
+function normalizeTraceRecord(item) {
+    const metadata = parseMaybeJson(item.metadata || {}) || {};
+    return {
+        ...item,
+        _id: item._id || item.id || item.wix_id || null,
+        traceId: item.traceId || item.trace_id || null,
+        name: item.name || 'operation',
+        source: item.source || metadata.source || 'system',
+        startTime: item.startTime || item.start_time || null,
+        endTime: item.endTime || item.end_time || null,
+        status: item.status || 'unknown',
+        spans: parseMaybeJson(item.spans || []) || [],
+        metadata,
+        tags: item.tags ? String(item.tags).split(',').map((tag) => tag.trim()).filter(Boolean) : [],
+        duration: Number(item.duration || 0),
+        summary: parseMaybeJson(item.summary || {}) || {}
+    };
+}
+
+function buildTraceTimeline(trace, logs) {
+    const spanEvents = (trace.spans || []).map((span) => ({
+        timestamp: span.endTime || span.startTime || trace.startTime,
+        spanId: span.spanId || null,
+        parentSpanId: span.parentSpanId || null,
+        message: span.name || 'span',
+        duration: span.duration || null,
+        level: span.status === 'error' ? 'ERROR' : 'INFO'
+    }));
+
+    return [...spanEvents, ...(logs || [])]
+        .map((entry) => ({
+            timestamp: entry.timestamp || entry.startTime || trace.startTime,
+            spanId: entry.spanId || entry.span_id || null,
+            parentSpanId: entry.parentSpanId || entry.parent_span_id || null,
+            message: entry.message || 'event',
+            duration: entry.duration || null,
+            level: String(entry.level || 'INFO').toUpperCase()
+        }))
+        .sort((a, b) => new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime());
+}
+
+function isAgentSource(source) {
+    const normalized = String(source || '').toLowerCase();
+    return AGENT_SOURCES.includes(normalized) || normalized.includes('agent');
+}
+
+function isAgentUsage(item) {
+    const functionId = String(item.functionId || '').toLowerCase();
+    return functionId.includes('agent') || functionId.includes('orchestration') || functionId.includes('b2b');
 }

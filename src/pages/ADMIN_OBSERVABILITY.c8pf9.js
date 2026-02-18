@@ -4,6 +4,7 @@ import {
     getTrace,
     getHealthMetrics,
     getAIAnalytics,
+    getAgentBehavior,
     getLogMetadata,
     getActiveAnomalies,
     acknowledgeAnomaly,
@@ -109,6 +110,9 @@ async function handleMessage(component, message) {
             case 'getAIAnalytics':
                 await handleGetAIAnalytics(component, message.period);
                 break;
+            case 'getAgentBehavior':
+                await handleGetAgentBehavior(component, message.options);
+                break;
             case 'getActiveAnomalies':
                 await handleGetActiveAnomalies(component, message.options);
                 break;
@@ -181,6 +185,11 @@ async function handleGetHealthMetrics(component, period) {
 async function handleGetAIAnalytics(component, period) {
     const data = await getAIAnalytics(period || 'day');
     postToComponent(component, { action: 'aiAnalyticsLoaded', payload: data });
+}
+
+async function handleGetAgentBehavior(component, options) {
+    const data = await getAgentBehavior(options || {});
+    postToComponent(component, { action: 'agentBehaviorLoaded', payload: data });
 }
 
 async function handleGetActiveAnomalies(component, options) {

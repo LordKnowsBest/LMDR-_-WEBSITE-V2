@@ -1,0 +1,391 @@
+// ============================================================================
+// VOICE AGENT TEMPLATES - VAPI assistant template management
+// 13 pre-configured voice agent templates across 5 lifecycle groups
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+import { createAssistant } from 'backend/voiceService';
+
+const COLLECTIONS = {
+  templates: 'voiceAgentTemplates'
+};
+
+/**
+ * Get a single template by ID
+ * @param {string} templateId - e.g. 'vat_cold_outreach'
+ * @returns {Object|null}
+ */
+export async function getTemplate(templateId) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.templates, {
+      filters: { template_id: templateId },
+      limit: 1,
+      suppressAuth: true
+    });
+    return (result.items && result.items.length > 0) ? result.items[0] : null;
+  } catch (error) {
+    console.error('[voiceAgentTemplates] getTemplate error:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Get all templates in a category
+ * @param {string} category - sourcing, screening, application_support, onboarding, retention
+ * @returns {Array}
+ */
+export async function getTemplatesByCategory(category) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.templates, {
+      filters: { category, is_active: 'Yes' },
+      limit: 50,
+      suppressAuth: true
+    });
+    return result.items || [];
+  } catch (error) {
+    console.error('[voiceAgentTemplates] getTemplatesByCategory error:', error.message);
+    return [];
+  }
+}
+
+/**
+ * Create a VAPI assistant from a template with context overrides
+ * @param {string} templateId
+ * @param {Object} contextOverrides - { candidateName, carrierName, carrierDot, position, ... }
+ * @returns {{ success: boolean, assistantId: string }}
+ */
+export async function createAssistantFromTemplate(templateId, contextOverrides = {}) {
+  try {
+    const template = await getTemplate(templateId);
+    if (!template) {
+      return { success: false, error: `Template not found: ${templateId}` };
+    }
+
+    // Merge context into system prompt
+    let systemPrompt = template.system_prompt || '';
+    for (const [key, value] of Object.entries(contextOverrides)) {
+      systemPrompt = systemPrompt.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(value));
+    }
+
+    // Parse tools from template
+    let tools = [];
+    try {
+      tools = template.tools ? (typeof template.tools === 'string' ? JSON.parse(template.tools) : template.tools) : [];
+    } catch (e) {
+      tools = [];
+    }
+
+    // Parse voice config
+    let voiceConfig = {};
+    try {
+      voiceConfig = template.voice_config ? (typeof template.voice_config === 'string' ? JSON.parse(template.voice_config) : template.voice_config) : {};
+    } catch (e) {
+      voiceConfig = {};
+    }
+
+    // Build VAPI assistant config
+    const assistantConfig = {
+      name: `${template.name} - ${contextOverrides.candidateName || 'Unknown'}`,
+      model: {
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        messages: [{
+          role: 'system',
+          content: systemPrompt
+        }],
+        tools: tools.map(t => ({
+          type: 'function',
+          function: {
+            name: t.name || t,
+            description: t.description || `Execute ${t.name || t}`,
+            parameters: t.parameters || { type: 'object', properties: {} }
+          }
+        }))
+      },
+      voice: voiceConfig.voice || { provider: '11labs', voiceId: 'paula' },
+      firstMessage: template.first_message || 'Hello, this is VelocityMatch calling.',
+      maxDurationSeconds: template.max_duration_seconds || 300,
+      metadata: {
+        template_id: templateId,
+        category: template.category,
+        ...contextOverrides
+      }
+    };
+
+    const result = await createAssistant(assistantConfig);
+
+    return {
+      success: true,
+      assistantId: result.id,
+      templateId,
+      name: assistantConfig.name
+    };
+  } catch (error) {
+    console.error('[voiceAgentTemplates] createAssistantFromTemplate error:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Seed all 13 default voice agent templates to Airtable
+ * @returns {{ seeded: number, skipped: number }}
+ */
+export async function seedDefaultTemplates() {
+  const templates = getDefaultTemplates();
+  let seeded = 0;
+  let skipped = 0;
+
+  for (const template of templates) {
+    try {
+      const existing = await getTemplate(template.template_id);
+      if (existing) {
+        skipped++;
+        continue;
+      }
+
+      await dataAccess.insertRecord(COLLECTIONS.templates, {
+        ...template,
+        tools: JSON.stringify(template.tools),
+        escalation_rules: JSON.stringify(template.escalation_rules),
+        voice_config: JSON.stringify(template.voice_config),
+        is_active: 'Yes',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }, { suppressAuth: true });
+      seeded++;
+    } catch (err) {
+      console.warn('[voiceAgentTemplates] Seed failed for', template.template_id, err.message);
+    }
+  }
+
+  return { seeded, skipped, total: templates.length };
+}
+
+// ============================================================================
+// 13 DEFAULT TEMPLATES
+// ============================================================================
+
+function getDefaultTemplates() {
+  return [
+    // ── SOURCING (3) ──
+    {
+      template_id: 'vat_cold_outreach',
+      name: 'Cold Outreach',
+      category: 'sourcing',
+      system_prompt: 'You are a professional CDL recruiting specialist from VelocityMatch calling on behalf of {{carrierName}}. This is a cold outreach call. Be friendly, brief, and respectful. Introduce yourself, mention the driving opportunity, and gauge interest. If the driver is interested, offer to share matching jobs. If not interested, thank them and end the call politely. Never pressure the candidate. Comply with all TCPA regulations.',
+      first_message: 'Hi, this is VelocityMatch calling about a CDL driving opportunity with {{carrierName}}. Do you have a quick minute?',
+      tools: [
+        { name: 'getMatchingJobs', description: 'Get matching jobs for the driver' },
+        { name: 'scheduleCallback', description: 'Schedule a callback at a preferred time' },
+        { name: 'sendFollowUpSMS', description: 'Send a follow-up SMS with job details' }
+      ],
+      escalation_rules: { no_answer: 'voicemail_then_sms', hostile: 'end_call_immediately', interested: 'transfer_to_recruiter' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 180,
+      tcpa_required: 'Yes'
+    },
+    {
+      template_id: 'vat_warm_lead',
+      name: 'Warm Lead Follow-up',
+      category: 'sourcing',
+      system_prompt: 'You are a CDL recruiting specialist from VelocityMatch following up with {{candidateName}} who expressed interest in driving for {{carrierName}}. Reference their interest and provide specific job details. Answer questions about pay, routes, home time, and benefits. If they want to proceed, help them understand next steps. Be warm and informative.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch following up on your interest in driving for {{carrierName}}. I have some great details to share with you.',
+      tools: [
+        { name: 'getMatchingJobs', description: 'Get matching jobs for the driver' },
+        { name: 'getCarrierDetails', description: 'Get detailed carrier information' },
+        { name: 'scheduleInterview', description: 'Schedule an interview' },
+        { name: 'updatePipelineStage', description: 'Update candidate pipeline stage' }
+      ],
+      escalation_rules: { ready_to_apply: 'advance_to_applied', questions_about_safety: 'provide_fmcsa_data' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 240,
+      tcpa_required: 'Yes'
+    },
+    {
+      template_id: 'vat_referral',
+      name: 'Referral Outreach',
+      category: 'sourcing',
+      system_prompt: 'You are a CDL recruiting specialist from VelocityMatch. {{referrerName}} referred {{candidateName}} for a driving opportunity with {{carrierName}}. Mention the referral connection to build rapport. Share job details and gauge interest. If interested, guide them to the application process.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. Your colleague {{referrerName}} thought you might be a great fit for a driving position. Do you have a moment?',
+      tools: [
+        { name: 'getReferralDetails', description: 'Get referral program details and bonus info' },
+        { name: 'getMatchingJobs', description: 'Get matching jobs for the driver' },
+        { name: 'scheduleCallback', description: 'Schedule a callback' }
+      ],
+      escalation_rules: { interested: 'advance_to_applied', not_interested: 'log_and_close' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 180,
+      tcpa_required: 'Yes'
+    },
+
+    // ── SCREENING (3) ──
+    {
+      template_id: 'vat_qualification',
+      name: 'Qualification Screen',
+      category: 'screening',
+      system_prompt: 'You are conducting a CDL qualification screening call for VelocityMatch on behalf of {{carrierName}}. Verify: CDL class and endorsements, years of experience, MVR status, employment history (last 3 years), and availability. Be professional and systematic. Record all answers accurately. If the candidate meets minimum requirements, advance them. If not, explain why respectfully.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. I\'m calling to go through a quick qualification screening for the driving position with {{carrierName}}. It should take about 5 minutes. Ready to get started?',
+      tools: [
+        { name: 'verifyLicense', description: 'Verify CDL license status' },
+        { name: 'checkEndorsements', description: 'Check required endorsements' },
+        { name: 'updateQualificationStatus', description: 'Update qualification status' }
+      ],
+      escalation_rules: { not_qualified: 'reject_with_reason', qualified: 'advance_to_review' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 300,
+      tcpa_required: 'Yes'
+    },
+    {
+      template_id: 'vat_background',
+      name: 'Background Check Initiation',
+      category: 'screening',
+      system_prompt: 'You are initiating a background check process for VelocityMatch. Explain the process to {{candidateName}}: what will be checked (MVR, criminal, employment verification), timeline (3-5 business days), and consent requirements. Obtain verbal consent and initiate the check. Be transparent about what disqualifies a candidate.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. I\'m calling to walk you through our background verification process for the position with {{carrierName}}. This is a standard step and should be quick.',
+      tools: [
+        { name: 'initiateBackgroundCheck', description: 'Start the background check process' },
+        { name: 'getCheckStatus', description: 'Get current check status' },
+        { name: 'escalateToCompliance', description: 'Escalate issues to compliance team' }
+      ],
+      escalation_rules: { consent_refused: 'log_and_close', issues_found: 'escalate_to_compliance' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 240,
+      tcpa_required: 'Yes'
+    },
+    {
+      template_id: 'vat_technical',
+      name: 'Technical Screen',
+      category: 'screening',
+      system_prompt: 'You are conducting a technical screening for VelocityMatch on behalf of {{carrierName}}. Ask about: equipment experience (types of trailers, ELD systems), route knowledge, safety procedures, hours-of-service compliance knowledge, and pre/post-trip inspection process. Score responses on a 1-5 scale. Be conversational, not interrogative.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. I have a few technical questions about your driving experience for the {{carrierName}} position. It\'s informal — just want to learn about your background.',
+      tools: [
+        { name: 'recordScreeningAnswers', description: 'Record screening question answers' },
+        { name: 'scoreCandidate', description: 'Calculate candidate technical score' },
+        { name: 'scheduleNextStep', description: 'Schedule the next step in the process' }
+      ],
+      escalation_rules: { high_score: 'advance_to_offer', low_score: 'review_with_recruiter' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 360,
+      tcpa_required: 'Yes'
+    },
+
+    // ── APPLICATION SUPPORT (2) ──
+    {
+      template_id: 'vat_application_helper',
+      name: 'Application Helper',
+      category: 'application_support',
+      system_prompt: 'You are helping {{candidateName}} complete their application for {{carrierName}} through VelocityMatch. Walk them through any sections they\'re stuck on. Help with employment history, education, references, and personal information. Be patient and supportive. If they need to gather documents, note what\'s needed and schedule a callback.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. I\'m calling to help you finish your application for {{carrierName}}. Where did you leave off?',
+      tools: [
+        { name: 'getApplicationStatus', description: 'Get current application completion status' },
+        { name: 'updateApplication', description: 'Update application fields' },
+        { name: 'submitApplication', description: 'Submit the completed application' }
+      ],
+      escalation_rules: { completed: 'advance_to_screening', needs_documents: 'send_document_links' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 300,
+      tcpa_required: 'Yes'
+    },
+    {
+      template_id: 'vat_document_collector',
+      name: 'Document Collector',
+      category: 'application_support',
+      system_prompt: 'You are helping {{candidateName}} submit required documents for their {{carrierName}} application through VelocityMatch. Check what documents are still needed (CDL copy, medical card, MVR, employment verification). Explain how to upload documents via the portal. Send upload links via SMS if needed. Be helpful and patient.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. I\'m following up on some documents we need for your application with {{carrierName}}. Let me check what\'s still outstanding.',
+      tools: [
+        { name: 'getRequiredDocuments', description: 'Get list of required and submitted documents' },
+        { name: 'sendDocumentUploadLink', description: 'Send document upload link via SMS' },
+        { name: 'updateDocumentStatus', description: 'Update document receipt status' }
+      ],
+      escalation_rules: { all_received: 'advance_stage', missing_critical: 'schedule_followup' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 240,
+      tcpa_required: 'Yes'
+    },
+
+    // ── ONBOARDING (2) ──
+    {
+      template_id: 'vat_orientation',
+      name: 'Orientation Scheduling',
+      category: 'onboarding',
+      system_prompt: 'You are calling {{candidateName}} to schedule their orientation with {{carrierName}} through VelocityMatch. Congratulate them on getting hired. Explain orientation details: location, duration, what to bring, dress code, and first-day logistics. Schedule a date that works for them. Send confirmation details via SMS/email after scheduling.',
+      first_message: 'Hi {{candidateName}}, congratulations! This is VelocityMatch calling to schedule your orientation with {{carrierName}}. We\'re excited to get you started!',
+      tools: [
+        { name: 'getOnboardingChecklist', description: 'Get onboarding requirements checklist' },
+        { name: 'scheduleOrientation', description: 'Schedule orientation date' },
+        { name: 'sendOrientationMaterials', description: 'Send pre-orientation materials via email' }
+      ],
+      escalation_rules: { scheduled: 'send_confirmation', cant_schedule: 'offer_alternatives' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 420,
+      tcpa_required: 'Yes'
+    },
+    {
+      template_id: 'vat_first_day',
+      name: 'First Day Check-in',
+      category: 'onboarding',
+      system_prompt: 'You are calling {{candidateName}} on their first day (or day before) with {{carrierName}} through VelocityMatch. Confirm logistics: report time, location, who to ask for, what to bring. Answer any last-minute questions. If they report any issues (transportation, missing documents), help resolve them or connect them to the right person.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. Just checking in before your first day with {{carrierName}}. Want to make sure you\'re all set!',
+      tools: [
+        { name: 'getFirstDayChecklist', description: 'Get first day checklist and logistics' },
+        { name: 'reportIssue', description: 'Report a first-day issue for resolution' },
+        { name: 'connectToDispatch', description: 'Connect driver to carrier dispatch' }
+      ],
+      escalation_rules: { issue_reported: 'escalate_to_recruiter', all_good: 'log_successful_start' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 300,
+      tcpa_required: 'Yes'
+    },
+
+    // ── RETENTION (3) ──
+    {
+      template_id: 'vat_satisfaction',
+      name: 'Satisfaction Survey',
+      category: 'retention',
+      system_prompt: 'You are calling {{candidateName}} for a satisfaction check-in at {{carrierName}} through VelocityMatch. Ask about: overall satisfaction (1-10), pay satisfaction, home time, equipment quality, management support, and any concerns. Be empathetic and listen actively. Flag any serious concerns immediately. Thank them for their feedback.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. We\'re doing a quick check-in to see how things are going at {{carrierName}}. Your feedback helps us improve. Got a few minutes?',
+      tools: [
+        { name: 'recordSurveyResponse', description: 'Record survey response and scores' },
+        { name: 'flagConcern', description: 'Flag a serious concern for immediate attention' },
+        { name: 'scheduleManagerCallback', description: 'Schedule a callback with their manager' }
+      ],
+      escalation_rules: { low_score: 'trigger_retention_intervention', high_score: 'log_positive_feedback' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 300,
+      tcpa_required: 'Yes'
+    },
+    {
+      template_id: 'vat_retention',
+      name: 'Retention Intervention',
+      category: 'retention',
+      system_prompt: 'You are calling {{candidateName}} who has been flagged as at-risk for leaving {{carrierName}}. Be empathetic and understanding. Ask about their concerns. Based on their feedback, you may offer retention incentives (pay increase, better routes, schedule adjustment, equipment upgrade). Do not make promises you cannot keep — only offer what is in the approved incentive list. If they are determined to leave, be respectful and try to understand their reasons for future improvement.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. We value you as a driver at {{carrierName}} and wanted to check in. How are things going?',
+      tools: [
+        { name: 'getRiskFactors', description: 'Get the driver retention risk factors' },
+        { name: 'offerRetentionIncentive', description: 'Present an approved retention incentive' },
+        { name: 'scheduleManagerCallback', description: 'Schedule callback with fleet manager' },
+        { name: 'updateRetentionStatus', description: 'Update driver retention status' }
+      ],
+      escalation_rules: { accepting_offer: 'log_retention_save', leaving: 'trigger_exit_interview', needs_manager: 'schedule_callback' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 360,
+      tcpa_required: 'Yes'
+    },
+    {
+      template_id: 'vat_winback',
+      name: 'Win-back Campaign',
+      category: 'retention',
+      system_prompt: 'You are calling {{candidateName}} who previously drove for {{carrierName}} (or a similar carrier) through VelocityMatch. Acknowledge they left and ask what has changed since then. Share any improvements the carrier has made (better pay, new equipment, improved routes). If interested, help them restart the application process. Be respectful if they decline.',
+      first_message: 'Hi {{candidateName}}, this is VelocityMatch. We noticed you used to drive with us and wanted to share some exciting changes. Do you have a moment?',
+      tools: [
+        { name: 'getDriverHistory', description: 'Get the driver previous employment history' },
+        { name: 'getMatchingJobs', description: 'Get current matching job openings' },
+        { name: 'scheduleCallback', description: 'Schedule a follow-up callback' },
+        { name: 'reactivateProfile', description: 'Reactivate the driver profile' }
+      ],
+      escalation_rules: { interested: 'reactivate_and_advance', not_interested: 'log_and_close' },
+      voice_config: { voice: { provider: '11labs', voiceId: 'paula' } },
+      max_duration_seconds: 240,
+      tcpa_required: 'Yes'
+    }
+  ];
+}

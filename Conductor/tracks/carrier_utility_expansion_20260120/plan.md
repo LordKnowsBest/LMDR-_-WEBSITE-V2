@@ -19,77 +19,77 @@ Enable carriers to quickly set up hiring preferences using pre-configured templa
 
 ### Backend Tasks
 
-- [ ] **Task 1.1**: Create preset template data structure in `carrierPreferences.jsw`
-  - [ ] Define `PRESET_TEMPLATES` constant with all 5 presets
-  - [ ] Each preset includes: id, name, description, icon, weights, preferences
-  - [ ] Presets: OTR Heavy Haul, Regional Dedicated, Local P&D, Tanker/Hazmat, Flatbed/Stepdeck
+- [x] **Task 1.1**: Create preset template data structure in `carrierPreferences.jsw`
+  - [x] Define `PRESET_TEMPLATES` constant with all 5 presets
+  - [x] Each preset includes: id, name, description, icon, weights, preferences
+  - [x] Presets: OTR Heavy Haul, Regional Dedicated, Local P&D, Tanker/Hazmat, Flatbed/Stepdeck
 
-- [ ] **Task 1.2**: Implement `getPresetTemplates()` function
-  - [ ] Returns all preset definitions as array
-  - [ ] No authentication required (public function for UI)
-  - [ ] Include metadata for UI rendering (icons, descriptions)
+- [x] **Task 1.2**: Implement `getPresetTemplates()` function
+  - [x] Returns all preset definitions as array
+  - [x] No authentication required (public function for UI)
+  - [x] Include metadata for UI rendering (icons, descriptions)
 
-- [ ] **Task 1.3**: Implement `applyPresetTemplate(carrierDot, presetId)` function
-  - [ ] Validate carrier access (existing auth pattern)
-  - [ ] Validate presetId exists in PRESET_TEMPLATES
-  - [ ] Update or create CarrierHiringPreferences record
-  - [ ] Set weights from preset
-  - [ ] Set hiring criteria from preset
-  - [ ] Record preset_id and preset_applied_at
-  - [ ] Return updated preferences
+- [x] **Task 1.3**: Implement `applyPresetTemplate(carrierDot, presetId)` function
+  - [x] Validate carrier access (existing auth pattern)
+  - [x] Validate presetId exists in PRESET_TEMPLATES
+  - [x] Update or create CarrierHiringPreferences record
+  - [x] Set weights from preset
+  - [x] Set hiring criteria from preset
+  - [x] Record preset_id and preset_applied_at
+  - [x] Return updated preferences
 
-- [ ] **Task 1.4**: Extend CarrierHiringPreferences collection schema
-  - [ ] Add field: `preset_id` (String, nullable)
-  - [ ] Add field: `preset_applied_at` (DateTime, nullable)
-  - [ ] Add field: `is_customized` (Boolean, default false)
+- [x] **Task 1.4**: Extend CarrierHiringPreferences collection schema
+  - [x] Add field: `preset_id` (String, nullable)
+  - [x] Add field: `preset_applied_at` (DateTime, nullable)
+  - [x] Add field: `is_customized` (Boolean, default false)
 
-- [ ] **Task 1.5**: Update `saveWeightPreferences()` to track customization
-  - [ ] If preset_id exists and weights differ, set is_customized = true
-  - [ ] Preserve preset_id even after customization for analytics
+- [x] **Task 1.5**: Update `saveWeightPreferences()` to track customization
+  - [x] If preset_id exists and weights differ, set is_customized = true
+  - [x] Preserve preset_id even after customization for analytics
 
 ### Frontend Tasks
 
-- [ ] **Task 1.6**: Add preset selector section to `CARRIER_WEIGHT_PREFERENCES.html`
-  - [ ] Add "Quick Start" section above existing weight sliders
-  - [ ] Create grid of preset cards (responsive: 2-5 columns)
-  - [ ] Each card shows: icon, name, description, key highlights
-  - [ ] Add "Apply" button on each card
+- [x] **Task 1.6**: Add preset selector section to `CARRIER_WEIGHT_PREFERENCES.html`
+  - [x] Add "Quick Start" section above existing weight sliders
+  - [x] Create grid of preset cards (responsive: 2-5 columns)
+  - [x] Each card shows: icon, name, description, key highlights
+  - [x] Add "Apply" button on each card
 
-- [ ] **Task 1.7**: Implement preset card click handler
-  - [ ] Show confirmation modal: "Apply [Preset Name] preset?"
-  - [ ] Modal lists what will be updated (weights, CDL requirements, experience)
-  - [ ] Include "Cancel" and "Apply Preset" buttons
+- [x] **Task 1.7**: Implement preset card click handler
+  - [x] Show confirmation modal: "Apply [Preset Name] preset?"
+  - [x] Modal lists what will be updated (weights, CDL requirements, experience)
+  - [x] Include "Cancel" and "Apply Preset" buttons
 
-- [ ] **Task 1.8**: Implement preset application logic
-  - [ ] On confirm, send postMessage to Wix: `{ type: 'applyPreset', presetId: '...' }`
-  - [ ] Update all slider values to match preset weights
-  - [ ] Update visual donut chart
-  - [ ] Show success indicator on applied preset card
+- [x] **Task 1.8**: Implement preset application logic
+  - [x] On confirm, send postMessage to Wix: `{ type: 'applyPreset', presetId: '...' }`
+  - [x] Update all slider values to match preset weights
+  - [x] Update visual donut chart
+  - [x] Show success indicator on applied preset card
 
-- [ ] **Task 1.9**: Update Wix page code for preset handling
-  - [ ] Listen for `applyPreset` message
-  - [ ] Call `applyPresetTemplate(carrierDot, presetId)`
-  - [ ] Send result back to HTML component
-  - [ ] Handle errors with user-friendly messages
+- [x] **Task 1.9**: Update Wix page code for preset handling
+  - [x] Listen for `applyPreset` message
+  - [x] Call `applyPresetTemplate(carrierDot, presetId)`
+  - [x] Send result back to HTML component
+  - [x] Handle errors with user-friendly messages
 
-- [ ] **Task 1.10**: Add visual indicator for active preset
-  - [ ] Highlight currently applied preset card
-  - [ ] Show "Active" badge on applied preset
-  - [ ] Show "Customized" badge if user modified after applying
+- [x] **Task 1.10**: Add visual indicator for active preset
+  - [x] Highlight currently applied preset card
+  - [x] Show "Active" badge on applied preset
+  - [x] Show "Customized" badge if user modified after applying
 
 ### Testing Tasks
 
-- [ ] **Task 1.11**: Write unit tests for preset functions
-  - [ ] Test getPresetTemplates returns all presets
-  - [ ] Test applyPresetTemplate with valid/invalid presetId
-  - [ ] Test authorization enforcement
-  - [ ] Test is_customized flag behavior
+- [x] **Task 1.11**: Write unit tests for preset functions
+  - [x] Test getPresetTemplates returns all presets
+  - [x] Test applyPresetTemplate with valid/invalid presetId
+  - [x] Test authorization enforcement
+  - [x] Test is_customized flag behavior
 
-- [ ] **Task 1.12**: Manual QA testing
-  - [ ] Verify all 5 presets apply correctly
-  - [ ] Verify weights update visually
-  - [ ] Verify persistence across page reload
-  - [ ] Test mobile responsiveness
+- [x] **Task 1.12**: Manual QA testing
+  - [x] Verify all 5 presets apply correctly
+  - [x] Verify weights update visually
+  - [x] Verify persistence across page reload
+  - [x] Test mobile responsiveness
 
 ---
 
@@ -100,94 +100,94 @@ Display real-time progress indicators showing carriers where they are in the onb
 
 ### Backend Tasks
 
-- [ ] **Task 2.1**: Create `carrierStatusService.jsw` backend module
-  - [ ] Import wixData
-  - [ ] Define stage constants (STAGES enum)
-  - [ ] Define status response structure
+- [x] **Task 2.1**: Create `carrierStatusService.jsw` backend module
+  - [x] Import wixData
+  - [x] Define stage constants (STAGES enum)
+  - [x] Define status response structure
 
-- [ ] **Task 2.2**: Implement `getCarrierOnboardingStatus(carrierDot)` function
-  - [ ] Query Carriers collection for carrier record
-  - [ ] Query CarrierEnrichments for enrichment status
-  - [ ] Determine current stage based on data state
-  - [ ] Calculate enrichment progress if in-progress
-  - [ ] Return structured status object
+- [x] **Task 2.2**: Implement `getCarrierOnboardingStatus(carrierDot)` function
+  - [x] Query Carriers collection for carrier record
+  - [x] Query CarrierEnrichments for enrichment status
+  - [x] Determine current stage based on data state
+  - [x] Calculate enrichment progress if in-progress
+  - [x] Return structured status object
 
-- [ ] **Task 2.3**: Implement `getMatchCount(carrierDot)` function
-  - [ ] Get carrier's hiring preferences
-  - [ ] Build DriverProfiles query based on preferences
-  - [ ] Execute count query (optimized, no full data load)
-  - [ ] Return count with timestamp
+- [x] **Task 2.3**: Implement `getMatchCount(carrierDot)` function
+  - [x] Get carrier's hiring preferences
+  - [x] Build DriverProfiles query based on preferences
+  - [x] Execute count query (optimized, no full data load)
+  - [x] Return count with timestamp
 
-- [ ] **Task 2.4**: Implement match count caching logic
-  - [ ] Cache match count in carrier record or separate collection
-  - [ ] Invalidate cache after 15 minutes
-  - [ ] Invalidate on preference changes
-  - [ ] Return cached count if fresh, recalculate if stale
+- [x] **Task 2.4**: Implement match count caching logic
+  - [x] Cache match count in carrier record or separate collection
+  - [x] Invalidate cache after 15 minutes
+  - [x] Invalidate on preference changes
+  - [x] Return cached count if fresh, recalculate if stale
 
-- [ ] **Task 2.5**: Create CarrierOnboardingStatus collection (optional)
-  - [ ] Define schema per spec
-  - [ ] Create indexes on carrier_dot
-  - [ ] Set up triggers to update status on events
+- [x] **Task 2.5**: Create CarrierOnboardingStatus collection (optional)
+  - [x] Define schema per spec
+  - [x] Create indexes on carrier_dot
+  - [x] Set up triggers to update status on events
 
 ### Frontend Tasks
 
-- [ ] **Task 2.6**: Create `STATUS_TRACKER.html` component
-  - [ ] Create new file in `src/public/carrier/`
-  - [ ] Implement responsive HTML/CSS with Tailwind
-  - [ ] Add progress step indicator (5 steps)
-  - [ ] Add current stage details panel
-  - [ ] Add match preview card
+- [x] **Task 2.6**: Create `STATUS_TRACKER.html` component
+  - [x] Create new file in `src/public/carrier/`
+  - [x] Implement responsive HTML/CSS with Tailwind
+  - [x] Add progress step indicator (5 steps)
+  - [x] Add current stage details panel
+  - [x] Add match preview card
 
-- [ ] **Task 2.7**: Implement progress step visualization
-  - [ ] SVG/CSS based step circles with connecting lines
-  - [ ] States: completed (green checkmark), active (blue pulse), pending (gray)
-  - [ ] Animated transitions between states
-  - [ ] Mobile-friendly vertical layout option
+- [x] **Task 2.7**: Implement progress step visualization
+  - [x] SVG/CSS based step circles with connecting lines
+  - [x] States: completed (green checkmark), active (blue pulse), pending (gray)
+  - [x] Animated transitions between states
+  - [x] Mobile-friendly vertical layout option
 
-- [ ] **Task 2.8**: Implement enrichment progress display
-  - [ ] Show when stage is 'enriching'
-  - [ ] Display checklist of enrichment tasks
-  - [ ] Show progress bar with percentage
-  - [ ] Show estimated completion time
+- [x] **Task 2.8**: Implement enrichment progress display
+  - [x] Show when stage is 'enriching'
+  - [x] Display checklist of enrichment tasks
+  - [x] Show progress bar with percentage
+  - [x] Show estimated completion time
 
-- [ ] **Task 2.9**: Implement match preview card
-  - [ ] Display match count prominently
-  - [ ] Show breakdown by CDL class
-  - [ ] Show average experience
-  - [ ] Add "View Matches" CTA button (links to search or triggers upgrade)
+- [x] **Task 2.9**: Implement match preview card
+  - [x] Display match count prominently
+  - [x] Show breakdown by CDL class
+  - [x] Show average experience
+  - [x] Add "View Matches" CTA button (links to search or triggers upgrade)
 
-- [ ] **Task 2.10**: Add postMessage communication
-  - [ ] Listen for `loadStatus` message from Wix
-  - [ ] Parse status data and update UI
-  - [ ] Send `viewMatches` message when CTA clicked
+- [x] **Task 2.10**: Add postMessage communication
+  - [x] Listen for `loadStatus` message from Wix
+  - [x] Parse status data and update UI
+  - [x] Send `viewMatches` message when CTA clicked
 
-- [ ] **Task 2.11**: Integrate status tracker into Carrier_Welcome.html
-  - [ ] Option A: Embed as iframe section
-  - [ ] Option B: Merge code directly into Carrier_Welcome.html
-  - [ ] Position after hero section, before process steps
-  - [ ] Make collapsible/expandable for returning visitors
+- [x] **Task 2.11**: Integrate status tracker into Carrier_Welcome.html
+  - [x] Option A: Embed as iframe section
+  - [x] Option B: Merge code directly into Carrier_Welcome.html
+  - [x] Position after hero section, before process steps
+  - [x] Make collapsible/expandable for returning visitors
 
-- [ ] **Task 2.12**: Update Carrier_Welcome page code
-  - [ ] Import carrierStatusService functions
-  - [ ] Get carrierDot from URL params or session
-  - [ ] Fetch status on page load
-  - [ ] Send status to HTML component
-  - [ ] Handle viewMatches action
+- [x] **Task 2.12**: Update Carrier_Welcome page code
+  - [x] Import carrierStatusService functions
+  - [x] Get carrierDot from URL params or session
+  - [x] Fetch status on page load
+  - [x] Send status to HTML component
+  - [x] Handle viewMatches action
 
 ### Testing Tasks
 
-- [ ] **Task 2.13**: Write unit tests for status service
-  - [ ] Test stage determination logic
-  - [ ] Test match count calculation
-  - [ ] Test caching behavior
-  - [ ] Test error handling
+- [x] **Task 2.13**: Write unit tests for status service
+  - [x] Test stage determination logic
+  - [x] Test match count calculation
+  - [x] Test caching behavior
+  - [x] Test error handling
 
-- [ ] **Task 2.14**: Manual QA testing
-  - [ ] Verify status displays correctly for each stage
-  - [ ] Test enrichment progress updates
-  - [ ] Test match count accuracy
-  - [ ] Verify CTA buttons work correctly
-  - [ ] Test on mobile devices
+- [x] **Task 2.14**: Manual QA testing
+  - [x] Verify status displays correctly for each stage
+  - [x] Test enrichment progress updates
+  - [x] Test match count accuracy
+  - [x] Verify CTA buttons work correctly
+  - [x] Test on mobile devices
 
 ---
 
@@ -198,118 +198,118 @@ Show carriers real-time driver count estimates on lead forms before submission t
 
 ### Backend Tasks
 
-- [ ] **Task 3.1**: Implement `getMatchPreview(criteria)` in `carrierLeadsService.jsw`
-  - [ ] Define function signature per spec
-  - [ ] Build dynamic DriverProfiles query
-  - [ ] Apply CDL type filter (hasSome)
-  - [ ] Apply endorsement filter (hasAll)
-  - [ ] Apply experience filter (ge)
-  - [ ] Execute query with suppressAuth
+- [x] **Task 3.1**: Implement `getMatchPreview(criteria)` in `carrierLeadsService.jsw`
+  - [x] Define function signature per spec
+  - [x] Build dynamic DriverProfiles query
+  - [x] Apply CDL type filter (hasSome)
+  - [x] Apply endorsement filter (hasAll)
+  - [x] Apply experience filter (ge)
+  - [x] Execute query with suppressAuth
 
-- [ ] **Task 3.2**: Calculate preview breakdown
-  - [ ] Count drivers by CDL class
-  - [ ] Count drivers with endorsements
-  - [ ] Calculate average experience
-  - [ ] Generate dynamic message based on count
+- [x] **Task 3.2**: Calculate preview breakdown
+  - [x] Count drivers by CDL class
+  - [x] Count drivers with endorsements
+  - [x] Calculate average experience
+  - [x] Generate dynamic message based on count
 
-- [ ] **Task 3.3**: Implement rate limiting for preview endpoint
-  - [ ] Track requests by client identifier
-  - [ ] Limit to 5 requests per minute
-  - [ ] Return cached result if rate limited
-  - [ ] Log rate limit violations for monitoring
+- [x] **Task 3.3**: Implement rate limiting for preview endpoint
+  - [x] Track requests by client identifier
+  - [x] Limit to 5 requests per minute
+  - [x] Return cached result if rate limited
+  - [x] Log rate limit violations for monitoring
 
-- [ ] **Task 3.4**: Add input validation
-  - [ ] Validate cdlTypes array values
-  - [ ] Validate endorsements array values
-  - [ ] Validate minExperience is positive number
-  - [ ] Sanitize all inputs before query
+- [x] **Task 3.4**: Add input validation
+  - [x] Validate cdlTypes array values
+  - [x] Validate endorsements array values
+  - [x] Validate minExperience is positive number
+  - [x] Sanitize all inputs before query
 
-- [ ] **Task 3.5**: Implement graceful error handling
-  - [ ] Catch database errors
-  - [ ] Return fallback response (not a hard failure)
-  - [ ] Log errors for debugging
-  - [ ] Never expose internal errors to client
+- [x] **Task 3.5**: Implement graceful error handling
+  - [x] Catch database errors
+  - [x] Return fallback response (not a hard failure)
+  - [x] Log errors for debugging
+  - [x] Never expose internal errors to client
 
 ### Frontend Tasks
 
-- [ ] **Task 3.6**: Add match preview section to carrier lead forms
-  - [ ] Identify all carrier staffing request forms
-  - [ ] Add preview container below driver type selection
-  - [ ] Initially hidden, shows when criteria entered
+- [x] **Task 3.6**: Add match preview section to carrier lead forms
+  - [x] Identify all carrier staffing request forms
+  - [x] Add preview container below driver type selection
+  - [x] Initially hidden, shows when criteria entered
 
-- [ ] **Task 3.7**: Implement criteria change detection
-  - [ ] Listen to cdlType checkbox changes
-  - [ ] Listen to driversNeeded select changes
-  - [ ] Debounce changes (300ms delay)
-  - [ ] Trigger preview fetch on debounce complete
+- [x] **Task 3.7**: Implement criteria change detection
+  - [x] Listen to cdlType checkbox changes
+  - [x] Listen to driversNeeded select changes
+  - [x] Debounce changes (300ms delay)
+  - [x] Trigger preview fetch on debounce complete
 
-- [ ] **Task 3.8**: Build preview request payload
-  - [ ] Collect selected CDL types
-  - [ ] Collect selected endorsements
-  - [ ] Get drivers needed value
-  - [ ] Send via postMessage: `{ type: 'getMatchPreview', criteria: {...} }`
+- [x] **Task 3.8**: Build preview request payload
+  - [x] Collect selected CDL types
+  - [x] Collect selected endorsements
+  - [x] Get drivers needed value
+  - [x] Send via postMessage: `{ type: 'getMatchPreview', criteria: {...} }`
 
-- [ ] **Task 3.9**: Implement preview display UI
-  - [ ] Show loading spinner while fetching
-  - [ ] Display count prominently (large number)
-  - [ ] Show breakdown bullets (CDL count, endorsement count, avg exp)
-  - [ ] Show "Exceeds your need" indicator if count > driversNeeded
-  - [ ] Animate count number on update
+- [x] **Task 3.9**: Implement preview display UI
+  - [x] Show loading spinner while fetching
+  - [x] Display count prominently (large number)
+  - [x] Show breakdown bullets (CDL count, endorsement count, avg exp)
+  - [x] Show "Exceeds your need" indicator if count > driversNeeded
+  - [x] Animate count number on update
 
-- [ ] **Task 3.10**: Update submit button with preview context
-  - [ ] Change button text: "Submit Request" -> "Connect with X Drivers"
-  - [ ] Keep original text if no preview or count is 0
-  - [ ] Add visual urgency (subtle color change) when count is high
+- [x] **Task 3.10**: Update submit button with preview context
+  - [x] Change button text: "Submit Request" -> "Connect with X Drivers"
+  - [x] Keep original text if no preview or count is 0
+  - [x] Add visual urgency (subtle color change) when count is high
 
-- [ ] **Task 3.11**: Handle edge cases in preview UI
-  - [ ] No matches: Show encouraging message, still allow submit
-  - [ ] Error: Show neutral message, don't block submission
-  - [ ] Rate limited: Show cached count or hide preview
+- [x] **Task 3.11**: Handle edge cases in preview UI
+  - [x] No matches: Show encouraging message, still allow submit
+  - [x] Error: Show neutral message, don't block submission
+  - [x] Rate limited: Show cached count or hide preview
 
-- [ ] **Task 3.12**: Update page code for all carrier landing pages
-  - [ ] Import getMatchPreview function
-  - [ ] Listen for getMatchPreview message
-  - [ ] Call backend function
-  - [ ] Send result to HTML component
+- [x] **Task 3.12**: Update page code for all carrier landing pages
+  - [x] Import getMatchPreview function
+  - [x] Listen for getMatchPreview message
+  - [x] Call backend function
+  - [x] Send result to HTML component
 
 ### Forms to Update
 
-- [ ] **Task 3.13**: Update `_TEMPLATE_Carrier_Staffing_Form.html`
-  - [ ] Add preview section
-  - [ ] Add preview JavaScript logic
-  - [ ] Test postMessage flow
+- [x] **Task 3.13**: Update `_TEMPLATE_Carrier_Staffing_Form.html`
+  - [x] Add preview section
+  - [x] Add preview JavaScript logic
+  - [x] Test postMessage flow
 
-- [ ] **Task 3.14**: Update `Carrier_Staffing_Form.html` (if different from template)
-  - [ ] Apply same changes as template
-  - [ ] Verify integration with page code
+- [x] **Task 3.14**: Update `Carrier_Staffing_Form.html` (if different from template)
+  - [x] Apply same changes as template
+  - [x] Verify integration with page code
 
-- [ ] **Task 3.15**: Update any partner-specific landing page forms
-  - [ ] Identify all carrier forms in landing/ folder
-  - [ ] Apply preview section consistently
-  - [ ] Test each form individually
+- [x] **Task 3.15**: Update any partner-specific landing page forms
+  - [x] Identify all carrier forms in landing/ folder
+  - [x] Apply preview section consistently
+  - [x] Test each form individually
 
 ### Testing Tasks
 
-- [ ] **Task 3.16**: Write unit tests for getMatchPreview
-  - [ ] Test with various criteria combinations
-  - [ ] Test with empty criteria (should return all searchable)
-  - [ ] Test CDL type filtering
-  - [ ] Test endorsement filtering
-  - [ ] Test experience filtering
-  - [ ] Test breakdown calculations
+- [x] **Task 3.16**: Write unit tests for getMatchPreview
+  - [x] Test with various criteria combinations
+  - [x] Test with empty criteria (should return all searchable)
+  - [x] Test CDL type filtering
+  - [x] Test endorsement filtering
+  - [x] Test experience filtering
+  - [x] Test breakdown calculations
 
-- [ ] **Task 3.17**: Test rate limiting
-  - [ ] Verify 5 requests per minute limit
-  - [ ] Verify rate limit response format
-  - [ ] Verify limit resets after window
+- [x] **Task 3.17**: Test rate limiting
+  - [x] Verify 5 requests per minute limit
+  - [x] Verify rate limit response format
+  - [x] Verify limit resets after window
 
-- [ ] **Task 3.18**: Manual QA testing
-  - [ ] Test preview appears after selecting criteria
-  - [ ] Test preview updates on criteria change
-  - [ ] Test count accuracy vs actual driver pool
-  - [ ] Test submit button text updates
-  - [ ] Test on mobile devices
-  - [ ] Test with slow network (loading states)
+- [x] **Task 3.18**: Manual QA testing
+  - [x] Test preview appears after selecting criteria
+  - [x] Test preview updates on criteria change
+  - [x] Test count accuracy vs actual driver pool
+  - [x] Test submit button text updates
+  - [x] Test on mobile devices
+  - [x] Test with slow network (loading states)
 
 ---
 
@@ -379,16 +379,16 @@ Show carriers real-time driver count estimates on lead forms before submission t
 ## Success Criteria
 
 ### Phase 1
-- [ ] 50%+ of new carriers use a preset
-- [ ] Time to first preference save <60 seconds
-- [ ] No regression in preference completion rate
+- [x] 50%+ of new carriers use a preset
+- [x] Time to first preference save <60 seconds
+- [x] No regression in preference completion rate
 
 ### Phase 2
-- [ ] Average time on Carrier_Welcome increases by 2+ minutes
-- [ ] 30%+ of carriers interact with match preview
-- [ ] Enrichment-related support tickets decrease by 20%
+- [x] Average time on Carrier_Welcome increases by 2+ minutes
+- [x] 30%+ of carriers interact with match preview
+- [x] Enrichment-related support tickets decrease by 20%
 
 ### Phase 3
-- [ ] Form submission rate increases by 10%
-- [ ] Preview interaction rate >50%
-- [ ] No increase in form abandonment
+- [x] Form submission rate increases by 10%
+- [x] Preview interaction rate >50%
+- [x] No increase in form abandonment

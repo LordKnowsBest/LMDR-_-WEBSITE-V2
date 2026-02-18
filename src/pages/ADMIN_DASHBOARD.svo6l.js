@@ -16,6 +16,7 @@ import {
 } from 'backend/featureAdoptionService';
 import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
+import { getLatestEvaluation } from 'backend/agentEvaluationService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
@@ -145,6 +146,10 @@ async function routeMessage(component, message) {
 
             case 'getQualityTrends':
                 await handleGetQualityTrends(component, message);
+                break;
+
+            case 'getWeeklyEvaluation':
+                await handleGetWeeklyEvaluation(component, message);
                 break;
 
             default:
@@ -398,6 +403,36 @@ async function handleGetQualityTrends(component, message) {
         safeSend(component, { action: 'qualityTrendsLoaded', payload: result });
     } catch (err) {
         safeSend(component, { action: 'qualityTrendsLoaded', payload: { trends: [], costs: { by_role: {}, total: 0 }, period_days: 7, error: err.message } });
+    }
+}
+
+// ============================================
+// EVALUATION HANDLERS
+// ============================================
+
+async function handleGetWeeklyEvaluation(component, message) {
+    try {
+        const roles = ['driver', 'recruiter', 'admin', 'carrier'];
+        const evaluations = {};
+
+        const results = await Promise.all(
+            roles.map(async (role) => {
+                try {
+                    const evaluation = await getLatestEvaluation(role);
+                    return { role, evaluation };
+                } catch (err) {
+                    return { role, evaluation: null };
+                }
+            })
+        );
+
+        for (const { role, evaluation } of results) {
+            evaluations[role] = evaluation;
+        }
+
+        safeSend(component, { action: 'weeklyEvaluationLoaded', payload: evaluations });
+    } catch (err) {
+        safeSend(component, { action: 'weeklyEvaluationLoaded', payload: {}, error: err.message });
     }
 }
 

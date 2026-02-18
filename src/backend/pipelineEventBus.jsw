@@ -1,0 +1,207 @@
+// ============================================================================
+// PIPELINE EVENT BUS - Central event dispatch for pipeline state changes
+// Replaces inline emitPipelineEventNonBlocking with durable event records
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  events: 'pipelineEvents'
+};
+
+/**
+ * Emit a pipeline event — persists to Airtable, then processes asynchronously.
+ * @param {string} eventType - e.g. 'stage_change', 'no_response', 'call_completed', 'document_received', 'application_submitted'
+ * @param {Object} payload - { candidate_id, carrier_dot, recruiter_id, stage_from, stage_to, channel, metadata }
+ * @returns {{ success: boolean, event_id: string }}
+ */
+export async function emitEvent(eventType, payload = {}) {
+  const eventId = `pe_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const now = new Date().toISOString();
+
+  try {
+    await dataAccess.insertRecord(COLLECTIONS.events, {
+      event_id: eventId,
+      event_type: eventType,
+      candidate_id: payload.candidate_id || payload.driverId || '',
+      carrier_dot: payload.carrier_dot || String(payload.carrierDot || ''),
+      recruiter_id: payload.recruiter_id || payload.recruiterId || '',
+      stage_from: payload.stage_from || payload.fromStatus || '',
+      stage_to: payload.stage_to || payload.toStatus || '',
+      channel: payload.channel || '',
+      metadata: JSON.stringify(payload.metadata || payload),
+      processed: 'No',
+      processed_by: '',
+      decision: '',
+      created_at: now,
+      processed_at: ''
+    }, { suppressAuth: true });
+
+    // Process asynchronously — don't await
+    processEvent({
+      event_id: eventId,
+      event_type: eventType,
+      candidate_id: payload.candidate_id || payload.driverId || '',
+      carrier_dot: payload.carrier_dot || String(payload.carrierDot || ''),
+      recruiter_id: payload.recruiter_id || payload.recruiterId || '',
+      stage_from: payload.stage_from || payload.fromStatus || '',
+      stage_to: payload.stage_to || payload.toStatus || '',
+      channel: payload.channel || '',
+      metadata: payload.metadata || payload
+    }).catch(err => {
+      console.warn('[pipelineEventBus] Async processing failed for', eventId, err.message);
+    });
+
+    return { success: true, event_id: eventId };
+  } catch (error) {
+    console.error('[pipelineEventBus] emitEvent error:', error.message);
+    return { success: false, event_id: eventId, error: error.message };
+  }
+}
+
+/**
+ * Process a single pipeline event through the execution agent.
+ * Falls back to legacy pipelineAutomationService on failure.
+ * @param {Object} event - Pipeline event record
+ */
+export async function processEvent(event) {
+  const startTime = Date.now();
+
+  try {
+    // Primary: Pipeline Execution Agent
+    const { decide } = await import('backend/pipelineExecutionAgent');
+    const decision = await decide(event);
+
+    // Execute each action from the decision
+    if (decision.actions && decision.actions.length > 0) {
+      for (const action of decision.actions) {
+        await executeAction(action, event);
+      }
+    }
+
+    // Update event record as processed
+    await markEventProcessed(event.event_id, 'pipelineExecutionAgent', JSON.stringify(decision));
+
+    return { success: true, decision };
+  } catch (agentError) {
+    console.warn('[pipelineEventBus] Agent processing failed, falling back:', agentError.message);
+
+    // Fallback: legacy pipeline automation
+    try {
+      const automation = await import('backend/pipelineAutomationService');
+      await automation.processEvent(event.carrier_dot, event.event_type, {
+        driverId: event.candidate_id,
+        fromStatus: event.stage_from,
+        toStatus: event.stage_to,
+        ...(typeof event.metadata === 'string' ? JSON.parse(event.metadata) : event.metadata)
+      });
+      await markEventProcessed(event.event_id, 'pipelineAutomationService_fallback', JSON.stringify({ fallback: true, error: agentError.message }));
+      return { success: true, fallback: true };
+    } catch (fallbackError) {
+      console.error('[pipelineEventBus] Both agent and fallback failed:', fallbackError.message);
+      await markEventProcessed(event.event_id, 'failed', JSON.stringify({ agentError: agentError.message, fallbackError: fallbackError.message }));
+      return { success: false, error: fallbackError.message };
+    }
+  }
+}
+
+/**
+ * Reprocess failed events
+ * @param {number} limit - Max events to reprocess (default 50)
+ * @returns {{ reprocessed: number, failed: number }}
+ */
+export async function reprocessFailedEvents(limit = 50) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.events, {
+      filters: { processed: 'No' },
+      sort: [{ field: 'created_at', direction: 'asc' }],
+      limit,
+      suppressAuth: true
+    });
+
+    const events = result.items || [];
+    let reprocessed = 0;
+    let failed = 0;
+
+    for (const event of events) {
+      try {
+        const meta = typeof event.metadata === 'string' ? JSON.parse(event.metadata) : event.metadata;
+        await processEvent({ ...event, metadata: meta });
+        reprocessed++;
+      } catch (err) {
+        failed++;
+        console.warn('[pipelineEventBus] Reprocess failed for', event.event_id, err.message);
+      }
+    }
+
+    return { reprocessed, failed, total: events.length };
+  } catch (error) {
+    console.error('[pipelineEventBus] reprocessFailedEvents error:', error.message);
+    return { reprocessed: 0, failed: 0, error: error.message };
+  }
+}
+
+// ── Internal Helpers ──
+
+async function markEventProcessed(eventId, processedBy, decision) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.events, {
+      filters: { event_id: eventId },
+      limit: 1,
+      suppressAuth: true
+    });
+    if (result.items && result.items.length > 0) {
+      const record = result.items[0];
+      await dataAccess.updateRecord(COLLECTIONS.events, {
+        ...record,
+        _id: record._id,
+        processed: 'Yes',
+        processed_by: processedBy,
+        decision: decision,
+        processed_at: new Date().toISOString()
+      }, { suppressAuth: true });
+    }
+  } catch (err) {
+    console.warn('[pipelineEventBus] markEventProcessed error:', err.message);
+  }
+}
+
+async function executeAction(action, event) {
+  try {
+    switch (action.type) {
+      case 'send_sms': {
+        const smsService = await import('backend/smsCampaignService');
+        if (smsService.sendSingleSMS) {
+          await smsService.sendSingleSMS(action.to, action.message, { candidateId: event.candidate_id });
+        }
+        break;
+      }
+      case 'send_email': {
+        const emailService = await import('backend/emailService');
+        if (emailService.sendTemplateEmail) {
+          await emailService.sendTemplateEmail(action.to, action.template, action.data);
+        }
+        break;
+      }
+      case 'schedule_voice_call': {
+        // Voice calls are scheduled by creating a delayed event
+        // The actual call is initiated by the pipeline jobs cron
+        console.log('[pipelineEventBus] Voice call scheduled for', event.candidate_id, 'delay:', action.delay_minutes, 'min');
+        break;
+      }
+      case 'advance_stage': {
+        const recruiterService = await import('backend/recruiter_service');
+        await recruiterService.updateCandidateStatus(action.interest_id || event.candidate_id, action.new_stage, action.notes || 'Auto-advanced by pipeline agent');
+        break;
+      }
+      case 'queue_recruiter': {
+        console.log('[pipelineEventBus] Queued for recruiter review:', event.candidate_id);
+        break;
+      }
+      default:
+        console.log('[pipelineEventBus] Unknown action type:', action.type);
+    }
+  } catch (err) {
+    console.warn('[pipelineEventBus] executeAction failed:', action.type, err.message);
+  }
+}

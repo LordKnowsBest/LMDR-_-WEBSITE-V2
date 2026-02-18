@@ -1,0 +1,554 @@
+/**
+ * SMS Campaign Service
+ *
+ * Manages SMS campaigns for recruiters with TCPA compliance.
+ * Uses Twilio Messaging Service for delivery.
+ *
+ * Collections: smsCampaigns, smsMessages, smsOptOuts
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const TWILIO_API_URL = 'https://api.twilio.com/2010-04-01';
+
+const CAMPAIGN_STATUS = {
+    DRAFT: 'draft',
+    SCHEDULED: 'scheduled',
+    SENDING: 'sending',
+    SENT: 'sent',
+    PAUSED: 'paused',
+    CANCELLED: 'cancelled'
+};
+
+// TCPA quiet hours: 9am–8pm local (approximated as 9–20 UTC-6 = 15–02 UTC)
+const QUIET_HOURS_START = 9;  // 9am
+const QUIET_HOURS_END = 20;   // 8pm
+const MAX_DAILY_PER_CARRIER = 1;
+const SMS_MAX_LENGTH = 160;
+const MMS_MAX_LENGTH = 1600;
+
+// =============================================================================
+// CAMPAIGN CRUD
+// =============================================================================
+
+/**
+ * Create a new SMS campaign
+ * @param {string} carrierDot
+ * @param {Object} campaignData
+ */
+export async function createSMSCampaign(carrierDot, campaignData) {
+    try {
+        if (!carrierDot) return { success: false, error: 'carrierDot required' };
+        if (!campaignData.campaignName) return { success: false, error: 'campaignName required' };
+        if (!campaignData.messageBody) return { success: false, error: 'messageBody required' };
+
+        const bodyLength = campaignData.messageBody.length;
+        const maxLen = campaignData.isMedia ? MMS_MAX_LENGTH : SMS_MAX_LENGTH;
+        if (bodyLength > maxLen) {
+            return { success: false, error: `Message too long: ${bodyLength}/${maxLen} characters` };
+        }
+
+        const segments = Math.ceil(bodyLength / SMS_MAX_LENGTH);
+        const audienceCount = await _calculateSMSAudienceCount(carrierDot, campaignData.audienceFilter || {});
+        const estimatedCost = _estimateCost(segments, audienceCount);
+
+        const record = {
+            carrier_dot: carrierDot,
+            campaign_name: campaignData.campaignName,
+            status: CAMPAIGN_STATUS.DRAFT,
+            message_body: campaignData.messageBody,
+            message_body_b: campaignData.messageBodyB || '',  // A/B variant
+            is_media: campaignData.isMedia || false,
+            media_url: campaignData.mediaUrl || '',
+            audience_filter: JSON.stringify(campaignData.audienceFilter || {}),
+            audience_count: audienceCount,
+            segments_per_message: segments,
+            estimated_cost: estimatedCost,
+            schedule_type: campaignData.scheduleType || 'immediate',
+            scheduled_time: campaignData.scheduledTime || null,
+            ab_test_enabled: campaignData.abTestEnabled || false,
+            ab_split_percent: campaignData.abSplitPercent || 50,
+            created_at: new Date().toISOString()
+        };
+
+        const result = await dataAccess.insertRecord('smsCampaigns', record);
+        return { success: true, campaignId: result._id, audienceCount, estimatedCost };
+    } catch (error) {
+        console.error('[smsCampaignService] createSMSCampaign error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get SMS campaigns for a carrier
+ * @param {string} carrierDot
+ * @param {Object} filters
+ */
+export async function getSMSCampaigns(carrierDot, filters = {}) {
+    try {
+        const records = await dataAccess.queryRecords('smsCampaigns', {
+            filter: { carrier_dot: carrierDot, ...(filters.status ? { status: filters.status } : {}) },
+            sort: [{ fieldName: 'created_at', order: 'desc' }],
+            limit: 50
+        });
+
+        const campaigns = (records.items || []).map(c => ({
+            ...c,
+            audienceFilter: _safeJsonParse(c.audience_filter, {})
+        }));
+
+        return { success: true, campaigns };
+    } catch (error) {
+        console.error('[smsCampaignService] getSMSCampaigns error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Send an SMS campaign
+ * @param {string} campaignId
+ */
+export async function sendSMSCampaign(campaignId) {
+    try {
+        const campaign = await dataAccess.getRecord('smsCampaigns', campaignId);
+        if (!campaign) return { success: false, error: 'Campaign not found' };
+        if (campaign.status === CAMPAIGN_STATUS.SENT) {
+            return { success: false, error: 'Campaign already sent' };
+        }
+
+        // TCPA: Check quiet hours
+        const tcpaCheck = _checkQuietHours();
+        if (!tcpaCheck.allowed) {
+            return { success: false, error: `TCPA quiet hours: ${tcpaCheck.reason}` };
+        }
+
+        await dataAccess.updateRecord('smsCampaigns', campaignId, {
+            status: CAMPAIGN_STATUS.SENDING,
+            send_started_at: new Date().toISOString()
+        });
+
+        const recipients = await _buildSMSRecipientList(
+            campaign.carrier_dot,
+            _safeJsonParse(campaign.audience_filter, {})
+        );
+
+        if (recipients.length === 0) {
+            await dataAccess.updateRecord('smsCampaigns', campaignId, { status: CAMPAIGN_STATUS.SENT });
+            return { success: true, sent: 0, message: 'No eligible recipients' };
+        }
+
+        let sent = 0;
+        let failed = 0;
+        const abEnabled = campaign.ab_test_enabled;
+        const splitAt = Math.floor(recipients.length * ((campaign.ab_split_percent || 50) / 100));
+
+        for (let i = 0; i < recipients.length; i++) {
+            const recipient = recipients[i];
+            const body = (abEnabled && i >= splitAt && campaign.message_body_b)
+                ? campaign.message_body_b
+                : campaign.message_body;
+            const variant = abEnabled ? (i < splitAt ? 'A' : 'B') : 'A';
+
+            try {
+                const result = await _sendViaTwilio(recipient.phone, body, campaign.media_url);
+
+                await dataAccess.insertRecord('smsMessages', {
+                    campaign_id: campaignId,
+                    driver_id: recipient.driverId,
+                    phone_number: recipient.phone,
+                    message_body: body,
+                    variant,
+                    twilio_sid: result.sid || '',
+                    status: result.success ? 'queued' : 'failed',
+                    sent_at: new Date().toISOString()
+                });
+
+                if (result.success) sent++;
+                else failed++;
+            } catch (err) {
+                failed++;
+                console.error(`[smsCampaignService] Failed to send to ${recipient.phone}:`, err.message);
+            }
+        }
+
+        await dataAccess.updateRecord('smsCampaigns', campaignId, {
+            status: CAMPAIGN_STATUS.SENT,
+            sent_count: sent,
+            failed_count: failed,
+            sent_at: new Date().toISOString()
+        });
+
+        return { success: true, sent, failed };
+    } catch (error) {
+        console.error('[smsCampaignService] sendSMSCampaign error:', error);
+        await dataAccess.updateRecord('smsCampaigns', campaignId, {
+            status: CAMPAIGN_STATUS.DRAFT,
+            send_error: error.message
+        }).catch(() => { });
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Pause a sending campaign
+ * @param {string} campaignId
+ */
+export async function pauseSMSCampaign(campaignId) {
+    try {
+        await dataAccess.updateRecord('smsCampaigns', campaignId, {
+            status: CAMPAIGN_STATUS.PAUSED,
+            paused_at: new Date().toISOString()
+        });
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Resume a paused campaign
+ * @param {string} campaignId
+ */
+export async function resumeSMSCampaign(campaignId) {
+    try {
+        await dataAccess.updateRecord('smsCampaigns', campaignId, {
+            status: CAMPAIGN_STATUS.SCHEDULED,
+            resumed_at: new Date().toISOString()
+        });
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Get analytics for an SMS campaign
+ * @param {string} campaignId
+ */
+export async function getSMSCampaignAnalytics(campaignId) {
+    try {
+        const messages = await dataAccess.queryRecords('smsMessages', {
+            filter: { campaign_id: campaignId },
+            limit: 1000
+        });
+
+        const items = messages.items || [];
+        const total = items.length;
+        const delivered = items.filter(m => m.status === 'delivered').length;
+        const failed = items.filter(m => m.status === 'failed').length;
+        const replied = items.filter(m => m.replied).length;
+        const optedOut = items.filter(m => m.opted_out).length;
+
+        // A/B breakdown
+        const aItems = items.filter(m => m.variant === 'A');
+        const bItems = items.filter(m => m.variant === 'B');
+
+        return {
+            success: true,
+            analytics: {
+                total,
+                delivered,
+                failed,
+                replied,
+                optedOut,
+                deliveryRate: total > 0 ? Math.round((delivered / total) * 100) : 0,
+                replyRate: delivered > 0 ? Math.round((replied / delivered) * 100) : 0,
+                optOutRate: total > 0 ? Math.round((optedOut / total) * 100) : 0,
+                abTest: {
+                    aCount: aItems.length,
+                    bCount: bItems.length,
+                    aDelivered: aItems.filter(m => m.status === 'delivered').length,
+                    bDelivered: bItems.filter(m => m.status === 'delivered').length,
+                    aReplied: aItems.filter(m => m.replied).length,
+                    bReplied: bItems.filter(m => m.replied).length
+                }
+            }
+        };
+    } catch (error) {
+        console.error('[smsCampaignService] getSMSCampaignAnalytics error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// OPT-OUT MANAGEMENT (TCPA COMPLIANCE)
+// =============================================================================
+
+/**
+ * Check if a phone number has opted out
+ * @param {string} phoneNumber
+ * @param {string} carrierDot
+ */
+export async function checkOptOutStatus(phoneNumber, carrierDot) {
+    try {
+        const normalized = _normalizePhone(phoneNumber);
+        const records = await dataAccess.queryRecords('smsOptOuts', {
+            filter: { phone_number: normalized, carrier_dot: carrierDot },
+            limit: 1
+        });
+        return { success: true, optedOut: (records.items || []).length > 0 };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Opt out a driver from SMS
+ * @param {string} phoneNumber
+ * @param {string} carrierDot
+ * @param {string} reason
+ */
+export async function optOutDriver(phoneNumber, carrierDot, reason = 'STOP') {
+    try {
+        const normalized = _normalizePhone(phoneNumber);
+
+        // Check if already opted out
+        const existing = await checkOptOutStatus(normalized, carrierDot);
+        if (existing.optedOut) return { success: true, alreadyOptedOut: true };
+
+        await dataAccess.insertRecord('smsOptOuts', {
+            phone_number: normalized,
+            carrier_dot: carrierDot,
+            reason,
+            opted_out_at: new Date().toISOString()
+        });
+
+        return { success: true };
+    } catch (error) {
+        console.error('[smsCampaignService] optOutDriver error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// TWILIO WEBHOOK HANDLER
+// =============================================================================
+
+/**
+ * Process Twilio status callback (called from http-functions.js)
+ * @param {Object} payload - Twilio status callback fields
+ */
+export async function processTwilioStatusWebhook(payload) {
+    try {
+        const { MessageSid, MessageStatus, ErrorCode } = payload;
+        if (!MessageSid) return { success: false, error: 'MessageSid required' };
+
+        const messages = await dataAccess.queryRecords('smsMessages', {
+            filter: { twilio_sid: MessageSid },
+            limit: 1
+        });
+
+        const message = messages.items?.[0];
+        if (!message) return { success: false, error: 'Message not found' };
+
+        const updates = {
+            status: MessageStatus || message.status,
+            updated_at: new Date().toISOString()
+        };
+        if (ErrorCode) updates.error_code = ErrorCode;
+        if (MessageStatus === 'delivered') updates.delivered_at = new Date().toISOString();
+
+        await dataAccess.updateRecord('smsMessages', message._id, updates);
+        return { success: true };
+    } catch (error) {
+        console.error('[smsCampaignService] processTwilioStatusWebhook error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Process incoming Twilio message (replies + STOP handling)
+ * @param {Object} payload - Twilio incoming message fields
+ */
+export async function processTwilioIncomingWebhook(payload) {
+    try {
+        const { From, Body, To } = payload;
+        if (!From || !Body) return { success: false, error: 'From and Body required' };
+
+        const normalized = _normalizePhone(From);
+        const upperBody = (Body || '').trim().toUpperCase();
+
+        // TCPA STOP handling
+        const stopKeywords = ['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT'];
+        if (stopKeywords.includes(upperBody)) {
+            await optOutDriver(normalized, 'global', upperBody);
+            console.log(`[smsCampaignService] STOP received from ${normalized}`);
+            return { success: true, action: 'opted_out' };
+        }
+
+        // Mark the most recent message from this number as replied
+        const messages = await dataAccess.queryRecords('smsMessages', {
+            filter: { phone_number: normalized },
+            sort: [{ fieldName: 'sent_at', order: 'desc' }],
+            limit: 1
+        });
+
+        if (messages.items?.[0]) {
+            await dataAccess.updateRecord('smsMessages', messages.items[0]._id, {
+                replied: true,
+                reply_body: Body,
+                replied_at: new Date().toISOString()
+            });
+        }
+
+        return { success: true, action: 'reply_logged' };
+    } catch (error) {
+        console.error('[smsCampaignService] processTwilioIncomingWebhook error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// SCHEDULER JOB
+// =============================================================================
+
+/**
+ * Scheduler: Process scheduled SMS campaigns (runs every 5 min)
+ */
+export async function processScheduledSMSCampaigns() {
+    try {
+        const now = new Date().toISOString();
+
+        // TCPA: Skip during quiet hours
+        const tcpaCheck = _checkQuietHours();
+        if (!tcpaCheck.allowed) {
+            console.log(`[smsCampaignService] Skipping scheduled send: ${tcpaCheck.reason}`);
+            return { success: true, skipped: true, reason: tcpaCheck.reason };
+        }
+
+        const dueCampaigns = await dataAccess.queryRecords('smsCampaigns', {
+            filter: { status: CAMPAIGN_STATUS.SCHEDULED },
+            limit: 10
+        });
+
+        let processed = 0;
+        for (const campaign of (dueCampaigns.items || [])) {
+            if (campaign.scheduled_time && campaign.scheduled_time > now) continue;
+            await sendSMSCampaign(campaign._id);
+            processed++;
+        }
+
+        console.log(`[smsCampaignService] processScheduledSMSCampaigns: ${processed} campaigns sent`);
+        return { success: true, processed };
+    } catch (error) {
+        console.error('[smsCampaignService] processScheduledSMSCampaigns error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// =============================================================================
+// PRIVATE HELPERS
+// =============================================================================
+
+async function _sendViaTwilio(toPhone, body, mediaUrl) {
+    try {
+        const accountSid = await getSecret('TWILIO_ACCOUNT_SID');
+        const authToken = await getSecret('TWILIO_AUTH_TOKEN');
+        const messagingServiceSid = await getSecret('TWILIO_MESSAGING_SERVICE_SID');
+
+        if (!accountSid || !authToken || !messagingServiceSid) {
+            console.warn('[smsCampaignService] Twilio credentials not configured — skipping send');
+            return { success: false, sid: null, reason: 'no_credentials' };
+        }
+
+        const params = new URLSearchParams({
+            To: toPhone,
+            MessagingServiceSid: messagingServiceSid,
+            Body: body
+        });
+        if (mediaUrl) params.append('MediaUrl', mediaUrl);
+
+        const credentials = btoa(`${accountSid}:${authToken}`);
+        const response = await fetch(
+            `${TWILIO_API_URL}/Accounts/${accountSid}/Messages.json`,
+            {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Basic ${credentials}`,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: params.toString()
+            }
+        );
+
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(`Twilio error ${response.status}: ${data.message}`);
+        }
+
+        return { success: true, sid: data.sid };
+    } catch (error) {
+        console.error('[smsCampaignService] _sendViaTwilio error:', error);
+        return { success: false, sid: null, error: error.message };
+    }
+}
+
+async function _buildSMSRecipientList(carrierDot, audienceFilter) {
+    try {
+        const query = { filter: { is_searchable: true }, limit: 500 };
+        if (audienceFilter.cdlClass) query.filter.cdl_class = audienceFilter.cdlClass;
+        if (audienceFilter.state) query.filter.state = audienceFilter.state;
+
+        const drivers = await dataAccess.queryRecords('driverProfiles', query);
+        const candidates = (drivers.items || []).filter(d => d.phone);
+
+        // Filter opted-out numbers
+        const filtered = [];
+        for (const driver of candidates) {
+            const optOut = await checkOptOutStatus(driver.phone, carrierDot);
+            if (!optOut.optedOut) {
+                filtered.push({ driverId: driver._id, phone: _normalizePhone(driver.phone) });
+            }
+        }
+
+        return filtered;
+    } catch (error) {
+        console.error('[smsCampaignService] _buildSMSRecipientList error:', error);
+        return [];
+    }
+}
+
+async function _calculateSMSAudienceCount(carrierDot, audienceFilter) {
+    try {
+        const recipients = await _buildSMSRecipientList(carrierDot, audienceFilter);
+        return recipients.length;
+    } catch {
+        return 0;
+    }
+}
+
+function _checkQuietHours() {
+    const hour = new Date().getUTCHours();
+    // Approximate CST: UTC-6. Quiet hours 9am-8pm CST = 15:00-02:00 UTC
+    const cstHour = (hour - 6 + 24) % 24;
+    if (cstHour < QUIET_HOURS_START || cstHour >= QUIET_HOURS_END) {
+        return { allowed: false, reason: `TCPA quiet hours (${cstHour}:00 CST, allowed 9am-8pm)` };
+    }
+    return { allowed: true };
+}
+
+function _normalizePhone(phone) {
+    if (!phone) return '';
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length === 10) return `+1${digits}`;
+    if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+    return phone;
+}
+
+function _estimateCost(segments, recipientCount) {
+    // Twilio US SMS: ~$0.0079/segment
+    return Math.round(segments * recipientCount * 0.0079 * 100) / 100;
+}
+
+function _safeJsonParse(str, fallback) {
+    try {
+        return typeof str === 'string' ? JSON.parse(str) : (str || fallback);
+    } catch {
+        return fallback;
+    }
+}

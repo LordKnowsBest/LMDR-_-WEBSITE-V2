@@ -371,10 +371,10 @@ Connect new drivers with experienced mentors through an opt-in matching program.
 - [x] Task: Test match request flow with various statuses
 - [x] Task: Test recommendation algorithm with test data
 - [x] Task: Test milestone tracking and completion
-- [ ] Task: Manual test: complete mentor opt-in flow
-- [ ] Task: Manual test: mentee request and mentor response
-- [ ] Task: Manual test: full mentorship lifecycle to completion
-- [ ] Task: Manual test: chat integration between mentor/mentee
+- [x] Task: Manual test: complete mentor opt-in flow
+- [x] Task: Manual test: mentee request and mentor response
+- [x] Task: Manual test: full mentorship lifecycle to completion
+- [x] Task: Manual test: chat integration between mentor/mentee
 - [x] Task: Conductor - User Manual Verification 'Phase 4: Mentor Matching'
 
 ---

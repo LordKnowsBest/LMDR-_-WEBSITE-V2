@@ -20,7 +20,7 @@ This phase establishes the core document collection infrastructure that all othe
 
 ### 1.2 Onboarding Workflow Service Tests (RED)
 
-- [ ] Task: Write `onboardingWorkflowService.test.js` - tests for `createOnboardingWorkflow()`
+- [x] Task: Write `onboardingWorkflowService.test.js` - tests for `createOnboardingWorkflow()`
 - [ ] Task: Write tests for `getWorkflowStatus()` - retrieve full workflow with sub-statuses
 - [ ] Task: Write tests for `getActiveWorkflows()` - filtering by recruiter, carrier, status
 - [ ] Task: Write tests for `updateWorkflowStatus()` - state machine transitions
@@ -31,20 +31,20 @@ This phase establishes the core document collection infrastructure that all othe
 
 ### 1.3 Onboarding Workflow Service Implementation (GREEN)
 
-- [ ] Task: Create `src/backend/onboardingWorkflowService.jsw`
-- [ ] Task: Implement `createOnboardingWorkflow()` - make tests pass
-- [ ] Task: Implement `getWorkflowStatus()` - make tests pass
-- [ ] Task: Implement `getActiveWorkflows()` - make tests pass
-- [ ] Task: Implement `updateWorkflowStatus()` - make tests pass
-- [ ] Task: Implement `cancelWorkflow()` - make tests pass
-- [ ] Task: Implement `getComplianceChecklist()` - make tests pass
-- [ ] Task: Implement authorization middleware
+- [x] Task: Create `src/backend/onboardingWorkflowService.jsw`
+- [x] Task: Implement `createOnboardingWorkflow()` - make tests pass
+- [x] Task: Implement `getWorkflowStatus()` - make tests pass
+- [x] Task: Implement `getActiveWorkflows()` - make tests pass
+- [x] Task: Implement `updateWorkflowStatus()` - make tests pass
+- [x] Task: Implement `cancelWorkflow()` - make tests pass
+- [x] Task: Implement `getComplianceChecklist()` - make tests pass
+- [x] Task: Implement authorization middleware
 - [ ] Task: Verify all tests pass (GREEN phase complete)
 - [ ] Task: Verify coverage >90% for onboardingWorkflowService.jsw
 
 ### 1.4 Document Collection Service Tests (RED)
 
-- [ ] Task: Write `documentCollectionService.test.js` - tests for `requestDocuments()`
+- [x] Task: Write `documentCollectionService.test.js` - tests for `requestDocuments()`
 - [ ] Task: Write tests for `getDocumentStatus()` - retrieve all documents for workflow
 - [ ] Task: Write tests for `uploadDocument()` - secure token validation, file handling
 - [ ] Task: Write tests for `verifyDocument()` - recruiter verification flow
@@ -56,51 +56,51 @@ This phase establishes the core document collection infrastructure that all othe
 
 ### 1.5 Document Collection Service Implementation (GREEN)
 
-- [ ] Task: Create `src/backend/documentCollectionService.jsw`
-- [ ] Task: Implement `requestDocuments()` - make tests pass
-- [ ] Task: Implement `getDocumentStatus()` - make tests pass
-- [ ] Task: Implement `uploadDocument()` with token validation - make tests pass
-- [ ] Task: Implement `verifyDocument()` - make tests pass
-- [ ] Task: Implement `sendDocumentReminder()` - make tests pass
-- [ ] Task: Implement `checkDocumentExpiration()` - make tests pass
-- [ ] Task: Implement secure upload token generation (UUID + expiry)
+- [x] Task: Create `src/backend/documentCollectionService.jsw`
+- [x] Task: Implement `requestDocuments()` - make tests pass
+- [x] Task: Implement `getDocumentStatus()` - make tests pass
+- [x] Task: Implement `uploadDocument()` with token validation - make tests pass
+- [x] Task: Implement `verifyDocument()` - make tests pass
+- [x] Task: Implement `sendDocumentReminder()` - make tests pass
+- [x] Task: Implement `checkDocumentExpiration()` - make tests pass
+- [x] Task: Implement secure upload token generation (UUID + expiry)
 - [ ] Task: Verify all tests pass (GREEN phase complete)
 - [ ] Task: Verify coverage >90% for documentCollectionService.jsw
 
 ### 1.6 OCR Integration for CDL Verification
 
 - [ ] Task: Write tests for CDL OCR extraction (using existing ocrService.jsw)
-- [ ] Task: Implement `extractCdlData()` - extract name, DOB, license number, class, endorsements, expiration
-- [ ] Task: Implement auto-verification logic (match extracted data to driver profile)
-- [ ] Task: Add OCR trigger on CDL document upload
+- [x] Task: Implement `extractCdlData()` - extract name, DOB, license number, class, endorsements, expiration
+- [x] Task: Implement auto-verification logic (match extracted data to driver profile)
+- [x] Task: Add OCR trigger on CDL document upload
 - [ ] Task: Verify OCR tests pass
 
 ### 1.7 Document Upload Portal (Frontend)
 
-- [ ] Task: Create `src/public/driver/DRIVER_DOCUMENT_UPLOAD.html`
-- [ ] Task: Build document checklist UI with status indicators
-- [ ] Task: Build drag-and-drop file upload component
-- [ ] Task: Implement file preview before upload
-- [ ] Task: Implement progress indicators for upload
-- [ ] Task: Add "How to get this document" help links
-- [ ] Task: Wire up postMessage handlers to backend
-- [ ] Task: Add mobile-responsive design
+- [x] Task: Create `src/public/driver/DRIVER_DOCUMENT_UPLOAD.html`
+- [x] Task: Build document checklist UI with status indicators
+- [x] Task: Build drag-and-drop file upload component
+- [x] Task: Implement file preview before upload
+- [x] Task: Implement progress indicators for upload
+- [x] Task: Add "How to get this document" help links
+- [x] Task: Wire up postMessage handlers to backend
+- [x] Task: Add mobile-responsive design
 
 ### 1.8 Recruiter Onboarding Dashboard (Frontend)
 
-- [ ] Task: Create `src/public/recruiter/RECRUITER_ONBOARDING_DASHBOARD.html`
-- [ ] Task: Build workflow list view with filters
-- [ ] Task: Build individual workflow detail view
-- [ ] Task: Build document status panel with verify/reject actions
-- [ ] Task: Add reminder send buttons
-- [ ] Task: Wire up postMessage handlers to backend
+- [x] Task: Create `src/public/recruiter/RECRUITER_ONBOARDING_DASHBOARD.html`
+- [x] Task: Build workflow list view with filters
+- [x] Task: Build individual workflow detail view
+- [x] Task: Build document status panel with verify/reject actions
+- [x] Task: Add reminder send buttons
+- [x] Task: Wire up postMessage handlers to backend
 
 ### 1.9 Notification Integration
 
 - [ ] Task: Create email template for document request
 - [ ] Task: Create SMS template for document reminder
-- [ ] Task: Implement scheduled job for auto-reminders (day 2, 5, 7)
-- [ ] Task: Add reminder job to `jobs.config`
+- [x] Task: Implement scheduled job for auto-reminders (day 2, 5, 7)
+- [x] Task: Add reminder job to `jobs.config`
 
 ### 1.10 Phase 1 Integration Tests
 

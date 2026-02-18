@@ -1,0 +1,266 @@
+// =============================================================================
+// AGENT JOBS — Scheduled jobs for agentic orchestration subsystem
+// =============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+// =============================================================================
+// 1. advanceActiveCampaigns — Every 15 min
+// =============================================================================
+
+/**
+ * Advance all active autopilot campaigns by one step.
+ * Cron: */15 * * * *
+ */
+export async function advanceActiveCampaigns() {
+  const PREFIX = '[AgentJobs:advanceCampaigns]';
+  console.log(`${PREFIX} Starting...`);
+
+  try {
+    const { advanceCampaign } = await import('backend/autopilotService');
+
+    // Query active campaigns
+    const result = await dataAccess.queryRecords('autopilotCampaigns', {
+      filters: { status: 'active' },
+      limit: 100,
+      suppressAuth: true
+    });
+
+    const campaigns = result?.items || [];
+    if (campaigns.length === 0) {
+      console.log(`${PREFIX} No active campaigns`);
+      return { success: true, campaigns_processed: 0, steps_advanced: 0, approvals_pending: 0, executedAt: new Date().toISOString() };
+    }
+
+    let stepsAdvanced = 0;
+    let approvalsPending = 0;
+
+    const chunks = chunkArray(campaigns, 5);
+    for (const chunk of chunks) {
+      const results = await Promise.all(
+        chunk.map(async (campaign) => {
+          try {
+            const res = await advanceCampaign(campaign.campaign_id || campaign._id);
+            return { success: true, stepped: res?.stepsProcessed || 0, pending: res?.pendingApproval ? 1 : 0 };
+          } catch (err) {
+            console.error(`${PREFIX} Failed campaign ${campaign.campaign_id}:`, err.message);
+            return { success: false, stepped: 0, pending: 0 };
+          }
+        })
+      );
+
+      for (const r of results) {
+        stepsAdvanced += r.stepped;
+        approvalsPending += r.pending;
+      }
+
+      // Rate limit between chunks
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    console.log(`${PREFIX} Done — ${campaigns.length} campaigns, ${stepsAdvanced} steps, ${approvalsPending} pending`);
+    return {
+      success: true,
+      campaigns_processed: campaigns.length,
+      steps_advanced: stepsAdvanced,
+      approvals_pending: approvalsPending,
+      executedAt: new Date().toISOString()
+    };
+  } catch (err) {
+    console.error(`${PREFIX} Fatal:`, err.message);
+    return { success: false, error: err.message, executedAt: new Date().toISOString() };
+  }
+}
+
+// =============================================================================
+// 2. runSelfHealingTriage — Every 5 min
+// =============================================================================
+
+/**
+ * Detect incidents and auto-propose remediation for critical ones.
+ * Cron: */5 * * * *
+ */
+export async function runSelfHealingTriage() {
+  const PREFIX = '[AgentJobs:selfHealing]';
+  console.log(`${PREFIX} Starting...`);
+
+  try {
+    const { detectAndTriage, proposeRemediation } = await import('backend/selfHealingService');
+
+    const triageResult = await detectAndTriage();
+    const incidents = triageResult?.incidents || [];
+    const criticalCount = triageResult?.critical_count || 0;
+
+    let proposalsCreated = 0;
+
+    // Auto-propose remediation for critical incidents
+    if (criticalCount > 0) {
+      const criticals = incidents.filter(i => i.severity === 'critical');
+      for (const incident of criticals) {
+        try {
+          await proposeRemediation(incident.incident_id || incident._id);
+          proposalsCreated++;
+        } catch (err) {
+          console.error(`${PREFIX} Failed remediation proposal for ${incident.incident_id}:`, err.message);
+        }
+      }
+    }
+
+    console.log(`${PREFIX} Done — ${incidents.length} incidents, ${criticalCount} critical, ${proposalsCreated} proposals`);
+    return {
+      success: true,
+      incidents_detected: incidents.length,
+      critical_count: criticalCount,
+      proposals_created: proposalsCreated,
+      executedAt: new Date().toISOString()
+    };
+  } catch (err) {
+    console.error(`${PREFIX} Fatal:`, err.message);
+    return { success: false, error: err.message, executedAt: new Date().toISOString() };
+  }
+}
+
+// =============================================================================
+// 3. runWeeklyCurator — Sunday 3 AM
+// =============================================================================
+
+const DEPARTMENTS = ['driver', 'recruiter', 'admin', 'carrier', 'platform'];
+
+/**
+ * Run knowledge compendium curator for all departments.
+ * Cron: 0 3 * * 0
+ */
+export async function runWeeklyCurator() {
+  const PREFIX = '[AgentJobs:curator]';
+  console.log(`${PREFIX} Starting weekly curation...`);
+
+  try {
+    const { runCurator, checkShardingNeeded, generateWeeklySummary } = await import('backend/compendiumService');
+
+    // Run curator for all departments
+    const curatorResult = await runCurator('all', 7);
+
+    let totalNewPatterns = curatorResult?.new_patterns || 0;
+    let totalUpdated = curatorResult?.updated_patterns || 0;
+    let totalRegressions = curatorResult?.regressions || 0;
+    let shardingNeeded = [];
+
+    // Per-department: check sharding + generate summary
+    for (const dept of DEPARTMENTS) {
+      try {
+        const shardCheck = await checkShardingNeeded(dept);
+        if (shardCheck?.needs_sharding) {
+          shardingNeeded.push(dept);
+        }
+
+        await generateWeeklySummary(dept);
+      } catch (err) {
+        console.error(`${PREFIX} Department ${dept} error:`, err.message);
+      }
+    }
+
+    console.log(`${PREFIX} Done — ${DEPARTMENTS.length} depts, ${totalNewPatterns} new, ${totalUpdated} updated, ${totalRegressions} regressions`);
+    return {
+      success: true,
+      departments_curated: DEPARTMENTS.length,
+      new_patterns: totalNewPatterns,
+      updated_patterns: totalUpdated,
+      regressions: totalRegressions,
+      sharding_needed: shardingNeeded,
+      executedAt: new Date().toISOString()
+    };
+  } catch (err) {
+    console.error(`${PREFIX} Fatal:`, err.message);
+    return { success: false, error: err.message, executedAt: new Date().toISOString() };
+  }
+}
+
+// =============================================================================
+// 4. cleanupOldConversations — Daily 4 AM
+// =============================================================================
+
+/**
+ * Delete agent conversations and turns older than 30 days.
+ * Cron: 0 4 * * *
+ */
+export async function cleanupOldConversations() {
+  const PREFIX = '[AgentJobs:cleanup]';
+  console.log(`${PREFIX} Starting conversation cleanup...`);
+
+  try {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - 30);
+    const cutoffISO = cutoffDate.toISOString();
+
+    // Query old conversations
+    const result = await dataAccess.queryRecords('agentConversations', {
+      filters: { created_at: { lt: cutoffISO } },
+      limit: 200,
+      suppressAuth: true
+    });
+
+    const oldConversations = result?.items || [];
+    if (oldConversations.length === 0) {
+      console.log(`${PREFIX} No old conversations to clean up`);
+      return { success: true, conversations_deleted: 0, turns_deleted: 0, executedAt: new Date().toISOString() };
+    }
+
+    let turnsDeleted = 0;
+    let conversationsDeleted = 0;
+
+    const chunks = chunkArray(oldConversations, 10);
+    for (const chunk of chunks) {
+      // Delete turns first for each conversation
+      for (const convo of chunk) {
+        try {
+          const convoId = convo.conversation_id || convo._id;
+
+          // Query turns for this conversation
+          const turnsResult = await dataAccess.queryRecords('agentTurns', {
+            filters: { conversation_id: convoId },
+            limit: 200,
+            suppressAuth: true
+          });
+
+          const turns = turnsResult?.items || [];
+          if (turns.length > 0) {
+            const turnChunks = chunkArray(turns, 10);
+            for (const turnChunk of turnChunks) {
+              await Promise.all(
+                turnChunk.map(async (turn) => {
+                  try {
+                    await dataAccess.removeRecord('agentTurns', turn._id, { suppressAuth: true });
+                    turnsDeleted++;
+                  } catch (e) {
+                    console.error(`${PREFIX} Failed to delete turn:`, e.message);
+                  }
+                })
+              );
+              await new Promise(r => setTimeout(r, 200));
+            }
+          }
+
+          // Delete the conversation
+          await dataAccess.removeRecord('agentConversations', convo._id, { suppressAuth: true });
+          conversationsDeleted++;
+        } catch (err) {
+          console.error(`${PREFIX} Failed to cleanup conversation:`, err.message);
+        }
+      }
+
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    console.log(`${PREFIX} Done — ${conversationsDeleted} conversations, ${turnsDeleted} turns deleted`);
+    return {
+      success: true,
+      conversations_deleted: conversationsDeleted,
+      turns_deleted: turnsDeleted,
+      executedAt: new Date().toISOString()
+    };
+  } catch (err) {
+    console.error(`${PREFIX} Fatal:`, err.message);
+    return { success: false, error: err.message, executedAt: new Date().toISOString() };
+  }
+}

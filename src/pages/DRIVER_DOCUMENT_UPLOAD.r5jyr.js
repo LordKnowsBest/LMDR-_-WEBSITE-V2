@@ -8,9 +8,12 @@
  */
 
 import {
-    getWorkflowStatus,
-    getComplianceChecklist
+    getWorkflowStatus
 } from 'backend/onboardingWorkflowService';
+import {
+    getDocumentStatus,
+    uploadDocument as uploadDriverDocument
+} from 'backend/documentCollectionService';
 
 import wixLocationFrontend from 'wix-location-frontend';
 import wixUsers from 'wix-users';
@@ -77,19 +80,28 @@ async function handleDocumentUploadReady(component) {
         const workflowId = query.workflowId || query.wfId || '';
 
         let workflowData = {};
+        let uploadToken = '';
         if (workflowId) {
             workflowData = await getWorkflowStatus(workflowId) || {};
+            const docStatus = await getDocumentStatus(workflowId);
+            const firstPendingDoc = (docStatus?.documents || []).find(
+                (d) => d.status === 'requested' || d.status === 'rejected'
+            );
+            uploadToken = firstPendingDoc?.upload_token || '';
         }
+
+        const workflow = workflowData.workflow || {};
+        const meta = workflow.metadata || {};
 
         safeSend(component, {
             type: 'initDocumentUpload',
             data: {
                 workflowId,
-                uploadToken: workflowId,
-                driverName: workflowData.driverName || '',
-                recruiterName: workflowData.recruiterName || '',
-                recruiterEmail: workflowData.recruiterEmail || '',
-                carrierName: workflowData.carrierName || ''
+                uploadToken,
+                driverName: meta.driver_name || workflowData.driverName || '',
+                recruiterName: meta.recruiter_name || workflowData.recruiterName || '',
+                recruiterEmail: meta.recruiter_email || workflowData.recruiterEmail || '',
+                carrierName: meta.carrier_name || workflowData.carrierName || ''
             }
         });
     } catch (error) {
@@ -109,10 +121,20 @@ async function handleRequestDocumentList(component, msg) {
             safeSend(component, { type: 'documentList', data: { documents: [] } });
             return;
         }
-        const checklist = await getComplianceChecklist(workflowId);
+        const result = await getDocumentStatus(workflowId);
+        const documents = (result?.documents || []).map((doc) => ({
+            documentId: doc._id || doc.id,
+            documentType: doc.document_type || doc.documentType,
+            displayName: doc.display_name || doc.document_type || 'Document',
+            description: doc.description || '',
+            isRequired: !!doc.is_required,
+            status: doc.status || 'requested',
+            rejectionReason: doc.rejection_reason || null,
+            submittedDate: doc.submitted_date || null
+        }));
         safeSend(component, {
             type: 'documentList',
-            data: { documents: checklist || [] }
+            data: { documents }
         });
     } catch (error) {
         console.error('DRIVER_DOCUMENT_UPLOAD: requestDocumentList error:', error);
@@ -123,14 +145,23 @@ async function handleRequestDocumentList(component, msg) {
 async function handleUploadDocument(component, msg) {
     try {
         const data = msg.data || {};
-        // File upload handling requires a dedicated backend endpoint
-        // The HTML sends base64 file data in data.fileData
+        const token = data.token;
+        const documentType = data.documentType;
+        const fileData = {
+            mimeType: data.fileType,
+            size: data.fileSize,
+            fileName: data.fileName,
+            content: data.fileData
+        };
+
+        const result = await uploadDriverDocument(token, documentType, fileData);
         safeSend(component, {
             type: 'uploadResult',
             data: {
-                documentType: data.documentType,
-                success: false,
-                error: 'Upload endpoint not yet configured'
+                documentType,
+                success: !!result?.success,
+                documentId: result?.documentId || null,
+                error: result?.error || null
             }
         });
     } catch (error) {

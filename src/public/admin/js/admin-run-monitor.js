@@ -6,9 +6,9 @@
 (function () {
   'use strict';
 
-  const TABS = ['active', 'completed', 'audit', 'trends'];
-  const TAB_LABELS = { active: 'Active Runs', completed: 'Completed Runs', audit: 'Approval Audit', trends: 'Quality Trends' };
-  const TAB_ICONS = { active: 'play_circle', completed: 'check_circle', audit: 'gavel', trends: 'trending_up' };
+  const TABS = ['active', 'completed', 'audit', 'trends', 'evaluations'];
+  const TAB_LABELS = { active: 'Active Runs', completed: 'Completed Runs', audit: 'Approval Audit', trends: 'Quality Trends', evaluations: 'Evaluations' };
+  const TAB_ICONS = { active: 'play_circle', completed: 'check_circle', audit: 'gavel', trends: 'trending_up', evaluations: 'assessment' };
 
   let currentTab = 'active';
   let completedPage = 0;
@@ -33,6 +33,7 @@
       case 'runDetailLoaded': onRunDetailLoaded(payload); break;
       case 'approvalAuditLoaded': onAuditLoaded(payload); break;
       case 'qualityTrendsLoaded': onTrendsLoaded(payload); break;
+      case 'weeklyEvaluationLoaded': onEvaluationLoaded(payload); break;
     }
   });
 
@@ -127,6 +128,9 @@
         break;
       case 'trends':
         send({ action: 'getQualityTrends', days: 7 });
+        break;
+      case 'evaluations':
+        send({ action: 'getWeeklyEvaluation' });
         break;
     }
   }
@@ -585,6 +589,154 @@
         }
       }
     });
+  }
+
+  // ===================== EVALUATIONS TAB =====================
+
+  function onEvaluationLoaded(payload) {
+    if (!payload || Object.keys(payload).length === 0) { showEmpty('No evaluations available yet'); return; }
+
+    var roles = ['driver', 'recruiter', 'admin', 'carrier'];
+    var roleColors = { driver: '#3b82f6', recruiter: '#a855f7', admin: '#10b981', carrier: '#f59e0b' };
+    var trendArrows = { improving: '\u2191', declining: '\u2193', stable: '\u2192' };
+    var trendColors = { improving: '#10b981', declining: '#ef4444', stable: '#fbbf24' };
+
+    var html = '';
+
+    // Role scorecard cards
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px;">';
+    for (var i = 0; i < roles.length; i++) {
+      var role = roles[i];
+      var ev = payload[role];
+      var color = roleColors[role] || '#6b7280';
+
+      if (!ev) {
+        html += '<div style="background:rgba(255,255,255,0.03);border-radius:12px;padding:16px;border-left:3px solid ' + color + ';">';
+        html += '<div style="font-size:13px;font-weight:600;color:' + color + ';text-transform:capitalize;margin-bottom:8px;">' + esc(role) + '</div>';
+        html += '<div style="font-size:11px;color:rgba(255,255,255,0.4);">No evaluation data</div></div>';
+        continue;
+      }
+
+      var trend = ev.trend || 'stable';
+      var arrow = trendArrows[trend] || '\u2192';
+      var trendColor = trendColors[trend] || '#fbbf24';
+
+      html += '<div style="background:rgba(255,255,255,0.03);border-radius:12px;padding:16px;border-left:3px solid ' + color + ';">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">';
+      html += '<div style="font-size:13px;font-weight:600;color:' + color + ';text-transform:capitalize;">' + esc(role) + '</div>';
+      html += '<span style="color:' + trendColor + ';font-size:16px;font-weight:700;" title="' + esc(trend) + '">' + arrow + '</span>';
+      html += '</div>';
+
+      // Quality score bar
+      html += '<div style="margin-bottom:8px;">' + qualityBar(ev.avg_quality_score || 0) + '</div>';
+
+      // Stats row
+      html += '<div style="display:flex;justify-content:space-between;font-size:11px;color:rgba(255,255,255,0.5);">';
+      html += '<span>Success: ' + (ev.success_rate || 0) + '%</span>';
+      html += '<span>Runs: ' + (ev.total_runs || 0) + '</span>';
+      html += '<span>$' + ((ev.total_cost || 0).toFixed(2)) + '</span>';
+      html += '</div>';
+
+      // Period
+      html += '<div style="margin-top:6px;font-size:10px;color:rgba(255,255,255,0.3);">' + esc((ev.period_start || '').substring(0, 10)) + ' \u2014 ' + esc((ev.period_end || '').substring(0, 10)) + '</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+
+    // Regressions table (aggregate across all roles)
+    var allRegressions = [];
+    for (var r = 0; r < roles.length; r++) {
+      var evData = payload[roles[r]];
+      if (evData && Array.isArray(evData.tool_regressions)) {
+        for (var j = 0; j < evData.tool_regressions.length; j++) {
+          var reg = evData.tool_regressions[j];
+          if (!allRegressions.find(function (x) { return x.tool === reg.tool; })) {
+            allRegressions.push(reg);
+          }
+        }
+      }
+    }
+
+    if (allRegressions.length > 0) {
+      html += '<div style="font-size:13px;font-weight:600;color:rgba(255,255,255,0.8);margin-bottom:8px;display:flex;align-items:center;gap:6px;">';
+      html += '<span class="material-symbols-outlined" style="font-size:16px;color:#ef4444;">warning</span> Tool Regressions</div>';
+      html += '<div style="overflow-x:auto;margin-bottom:16px;"><table style="width:100%;border-collapse:collapse;font-size:12px;">';
+      html += '<thead><tr style="border-bottom:1px solid rgba(255,255,255,0.1);">';
+      html += '<th style="padding:8px 6px;text-align:left;color:rgba(255,255,255,0.5);font-weight:500;">Tool</th>';
+      html += '<th style="padding:8px 6px;text-align:right;color:rgba(255,255,255,0.5);font-weight:500;">Prior Rate</th>';
+      html += '<th style="padding:8px 6px;text-align:right;color:rgba(255,255,255,0.5);font-weight:500;">Current Rate</th>';
+      html += '<th style="padding:8px 6px;text-align:right;color:rgba(255,255,255,0.5);font-weight:500;">Drop</th>';
+      html += '</tr></thead><tbody>';
+
+      for (var k = 0; k < allRegressions.length; k++) {
+        var rg = allRegressions[k];
+        html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">';
+        html += '<td style="padding:8px 6px;color:rgba(255,255,255,0.7);">' + esc(rg.tool || '-') + '</td>';
+        html += '<td style="padding:8px 6px;text-align:right;color:rgba(255,255,255,0.6);">' + (rg.prior_rate || 0) + '%</td>';
+        html += '<td style="padding:8px 6px;text-align:right;color:rgba(255,255,255,0.6);">' + (rg.current_rate || 0) + '%</td>';
+        html += '<td style="padding:8px 6px;text-align:right;color:#ef4444;font-weight:600;">-' + (rg.drop_pct || 0) + '%</td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+
+    // Improvement actions grouped by category
+    var allActions = [];
+    for (var m = 0; m < roles.length; m++) {
+      var evAct = payload[roles[m]];
+      if (evAct && Array.isArray(evAct.improvement_actions)) {
+        for (var n = 0; n < evAct.improvement_actions.length; n++) {
+          allActions.push(evAct.improvement_actions[n]);
+        }
+      }
+    }
+
+    if (allActions.length > 0) {
+      var categories = {};
+      for (var p = 0; p < allActions.length; p++) {
+        var cat = allActions[p].category || 'other';
+        if (!categories[cat]) categories[cat] = [];
+        categories[cat].push(allActions[p]);
+      }
+
+      var catIcons = { quality: 'star', cost: 'payments', approval: 'gavel', engagement: 'group', regression: 'warning', other: 'info' };
+      var catColors = { quality: '#a855f7', cost: '#fbbf24', approval: '#3b82f6', engagement: '#10b981', regression: '#ef4444', other: '#6b7280' };
+      var sevColors = { critical: '#ef4444', high: '#f59e0b', medium: '#3b82f6', low: '#6b7280' };
+
+      html += '<div style="font-size:13px;font-weight:600;color:rgba(255,255,255,0.8);margin-bottom:8px;display:flex;align-items:center;gap:6px;">';
+      html += '<span class="material-symbols-outlined" style="font-size:16px;color:#fbbf24;">lightbulb</span> Improvement Actions</div>';
+
+      var catKeys = Object.keys(categories);
+      for (var q = 0; q < catKeys.length; q++) {
+        var ck = catKeys[q];
+        var items = categories[ck];
+        var cIcon = catIcons[ck] || 'info';
+        var cColor = catColors[ck] || '#6b7280';
+
+        html += '<div style="margin-bottom:12px;">';
+        html += '<div style="display:flex;align-items:center;gap:4px;margin-bottom:6px;">';
+        html += '<span class="material-symbols-outlined" style="font-size:14px;color:' + cColor + ';">' + cIcon + '</span>';
+        html += '<span style="font-size:12px;font-weight:600;color:' + cColor + ';text-transform:capitalize;">' + esc(ck) + '</span>';
+        html += '</div>';
+
+        for (var u = 0; u < items.length; u++) {
+          var item = items[u];
+          var sColor = sevColors[item.severity] || '#6b7280';
+          html += '<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:8px 10px;margin-bottom:4px;display:flex;align-items:start;gap:8px;">';
+          html += '<span style="background:' + sColor + '22;color:' + sColor + ';border-radius:9999px;padding:1px 6px;font-size:10px;font-weight:500;white-space:nowrap;margin-top:1px;">' + esc(item.severity || 'info') + '</span>';
+          html += '<span style="font-size:12px;color:rgba(255,255,255,0.7);">' + esc(item.action || '') + '</span>';
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+    }
+
+    if (allRegressions.length === 0 && allActions.length === 0) {
+      html += '<div style="text-align:center;padding:20px;color:rgba(255,255,255,0.4);font-size:12px;">No regressions or improvement actions detected.</div>';
+    }
+
+    var el = document.getElementById('rmContent');
+    if (el) el.innerHTML = html;
   }
 
 })();

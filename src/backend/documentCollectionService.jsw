@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as dataAccess from 'backend/dataAccess';
 import * as emailService from 'backend/emailService';
+import { extractInfoFromDocument } from 'backend/ocrService';
 
 // Collection keys for dataAccess routing
 const COLLECTION_KEYS = {
@@ -14,6 +15,7 @@ const COLLECTION_KEYS = {
 // ============================================================================
 
 const CONFIG = {
+    baseUrl: 'https://www.lastmiledr.app',
     // Document types enum
     documentTypes: {
         CDL_FRONT: 'cdl_front',
@@ -146,7 +148,7 @@ export async function requestDocuments(workflowId, documentTypes) {
             ...workflow, documents_status: 'pending', status: 'documents_requested', _updatedDate: now
         }, { suppressAuth: true });
 
-        return { success: true, requestIds, uploadPortalUrl: `https://lastmilecdl.com/document-upload?token=${token}`, token, tokenExpiry: expiry };
+        return { success: true, requestIds, uploadPortalUrl: `${CONFIG.baseUrl}/document-upload?token=${token}`, token, tokenExpiry: expiry };
     } catch (error) {
         console.error('[DocumentCollection] Error requesting documents:', error);
         return { success: false, error: error.message };
@@ -211,8 +213,19 @@ export async function uploadDocument(token, documentType, fileData) {
             file_hash: fileHash, submitted_date: now, _updatedDate: now
         };
 
+        // Optional OCR extraction for CDL uploads when raw base64 is provided.
+        if ((documentType === CONFIG.documentTypes.CDL_FRONT || documentType === CONFIG.documentTypes.CDL_BACK) &&
+            fileData.content && fileData.mimeType) {
+            const ocrResult = await extractCdlData(fileData.content, fileData.mimeType, documentType);
+            if (ocrResult.success) {
+                updatedDoc.ocr_data = ocrResult.extracted;
+                const autoVerification = await autoVerifyCdlData(docRequest.driver_id, ocrResult.extracted);
+                updatedDoc.auto_verification = autoVerification;
+            }
+        }
+
         await dataAccess.updateRecord(COLLECTION_KEYS.documentRequests, updatedDoc, { suppressAuth: true });
-        return { success: true, documentId: docRequest._id, status: CONFIG.status.UPLOADED, verificationStatus: 'pending_review' };
+        return { success: true, documentId: docRequest._id, status: CONFIG.status.UPLOADED, verificationStatus: 'pending_review', ocrExtracted: !!updatedDoc.ocr_data };
     } catch (error) {
         console.error('[DocumentCollection] Error uploading document:', error);
         return { success: false, error: error.message };
@@ -267,7 +280,7 @@ export async function sendDocumentReminder(documentId) {
         if (driverProfile?.wix_member_id) {
             await emailService.sendDocumentReminderEmail(driverProfile.wix_member_id, {
                 documentName: docRequest.display_name,
-                uploadUrl: `https://lastmilecdl.com/document-upload?token=${token}`,
+                uploadUrl: `${CONFIG.baseUrl}/document-upload?token=${token}`,
                 driverName: driverProfile.display_name || 'Driver'
             });
         }
@@ -393,7 +406,7 @@ export async function regenerateUploadToken(workflowId) {
             await dataAccess.updateRecord(COLLECTION_KEYS.documentRequests, { ...doc, upload_token: token, upload_token_expiry: expiry, _updatedDate: now }, { suppressAuth: true });
         }
 
-        return { success: true, token, tokenExpiry: expiry, uploadPortalUrl: `https://lastmilecdl.com/document-upload?token=${token}`, documentsUpdated: result.items.length };
+        return { success: true, token, tokenExpiry: expiry, uploadPortalUrl: `${CONFIG.baseUrl}/document-upload?token=${token}`, documentsUpdated: result.items.length };
     } catch (error) {
         console.error('[DocumentCollection] Error regenerating token:', error);
         return { success: false, error: error.message };
@@ -427,5 +440,70 @@ export async function sendAutoReminders() {
     } catch (error) {
         console.error('[DocumentCollection] Error in sendAutoReminders:', error);
         return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// OCR + AUTO-VERIFICATION
+// ============================================================================
+
+/**
+ * Extract structured CDL fields using OCR service.
+ * @param {string} base64Data Raw base64 document content (no data URL prefix)
+ * @param {string} mimeType Mime type, e.g. image/jpeg or application/pdf
+ * @param {string} documentType cdl_front | cdl_back
+ * @returns {Promise<{success: boolean, extracted?: Object, error?: string}>}
+ */
+export async function extractCdlData(base64Data, mimeType, documentType = CONFIG.documentTypes.CDL_FRONT) {
+    try {
+        if (!base64Data || !mimeType) return { success: false, error: 'base64Data and mimeType are required' };
+        const docType = documentType === CONFIG.documentTypes.CDL_BACK ? 'CDL_BACK' : 'CDL_FRONT';
+        const result = await extractInfoFromDocument(base64Data, mimeType, docType);
+        if (!result || result.success === false || result.error) {
+            return { success: false, error: result?.error || 'OCR extraction failed' };
+        }
+
+        return {
+            success: true,
+            extracted: {
+                fullName: result.fullName || result.driverName || null,
+                licenseNumber: result.licenseNumber || null,
+                state: result.state || null,
+                dob: result.dob || null,
+                expirationDate: result.expirationDate || null,
+                cdlClass: result.cdlClass || null,
+                endorsements: Array.isArray(result.endorsements) ? result.endorsements : [],
+                restrictions: Array.isArray(result.restrictions) ? result.restrictions : []
+            }
+        };
+    } catch (error) {
+        console.error('[DocumentCollection] extractCdlData error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+async function autoVerifyCdlData(driverId, extracted) {
+    try {
+        if (!driverId || !extracted) return { autoVerified: false, reason: 'Missing driver or extracted data' };
+        const profile = await dataAccess.getRecord(COLLECTION_KEYS.driverProfiles, driverId, { suppressAuth: true });
+        if (!profile) return { autoVerified: false, reason: 'Driver profile not found' };
+
+        const profileName = String(profile.display_name || profile.driver_name || '').trim().toLowerCase();
+        const extractedName = String(extracted.fullName || '').trim().toLowerCase();
+        const nameMatch = !!profileName && !!extractedName && profileName === extractedName;
+
+        const profileLicense = String(profile.license_number || profile.cdl_number || '').trim().toLowerCase();
+        const extractedLicense = String(extracted.licenseNumber || '').trim().toLowerCase();
+        const licenseMatch = !!profileLicense && !!extractedLicense && profileLicense === extractedLicense;
+
+        const autoVerified = nameMatch || licenseMatch;
+        return {
+            autoVerified,
+            nameMatch,
+            licenseMatch,
+            checkedAt: new Date().toISOString()
+        };
+    } catch (error) {
+        return { autoVerified: false, reason: error.message };
     }
 }

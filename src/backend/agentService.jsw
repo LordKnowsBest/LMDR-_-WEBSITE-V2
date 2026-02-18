@@ -727,6 +727,84 @@ const TOOL_DEFINITIONS = {
       rollback_strategy: 'revert_config_changes',
       audit_fields: ['plan_id', 'approved_by']
     }
+  },
+
+  // Pipeline Execution Agent tools
+  initiate_voice_screen: {
+    name: 'initiate_voice_screen',
+    description: 'Create a VAPI voice assistant from a template and initiate an outbound screening call to a candidate',
+    input_schema: {
+      type: 'object',
+      properties: {
+        template_id: { type: 'string', description: 'Voice agent template ID (e.g. vat_qualification, vat_cold_outreach)' },
+        candidate_id: { type: 'string', description: 'Candidate/driver record ID' },
+        candidate_name: { type: 'string', description: 'Candidate display name' },
+        candidate_phone: { type: 'string', description: 'Candidate phone number' },
+        carrier_dot: { type: 'string', description: 'Carrier DOT number' },
+        carrier_name: { type: 'string', description: 'Carrier display name' }
+      },
+      required: ['template_id', 'candidate_id', 'candidate_phone', 'carrier_dot']
+    },
+    roles: ['recruiter'],
+    serviceModule: 'backend/voiceAgentTemplates',
+    serviceFunction: 'createAssistantFromTemplate',
+    policy: {
+      risk_level: 'execute_high',
+      requires_approval: true,
+      rate_limit: 10,
+      success_metric: 'assistant_created_and_call_initiated',
+      rollback_strategy: null,
+      audit_fields: ['template_id', 'candidate_id', 'carrier_dot']
+    }
+  },
+  get_pipeline_health: {
+    name: 'get_pipeline_health',
+    description: 'Get pipeline health metrics — SLA compliance rate, conversion rates, average time to contact',
+    input_schema: {
+      type: 'object',
+      properties: {
+        recruiter_id: { type: 'string', description: 'Recruiter user ID' },
+        days: { type: 'number', description: 'Look-back period in days (default 7)' }
+      },
+      required: ['recruiter_id']
+    },
+    roles: ['recruiter', 'admin'],
+    serviceModule: 'backend/pipelineExecutionAgent',
+    serviceFunction: 'getPipelineHealth',
+    policy: {
+      risk_level: 'read',
+      requires_approval: false,
+      rate_limit: 20,
+      success_metric: 'health_metrics_returned',
+      rollback_strategy: null,
+      audit_fields: ['recruiter_id', 'days']
+    }
+  },
+  emit_pipeline_event: {
+    name: 'emit_pipeline_event',
+    description: 'Fire a pipeline event to the event bus for processing by the pipeline execution agent',
+    input_schema: {
+      type: 'object',
+      properties: {
+        event_type: { type: 'string', description: 'Event type: stage_change, no_response, call_completed, document_received, application_submitted' },
+        candidate_id: { type: 'string', description: 'Candidate/driver record ID' },
+        carrier_dot: { type: 'string', description: 'Carrier DOT number' },
+        stage_from: { type: 'string', description: 'Previous pipeline stage' },
+        stage_to: { type: 'string', description: 'New pipeline stage' }
+      },
+      required: ['event_type', 'candidate_id']
+    },
+    roles: ['recruiter'],
+    serviceModule: 'backend/pipelineEventBus',
+    serviceFunction: 'emitEvent',
+    policy: {
+      risk_level: 'execute_low',
+      requires_approval: false,
+      rate_limit: 30,
+      success_metric: 'event_emitted',
+      rollback_strategy: null,
+      audit_fields: ['event_type', 'candidate_id']
+    }
   }
 };
 
@@ -768,7 +846,7 @@ export function validateToolExecution(toolName, userId) {
 // Role system prompts
 const ROLE_SYSTEM_PROMPTS = {
   driver: 'You are LMDR\'s AI assistant for CDL truck drivers. Help drivers find carrier matches, understand safety data, check road conditions, and navigate their job search. Be friendly, practical, and driver-focused. When you have tools available, use them to provide real data rather than generic answers. You can check compensation benchmarks to understand fair pay rates for your experience and region.',
-  recruiter: 'You are VelocityMatch\'s AI recruiting assistant. Help recruiters find qualified drivers, manage their pipeline, schedule interviews, track analytics, and optimize their recruiting workflow. Be efficient and data-driven. You have access to market intelligence including carrier demand signals, lane-level demand analysis, and compensation benchmarks from across the platform. You can start autopilot campaigns for automated outreach with approval-gated sends, and check campaign status.',
+  recruiter: 'You are VelocityMatch\'s AI recruiting assistant. Help recruiters find qualified drivers, manage their pipeline, schedule interviews, track analytics, and optimize their recruiting workflow. Be efficient and data-driven. You have access to market intelligence including carrier demand signals, lane-level demand analysis, and compensation benchmarks from across the platform. You can start autopilot campaigns for automated outreach with approval-gated sends, check campaign status, initiate voice screening calls, monitor pipeline health and SLA compliance, and fire pipeline events.',
   admin: 'You are the VelocityMatch platform admin assistant. Help administrators monitor system health, manage AI configurations, review driver and carrier data, and handle platform operations. You can trigger the Knowledge Curator to analyze recent agent runs and update department compendiums. You can detect anomalies, propose fixes, and execute approved remediations. The self-healing pipeline automatically triages issues against known patterns.',
   carrier: 'You are VelocityMatch\'s B2B assistant for carrier accounts. Help carriers understand their hiring pipeline, review match signals, and manage their account. You can access hiring benchmarks and conversion insights to understand how your recruiting pipeline compares to platform averages.'
 };
@@ -785,7 +863,8 @@ function getToolsForRole(role) {
 }
 
 // Execute a tool call against the real backend service
-async function executeTool(toolName, toolInput, runContext = {}) {
+// Exported for VAPI webhook template-scoped tool access
+export async function executeTool(toolName, toolInput, runContext = {}) {
   const toolDef = TOOL_DEFINITIONS[toolName];
   if (!toolDef) {
     return { error: `Unknown tool: ${toolName}` };

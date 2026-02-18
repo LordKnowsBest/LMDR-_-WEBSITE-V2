@@ -1,0 +1,84 @@
+// ============================================================================
+// PIPELINE JOBS - Scheduled cron jobs for pipeline SLA enforcement
+// ============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+import { enforceContactSLA } from 'backend/pipelineExecutionAgent';
+import { reprocessFailedEvents, emitEvent } from 'backend/pipelineEventBus';
+import { isTCPACompliant } from 'backend/utils/tcpaGuard';
+
+const COLLECTIONS = {
+  events: 'pipelineEvents',
+  interests: 'driverCarrierInterests'
+};
+
+/**
+ * Enforce contact SLAs — runs every 5 minutes.
+ * Checks recent stage_change events for SLA breaches and creates urgent outreach actions.
+ */
+export async function enforceContactSLAs() {
+  try {
+    // Get recent unprocessed stage_change events from the last hour
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.events, {
+      filters: {
+        processed: 'No',
+        event_type: 'stage_change'
+      },
+      sort: [{ field: 'created_at', direction: 'asc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    const events = (result.items || []).filter(e => e.created_at >= oneHourAgo);
+    let breached = 0;
+    let actioned = 0;
+
+    for (const event of events) {
+      if (!event.candidate_id) continue;
+
+      const slaStatus = await enforceContactSLA(event.candidate_id);
+
+      if (!slaStatus.inSLA && slaStatus.action_needed) {
+        breached++;
+
+        // Only take action during TCPA-compliant hours
+        if (isTCPACompliant()) {
+          await emitEvent('no_response', {
+            candidate_id: event.candidate_id,
+            carrier_dot: event.carrier_dot,
+            recruiter_id: event.recruiter_id,
+            metadata: {
+              sla_breach: true,
+              elapsed_ms: slaStatus.elapsed_ms,
+              original_event_id: event.event_id,
+              attempt_count: 0
+            }
+          });
+          actioned++;
+        }
+      }
+    }
+
+    console.log(`[pipelineJobs] SLA enforcement: ${events.length} checked, ${breached} breached, ${actioned} actioned`);
+    return { checked: events.length, breached, actioned };
+  } catch (error) {
+    console.error('[pipelineJobs] enforceContactSLAs error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Reprocess failed pipeline events — runs every 15 minutes.
+ */
+export async function reprocessFailedPipelineEvents() {
+  try {
+    const result = await reprocessFailedEvents(50);
+    console.log(`[pipelineJobs] Reprocessed: ${result.reprocessed} success, ${result.failed} failed of ${result.total} total`);
+    return result;
+  } catch (error) {
+    console.error('[pipelineJobs] reprocessFailedPipelineEvents error:', error.message);
+    return { error: error.message };
+  }
+}

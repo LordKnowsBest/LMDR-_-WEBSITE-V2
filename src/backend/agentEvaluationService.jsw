@@ -1,0 +1,552 @@
+// =============================================================================
+// AGENT EVALUATION SERVICE — Continuous improvement feedback loop
+//
+// Closes the loop: Outcome → Scorecard → Regression Detection →
+// Improvement Actions → Compendium Update
+// =============================================================================
+
+import * as dataAccess from 'backend/dataAccess';
+
+const ROLES = ['driver', 'recruiter', 'admin', 'carrier'];
+const COLLECTIONS = {
+  runs: 'agentRuns',
+  steps: 'agentSteps',
+  gates: 'approvalGates',
+  outcomes: 'runOutcomes',
+  compendium: 'compendiumEntries',
+  evaluations: 'agentEvaluations'
+};
+
+function generateId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// =============================================================================
+// 1. computeWeeklyScorecard(role, days=7)
+// =============================================================================
+
+/**
+ * Aggregate run metrics for a role over the given period.
+ * Returns scorecard with quality trends, tool effectiveness, cost, and approval stats.
+ */
+export async function computeWeeklyScorecard(role, days = 7) {
+  const PREFIX = `[Evaluation:scorecard:${role}]`;
+  const now = new Date();
+  const periodEnd = now.toISOString();
+  const periodStart = new Date(now.getTime() - days * 86400000).toISOString();
+  const priorStart = new Date(now.getTime() - days * 2 * 86400000).toISOString();
+
+  try {
+    // Current period runs
+    const runsResult = await dataAccess.queryRecords(COLLECTIONS.runs, {
+      filters: { role, started_at: { gte: periodStart } },
+      limit: 500,
+      suppressAuth: true
+    });
+    const runs = runsResult?.items || [];
+
+    // Prior period runs for trend calculation
+    const priorResult = await dataAccess.queryRecords(COLLECTIONS.runs, {
+      filters: { role, started_at: { gte: priorStart, lt: periodStart } },
+      limit: 500,
+      suppressAuth: true
+    });
+    const priorRuns = priorResult?.items || [];
+
+    // Current period outcomes
+    const currentRunIds = runs.map(r => r.run_id).filter(Boolean);
+    let outcomes = [];
+    if (currentRunIds.length > 0) {
+      const outResult = await dataAccess.queryRecords(COLLECTIONS.outcomes, {
+        filters: { run_id: { in: currentRunIds } },
+        limit: 500,
+        suppressAuth: true
+      });
+      outcomes = outResult?.items || [];
+    }
+
+    // Prior period outcomes for trend
+    const priorRunIds = priorRuns.map(r => r.run_id).filter(Boolean);
+    let priorOutcomes = [];
+    if (priorRunIds.length > 0) {
+      const priorOutResult = await dataAccess.queryRecords(COLLECTIONS.outcomes, {
+        filters: { run_id: { in: priorRunIds } },
+        limit: 500,
+        suppressAuth: true
+      });
+      priorOutcomes = priorOutResult?.items || [];
+    }
+
+    // Compute current quality
+    const qualityScores = outcomes.map(o => o.quality_score).filter(s => typeof s === 'number');
+    const avgQuality = qualityScores.length > 0
+      ? Math.round(qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length * 10) / 10
+      : 0;
+
+    // Prior quality for trend
+    const priorScores = priorOutcomes.map(o => o.quality_score).filter(s => typeof s === 'number');
+    const priorAvgQuality = priorScores.length > 0
+      ? priorScores.reduce((a, b) => a + b, 0) / priorScores.length
+      : 0;
+
+    // Trend
+    const qualityDelta = avgQuality - priorAvgQuality;
+    const trend = Math.abs(qualityDelta) < 5 ? 'stable' : qualityDelta > 0 ? 'improving' : 'declining';
+
+    // Success/partial/failure rates
+    const successCount = outcomes.filter(o => o.objective_met === 'yes').length;
+    const partialCount = outcomes.filter(o => o.objective_met === 'partial').length;
+    const failureCount = outcomes.filter(o => o.objective_met === 'no').length;
+    const totalOutcomes = outcomes.length || 1;
+    const successRate = Math.round(successCount / totalOutcomes * 100 * 10) / 10;
+    const partialRate = Math.round(partialCount / totalOutcomes * 100 * 10) / 10;
+    const failureRate = Math.round(failureCount / totalOutcomes * 100 * 10) / 10;
+
+    // Cost efficiency
+    const totalTokens = runs.reduce((sum, r) => sum + (r.total_tokens || 0), 0);
+    const totalCost = runs.reduce((sum, r) => sum + (r.total_cost_usd || 0), 0);
+    const avgTokensPerRun = runs.length > 0 ? Math.round(totalTokens / runs.length) : 0;
+
+    // Per-tool effectiveness from steps
+    const toolStats = await computeToolEffectiveness(currentRunIds);
+
+    // Approval gate stats
+    const gateStats = await computeGateStats(currentRunIds);
+
+    return {
+      role,
+      period: { start: periodStart, end: periodEnd, days },
+      quality: { avg_score: avgQuality, trend, delta: Math.round(qualityDelta * 10) / 10 },
+      rates: { success: successRate, partial: partialRate, failure: failureRate },
+      volume: { total_runs: runs.length, total_outcomes: outcomes.length },
+      cost: { total_tokens: totalTokens, total_usd: Math.round(totalCost * 10000) / 10000, avg_tokens_per_run: avgTokensPerRun },
+      tools: toolStats,
+      gates: gateStats
+    };
+  } catch (err) {
+    console.error(`${PREFIX} Error:`, err.message);
+    return { role, error: err.message };
+  }
+}
+
+async function computeToolEffectiveness(runIds) {
+  if (!runIds || runIds.length === 0) return [];
+
+  try {
+    const stepsResult = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { run_id: { in: runIds } },
+      limit: 2000,
+      suppressAuth: true
+    });
+    const steps = stepsResult?.items || [];
+
+    // Group by tool
+    const byTool = {};
+    for (const step of steps) {
+      const tool = step.tool_name || 'unknown';
+      if (!byTool[tool]) byTool[tool] = { total: 0, success: 0, totalLatency: 0 };
+      byTool[tool].total++;
+      if (step.status === 'completed') byTool[tool].success++;
+      byTool[tool].totalLatency += step.latency_ms || 0;
+    }
+
+    return Object.entries(byTool)
+      .map(([tool, stats]) => ({
+        tool,
+        total: stats.total,
+        success_rate: Math.round(stats.success / stats.total * 100),
+        avg_latency_ms: Math.round(stats.totalLatency / stats.total)
+      }))
+      .sort((a, b) => b.total - a.total);
+  } catch (err) {
+    return [];
+  }
+}
+
+async function computeGateStats(runIds) {
+  if (!runIds || runIds.length === 0) return { total: 0, rejection_rate: 0, timeout_rate: 0, most_rejected: [] };
+
+  try {
+    const gatesResult = await dataAccess.queryRecords(COLLECTIONS.gates, {
+      filters: { run_id: { in: runIds } },
+      limit: 500,
+      suppressAuth: true
+    });
+    const gates = gatesResult?.items || [];
+
+    const total = gates.length;
+    if (total === 0) return { total: 0, rejection_rate: 0, timeout_rate: 0, most_rejected: [] };
+
+    const rejected = gates.filter(g => g.decision === 'rejected').length;
+    const timedOut = gates.filter(g => g.decision === 'timeout').length;
+
+    // Most-rejected tools
+    const rejByTool = {};
+    for (const g of gates.filter(g => g.decision === 'rejected')) {
+      const tool = g.tool_name || 'unknown';
+      rejByTool[tool] = (rejByTool[tool] || 0) + 1;
+    }
+    const mostRejected = Object.entries(rejByTool)
+      .map(([tool, count]) => ({ tool, rejections: count }))
+      .sort((a, b) => b.rejections - a.rejections)
+      .slice(0, 5);
+
+    return {
+      total,
+      rejection_rate: Math.round(rejected / total * 100),
+      timeout_rate: Math.round(timedOut / total * 100),
+      most_rejected: mostRejected
+    };
+  } catch (err) {
+    return { total: 0, rejection_rate: 0, timeout_rate: 0, most_rejected: [] };
+  }
+}
+
+// =============================================================================
+// 2. detectToolRegressions(days=14)
+// =============================================================================
+
+/**
+ * Compare tool success rates between current 7-day window and prior 7-day window.
+ * Flags tools with >15% absolute drop AND sample size >= 3 in both windows.
+ */
+export async function detectToolRegressions(days = 14) {
+  const PREFIX = '[Evaluation:regressions]';
+  const now = new Date();
+  const midpoint = new Date(now.getTime() - (days / 2) * 86400000).toISOString();
+  const start = new Date(now.getTime() - days * 86400000).toISOString();
+
+  try {
+    // Current window steps (last 7 days)
+    const currentResult = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { executed_at: { gte: midpoint } },
+      limit: 5000,
+      suppressAuth: true
+    });
+    const currentSteps = currentResult?.items || [];
+
+    // Prior window steps (7-14 days ago)
+    const priorResult = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { executed_at: { gte: start, lt: midpoint } },
+      limit: 5000,
+      suppressAuth: true
+    });
+    const priorSteps = priorResult?.items || [];
+
+    // Compute per-tool rates
+    const currentRates = computeToolRates(currentSteps);
+    const priorRates = computeToolRates(priorSteps);
+
+    // Detect regressions
+    const regressions = [];
+    for (const [tool, current] of Object.entries(currentRates)) {
+      const prior = priorRates[tool];
+      if (!prior) continue;
+
+      // Need >= 3 samples in both windows
+      if (current.total < 3 || prior.total < 3) continue;
+
+      const drop = prior.rate - current.rate;
+      if (drop > 15) {
+        regressions.push({
+          tool,
+          current_rate: current.rate,
+          prior_rate: prior.rate,
+          drop_pct: Math.round(drop * 10) / 10,
+          current_samples: current.total,
+          prior_samples: prior.total
+        });
+      }
+    }
+
+    regressions.sort((a, b) => b.drop_pct - a.drop_pct);
+
+    console.log(`${PREFIX} Found ${regressions.length} regressions across ${Object.keys(currentRates).length} tools`);
+    return { regressions, period_days: days };
+  } catch (err) {
+    console.error(`${PREFIX} Error:`, err.message);
+    return { regressions: [], error: err.message };
+  }
+}
+
+function computeToolRates(steps) {
+  const byTool = {};
+  for (const step of steps) {
+    const tool = step.tool_name || 'unknown';
+    if (!byTool[tool]) byTool[tool] = { total: 0, success: 0 };
+    byTool[tool].total++;
+    if (step.status === 'completed') byTool[tool].success++;
+  }
+
+  const rates = {};
+  for (const [tool, stats] of Object.entries(byTool)) {
+    rates[tool] = {
+      total: stats.total,
+      rate: Math.round(stats.success / stats.total * 100)
+    };
+  }
+  return rates;
+}
+
+// =============================================================================
+// 3. generateImprovementActions(scorecardData)
+// =============================================================================
+
+/**
+ * Rule-based improvement recommendations from scorecard data.
+ * No AI calls — pure heuristic analysis.
+ */
+export async function generateImprovementActions(scorecardData) {
+  const actions = [];
+  const role = scorecardData?.role || 'unknown';
+
+  // Quality declining → identify degraded tools
+  if (scorecardData?.quality?.trend === 'declining') {
+    const degradedTools = (scorecardData?.tools || [])
+      .filter(t => t.success_rate < 70)
+      .map(t => t.tool)
+      .slice(0, 3);
+
+    actions.push({
+      category: 'quality',
+      severity: 'high',
+      action: `Quality declining for ${role} role (delta: ${scorecardData.quality.delta}). Review prompt templates for: ${degradedTools.join(', ') || 'all tools'}.`,
+      tools_affected: degradedTools
+    });
+  }
+
+  // Cost high (>5K tokens per successful run)
+  if (scorecardData?.cost?.avg_tokens_per_run > 5000) {
+    actions.push({
+      category: 'cost',
+      severity: 'medium',
+      action: `High token usage (${scorecardData.cost.avg_tokens_per_run} avg/run) for ${role}. Consider using smaller models for read-only tools.`,
+      tools_affected: []
+    });
+  }
+
+  // Rejection rate > 30%
+  if (scorecardData?.gates?.rejection_rate > 30) {
+    const topRejected = (scorecardData?.gates?.most_rejected || []).map(r => r.tool);
+    actions.push({
+      category: 'approval',
+      severity: 'medium',
+      action: `High rejection rate (${scorecardData.gates.rejection_rate}%) for ${role}. Consider adjusting risk levels for: ${topRejected.join(', ') || 'high-rejection tools'}.`,
+      tools_affected: topRejected
+    });
+  }
+
+  // Success rate < 50%
+  if (scorecardData?.rates?.success < 50 && scorecardData?.volume?.total_runs > 0) {
+    actions.push({
+      category: 'quality',
+      severity: 'critical',
+      action: `Low success rate (${scorecardData.rates.success}%) for ${role}. Review response quality and tool argument validation.`,
+      tools_affected: []
+    });
+  }
+
+  // Failure rate > 25%
+  if (scorecardData?.rates?.failure > 25) {
+    actions.push({
+      category: 'quality',
+      severity: 'high',
+      action: `High failure rate (${scorecardData.rates.failure}%) for ${role}. Investigate error patterns in failed runs.`,
+      tools_affected: []
+    });
+  }
+
+  // Timeout rate > 20% on gates
+  if (scorecardData?.gates?.timeout_rate > 20) {
+    actions.push({
+      category: 'approval',
+      severity: 'low',
+      action: `High gate timeout rate (${scorecardData.gates.timeout_rate}%) for ${role}. Consider auto-approve for low-risk tools or increase timeout window.`,
+      tools_affected: []
+    });
+  }
+
+  // No runs at all — engagement concern
+  if (scorecardData?.volume?.total_runs === 0) {
+    actions.push({
+      category: 'engagement',
+      severity: 'low',
+      action: `Zero runs for ${role} in the evaluation period. Verify agent availability and user awareness.`,
+      tools_affected: []
+    });
+  }
+
+  return actions;
+}
+
+// =============================================================================
+// 4. runWeeklyEvaluation() — Sunday 4 AM
+// =============================================================================
+
+/**
+ * Compute scorecards for all roles, detect regressions, generate actions, persist.
+ * Cron: 0 4 * * 0
+ */
+export async function runWeeklyEvaluation() {
+  const PREFIX = '[Evaluation:weekly]';
+  console.log(`${PREFIX} Starting weekly evaluation...`);
+
+  try {
+    const now = new Date();
+    const periodEnd = now.toISOString().split('T')[0];
+    const periodStart = new Date(now.getTime() - 7 * 86400000).toISOString().split('T')[0];
+
+    // Compute scorecards for all roles
+    const scorecards = {};
+    for (const role of ROLES) {
+      scorecards[role] = await computeWeeklyScorecard(role, 7);
+    }
+
+    // Detect regressions across all tools (14-day window)
+    const regressionResult = await detectToolRegressions(14);
+    const regressions = regressionResult?.regressions || [];
+
+    // Generate improvement actions per role
+    const allActions = {};
+    let totalActions = 0;
+    const criticalRoles = [];
+
+    for (const role of ROLES) {
+      const sc = scorecards[role];
+      const roleActions = await generateImprovementActions(sc);
+
+      // Add regression-specific actions for this role's tools
+      const roleTools = (sc?.tools || []).map(t => t.tool);
+      const roleRegressions = regressions.filter(r => roleTools.includes(r.tool));
+      if (roleRegressions.length > 0) {
+        roleActions.push({
+          category: 'regression',
+          severity: 'high',
+          action: `${roleRegressions.length} tool regression(s) detected: ${roleRegressions.map(r => `${r.tool} (${r.drop_pct}% drop)`).join(', ')}`,
+          tools_affected: roleRegressions.map(r => r.tool)
+        });
+      }
+
+      allActions[role] = roleActions;
+      totalActions += roleActions.length;
+
+      // Track critical quality roles
+      if (sc?.quality?.avg_score < 40 && sc?.volume?.total_runs > 0) {
+        criticalRoles.push(role);
+      }
+    }
+
+    // Persist evaluation records
+    for (const role of ROLES) {
+      const sc = scorecards[role];
+      const record = {
+        evaluation_id: generateId('eval'),
+        period_start: periodStart,
+        period_end: periodEnd,
+        role,
+        avg_quality_score: sc?.quality?.avg_score || 0,
+        success_rate: sc?.rates?.success || 0,
+        total_runs: sc?.volume?.total_runs || 0,
+        total_cost: sc?.cost?.total_usd || 0,
+        tool_regressions: JSON.stringify(regressions.filter(r => (sc?.tools || []).map(t => t.tool).includes(r.tool))),
+        improvement_actions: JSON.stringify(allActions[role] || []),
+        trend: sc?.quality?.trend || 'stable',
+        created_at: now.toISOString()
+      };
+
+      try {
+        await dataAccess.insertRecord(COLLECTIONS.evaluations, record, { suppressAuth: true });
+      } catch (err) {
+        console.error(`${PREFIX} Failed to persist evaluation for ${role}:`, err.message);
+      }
+    }
+
+    // Write summary to compendium
+    try {
+      const { addEntry } = await import('backend/compendiumService');
+      await addEntry({
+        department: 'admin',
+        category: 'evaluation',
+        key: `weekly_${periodEnd}`,
+        content: JSON.stringify({
+          period: { start: periodStart, end: periodEnd },
+          roles: ROLES.map(r => ({
+            role: r,
+            quality: scorecards[r]?.quality?.avg_score || 0,
+            trend: scorecards[r]?.quality?.trend || 'stable',
+            runs: scorecards[r]?.volume?.total_runs || 0,
+            actions: (allActions[r] || []).length
+          })),
+          regressions_count: regressions.length,
+          critical_roles: criticalRoles
+        }),
+        confidence: 0.9,
+        source: 'automated_evaluation'
+      });
+    } catch (err) {
+      console.error(`${PREFIX} Failed to write compendium entry:`, err.message);
+    }
+
+    // Log CRITICAL alert if any role quality < 40
+    if (criticalRoles.length > 0) {
+      console.error(`${PREFIX} CRITICAL: Low quality roles: ${criticalRoles.join(', ')}`);
+      try {
+        const { log } = await import('backend/observabilityService');
+        await log('CRITICAL', 'agent_evaluation', `Weekly evaluation: critical quality for roles: ${criticalRoles.join(', ')}`, {
+          criticalRoles,
+          period: { start: periodStart, end: periodEnd }
+        });
+      } catch (err) {
+        // Observability logging is best-effort
+      }
+    }
+
+    console.log(`${PREFIX} Done — ${ROLES.length} scorecards, ${regressions.length} regressions, ${totalActions} actions, ${criticalRoles.length} critical`);
+    return {
+      success: true,
+      scorecards,
+      regressions_found: regressions.length,
+      total_actions: totalActions,
+      critical_roles: criticalRoles,
+      executedAt: now.toISOString()
+    };
+  } catch (err) {
+    console.error(`${PREFIX} Fatal:`, err.message);
+    return { success: false, error: err.message, executedAt: new Date().toISOString() };
+  }
+}
+
+// =============================================================================
+// 5. getLatestEvaluation(role) — For admin UI
+// =============================================================================
+
+/**
+ * Get the most recent evaluation record for a given role.
+ */
+export async function getLatestEvaluation(role) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.evaluations, {
+      filters: { role },
+      sort: [{ field: 'created_at', order: 'desc' }],
+      limit: 1,
+      suppressAuth: true
+    });
+
+    const record = result?.items?.[0];
+    if (!record) return null;
+
+    // Parse JSON fields
+    return {
+      ...record,
+      tool_regressions: safeParseJSON(record.tool_regressions, []),
+      improvement_actions: safeParseJSON(record.improvement_actions, [])
+    };
+  } catch (err) {
+    console.error(`[Evaluation:getLatest] Error for ${role}:`, err.message);
+    return null;
+  }
+}
+
+function safeParseJSON(str, fallback) {
+  try { return JSON.parse(str); } catch { return fallback; }
+}

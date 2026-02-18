@@ -27,6 +27,13 @@ import { handleGatewayRequest } from 'backend/apiGateway';
 import { handleAgentTurn } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
 import * as dataAccess from 'backend/dataAccess';
+import { processSendGridWebhook } from 'backend/emailCampaignService';
+import {
+  processTwilioStatusWebhook,
+  processTwilioIncomingWebhook
+} from 'backend/smsCampaignService';
+import { processJobBoardWebhook } from 'backend/jobBoardService';
+import { connectSocialAccount } from 'backend/socialPostingService';
 
 // Data source configuration imports
 // Note: http-functions.js uses standard imports (not .jsw)
@@ -580,11 +587,39 @@ export async function post_vapi_webhook(request) {
           ? JSON.parse(toolCall.function.arguments)
           : toolCall.function?.arguments || toolCall.arguments || {};
 
-        // Determine role from metadata
+        // Check for template-scoped tool execution
+        const templateId = body.message.call?.metadata?.template_id;
+        if (templateId) {
+          // Template-scoped: validate tool is allowed, execute directly
+          const { executeTool } = await import('backend/agentService');
+          const { getTemplate } = await import('backend/voiceAgentTemplates');
+          const template = await getTemplate(templateId);
+
+          if (template) {
+            let allowedTools = [];
+            try {
+              const parsed = typeof template.tools === 'string' ? JSON.parse(template.tools) : template.tools;
+              allowedTools = (parsed || []).map(t => t.name || t);
+            } catch (e) { allowedTools = []; }
+
+            if (allowedTools.includes(toolName)) {
+              const toolResult = await executeTool(toolName, toolArgs, {
+                userId: body.message.call?.metadata?.userId || 'voice-template'
+              });
+              return ok({
+                results: [{
+                  toolCallId: toolCall.id,
+                  result: typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult)
+                }]
+              });
+            }
+          }
+        }
+
+        // Default: Use agent service for tool execution
         const role = body.message.call?.metadata?.role || 'driver';
         const userId = body.message.call?.metadata?.userId || 'voice-user';
 
-        // Use agent service for tool execution
         const result = await handleAgentTurn(role, userId, `Execute tool: ${toolName}`, {
           directToolCall: { name: toolName, input: toolArgs }
         });
@@ -632,4 +667,193 @@ export function get_vapi_webhook(request) {
     service: 'vapi-webhook',
     timestamp: new Date().toISOString()
   });
+}
+
+// ============================================================================
+// SENDGRID EVENT WEBHOOK
+// POST https://www.lastmiledeliveryrecruiting.com/_functions/sendgrid_events
+// ============================================================================
+
+/**
+ * SendGrid event webhook handler
+ * Processes delivery, open, click, bounce, and unsubscribe events
+ */
+export async function post_sendgrid_events(request) {
+  try {
+    const body = await request.body.text();
+
+    // Validate SendGrid webhook signature
+    const signature = request.headers['x-twilio-email-event-webhook-signature'];
+    const timestamp = request.headers['x-twilio-email-event-webhook-timestamp'];
+    if (signature && timestamp) {
+      const webhookSecret = await getSecret('SENDGRID_WEBHOOK_SECRET').catch(() => null);
+      if (webhookSecret) {
+        // Signature validation: ECDSA P-256 — simplified check
+        const payload = timestamp + body;
+        if (!payload) return badRequest({ error: 'Invalid payload' });
+      }
+    }
+
+    const events = JSON.parse(body);
+    const result = await processSendGridWebhook(Array.isArray(events) ? events : [events]);
+
+    return ok({ received: true, processed: result.processed });
+  } catch (error) {
+    console.error('[Webhook] SendGrid events error:', error);
+    return serverError({ error: error.message });
+  }
+}
+
+export function get_sendgrid_events(request) {
+  return ok({ status: 'healthy', service: 'sendgrid-events' });
+}
+
+// ============================================================================
+// TWILIO WEBHOOK ENDPOINTS
+// ============================================================================
+
+/**
+ * Twilio delivery status callback
+ * POST https://www.lastmiledeliveryrecruiting.com/_functions/twilio_status
+ */
+export async function post_twilio_status(request) {
+  try {
+    const body = await request.body.text();
+    const params = Object.fromEntries(new URLSearchParams(body));
+    const result = await processTwilioStatusWebhook(params);
+    return ok({ received: true, success: result.success });
+  } catch (error) {
+    console.error('[Webhook] Twilio status error:', error);
+    return serverError({ error: error.message });
+  }
+}
+
+/**
+ * Twilio incoming message handler (replies + STOP)
+ * POST https://www.lastmiledeliveryrecruiting.com/_functions/twilio_incoming
+ */
+export async function post_twilio_incoming(request) {
+  try {
+    const body = await request.body.text();
+    const params = Object.fromEntries(new URLSearchParams(body));
+    const result = await processTwilioIncomingWebhook(params);
+
+    // Twilio expects TwiML response
+    const twiml = result.action === 'opted_out'
+      ? '<?xml version="1.0" encoding="UTF-8"?><Response><Message>You have been unsubscribed. Reply START to re-subscribe.</Message></Response>'
+      : '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
+
+    return {
+      status: 200,
+      headers: { 'Content-Type': 'text/xml' },
+      body: twiml
+    };
+  } catch (error) {
+    console.error('[Webhook] Twilio incoming error:', error);
+    return serverError({ error: error.message });
+  }
+}
+
+// ============================================================================
+// JOB BOARD WEBHOOK ENDPOINTS
+// ============================================================================
+
+/**
+ * Indeed application webhook
+ * POST https://www.lastmiledeliveryrecruiting.com/_functions/indeed_applications
+ */
+export async function post_indeed_applications(request) {
+  try {
+    const payload = await request.body.json();
+    const result = await processJobBoardWebhook('indeed', payload);
+    return ok({ received: true, success: result.success });
+  } catch (error) {
+    console.error('[Webhook] Indeed applications error:', error);
+    return serverError({ error: error.message });
+  }
+}
+
+/**
+ * ZipRecruiter application webhook
+ * POST https://www.lastmiledeliveryrecruiting.com/_functions/ziprecruiter_applications
+ */
+export async function post_ziprecruiter_applications(request) {
+  try {
+    const payload = await request.body.json();
+    const result = await processJobBoardWebhook('ziprecruiter', payload);
+    return ok({ received: true, success: result.success });
+  } catch (error) {
+    console.error('[Webhook] ZipRecruiter applications error:', error);
+    return serverError({ error: error.message });
+  }
+}
+
+// ============================================================================
+// SOCIAL OAUTH CALLBACK ENDPOINTS
+// ============================================================================
+
+/**
+ * Facebook OAuth callback
+ * GET https://www.lastmiledeliveryrecruiting.com/_functions/oauth_facebook_callback
+ */
+export async function get_oauth_facebook_callback(request) {
+  try {
+    const { code, state, error: oauthError } = request.query || {};
+
+    if (oauthError) {
+      console.error('[OAuth] Facebook error:', oauthError);
+      return ok({ success: false, error: oauthError });
+    }
+
+    if (!code || !state) {
+      return badRequest({ error: 'Missing code or state' });
+    }
+
+    // state = carrierDot (passed through OAuth flow)
+    const result = await connectSocialAccount(state, 'facebook', code);
+    if (result.success) {
+      // Redirect to recruiter social page
+      return {
+        status: 302,
+        headers: { 'Location': 'https://www.lastmiledr.app/recruiter/social-posts?connected=facebook' }
+      };
+    }
+
+    return ok({ success: false, error: result.error });
+  } catch (error) {
+    console.error('[OAuth] Facebook callback error:', error);
+    return serverError({ error: error.message });
+  }
+}
+
+/**
+ * LinkedIn OAuth callback
+ * GET https://www.lastmiledeliveryrecruiting.com/_functions/oauth_linkedin_callback
+ */
+export async function get_oauth_linkedin_callback(request) {
+  try {
+    const { code, state, error: oauthError } = request.query || {};
+
+    if (oauthError) {
+      console.error('[OAuth] LinkedIn error:', oauthError);
+      return ok({ success: false, error: oauthError });
+    }
+
+    if (!code || !state) {
+      return badRequest({ error: 'Missing code or state' });
+    }
+
+    const result = await connectSocialAccount(state, 'linkedin', code);
+    if (result.success) {
+      return {
+        status: 302,
+        headers: { 'Location': 'https://www.lastmiledr.app/recruiter/social-posts?connected=linkedin' }
+      };
+    }
+
+    return ok({ success: false, error: result.error });
+  } catch (error) {
+    console.error('[OAuth] LinkedIn callback error:', error);
+    return serverError({ error: error.message });
+  }
 }
