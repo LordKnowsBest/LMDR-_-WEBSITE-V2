@@ -184,6 +184,75 @@ export async function getRunOutcome(runId) {
 /**
  * Get aggregated outcome stats for KPI dashboard
  */
+/**
+ * Get outcome trends grouped by date+role — for quality trends chart
+ */
+export async function getOutcomeTrends(days = 7) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  const cutoffTime = cutoff.getTime();
+
+  const outcomes = await dataAccess.queryRecords(COLLECTIONS.outcomes, {
+    limit: 500,
+    suppressAuth: true
+  });
+  const items = (outcomes && outcomes.items) || [];
+  const recent = items.filter(o => new Date(o.evaluated_at).getTime() >= cutoffTime);
+
+  // We need run data to get roles — batch lookup
+  const runIds = [...new Set(recent.map(o => o.run_id).filter(Boolean))];
+  let runMap = {};
+  if (runIds.length > 0) {
+    const runsResult = await dataAccess.queryRecords('agentRuns', {
+      limit: 500,
+      suppressAuth: true
+    });
+    const allRuns = (runsResult && runsResult.items) || [];
+    for (const r of allRuns) {
+      if (r.run_id) runMap[r.run_id] = r;
+    }
+  }
+
+  // Group by date + role
+  const grouped = {};
+  for (const o of recent) {
+    const dateStr = (o.evaluated_at || '').substring(0, 10);
+    const run = runMap[o.run_id];
+    const role = (run && run.role) || 'unknown';
+    const key = `${dateStr}|${role}`;
+    if (!grouped[key]) {
+      grouped[key] = { date: dateStr, role, total_score: 0, count: 0 };
+    }
+    grouped[key].total_score += (o.quality_score || 0);
+    grouped[key].count += 1;
+  }
+
+  const trends = Object.values(grouped).map(g => ({
+    date: g.date,
+    role: g.role,
+    avg_quality: Math.round(g.total_score / g.count),
+    count: g.count
+  }));
+
+  // Cost summary from runs
+  const costByRole = {};
+  let totalCost = 0;
+  for (const o of recent) {
+    const run = runMap[o.run_id];
+    if (!run) continue;
+    const role = run.role || 'unknown';
+    const cost = run.total_cost_usd || 0;
+    costByRole[role] = (costByRole[role] || 0) + cost;
+    totalCost += cost;
+  }
+
+  return {
+    trends: trends.sort((a, b) => a.date.localeCompare(b.date)),
+    costs: { by_role: costByRole, total: Math.round(totalCost * 100) / 100 },
+    period_days: days
+  };
+}
+
 export async function getOutcomeStats(role, days = 7) {
   // Query recent outcomes
   const cutoff = new Date();

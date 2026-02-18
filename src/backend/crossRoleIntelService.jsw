@@ -1,0 +1,507 @@
+/**
+ * Cross-Role Intelligence Service
+ * Aggregates market intelligence, lane demand, compensation benchmarks,
+ * hiring benchmarks, and conversion insights across driver/recruiter/B2B roles.
+ *
+ * All data flows through dataAccess (dual-source routing).
+ * @module backend/crossRoleIntelService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+// ============================================================================
+// COLLECTION KEYS
+// ============================================================================
+
+const COLLECTIONS = {
+  signals: 'b2bMatchSignals',
+  intel: 'competitorIntel',
+  forecasts: 'hiringForecasts',
+  funnel: 'funnelEvents',
+  attribution: 'sourceAttribution',
+  spend: 'recruitingSpend'
+};
+
+// ============================================================================
+// MARKET INTELLIGENCE
+// ============================================================================
+
+/**
+ * Aggregate carrier demand signals and competitor pay data for a region/jobType.
+ * @param {string} [region] - Region filter (e.g. 'Southeast')
+ * @param {string} [jobType] - Job type filter (e.g. 'OTR')
+ * @returns {Promise<Object>} { success, demand_level, top_regions, top_equipment, avg_signal_score, pay_range, sample_size, generated_at }
+ */
+export async function getMarketIntel(region, jobType) {
+  try {
+    // Build signal filters
+    const signalFilters = {};
+    if (region) signalFilters.top_regions = region;
+    if (jobType) signalFilters.job_types = jobType;
+
+    const [signalRes, intelRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.signals, {
+        filters: signalFilters,
+        sort: [{ field: 'signal_score', direction: 'desc' }],
+        limit: 50,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.intel, {
+        filters: buildIntelFilters(region, jobType),
+        limit: 50,
+        suppressAuth: true
+      })
+    ]);
+
+    const signals = signalRes.items || [];
+    const intelItems = intelRes.items || [];
+
+    // Compute averages from signals
+    const avgScore = signals.length
+      ? Math.round(signals.reduce((s, r) => s + (Number(r.signal_score) || 0), 0) / signals.length)
+      : 0;
+
+    // Collect top regions and equipment from signals
+    const regionCounts = {};
+    const equipCounts = {};
+    for (const sig of signals) {
+      tallyCSV(sig.top_regions, regionCounts);
+      tallyCSV(sig.top_equipment, equipCounts);
+    }
+
+    // Extract pay range from competitor intel
+    const payValues = intelItems
+      .map(i => Number(i.avg_cpm || i.pay_rate || 0))
+      .filter(v => v > 0);
+
+    const payRange = payValues.length ? {
+      min: Math.min(...payValues),
+      max: Math.max(...payValues),
+      avg: Math.round(payValues.reduce((a, b) => a + b, 0) / payValues.length * 100) / 100
+    } : { min: 0, max: 0, avg: 0 };
+
+    const demandLevel = avgScore >= 70 ? 'high' : avgScore >= 40 ? 'medium' : 'low';
+
+    return {
+      success: true,
+      demand_level: demandLevel,
+      top_regions: topN(regionCounts, 5),
+      top_equipment: topN(equipCounts, 5),
+      avg_signal_score: avgScore,
+      pay_range: payRange,
+      sample_size: signals.length + intelItems.length,
+      generated_at: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('[CrossRoleIntel] getMarketIntel error:', error);
+    return {
+      success: false, error: error.message,
+      demand_level: 'unknown', top_regions: [], top_equipment: [],
+      avg_signal_score: 0, pay_range: { min: 0, max: 0, avg: 0 },
+      sample_size: 0, generated_at: new Date().toISOString()
+    };
+  }
+}
+
+// ============================================================================
+// LANE DEMAND
+// ============================================================================
+
+/**
+ * Lane-level demand analysis combining match signals and hiring forecasts.
+ * @param {Object} [options] - { region, limit }
+ * @returns {Promise<Object>} { success, lanes: [{ region, demand_score, driver_supply, gap, forecast_trend }], period }
+ */
+export async function getLaneDemand(options = {}) {
+  try {
+    const signalFilters = {};
+    if (options.region) signalFilters.top_regions = options.region;
+
+    const [signalRes, forecastRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.signals, {
+        filters: signalFilters,
+        limit: 200,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.forecasts, {
+        filters: options.region ? { region: options.region } : {},
+        limit: 100,
+        suppressAuth: true
+      })
+    ]);
+
+    const signals = signalRes.items || [];
+    const forecasts = forecastRes.items || [];
+
+    // Group signals by region
+    const regionData = {};
+    for (const sig of signals) {
+      const regions = String(sig.top_regions || '').split(',').map(r => r.trim()).filter(Boolean);
+      for (const r of regions) {
+        if (!regionData[r]) regionData[r] = { scores: [], driverCounts: [] };
+        regionData[r].scores.push(Number(sig.signal_score) || 0);
+        regionData[r].driverCounts.push(Number(sig.driver_count_high_match) || 0);
+      }
+    }
+
+    // Build forecast lookup by region
+    const forecastMap = {};
+    for (const f of forecasts) {
+      const key = String(f.region || '').toLowerCase();
+      if (key) forecastMap[key] = f;
+    }
+
+    // Assemble lane entries
+    const lanes = Object.entries(regionData).map(([region, data]) => {
+      const demandScore = data.scores.length
+        ? Math.round(data.scores.reduce((a, b) => a + b, 0) / data.scores.length)
+        : 0;
+      const driverSupply = data.driverCounts.reduce((a, b) => a + b, 0);
+      const forecast = forecastMap[region.toLowerCase()];
+
+      return {
+        region,
+        demand_score: demandScore,
+        driver_supply: driverSupply,
+        gap: Math.max(0, demandScore - Math.min(100, driverSupply)),
+        forecast_trend: forecast ? String(forecast.trend || forecast.forecast_trend || 'stable') : 'stable'
+      };
+    });
+
+    // Sort by demand_score descending, apply limit
+    lanes.sort((a, b) => b.demand_score - a.demand_score);
+    const limit = options.limit || 20;
+
+    return {
+      success: true,
+      lanes: lanes.slice(0, limit),
+      period: buildPeriodLabel()
+    };
+  } catch (error) {
+    console.error('[CrossRoleIntel] getLaneDemand error:', error);
+    return { success: false, error: error.message, lanes: [], period: buildPeriodLabel() };
+  }
+}
+
+// ============================================================================
+// COMPENSATION BENCHMARKS
+// ============================================================================
+
+/**
+ * Pay intelligence from competitor intel data.
+ * @param {string} [region] - Region filter
+ * @param {string} [jobType] - Job type filter (e.g. 'OTR', 'Regional')
+ * @param {string} [equipmentType] - Equipment type filter (e.g. 'Dry Van')
+ * @returns {Promise<Object>} { success, region, job_type, cpm, weekly_max, sign_on_bonus_avg, sample_size, freshness }
+ */
+export async function getCompensationBenchmarks(region, jobType, equipmentType) {
+  try {
+    const filters = {};
+    if (region) filters.region = region;
+    if (jobType) filters.job_type = jobType;
+    if (equipmentType) filters.equipment_type = equipmentType;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.intel, {
+      filters,
+      limit: 100,
+      suppressAuth: true
+    });
+
+    const items = result.items || [];
+
+    // Extract CPM values
+    const cpmValues = items
+      .map(i => Number(i.avg_cpm || i.pay_rate || 0))
+      .filter(v => v > 0)
+      .sort((a, b) => a - b);
+
+    const cpm = cpmValues.length ? {
+      min: cpmValues[0],
+      max: cpmValues[cpmValues.length - 1],
+      avg: Math.round(cpmValues.reduce((a, b) => a + b, 0) / cpmValues.length * 100) / 100,
+      median: percentile(cpmValues, 50),
+      p25: percentile(cpmValues, 25),
+      p75: percentile(cpmValues, 75)
+    } : { min: 0, max: 0, avg: 0, median: 0, p25: 0, p75: 0 };
+
+    // Weekly max and sign-on bonus
+    const weeklyValues = items.map(i => Number(i.weekly_max || 0)).filter(v => v > 0);
+    const bonusValues = items.map(i => Number(i.sign_on_bonus || 0)).filter(v => v > 0);
+
+    const weeklyMax = weeklyValues.length ? Math.max(...weeklyValues) : 0;
+    const signOnAvg = bonusValues.length
+      ? Math.round(bonusValues.reduce((a, b) => a + b, 0) / bonusValues.length)
+      : 0;
+
+    // Freshness = most recent record date
+    const dates = items.map(i => i.updated_at || i.created_at || '').filter(Boolean).sort().reverse();
+    const freshness = dates.length ? dates[0] : null;
+
+    return {
+      success: true,
+      region: region || 'all',
+      job_type: jobType || 'all',
+      cpm,
+      weekly_max: weeklyMax,
+      sign_on_bonus_avg: signOnAvg,
+      sample_size: items.length,
+      freshness
+    };
+  } catch (error) {
+    console.error('[CrossRoleIntel] getCompensationBenchmarks error:', error);
+    return {
+      success: false, error: error.message,
+      region: region || 'all', job_type: jobType || 'all',
+      cpm: { min: 0, max: 0, avg: 0, median: 0, p25: 0, p75: 0 },
+      weekly_max: 0, sign_on_bonus_avg: 0, sample_size: 0, freshness: null
+    };
+  }
+}
+
+// ============================================================================
+// HIRING BENCHMARKS
+// ============================================================================
+
+/**
+ * Recruiter outcome data for a specific carrier.
+ * @param {string} carrierDot - Carrier DOT number
+ * @returns {Promise<Object>} { success, carrier_dot, conversion_rates, avg_time_to_fill_days, top_drop_reasons, best_channels, period }
+ */
+export async function getHiringBenchmarks(carrierDot) {
+  try {
+    if (!carrierDot) return { success: false, error: 'carrierDot is required' };
+    const dotStr = String(carrierDot).trim();
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.funnel, {
+      filters: { carrier_dot: dotStr },
+      limit: 500,
+      suppressAuth: true
+    });
+
+    const events = result.items || [];
+
+    // Count events by stage
+    const stageCounts = {};
+    const dropReasons = {};
+    const channels = {};
+    let totalDaysToFill = 0;
+    let hireCount = 0;
+
+    for (const evt of events) {
+      const stage = String(evt.stage || evt.event_type || '').toLowerCase();
+      stageCounts[stage] = (stageCounts[stage] || 0) + 1;
+
+      if (evt.drop_reason) {
+        dropReasons[evt.drop_reason] = (dropReasons[evt.drop_reason] || 0) + 1;
+      }
+
+      if (evt.channel || evt.source) {
+        const ch = evt.channel || evt.source;
+        channels[ch] = (channels[ch] || 0) + 1;
+      }
+
+      if (stage === 'hire' || stage === 'hired') {
+        hireCount++;
+        if (evt.days_to_fill || evt.time_to_fill) {
+          totalDaysToFill += Number(evt.days_to_fill || evt.time_to_fill) || 0;
+        }
+      }
+    }
+
+    const leads = stageCounts['lead'] || stageCounts['applied'] || 0;
+    const screens = stageCounts['screen'] || stageCounts['screened'] || 0;
+    const interviews = stageCounts['interview'] || stageCounts['interviewed'] || 0;
+    const offers = stageCounts['offer'] || stageCounts['offered'] || 0;
+    const hires = stageCounts['hire'] || stageCounts['hired'] || 0;
+
+    const conversionRates = {
+      lead_to_screen: leads > 0 ? Math.round((screens / leads) * 100) / 100 : 0,
+      screen_to_interview: screens > 0 ? Math.round((interviews / screens) * 100) / 100 : 0,
+      interview_to_offer: interviews > 0 ? Math.round((offers / interviews) * 100) / 100 : 0,
+      offer_to_hire: offers > 0 ? Math.round((hires / offers) * 100) / 100 : 0
+    };
+
+    return {
+      success: true,
+      carrier_dot: dotStr,
+      conversion_rates: conversionRates,
+      avg_time_to_fill_days: hireCount > 0 ? Math.round(totalDaysToFill / hireCount) : 0,
+      top_drop_reasons: topN(dropReasons, 5),
+      best_channels: topN(channels, 5),
+      period: buildPeriodLabel()
+    };
+  } catch (error) {
+    console.error('[CrossRoleIntel] getHiringBenchmarks error:', error);
+    return {
+      success: false, error: error.message,
+      carrier_dot: String(carrierDot || ''),
+      conversion_rates: { lead_to_screen: 0, screen_to_interview: 0, interview_to_offer: 0, offer_to_hire: 0 },
+      avg_time_to_fill_days: 0, top_drop_reasons: [], best_channels: [],
+      period: buildPeriodLabel()
+    };
+  }
+}
+
+// ============================================================================
+// CONVERSION INSIGHTS
+// ============================================================================
+
+/**
+ * Platform-wide conversion patterns from funnel events and source attribution.
+ * @param {Object} [options] - { period_days, equipment_type }
+ * @returns {Promise<Object>} { success, overall_conversion_rate, by_source, by_equipment, avg_touchpoints_to_hire, best_contact_windows }
+ */
+export async function getConversionInsights(options = {}) {
+  try {
+    const [funnelRes, attrRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.funnel, {
+        filters: {},
+        limit: 500,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.attribution, {
+        filters: {},
+        limit: 200,
+        suppressAuth: true
+      })
+    ]);
+
+    const funnelItems = funnelRes.items || [];
+    const attrItems = attrRes.items || [];
+
+    // Overall conversion: leads → hires
+    let totalLeads = 0;
+    let totalHires = 0;
+    const bySource = {};
+    const byEquipment = {};
+    let totalTouchpoints = 0;
+    let touchpointCount = 0;
+    const contactHours = {};
+
+    for (const evt of funnelItems) {
+      const stage = String(evt.stage || evt.event_type || '').toLowerCase();
+      if (stage === 'lead' || stage === 'applied') totalLeads++;
+      if (stage === 'hire' || stage === 'hired') totalHires++;
+
+      // Group by equipment
+      const equip = evt.equipment_type || evt.equipment || 'unknown';
+      if (!byEquipment[equip]) byEquipment[equip] = { leads: 0, hires: 0 };
+      if (stage === 'lead' || stage === 'applied') byEquipment[equip].leads++;
+      if (stage === 'hire' || stage === 'hired') byEquipment[equip].hires++;
+
+      // Touchpoints
+      if (evt.touchpoints) {
+        totalTouchpoints += Number(evt.touchpoints) || 0;
+        touchpointCount++;
+      }
+
+      // Contact window analysis
+      if (evt.contact_hour || evt.created_at) {
+        const hour = evt.contact_hour || extractHour(evt.created_at);
+        if (hour !== null) contactHours[hour] = (contactHours[hour] || 0) + 1;
+      }
+    }
+
+    // Group attribution by source
+    for (const attr of attrItems) {
+      const source = attr.source || attr.channel || 'unknown';
+      if (!bySource[source]) bySource[source] = { leads: 0, hires: 0 };
+      bySource[source].leads += Number(attr.leads || attr.lead_count || 0);
+      bySource[source].hires += Number(attr.hires || attr.hire_count || 0);
+    }
+
+    // Format by_source with conversion rates
+    const bySourceArr = Object.entries(bySource).map(([source, data]) => ({
+      source,
+      leads: data.leads,
+      hires: data.hires,
+      conversion_rate: data.leads > 0 ? Math.round((data.hires / data.leads) * 100) / 100 : 0
+    })).sort((a, b) => b.conversion_rate - a.conversion_rate);
+
+    // Format by_equipment with conversion rates
+    const byEquipArr = Object.entries(byEquipment).map(([equipment, data]) => ({
+      equipment,
+      leads: data.leads,
+      hires: data.hires,
+      conversion_rate: data.leads > 0 ? Math.round((data.hires / data.leads) * 100) / 100 : 0
+    })).sort((a, b) => b.conversion_rate - a.conversion_rate);
+
+    // Best contact windows (top 3 hours)
+    const bestWindows = Object.entries(contactHours)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 3)
+      .map(([hour, count]) => ({ hour: Number(hour), engagement_count: count }));
+
+    return {
+      success: true,
+      overall_conversion_rate: totalLeads > 0 ? Math.round((totalHires / totalLeads) * 100) / 100 : 0,
+      by_source: bySourceArr,
+      by_equipment: byEquipArr,
+      avg_touchpoints_to_hire: touchpointCount > 0 ? Math.round(totalTouchpoints / touchpointCount * 10) / 10 : 0,
+      best_contact_windows: bestWindows
+    };
+  } catch (error) {
+    console.error('[CrossRoleIntel] getConversionInsights error:', error);
+    return {
+      success: false, error: error.message,
+      overall_conversion_rate: 0, by_source: [], by_equipment: [],
+      avg_touchpoints_to_hire: 0, best_contact_windows: []
+    };
+  }
+}
+
+// ============================================================================
+// HELPERS (internal only)
+// ============================================================================
+
+/** Build filters for competitorIntel queries */
+function buildIntelFilters(region, jobType) {
+  const filters = {};
+  if (region) filters.region = region;
+  if (jobType) filters.job_type = jobType;
+  return filters;
+}
+
+/** Tally comma-separated string values into a counts map */
+function tallyCSV(csv, counts) {
+  if (!csv) return;
+  String(csv).split(',').map(v => v.trim()).filter(Boolean).forEach(v => {
+    counts[v] = (counts[v] || 0) + 1;
+  });
+}
+
+/** Return top N entries from a counts map as sorted array of { name, count } */
+function topN(counts, n) {
+  return Object.entries(counts)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, n)
+    .map(([name, count]) => ({ name, count }));
+}
+
+/** Compute a percentile value from a sorted array */
+function percentile(sortedArr, pct) {
+  if (!sortedArr.length) return 0;
+  const idx = (pct / 100) * (sortedArr.length - 1);
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sortedArr[lower];
+  return Math.round((sortedArr[lower] + (idx - lower) * (sortedArr[upper] - sortedArr[lower])) * 100) / 100;
+}
+
+/** Extract hour (0-23) from an ISO date string */
+function extractHour(isoString) {
+  if (!isoString) return null;
+  try {
+    return new Date(isoString).getUTCHours();
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Build a human-readable period label (last 30 days) */
+function buildPeriodLabel() {
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - 30);
+  return `${start.toISOString().slice(0, 10)} to ${end.toISOString().slice(0, 10)}`;
+}

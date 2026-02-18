@@ -131,6 +131,22 @@ async function routeMessage(component, message) {
                 await handleGetAgentKpis(component, message);
                 break;
 
+            case 'getAgentRuns':
+                await handleGetAgentRuns(component, message);
+                break;
+
+            case 'getRunDetail':
+                await handleGetRunDetail(component, message);
+                break;
+
+            case 'getApprovalAudit':
+                await handleGetApprovalAudit(component, message);
+                break;
+
+            case 'getQualityTrends':
+                await handleGetQualityTrends(component, message);
+                break;
+
             default:
                 console.warn('ADMIN_DASHBOARD: Unknown action:', action);
         }
@@ -269,6 +285,119 @@ async function handleGetAgentKpis(component, message) {
         safeSend(component, { action: 'agentKpisLoaded', payload: stats });
     } catch (err) {
         safeSend(component, { action: 'agentKpisLoaded', payload: { total_runs: 0, success_rate: 0, avg_quality_score: 0, partial_rate: 0, failure_rate: 0, period_days: 7, role: 'all', error: err.message } });
+    }
+}
+
+// ============================================
+// AGENT RUN MONITOR HANDLERS
+// ============================================
+
+async function handleGetAgentRuns(component, message) {
+    try {
+        const { getRecentRuns } = await import('backend/agentRunLedgerService');
+        const result = await getRecentRuns({
+            status: message.status || undefined,
+            limit: message.limit || 20,
+            offset: message.offset || 0
+        });
+
+        // If completed runs, attach quality scores from outcomes
+        let runs = result.items || [];
+        if (message.status === 'completed' && runs.length > 0) {
+            try {
+                const { getRunOutcome } = await import('backend/agentOutcomeService');
+                const enriched = await Promise.all(runs.map(async (run) => {
+                    try {
+                        const outcome = await getRunOutcome(run.run_id);
+                        return {
+                            ...run,
+                            quality_score: outcome ? outcome.quality_score : 0,
+                            objective_met: outcome ? outcome.objective_met : 'unknown'
+                        };
+                    } catch (e) {
+                        return { ...run, quality_score: 0, objective_met: 'unknown' };
+                    }
+                }));
+                runs = enriched;
+            } catch (e) {
+                // Outcome service unavailable — return runs without scores
+            }
+        }
+
+        safeSend(component, { action: 'agentRunsLoaded', payload: { runs, total: result.totalCount || runs.length } });
+    } catch (err) {
+        safeSend(component, { action: 'agentRunsLoaded', payload: { runs: [], total: 0, error: err.message } });
+    }
+}
+
+async function handleGetRunDetail(component, message) {
+    try {
+        const { getRun, getSteps, getGatesForRun } = await import('backend/agentRunLedgerService');
+        const { getRunOutcome } = await import('backend/agentOutcomeService');
+        const runId = message.runId;
+        if (!runId) {
+            safeSend(component, { action: 'actionError', message: 'Missing runId' });
+            return;
+        }
+        const [run, steps, gates, outcome] = await Promise.all([
+            getRun(runId),
+            getSteps(runId),
+            getGatesForRun(runId),
+            getRunOutcome(runId)
+        ]);
+        safeSend(component, { action: 'runDetailLoaded', payload: { run: run || {}, steps: steps || [], gates: gates || [], outcome: outcome || {} } });
+    } catch (err) {
+        safeSend(component, { action: 'runDetailLoaded', payload: { run: {}, steps: [], gates: [], outcome: {}, error: err.message } });
+    }
+}
+
+async function handleGetApprovalAudit(component, message) {
+    try {
+        const { getApprovalGatesByDateRange } = await import('backend/agentRunLedgerService');
+        const days = message.days || 7;
+        const gates = await getApprovalGatesByDateRange(days);
+
+        // Calculate summary stats
+        const total = gates.length;
+        const approved = gates.filter(g => g.decision === 'approved').length;
+        const rejections = gates.filter(g => g.decision === 'rejected').length;
+        const approvalRate = total > 0 ? Math.round((approved / total) * 100) : 0;
+
+        // Average decision time
+        let totalDecisionMs = 0;
+        let decidedCount = 0;
+        for (const g of gates) {
+            if (g.presented_at && g.decided_at) {
+                const diff = new Date(g.decided_at).getTime() - new Date(g.presented_at).getTime();
+                if (diff > 0) {
+                    totalDecisionMs += diff;
+                    decidedCount++;
+                }
+            }
+        }
+        const avgMs = decidedCount > 0 ? Math.round(totalDecisionMs / decidedCount) : 0;
+        const avgDecisionTime = avgMs > 0 ? (avgMs < 60000 ? Math.round(avgMs / 1000) + 's' : Math.round(avgMs / 60000) + 'm') : '-';
+
+        safeSend(component, {
+            action: 'approvalAuditLoaded',
+            payload: {
+                gates,
+                summary: { total, approval_rate: approvalRate, avg_decision_time: avgDecisionTime, rejections }
+            }
+        });
+    } catch (err) {
+        safeSend(component, { action: 'approvalAuditLoaded', payload: { gates: [], summary: {}, error: err.message } });
+    }
+}
+
+async function handleGetQualityTrends(component, message) {
+    try {
+        const { getOutcomeTrends } = await import('backend/agentOutcomeService');
+        const days = message.days || 7;
+        const result = await getOutcomeTrends(days);
+        safeSend(component, { action: 'qualityTrendsLoaded', payload: result });
+    } catch (err) {
+        safeSend(component, { action: 'qualityTrendsLoaded', payload: { trends: [], costs: { by_role: {}, total: 0 }, period_days: 7, error: err.message } });
     }
 }
 
