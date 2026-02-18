@@ -205,7 +205,15 @@ const MESSAGE_REGISTRY = {
     'getAtRiskDrivers',
     'getLeaderboard',
     'getBadges',
-    'getSettingsData'
+    'getSettingsData',
+    // ── Agent & Voice Messages ──
+    'agentMessage',
+    'resolveApprovalGate',
+    'getVoiceConfig',
+    'getCampaigns',
+    'createCampaign',
+    'startCampaign',
+    'getCampaignStatus'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -275,7 +283,16 @@ const MESSAGE_REGISTRY = {
     'atRiskDriversLoaded',
     'leaderboardLoaded',
     'badgesLoaded',
-    'settingsDataLoaded'
+    'settingsDataLoaded',
+    // ── Agent & Voice Responses ──
+    'agentResponse',
+    'agentTyping',
+    'agentApprovalRequired',
+    'voiceReady',
+    'campaignsLoaded',
+    'campaignCreated',
+    'campaignStarted',
+    'campaignStatusLoaded'
   ]
 };
 

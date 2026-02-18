@@ -54,7 +54,7 @@ describe('Flag Service', () => {
 
     test('applies target rules correctly', async () => {
       dataAccess.findByField.mockResolvedValue({
-        key: 'test_flag',
+        key: 'test_flag_rules',
         enabled: true,
         rolloutPercentage: 0,
         targetRules: [
@@ -69,10 +69,10 @@ describe('Flag Service', () => {
         ]
       });
       
-      const resultAdmin = await flagService.evaluateFlag('test_flag', 'user123', { role: 'admin' });
+      const resultAdmin = await flagService.evaluateFlag('test_flag_rules', 'user123', { role: 'admin' });
       expect(resultAdmin).toBe(true);
       
-      const resultUser = await flagService.evaluateFlag('test_flag', 'user123', { role: 'user' });
+      const resultUser = await flagService.evaluateFlag('test_flag_rules', 'user123', { role: 'user' });
       expect(resultUser).toBe(false);
     });
 
