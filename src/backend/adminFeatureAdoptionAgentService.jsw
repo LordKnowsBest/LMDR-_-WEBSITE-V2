@@ -1,0 +1,399 @@
+/**
+ * Admin Feature Adoption Agent Service
+ *
+ * Thin wrapper for admin feature adoption agent actions.
+ * Delegates to existing featureAdoptionService and queries
+ * feature analytics collections via dataAccess.
+ *
+ * @module backend/adminFeatureAdoptionAgentService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+// Collection keys (camelCase from configData.js)
+const COLLECTIONS = {
+  logs: 'featureAdoptionLogs',
+  registry: 'featureRegistry',
+  funnels: 'featureFunnels',
+  metricsDaily: 'featureMetricsDaily',
+};
+
+// ============================================================================
+// 1. getFeatureAdoption
+// ============================================================================
+
+export async function getFeatureAdoption(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const days = params.days || 30;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    const cutoffISO = cutoff.toISOString();
+
+    const queryOpts = {
+      filters: { recorded_date: { gte: cutoffISO } },
+      limit: 5000,
+      suppressAuth: true,
+    };
+
+    if (params.featureId) {
+      queryOpts.filters.feature_id = params.featureId;
+    }
+
+    const metricsRes = await dataAccess.queryRecords(COLLECTIONS.metricsDaily, queryOpts);
+
+    // Group by feature_id and calculate adoption rates
+    const featureMap = {};
+    const allUsers = new Set();
+
+    for (const m of (metricsRes.items || [])) {
+      const fid = m.feature_id || 'unknown';
+      if (!featureMap[fid]) {
+        featureMap[fid] = { feature_id: fid, uniqueUsers: new Set(), totalEvents: 0, feature_name: m.feature_name || fid };
+      }
+      featureMap[fid].totalEvents += Number(m.event_count || m.unique_users || 1);
+      if (m.user_id) {
+        featureMap[fid].uniqueUsers.add(m.user_id);
+        allUsers.add(m.user_id);
+      }
+      if (m.unique_users) {
+        featureMap[fid].uniqueUsers.add(`batch_${fid}_${m.recorded_date}`);
+      }
+    }
+
+    const totalUsers = allUsers.size || 1;
+    const features = Object.values(featureMap).map(f => ({
+      feature_id: f.feature_id,
+      feature_name: f.feature_name,
+      uniqueUsers: f.uniqueUsers.size,
+      totalEvents: f.totalEvents,
+      adoptionRate: Math.round((f.uniqueUsers.size / totalUsers) * 100),
+    }));
+
+    // If single feature requested, return detail
+    if (params.featureId && features.length === 1) {
+      return { feature: features[0], period: `${days} days` };
+    }
+
+    return { features, totalUsers, period: `${days} days` };
+  } catch (error) {
+    console.error('[AdminFeatureAdoption] getFeatureAdoption error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 2. getAdoptionFunnels
+// ============================================================================
+
+export async function getAdoptionFunnels(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const queryOpts = {
+      limit: 500,
+      suppressAuth: true,
+    };
+
+    if (params.featureId) {
+      queryOpts.filters = { feature_id: params.featureId };
+    }
+
+    const funnelRes = await dataAccess.queryRecords(COLLECTIONS.funnels, queryOpts);
+
+    // Group funnel steps by feature and calculate conversion rates
+    const funnelMap = {};
+    for (const step of (funnelRes.items || [])) {
+      const fid = step.feature_id || 'unknown';
+      if (!funnelMap[fid]) funnelMap[fid] = [];
+      funnelMap[fid].push(step);
+    }
+
+    const funnels = Object.entries(funnelMap).map(([featureId, steps]) => {
+      // Sort steps by step_order
+      steps.sort((a, b) => (a.step_order || 0) - (b.step_order || 0));
+
+      const stepsWithConversion = steps.map((step, idx) => {
+        const prevCount = idx > 0 ? Number(steps[idx - 1].user_count || 0) : null;
+        const currentCount = Number(step.user_count || 0);
+        const conversionRate = prevCount && prevCount > 0
+          ? Math.round((currentCount / prevCount) * 100)
+          : 100;
+
+        return {
+          step_name: step.step_name || `Step ${idx + 1}`,
+          step_order: step.step_order || idx,
+          user_count: currentCount,
+          conversionRate,
+        };
+      });
+
+      return { feature_id: featureId, steps: stepsWithConversion };
+    });
+
+    return { funnels };
+  } catch (error) {
+    console.error('[AdminFeatureAdoption] getAdoptionFunnels error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 3. getFeatureHealth
+// ============================================================================
+
+export async function getFeatureHealth(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const [registryRes, logsRes, metricsRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.registry, { limit: 500, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.logs, {
+        filters: { action: 'error' },
+        limit: 5000,
+        suppressAuth: true,
+      }),
+      dataAccess.queryRecords(COLLECTIONS.metricsDaily, {
+        limit: 5000,
+        suppressAuth: true,
+      }),
+    ]);
+
+    // Build error counts per feature
+    const errorCounts = {};
+    for (const log of (logsRes.items || [])) {
+      const fid = log.feature_id || 'unknown';
+      errorCounts[fid] = (errorCounts[fid] || 0) + 1;
+    }
+
+    // Build usage counts per feature
+    const usageCounts = {};
+    for (const m of (metricsRes.items || [])) {
+      const fid = m.feature_id || 'unknown';
+      usageCounts[fid] = (usageCounts[fid] || 0) + Number(m.event_count || m.unique_users || 1);
+    }
+
+    const features = (registryRes.items || []).map(f => {
+      const fid = f.feature_id || f.id || f._id;
+      const usage = usageCounts[fid] || 0;
+      const errors = errorCounts[fid] || 0;
+      const totalEvents = usage + errors;
+
+      // Health score: 100 base, minus error penalty, minus low-usage penalty
+      const errorRate = totalEvents > 0 ? errors / totalEvents : 0;
+      const errorPenalty = Math.min(errorRate * 100, 50); // max 50 point penalty
+      const usagePenalty = usage === 0 ? 30 : usage < 10 ? 15 : 0;
+      const healthScore = Math.max(0, Math.round(100 - errorPenalty - usagePenalty));
+
+      return {
+        feature_id: fid,
+        feature_name: f.feature_name || f.name || fid,
+        health_score: healthScore,
+        usage,
+        errors,
+        errorRate: Math.round(errorRate * 100),
+        status: f.status || 'active',
+      };
+    });
+
+    // Sort by health score ascending (worst first)
+    features.sort((a, b) => a.health_score - b.health_score);
+
+    return { features };
+  } catch (error) {
+    console.error('[AdminFeatureAdoption] getFeatureHealth error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 4. getStickinessMetrics
+// ============================================================================
+
+export async function getStickinessMetrics(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const thirtyDaysAgoISO = thirtyDaysAgo.toISOString();
+
+    const queryOpts = {
+      filters: { created_at: { gte: thirtyDaysAgoISO } },
+      limit: 10000,
+      suppressAuth: true,
+    };
+
+    if (params.featureId) {
+      queryOpts.filters.feature_id = params.featureId;
+    }
+
+    const logsRes = await dataAccess.queryRecords(COLLECTIONS.logs, queryOpts);
+
+    // Calculate DAU and MAU per feature
+    const featureMap = {};
+
+    for (const log of (logsRes.items || [])) {
+      const fid = log.feature_id || 'unknown';
+      if (!featureMap[fid]) {
+        featureMap[fid] = { dau: new Set(), mau: new Set() };
+      }
+
+      const uid = log.user_id;
+      if (!uid) continue;
+
+      featureMap[fid].mau.add(uid);
+
+      // Check if log is from today for DAU
+      const logDate = (log.created_at || '').split('T')[0];
+      if (logDate === todayStr) {
+        featureMap[fid].dau.add(uid);
+      }
+    }
+
+    const metrics = Object.entries(featureMap).map(([featureId, data]) => {
+      const dau = data.dau.size;
+      const mau = data.mau.size;
+      const stickiness = mau > 0 ? Math.round((dau / mau) * 100) : 0;
+
+      return { feature_id: featureId, dau, mau, stickiness };
+    });
+
+    // Sort by stickiness descending
+    metrics.sort((a, b) => b.stickiness - a.stickiness);
+
+    return { metrics };
+  } catch (error) {
+    console.error('[AdminFeatureAdoption] getStickinessMetrics error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 5. getAdoptionCohorts
+// ============================================================================
+
+export async function getAdoptionCohorts(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const queryOpts = {
+      limit: 10000,
+      suppressAuth: true,
+    };
+
+    if (params.featureId) {
+      queryOpts.filters = { feature_id: params.featureId };
+    }
+
+    const logsRes = await dataAccess.queryRecords(COLLECTIONS.logs, queryOpts);
+
+    // Group users by their first-seen week (cohort)
+    const userFirstSeen = {};
+    const userLastSeen = {};
+
+    for (const log of (logsRes.items || [])) {
+      const uid = log.user_id;
+      if (!uid) continue;
+
+      const ts = log.created_at || '';
+      if (!userFirstSeen[uid] || ts < userFirstSeen[uid]) {
+        userFirstSeen[uid] = ts;
+      }
+      if (!userLastSeen[uid] || ts > userLastSeen[uid]) {
+        userLastSeen[uid] = ts;
+      }
+    }
+
+    // Bucket users into weekly cohorts based on first seen
+    const cohortMap = {};
+    for (const [uid, firstSeen] of Object.entries(userFirstSeen)) {
+      const date = new Date(firstSeen);
+      // Get Monday of the week
+      const day = date.getDay();
+      const monday = new Date(date);
+      monday.setDate(date.getDate() - (day === 0 ? 6 : day - 1));
+      const cohortKey = monday.toISOString().split('T')[0];
+
+      if (!cohortMap[cohortKey]) cohortMap[cohortKey] = [];
+      cohortMap[cohortKey].push(uid);
+    }
+
+    // For each cohort, calculate retention at weeks 1, 2, 4, 8, 12
+    const retentionWeeks = [1, 2, 4, 8, 12];
+    const cohorts = Object.entries(cohortMap)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([cohortDate, users]) => {
+        const cohortStart = new Date(cohortDate);
+        const cohortSize = users.length;
+
+        const retention = {};
+        for (const week of retentionWeeks) {
+          const weekEnd = new Date(cohortStart);
+          weekEnd.setDate(weekEnd.getDate() + (week * 7));
+          const weekEndISO = weekEnd.toISOString();
+
+          const retained = users.filter(uid => {
+            const last = userLastSeen[uid];
+            return last && last >= weekEndISO;
+          }).length;
+
+          retention[`week_${week}`] = cohortSize > 0 ? Math.round((retained / cohortSize) * 100) : 0;
+        }
+
+        return { cohort_date: cohortDate, cohort_size: cohortSize, retention };
+      });
+
+    return { cohorts };
+  } catch (error) {
+    console.error('[AdminFeatureAdoption] getAdoptionCohorts error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 6. createAdoptionCampaign
+// ============================================================================
+
+export async function createAdoptionCampaign(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    if (!params.featureId) return { error: 'params.featureId is required' };
+    if (!params.name) return { error: 'params.name is required' };
+
+    const record = {
+      feature_id: params.featureId,
+      campaign_name: params.name,
+      campaign_type: params.type || 'nudge',
+      target_audience: params.targetAudience || 'all',
+      message: params.message || '',
+      start_date: params.startDate || new Date().toISOString(),
+      end_date: params.endDate || '',
+      status: 'active',
+      created_by: userId,
+      created_at: new Date().toISOString(),
+    };
+
+    // Store as a log record with action='campaign_created'
+    const logRecord = {
+      feature_id: params.featureId,
+      user_id: userId,
+      action: 'campaign_created',
+      metadata: JSON.stringify(record),
+      created_at: new Date().toISOString(),
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.logs, logRecord, { suppressAuth: true });
+
+    if (!result.success) return { error: result.error || 'Failed to create campaign' };
+
+    console.log(`[AdminFeatureAdoption] Campaign "${params.name}" created by ${userId} for feature ${params.featureId}`);
+    return { success: true, campaign: record };
+  } catch (error) {
+    console.error('[AdminFeatureAdoption] createAdoptionCampaign error:', error.message);
+    return { error: error.message };
+  }
+}

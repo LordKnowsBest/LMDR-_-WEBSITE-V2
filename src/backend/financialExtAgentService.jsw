@@ -1,0 +1,243 @@
+/**
+ * Financial Extended Agent Service
+ *
+ * Cross-role financial tools: expense tracking, settlement details,
+ * trip costs, tax summaries, IFTA fuel tax, take-home estimation.
+ */
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  settlements: 'driverSettlements',
+  expenses: 'driverExpenses'
+};
+
+export async function trackExpenses(userId, params = {}) {
+  try {
+    const { driverId, expense } = params;
+    const financialSvc = await import('backend/driverFinancialService');
+    const result = await financialSvc.logExpense(driverId || userId, expense || params);
+    return result;
+  } catch (error) {
+    console.error('financialExtAgentService.trackExpenses error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function getExpenseReport(userId, params = {}) {
+  try {
+    const { driverId, period, dateRange, categories } = params;
+    const financialSvc = await import('backend/driverFinancialService');
+    const result = await financialSvc.getExpenseSummary(
+      driverId || userId,
+      period || 'monthly',
+      dateRange
+    );
+    return result;
+  } catch (error) {
+    console.error('financialExtAgentService.getExpenseReport error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function getSettlementDetail(userId, params = {}) {
+  try {
+    const { driverId, settlementId } = params;
+
+    if (settlementId) {
+      const result = await dataAccess.queryRecords(COLLECTIONS.settlements, {
+        filters: { _id: settlementId },
+        limit: 1,
+        suppressAuth: true
+      });
+      const settlement = result.items?.[0] || null;
+      if (!settlement) return { error: 'Settlement not found' };
+      return { settlement };
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.settlements, {
+      filters: { driver_id: driverId || userId },
+      sort: [{ field: 'settlement_date', direction: 'desc' }],
+      limit: 20,
+      suppressAuth: true
+    });
+
+    return { settlements: result.items || [], totalCount: result.totalCount || 0 };
+  } catch (error) {
+    console.error('financialExtAgentService.getSettlementDetail error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function calculateTripCost(userId, params = {}) {
+  try {
+    const { driverId, tripParams } = params;
+    const financialSvc = await import('backend/driverFinancialService');
+    const result = await financialSvc.calculateTripCost(driverId || userId, tripParams || params);
+    return result;
+  } catch (error) {
+    console.error('financialExtAgentService.calculateTripCost error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function getTaxSummary(userId, params = {}) {
+  try {
+    const { driverId, taxYear, filingStatus } = params;
+    const taxSvc = await import('backend/taxService');
+    const result = await taxSvc.getDriverTaxSummary(
+      driverId || userId,
+      taxYear,
+      filingStatus
+    );
+    return result;
+  } catch (error) {
+    console.error('financialExtAgentService.getTaxSummary error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function getIrsPerDiem(userId, params = {}) {
+  try {
+    const { taxYear, state } = params;
+    const taxSvc = await import('backend/taxService');
+    const result = await taxSvc.getPerDiemRates(taxYear, state);
+    return result;
+  } catch (error) {
+    console.error('financialExtAgentService.getIrsPerDiem error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function getFuelTaxReport(userId, params = {}) {
+  try {
+    const { driverId, quarter, year, states } = params;
+    if (!quarter || !year) return { error: 'quarter and year are required' };
+
+    const qNum = Number(quarter);
+    const yNum = Number(year);
+    const monthStart = (qNum - 1) * 3;
+    const dateFrom = `${yNum}-${String(monthStart + 1).padStart(2, '0')}-01`;
+    const lastMonth = monthStart + 3;
+    const dateTo = lastMonth > 12
+      ? `${yNum + 1}-01-01`
+      : `${yNum}-${String(lastMonth + 1).padStart(2, '0')}-01`;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.expenses, {
+      filters: {
+        driver_id: driverId || userId,
+        category: 'fuel'
+      },
+      limit: 5000,
+      suppressAuth: true
+    });
+
+    const fuelEntries = (result.items || []).filter(e => {
+      const d = e.expense_date || '';
+      return d >= dateFrom && d < dateTo;
+    });
+
+    const stateBreakdown = {};
+    for (const entry of fuelEntries) {
+      const st = entry.state || entry.vendor_state || 'unknown';
+      if (states && states.length > 0 && !states.includes(st)) continue;
+      if (!stateBreakdown[st]) {
+        stateBreakdown[st] = { state: st, gallons: 0, miles: 0, fuelCost: 0 };
+      }
+      stateBreakdown[st].gallons += Number(entry.gallons || 0);
+      stateBreakdown[st].miles += Number(entry.miles_driven || 0);
+      stateBreakdown[st].fuelCost += Number(entry.amount || 0);
+    }
+
+    const DEFAULT_TAX_RATE = 0.244;
+    let totalTaxDue = 0;
+    const breakdown = Object.values(stateBreakdown).map(s => {
+      const taxRate = s.taxRate || DEFAULT_TAX_RATE;
+      const taxDue = s.gallons * taxRate;
+      totalTaxDue += taxDue;
+      return {
+        state: s.state,
+        gallons: Math.round(s.gallons * 100) / 100,
+        miles: Math.round(s.miles),
+        taxRate,
+        taxDue: Math.round(taxDue * 100) / 100
+      };
+    });
+
+    return {
+      report: {
+        quarter: qNum,
+        year: yNum,
+        stateBreakdown: breakdown,
+        totalTaxDue: Math.round(totalTaxDue * 100) / 100
+      }
+    };
+  } catch (error) {
+    console.error('financialExtAgentService.getFuelTaxReport error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function estimateTakeHome(userId, params = {}) {
+  try {
+    const { driverId, grossPay, payPeriod, filingStatus, state } = params;
+    if (!grossPay) return { error: 'grossPay is required' };
+
+    const gross = Number(grossPay);
+    const period = payPeriod || 'monthly';
+
+    let annualized = gross;
+    if (period === 'weekly') annualized = gross * 52;
+    else if (period === 'biweekly') annualized = gross * 26;
+    else if (period === 'monthly') annualized = gross * 12;
+
+    const taxSvc = await import('backend/taxService');
+    let effectiveFederalRate = 0.22;
+    try {
+      const taxResult = await taxSvc.getDriverTaxSummary(
+        driverId || userId,
+        new Date().getFullYear().toString(),
+        filingStatus
+      );
+      if (taxResult?.summary?.effectiveTaxRate) {
+        effectiveFederalRate = taxResult.summary.effectiveTaxRate;
+      }
+    } catch (_taxErr) {
+      // use default rate
+    }
+
+    const stateTaxRate = 0.05;
+    const seTaxRate = 0.153;
+    const monthlyInsurance = 500;
+
+    const federalTax = gross * effectiveFederalRate;
+    const stateTax = gross * stateTaxRate;
+    const selfEmployment = gross * seTaxRate;
+    const insurance = period === 'weekly'
+      ? monthlyInsurance / 4.33
+      : period === 'biweekly'
+        ? monthlyInsurance / 2.17
+        : monthlyInsurance;
+
+    const totalDeductions = federalTax + stateTax + selfEmployment + insurance;
+    const estimatedTakeHome = gross - totalDeductions;
+    const effectiveTaxRate = gross > 0
+      ? Math.round((totalDeductions / gross) * 10000) / 10000
+      : 0;
+
+    return {
+      grossPay: gross,
+      deductions: {
+        federal: Math.round(federalTax * 100) / 100,
+        state: Math.round(stateTax * 100) / 100,
+        selfEmployment: Math.round(selfEmployment * 100) / 100,
+        insurance: Math.round(insurance * 100) / 100
+      },
+      estimatedTakeHome: Math.round(estimatedTakeHome * 100) / 100,
+      effectiveTaxRate,
+      payPeriod: period
+    };
+  } catch (error) {
+    console.error('financialExtAgentService.estimateTakeHome error:', error);
+    return { error: error.message };
+  }
+}

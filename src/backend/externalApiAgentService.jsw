@@ -1,0 +1,348 @@
+/**
+ * External API Agent Service
+ *
+ * Wraps API gateway, external matching/document/engagement APIs,
+ * and API management tools for agent-accessible operations.
+ */
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  requestLog: 'apiRequestLog',
+  usage: 'apiUsage',
+  partners: 'apiPartners',
+  carriers: 'carriers',
+  marketIntel: 'marketIntelligence'
+};
+
+export async function querySafetyApi(userId, params = {}) {
+  try {
+    const { dotNumber, reportType } = params;
+    if (!dotNumber) return { error: 'dotNumber is required' };
+
+    const gateway = await import('backend/apiGateway');
+    const request = {
+      path: '/v1/safety/' + dotNumber,
+      method: 'GET',
+      query: { report_type: reportType || 'basic' }
+    };
+
+    try {
+      const result = await gateway.handleGatewayRequest(request);
+      return { safety: result };
+    } catch (_gwErr) {
+      const fallback = await dataAccess.queryRecords(COLLECTIONS.carriers, {
+        filters: { dot_number: Number(dotNumber) },
+        limit: 1,
+        suppressAuth: true
+      });
+      return { safety: fallback.items?.[0] || null, source: 'fallback' };
+    }
+  } catch (error) {
+    console.error('externalApiAgentService.querySafetyApi error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function queryIntelApi(userId, params = {}) {
+  try {
+    const { query, region, dataType } = params;
+
+    const gateway = await import('backend/apiGateway');
+    const request = {
+      path: '/v1/intelligence/',
+      method: 'GET',
+      query: { query, region, dataType }
+    };
+
+    try {
+      const result = await gateway.handleGatewayRequest(request);
+      return { intelligence: result };
+    } catch (_gwErr) {
+      const filters = {};
+      if (region) filters.region = region;
+      if (dataType) filters.data_type = dataType;
+      const fallback = await dataAccess.queryRecords(COLLECTIONS.marketIntel, {
+        filters,
+        limit: 20,
+        suppressAuth: true
+      });
+      return { intelligence: fallback.items || [], source: 'fallback' };
+    }
+  } catch (error) {
+    console.error('externalApiAgentService.queryIntelApi error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function queryOpsApi(userId, params = {}) {
+  try {
+    const { endpoint, location, radius } = params;
+    if (!endpoint) return { error: 'endpoint is required (fuel or parking)' };
+
+    const gateway = await import('backend/apiGateway');
+    const path = endpoint === 'fuel' ? '/v1/fuel/' : '/v1/parking/';
+    const request = {
+      path,
+      method: 'GET',
+      query: { location, radius }
+    };
+
+    try {
+      const result = await gateway.handleGatewayRequest(request);
+      return { operations: result };
+    } catch (_gwErr) {
+      if (endpoint === 'fuel') {
+        const fuelSvc = await import('backend/fuelService');
+        const result = await fuelSvc.searchFuelPrices({ location, radius });
+        return { operations: result, source: 'fallback' };
+      }
+      const parkingSvc = await import('backend/parkingService');
+      const result = await parkingSvc.searchParking({ location, radius });
+      return { operations: result, source: 'fallback' };
+    }
+  } catch (error) {
+    console.error('externalApiAgentService.queryOpsApi error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function queryMatchingApi(userId, params = {}) {
+  try {
+    const { driverId, filters } = params;
+    const matchingApi = await import('backend/externalMatchingApi');
+
+    if (driverId) {
+      const result = await matchingApi.matchExternalCarriers({ driver_id: driverId, filters });
+      return { matching: result };
+    }
+
+    const result = await matchingApi.searchExternalDrivers({ filters });
+    return { matching: result };
+  } catch (error) {
+    console.error('externalApiAgentService.queryMatchingApi error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function queryDocumentApi(userId, params = {}) {
+  try {
+    const { documentType, documentData } = params;
+    if (!documentType) return { error: 'documentType is required' };
+
+    const docApi = await import('backend/externalDocumentApi');
+
+    if (documentType === 'cdl') {
+      const result = await docApi.extractExternalCDL(documentData || {});
+      return { document: result };
+    }
+
+    const result = await docApi.verifyExternalDocument(documentData || {});
+    return { document: result };
+  } catch (error) {
+    console.error('externalApiAgentService.queryDocumentApi error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function queryEngagementApi(userId, params = {}) {
+  try {
+    const { userId: targetUserId, action } = params;
+    const engApi = await import('backend/externalEngagementApi');
+    const uid = targetUserId || userId;
+
+    switch (action) {
+      case 'getUserProgress': {
+        const result = await engApi.getExternalUserProgress(uid, params);
+        return { engagement: result };
+      }
+      case 'awardXP': {
+        const result = await engApi.awardExternalXP({ user_id: uid, ...params });
+        return { engagement: result };
+      }
+      case 'checkAchievements': {
+        const result = await engApi.checkExternalAchievements(uid, params);
+        return { engagement: result };
+      }
+      case 'getLeaderboard': {
+        const result = await engApi.getExternalLeaderboard(params);
+        return { engagement: result };
+      }
+      default:
+        return { error: 'Unknown action. Use: getUserProgress, awardXP, checkAchievements, getLeaderboard' };
+    }
+  } catch (error) {
+    console.error('externalApiAgentService.queryEngagementApi error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function getApiUsage(userId, params = {}) {
+  try {
+    const { period, partnerId } = params;
+    const daysBack = Number(period) || 30;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - daysBack);
+    const cutoffStr = cutoff.toISOString();
+
+    const filters = {};
+    if (partnerId) filters.partner_id = partnerId;
+
+    const logResult = await dataAccess.queryRecords(COLLECTIONS.requestLog, {
+      filters,
+      limit: 1000,
+      suppressAuth: true
+    });
+
+    const recentLogs = (logResult.items || []).filter(r => {
+      const created = r._createdDate || r.created_at || '';
+      return created >= cutoffStr;
+    });
+
+    const byEndpoint = {};
+    const byPartner = {};
+    for (const log of recentLogs) {
+      const ep = log.endpoint_path || log.path || 'unknown';
+      byEndpoint[ep] = (byEndpoint[ep] || 0) + 1;
+      const pid = log.partner_id || 'anonymous';
+      byPartner[pid] = (byPartner[pid] || 0) + 1;
+    }
+
+    const aggregateResult = await dataAccess.queryRecords(COLLECTIONS.usage, {
+      filters: partnerId ? { partner_id: partnerId } : {},
+      limit: 100,
+      suppressAuth: true
+    });
+
+    return {
+      usage: {
+        totalRequests: recentLogs.length,
+        byEndpoint,
+        byPartner,
+        aggregateStats: aggregateResult.items || []
+      },
+      period: daysBack
+    };
+  } catch (error) {
+    console.error('externalApiAgentService.getApiUsage error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function getApiHealth(userId, params = {}) {
+  try {
+    const cutoff = new Date();
+    cutoff.setMinutes(cutoff.getMinutes() - 15);
+    const cutoffStr = cutoff.toISOString();
+
+    const logResult = await dataAccess.queryRecords(COLLECTIONS.requestLog, {
+      limit: 500,
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      suppressAuth: true
+    });
+
+    const recentLogs = (logResult.items || []).filter(r => {
+      const created = r._createdDate || r.created_at || '';
+      return created >= cutoffStr;
+    });
+
+    const categories = ['safety', 'intelligence', 'operations', 'matching', 'documents', 'engagement'];
+    const apis = categories.map(name => {
+      const catLogs = recentLogs.filter(r => {
+        const path = r.endpoint_path || r.path || '';
+        return path.includes(name) || path.includes(name.slice(0, 4));
+      });
+      const totalCat = catLogs.length;
+      const errors = catLogs.filter(r => Number(r.status_code || 200) >= 400).length;
+      const errorRate = totalCat > 0 ? errors / totalCat : 0;
+      const avgLatency = totalCat > 0
+        ? catLogs.reduce((sum, r) => sum + Number(r.response_time || 0), 0) / totalCat
+        : 0;
+
+      let status = 'healthy';
+      if (errorRate > 0.5) status = 'down';
+      else if (errorRate > 0.1) status = 'degraded';
+
+      return {
+        name,
+        status,
+        latency: Math.round(avgLatency),
+        errorRate: Math.round(errorRate * 100) / 100,
+        lastCheck: new Date().toISOString()
+      };
+    });
+
+    return { apis };
+  } catch (error) {
+    console.error('externalApiAgentService.getApiHealth error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function configureApiKey(userId, params = {}) {
+  try {
+    const { partnerId, keyName, permissions, tier } = params;
+    if (!partnerId || !keyName) return { error: 'partnerId and keyName are required' };
+
+    const authSvc = await import('backend/apiAuthService');
+    const existing = await dataAccess.queryRecords(COLLECTIONS.partners, {
+      filters: { partner_id: partnerId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (existing.items?.length > 0) {
+      await dataAccess.updateRecord(COLLECTIONS.partners, existing.items[0]._id || existing.items[0].id, {
+        key_name: keyName,
+        permissions: Array.isArray(permissions) ? permissions.join(',') : (permissions || ''),
+        tier: tier || 'standard',
+        updated_by: userId
+      }, { suppressAuth: true });
+    } else {
+      await dataAccess.insertRecord(COLLECTIONS.partners, {
+        partner_id: partnerId,
+        key_name: keyName,
+        permissions: Array.isArray(permissions) ? permissions.join(',') : (permissions || ''),
+        tier: tier || 'standard',
+        created_by: userId,
+        status: 'active'
+      }, { suppressAuth: true });
+    }
+
+    return { success: true, partnerId, keyName, tier: tier || 'standard' };
+  } catch (error) {
+    console.error('externalApiAgentService.configureApiKey error:', error);
+    return { error: error.message };
+  }
+}
+
+export async function testApiEndpoint(userId, params = {}) {
+  try {
+    const { endpoint, method, testPayload } = params;
+    if (!endpoint) return { error: 'endpoint is required' };
+
+    const gateway = await import('backend/apiGateway');
+    const startTime = Date.now();
+
+    const request = {
+      path: endpoint.startsWith('/') ? endpoint : '/' + endpoint,
+      method: method || 'GET',
+      body: testPayload || {}
+    };
+
+    const result = await gateway.handleGatewayRequest(request);
+    const responseTime = Date.now() - startTime;
+
+    const statusCode = result?.statusCode || (result?.error ? 500 : 200);
+    const preview = JSON.stringify(result).slice(0, 500);
+
+    return {
+      success: statusCode < 400,
+      statusCode,
+      responseTime,
+      responsePreview: preview
+    };
+  } catch (error) {
+    console.error('externalApiAgentService.testApiEndpoint error:', error);
+    return { error: error.message };
+  }
+}

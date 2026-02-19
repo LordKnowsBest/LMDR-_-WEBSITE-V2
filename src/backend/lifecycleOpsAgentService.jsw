@@ -1,0 +1,333 @@
+/**
+ * Lifecycle Operations Agent Service
+ *
+ * Cross-role lifecycle management: driver/carrier timelines, disposition
+ * updates, exit surveys, algorithm feedback, lifecycle analytics.
+ */
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  lifecycleEvents: 'driverLifecycleEvents',
+  exitSurveys: 'exitSurveys',
+  surveyResponses: 'driverSurveyResponses',
+  surveyRequests: 'driverSurveyRequests',
+  matchFeedback: 'driverMatchFeedback',
+  driverProfiles: 'driverProfiles',
+  driverCarrierInterests: 'driverCarrierInterests'
+};
+
+const VALID_DISPOSITIONS = [
+  'available', 'not_looking', 'hired', 'in_process',
+  'not_qualified', 'unresponsive', 'declined', 'blacklisted'
+];
+
+function getDefaultExitQuestions() {
+  return [
+    { id: 'q1', text: 'What was the primary reason for leaving?', type: 'select', options: ['Better pay', 'Home time', 'Management', 'Equipment', 'Other'] },
+    { id: 'q2', text: 'How would you rate your overall experience?', type: 'rating', scale: 5 },
+    { id: 'q3', text: 'Would you recommend this carrier to other drivers?', type: 'select', options: ['Yes', 'No', 'Maybe'] },
+    { id: 'q4', text: 'What could have been done differently to retain you?', type: 'text' },
+    { id: 'q5', text: 'Any additional comments?', type: 'text' }
+  ];
+}
+
+// ── 1. Get Driver Timeline ──────────────────────────────────────────
+export async function getDriverTimeline(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    if (!params.driverId) return { error: 'params.driverId is required' };
+    const lifecycleSvc = await import('backend/driverLifecycleService');
+    const result = await lifecycleSvc.getDriverTimeline(params.driverId, {
+      event_type: params.eventTypes,
+      limit: params.limit
+    });
+    return result;
+  } catch (error) {
+    console.error('[LifecycleOps] getDriverTimeline error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 2. Get Carrier Timeline ─────────────────────────────────────────
+export async function getCarrierTimeline(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    if (!params.carrierId) return { error: 'params.carrierId is required' };
+    const filters = { carrier_id: params.carrierId };
+    if (params.eventTypes) {
+      filters.event_type = params.eventTypes;
+    }
+    const result = await dataAccess.queryRecords(COLLECTIONS.lifecycleEvents, {
+      filters,
+      sort: [{ field: 'created_at', order: 'desc' }],
+      limit: params.limit || 50,
+      suppressAuth: true
+    });
+    const items = result.items || [];
+    return { items, totalCount: items.length, carrierId: params.carrierId };
+  } catch (error) {
+    console.error('[LifecycleOps] getCarrierTimeline error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 3. Update Disposition ───────────────────────────────────────────
+export async function updateDisposition(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    if (!params.driverId) return { error: 'params.driverId is required' };
+    if (!params.disposition) return { error: 'params.disposition is required' };
+    if (!VALID_DISPOSITIONS.includes(params.disposition)) {
+      return { error: 'Invalid disposition. Valid options: ' + VALID_DISPOSITIONS.join(', ') };
+    }
+    const lifecycleSvc = await import('backend/driverLifecycleService');
+    const result = await lifecycleSvc.updateDisposition(
+      params.driverId,
+      params.disposition,
+      params.availableDate,
+      params.notes
+    );
+    return result;
+  } catch (error) {
+    console.error('[LifecycleOps] updateDisposition error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 4. Get Disposition Options ──────────────────────────────────────
+export async function getDispositionOptions(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    return {
+      dispositions: VALID_DISPOSITIONS.map(d => ({
+        code: d,
+        label: d.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+      }))
+    };
+  } catch (error) {
+    console.error('[LifecycleOps] getDispositionOptions error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 5. Create Exit Survey ───────────────────────────────────────────
+export async function createExitSurvey(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    if (!params.driverId) return { error: 'params.driverId is required' };
+    const surveyId = 'exit_' + Date.now();
+    const record = {
+      survey_id: surveyId,
+      driver_id: params.driverId,
+      carrier_id: params.carrierId || '',
+      recruiter_id: userId,
+      survey_type: params.surveyType || 'exit',
+      status: 'sent',
+      questions: JSON.stringify(getDefaultExitQuestions()),
+      sent_at: new Date().toISOString()
+    };
+    await dataAccess.insertRecord(COLLECTIONS.exitSurveys, record, { suppressAuth: true });
+    return { success: true, surveyId };
+  } catch (error) {
+    console.error('[LifecycleOps] createExitSurvey error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 6. Get Survey Responses ─────────────────────────────────────────
+export async function getSurveyResponses(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    const filters = {};
+    if (params.carrierId) filters.carrier_id = params.carrierId;
+    if (params.driverId) filters.driver_id = params.driverId;
+    if (params.status) filters.status = params.status;
+
+    const collection = params.surveyType === 'exit'
+      ? COLLECTIONS.exitSurveys
+      : COLLECTIONS.surveyResponses;
+
+    const page = params.page || 1;
+    const pageSize = params.pageSize || 25;
+
+    const result = await dataAccess.queryRecords(collection, {
+      filters,
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      suppressAuth: true
+    });
+    const items = result.items || [];
+    return { items, totalCount: result.totalCount || items.length, page, pageSize };
+  } catch (error) {
+    console.error('[LifecycleOps] getSurveyResponses error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 7. Submit Algorithm Feedback ────────────────────────────────────
+export async function submitAlgorithmFeedback(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    const record = {
+      driver_id: userId,
+      match_id: params.matchId || '',
+      carrier_dot: params.carrierDot || '',
+      feedback_type: params.feedbackType || 'quality',
+      rating: Number(params.rating) || 3,
+      comments: params.comments || '',
+      created_at: new Date().toISOString()
+    };
+    const inserted = await dataAccess.insertRecord(COLLECTIONS.matchFeedback, record, { suppressAuth: true });
+    return { success: true, feedbackId: inserted._id || inserted.id || record.match_id };
+  } catch (error) {
+    console.error('[LifecycleOps] submitAlgorithmFeedback error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 8. Get Feedback Summary ─────────────────────────────────────────
+export async function getFeedbackSummary(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    const periodDays = params.period || 30;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - periodDays);
+    const cutoffISO = cutoff.toISOString();
+
+    const filters = { created_at: { gte: cutoffISO } };
+    if (params.feedbackType) filters.feedback_type = params.feedbackType;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.matchFeedback, {
+      filters,
+      limit: 1000,
+      suppressAuth: true
+    });
+    const items = result.items || [];
+    const totalCount = items.length;
+
+    const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    let ratingSum = 0;
+    const issueMap = {};
+
+    for (const item of items) {
+      const r = Number(item.rating) || 3;
+      ratingSum += r;
+      if (distribution[r] !== undefined) distribution[r]++;
+      if (item.comments) {
+        issueMap[item.comments] = (issueMap[item.comments] || 0) + 1;
+      }
+    }
+
+    const avgRating = totalCount > 0 ? Math.round((ratingSum / totalCount) * 100) / 100 : 0;
+    const topIssues = Object.entries(issueMap)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([comment, count]) => ({ comment, count }));
+
+    return {
+      summary: { avgRating, totalCount, distribution, topIssues },
+      period: periodDays
+    };
+  } catch (error) {
+    console.error('[LifecycleOps] getFeedbackSummary error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 9. Get Lifecycle Analytics ──────────────────────────────────────
+export async function getLifecycleAnalytics(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    const periodDays = params.period || 30;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - periodDays);
+    const cutoffISO = cutoff.toISOString();
+
+    const driversResult = await dataAccess.queryRecords(COLLECTIONS.driverProfiles, {
+      limit: 0,
+      suppressAuth: true
+    });
+    const totalDrivers = driversResult.totalCount || 0;
+
+    const eventsResult = await dataAccess.queryRecords(COLLECTIONS.lifecycleEvents, {
+      filters: { created_at: { gte: cutoffISO } },
+      limit: 1000,
+      suppressAuth: true
+    });
+    const events = eventsResult.items || [];
+    const eventBreakdown = {};
+    for (const ev of events) {
+      const t = ev.event_type || 'unknown';
+      eventBreakdown[t] = (eventBreakdown[t] || 0) + 1;
+    }
+
+    const interestsResult = await dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+      limit: 1000,
+      suppressAuth: true
+    });
+    const interests = interestsResult.items || [];
+    const pipelineDistribution = {};
+    for (const i of interests) {
+      const s = i.status || 'unknown';
+      pipelineDistribution[s] = (pipelineDistribution[s] || 0) + 1;
+    }
+
+    return {
+      analytics: { totalDrivers, eventBreakdown, pipelineDistribution, period: periodDays }
+    };
+  } catch (error) {
+    console.error('[LifecycleOps] getLifecycleAnalytics error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ── 10. Get Cohort Retention ────────────────────────────────────────
+export async function getCohortRetention(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    const months = params.months || 6;
+    const cohortField = params.cohortField || 'created_at';
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverProfiles, {
+      limit: 5000,
+      suppressAuth: true
+    });
+    const drivers = result.items || [];
+
+    const cohortMap = {};
+    for (const driver of drivers) {
+      const dateVal = driver[cohortField];
+      if (!dateVal) continue;
+      const d = new Date(dateVal);
+      const monthKey = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+      if (!cohortMap[monthKey]) {
+        cohortMap[monthKey] = { total: 0, active: 0 };
+      }
+      cohortMap[monthKey].total++;
+      if (driver.status === 'active') {
+        cohortMap[monthKey].active++;
+      }
+    }
+
+    const sortedKeys = Object.keys(cohortMap).sort().slice(-months);
+    const cohorts = sortedKeys.map(month => ({
+      month,
+      totalDrivers: cohortMap[month].total,
+      activeDrivers: cohortMap[month].active,
+      retentionRate: cohortMap[month].total > 0
+        ? Math.round((cohortMap[month].active / cohortMap[month].total) * 10000) / 100
+        : 0
+    }));
+
+    const totalAll = cohorts.reduce((s, c) => s + c.totalDrivers, 0);
+    const activeAll = cohorts.reduce((s, c) => s + c.activeDrivers, 0);
+    const overallRetention = totalAll > 0
+      ? Math.round((activeAll / totalAll) * 10000) / 100
+      : 0;
+
+    return { cohorts, overallRetention };
+  } catch (error) {
+    console.error('[LifecycleOps] getCohortRetention error:', error.message);
+    return { error: error.message };
+  }
+}

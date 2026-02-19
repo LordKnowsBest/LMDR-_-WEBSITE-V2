@@ -1,0 +1,339 @@
+/**
+ * Admin Gamification Agent Service
+ *
+ * Thin wrapper for admin gamification agent actions.
+ * Delegates to existing gamificationService and queries
+ * gamification Airtable collections via dataAccess.
+ *
+ * @module backend/adminGamificationAgentService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+// Collection keys (camelCase from configData.js)
+const COLLECTIONS = {
+  achievements: 'achievementDefinitions',
+  badges: 'badgeDefinitions',
+  challenges: 'challengeDefinitions',
+  leaderboard: 'leaderboardSnapshots',
+  events: 'gamificationEvents',
+  driverProg: 'driverProgression',
+  recruiterProg: 'recruiterProgression',
+  seasonal: 'seasonalEvents',
+  participants: 'eventParticipants',
+  settings: 'platformSettings',
+};
+
+// ============================================================================
+// 1. getGamificationConfig
+// ============================================================================
+
+export async function getGamificationConfig(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const [achieveRes, challengeRes, badgeRes, driverProgRes, recruiterProgRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.achievements, { limit: 1000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.challenges, { limit: 1000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.badges, { limit: 1000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.driverProg, { limit: 1000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.recruiterProg, { limit: 1000, suppressAuth: true }),
+    ]);
+
+    return {
+      achievementCount: achieveRes.items?.length || 0,
+      challengeCount: challengeRes.items?.length || 0,
+      badgeCount: badgeRes.items?.length || 0,
+      totalDriverParticipants: driverProgRes.items?.length || 0,
+      totalRecruiterParticipants: recruiterProgRes.items?.length || 0,
+    };
+  } catch (error) {
+    console.error('[AdminGamification] getGamificationConfig error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 2. updateXPRules
+// ============================================================================
+
+export async function updateXPRules(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    if (!params.rules) return { error: 'params.rules is required' };
+
+    // Look for existing XP rules record in platformSettings
+    const existing = await dataAccess.findByField(
+      COLLECTIONS.settings, 'setting_key', 'xp_rules', { suppressAuth: true }
+    );
+
+    const record = {
+      setting_key: 'xp_rules',
+      setting_value: JSON.stringify(params.rules),
+      updated_by: userId,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (existing.success && existing.items?.length > 0) {
+      const existingRecord = existing.items[0];
+      record.id = existingRecord.id || existingRecord._id;
+      await dataAccess.updateRecord(COLLECTIONS.settings, record, { suppressAuth: true });
+    } else {
+      record.created_by = userId;
+      record.created_at = new Date().toISOString();
+      await dataAccess.insertRecord(COLLECTIONS.settings, record, { suppressAuth: true });
+    }
+
+    console.log(`[AdminGamification] XP rules updated by ${userId}`);
+    return { success: true, rules: params.rules };
+  } catch (error) {
+    console.error('[AdminGamification] updateXPRules error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 3. getAchievementList
+// ============================================================================
+
+export async function getAchievementList(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const queryOpts = {
+      sort: [{ field: 'display_order', direction: 'asc' }],
+      limit: 500,
+      suppressAuth: true,
+    };
+
+    if (params.userType) {
+      queryOpts.filters = { user_type: params.userType };
+    }
+
+    const [achieveRes, driverProgRes, recruiterProgRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.achievements, queryOpts),
+      dataAccess.queryRecords(COLLECTIONS.driverProg, { limit: 1000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.recruiterProg, { limit: 1000, suppressAuth: true }),
+    ]);
+
+    const totalParticipants = (driverProgRes.items?.length || 0) + (recruiterProgRes.items?.length || 0);
+
+    const achievements = (achieveRes.items || []).map(a => {
+      // Count how many progression records reference this achievement
+      const driverUnlocks = (driverProgRes.items || []).filter(
+        p => p.unlocked_achievements && p.unlocked_achievements.includes(a.name)
+      ).length;
+      const recruiterUnlocks = (recruiterProgRes.items || []).filter(
+        p => p.unlocked_achievements && p.unlocked_achievements.includes(a.name)
+      ).length;
+      const totalUnlocks = driverUnlocks + recruiterUnlocks;
+      const unlockRate = totalParticipants > 0 ? Math.round((totalUnlocks / totalParticipants) * 100) : 0;
+
+      return { ...a, unlockRate, totalUnlocks };
+    });
+
+    return { achievements };
+  } catch (error) {
+    console.error('[AdminGamification] getAchievementList error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 4. createAchievement
+// ============================================================================
+
+export async function createAchievement(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    if (!params.name) return { error: 'params.name is required' };
+
+    const record = {
+      name: params.name,
+      description: params.description || '',
+      icon: params.icon || '',
+      xp_reward: params.xpReward || 0,
+      user_type: params.userType || 'driver',
+      criteria: JSON.stringify(params.criteria || {}),
+      is_active: 'Yes',
+      created_by: userId,
+      created_at: new Date().toISOString(),
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.achievements, record, { suppressAuth: true });
+
+    if (!result.success) return { error: result.error || 'Failed to create achievement' };
+
+    console.log(`[AdminGamification] Achievement "${params.name}" created by ${userId}`);
+    return { success: true, achievement: result.item || record };
+  } catch (error) {
+    console.error('[AdminGamification] createAchievement error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 5. createChallenge
+// ============================================================================
+
+export async function createChallenge(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+    if (!params.name) return { error: 'params.name is required' };
+
+    const record = {
+      name: params.name,
+      description: params.description || '',
+      challenge_type: params.challengeType || 'weekly',
+      target_metric: params.targetMetric || '',
+      target_value: params.targetValue || 0,
+      xp_reward: params.xpReward || 0,
+      start_date: params.startDate || new Date().toISOString(),
+      end_date: params.endDate || '',
+      user_type: params.userType || 'driver',
+      is_active: 'Yes',
+      created_by: userId,
+      created_at: new Date().toISOString(),
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.challenges, record, { suppressAuth: true });
+
+    if (!result.success) return { error: result.error || 'Failed to create challenge' };
+
+    console.log(`[AdminGamification] Challenge "${params.name}" created by ${userId}`);
+    return { success: true, challenge: result.item || record };
+  } catch (error) {
+    console.error('[AdminGamification] createChallenge error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 6. getActiveChallenges
+// ============================================================================
+
+export async function getActiveChallenges(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const filters = { is_active: 'Yes' };
+    if (params.userType) filters.user_type = params.userType;
+
+    const [challengeRes, participantRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.challenges, {
+        filters,
+        limit: 500,
+        suppressAuth: true,
+      }),
+      dataAccess.queryRecords(COLLECTIONS.participants, {
+        limit: 1000,
+        suppressAuth: true,
+      }),
+    ]);
+
+    const now = new Date().toISOString();
+    const challenges = (challengeRes.items || [])
+      .filter(c => !c.end_date || c.end_date >= now)
+      .map(c => {
+        const participantCount = (participantRes.items || []).filter(
+          p => p.challenge_id === (c.id || c._id)
+        ).length;
+        return { ...c, participantCount };
+      });
+
+    return { challenges };
+  } catch (error) {
+    console.error('[AdminGamification] getActiveChallenges error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 7. getGlobalLeaderboard
+// ============================================================================
+
+export async function getGlobalLeaderboard(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const queryOpts = {
+      sort: [{ field: 'score', direction: 'desc' }],
+      limit: params.limit || 50,
+      skip: params.skip || 0,
+      suppressAuth: true,
+    };
+
+    if (params.userType) {
+      queryOpts.filters = { user_type: params.userType };
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.leaderboard, queryOpts);
+
+    return {
+      entries: result.items || [],
+      totalCount: result.totalCount || result.items?.length || 0,
+    };
+  } catch (error) {
+    console.error('[AdminGamification] getGlobalLeaderboard error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 8. getGamificationAnalytics
+// ============================================================================
+
+export async function getGamificationAnalytics(userId, params = {}) {
+  try {
+    if (!userId) return { error: 'userId is required' };
+
+    const days = params.days || 30;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - days);
+    const cutoffISO = cutoff.toISOString();
+
+    const [eventsRes, driverProgRes, recruiterProgRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.events, {
+        filters: { created_at: { gte: cutoffISO } },
+        limit: 5000,
+        suppressAuth: true,
+      }),
+      dataAccess.queryRecords(COLLECTIONS.driverProg, { limit: 5000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.recruiterProg, { limit: 5000, suppressAuth: true }),
+    ]);
+
+    // Aggregate events by type
+    const eventCounts = {};
+    const activeUserSet = new Set();
+    for (const evt of (eventsRes.items || [])) {
+      const type = evt.event_type || 'unknown';
+      eventCounts[type] = (eventCounts[type] || 0) + 1;
+      if (evt.user_id) activeUserSet.add(evt.user_id);
+    }
+
+    // Level distribution from progression
+    const levelDistribution = {};
+    let totalXP = 0;
+    let progCount = 0;
+    const allProg = [...(driverProgRes.items || []), ...(recruiterProgRes.items || [])];
+    for (const p of allProg) {
+      const level = p.current_level || p.level || 0;
+      levelDistribution[level] = (levelDistribution[level] || 0) + 1;
+      totalXP += Number(p.total_xp || p.xp || 0);
+      progCount++;
+    }
+
+    const averageXP = progCount > 0 ? Math.round(totalXP / progCount) : 0;
+
+    return {
+      eventCounts,
+      levelDistribution,
+      averageXP,
+      activeUsers: activeUserSet.size,
+      period: `${days} days`,
+    };
+  } catch (error) {
+    console.error('[AdminGamification] getGamificationAnalytics error:', error.message);
+    return { error: error.message };
+  }
+}

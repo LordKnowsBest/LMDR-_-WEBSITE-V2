@@ -1,0 +1,328 @@
+/**
+ * Cross-Role Utility Agent Service
+ *
+ * Provides cross-role intelligence: mutual interest, match explanations,
+ * carrier comparisons, market benchmarks, industry trends, and more.
+ */
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  systemMetrics: 'systemMetrics',
+  driverProfiles: 'driverProfiles',
+  jobPostings: 'jobPostings',
+  marketIntelligence: 'marketIntelligence',
+  driverCarrierInterests: 'driverCarrierInterests',
+  carriers: 'carriers',
+  driverLifecycleEvents: 'driverLifecycleEvents'
+};
+
+export async function getMutualInterest(userId, params = {}) {
+  try {
+    const { driverId } = params;
+    if (!driverId) return { error: 'driverId is required' };
+    const svc = await import('backend/mutualInterestService');
+    const interests = await svc.getMutualInterestForDriver(driverId);
+    return { interests, count: Array.isArray(interests) ? interests.length : 0 };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getRetentionForCarrier(userId, params = {}) {
+  try {
+    const { carrierDot, period } = params;
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    try {
+      const svc = await import('backend/recruiterRetentionService');
+      const risks = await svc.getRetentionRisks(userId, { carrier_dot: carrierDot });
+      return { risks, riskCount: Array.isArray(risks) ? risks.length : 0, period: period || '30d' };
+    } catch (_importErr) {
+      // Fallback: query lifecycle events directly
+      const result = await dataAccess.queryRecords(COLLECTIONS.driverLifecycleEvents, {
+        filters: { carrier_id: carrierDot },
+        limit: 200,
+        suppressAuth: true
+      });
+      const items = (result?.items || []).filter(e =>
+        ['termination', 'resignation', 'churn_risk'].includes(e.event_type)
+      );
+      return { risks: items, riskCount: items.length, period: period || '30d' };
+    }
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getMatchExplanation(userId, params = {}) {
+  try {
+    const { driverId, carrierDot } = params;
+    if (!driverId || !carrierDot) return { error: 'driverId and carrierDot are required' };
+    const svc = await import('backend/matchExplanationService');
+    const explanation = await svc.getMatchExplanationForDriver(driverId, carrierDot);
+    return explanation;
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getRecruiterHealth(userId, params = {}) {
+  try {
+    const { carrierDot } = params;
+    const svc = await import('backend/recruiterHealthService');
+    const status = await svc.getRecruiterHealthStatus(carrierDot || userId);
+    return status;
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getPlatformBenchmarks(userId, params = {}) {
+  try {
+    const { period, metrics } = params;
+    const days = parseInt(period, 10) || 30;
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+    const sinceISO = since.toISOString();
+
+    const [metricsResult, driversResult, jobsResult] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.systemMetrics, {
+        filters: { created_date: { gte: sinceISO } },
+        limit: 500,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.driverProfiles, {
+        filters: { status: 'active' },
+        limit: 1,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.jobPostings, {
+        filters: { status: 'active' },
+        limit: 1,
+        suppressAuth: true
+      })
+    ]);
+
+    const items = metricsResult?.items || [];
+    let totalRuns = 0;
+    let qualitySum = 0;
+    let qualityCount = 0;
+    let latencySum = 0;
+    let latencyCount = 0;
+    let totalToolCalls = 0;
+
+    for (const item of items) {
+      if (item.metric_type === 'agent_run') totalRuns++;
+      if (item.quality_score != null) { qualitySum += Number(item.quality_score); qualityCount++; }
+      if (item.response_time != null) { latencySum += Number(item.response_time); latencyCount++; }
+      if (item.tool_calls != null) totalToolCalls += Number(item.tool_calls);
+    }
+
+    return {
+      benchmarks: {
+        agent_runs: totalRuns,
+        quality_score: qualityCount > 0 ? Math.round((qualitySum / qualityCount) * 100) / 100 : null,
+        response_time: latencyCount > 0 ? Math.round(latencySum / latencyCount) : null,
+        active_drivers: metricsResult?.totalCount != null ? driversResult?.totalCount : 0,
+        active_jobs: jobsResult?.totalCount || 0
+      },
+      period: days
+    };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getIndustryTrends(userId, params = {}) {
+  try {
+    const { region, period } = params;
+    const filters = { insight_type: 'industry_trend' };
+    if (region) filters.region = region;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.marketIntelligence, {
+      filters,
+      limit: 100,
+      suppressAuth: true
+    });
+
+    return { trends: result?.items || [], totalCount: result?.totalCount || 0 };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getRegionalAnalysis(userId, params = {}) {
+  try {
+    const { region, metric } = params;
+    if (!region) return { error: 'region is required' };
+
+    const [driversResult, jobsResult] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.driverProfiles, {
+        filters: { state: region },
+        limit: 1,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.jobPostings, {
+        filters: { state: region, status: 'active' },
+        limit: 1,
+        suppressAuth: true
+      })
+    ]);
+
+    const driverCount = driversResult?.totalCount || 0;
+    const jobCount = jobsResult?.totalCount || 0;
+    const ratio = jobCount > 0 ? Math.round((driverCount / jobCount) * 100) / 100 : null;
+
+    let analysis = 'balanced';
+    if (ratio !== null) {
+      if (ratio > 2) analysis = 'driver_surplus';
+      else if (ratio < 0.5) analysis = 'driver_shortage';
+    }
+
+    return { region, supply: driverCount, demand: jobCount, ratio, analysis };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getSeasonalPatterns(userId, params = {}) {
+  try {
+    const { metric, years } = params;
+    const lookbackYears = parseInt(years, 10) || 2;
+    const since = new Date();
+    since.setFullYear(since.getFullYear() - lookbackYears);
+    const sinceISO = since.toISOString();
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+      filters: { applied_at: { gte: sinceISO } },
+      limit: 2000,
+      suppressAuth: true
+    });
+
+    const items = result?.items || [];
+    const monthlyBuckets = {};
+    for (let m = 0; m < 12; m++) monthlyBuckets[m] = 0;
+
+    for (const item of items) {
+      const dateVal = item.applied_at || item._createdDate;
+      if (!dateVal) continue;
+      const month = new Date(dateVal).getMonth();
+      monthlyBuckets[month]++;
+    }
+
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const patterns = monthNames.map((name, i) => ({ month: name, count: monthlyBuckets[i] }));
+
+    let peakMonth = monthNames[0];
+    let troughMonth = monthNames[0];
+    let peakVal = -1;
+    let troughVal = Infinity;
+    for (let i = 0; i < 12; i++) {
+      if (monthlyBuckets[i] > peakVal) { peakVal = monthlyBuckets[i]; peakMonth = monthNames[i]; }
+      if (monthlyBuckets[i] < troughVal) { troughVal = monthlyBuckets[i]; troughMonth = monthNames[i]; }
+    }
+
+    return { patterns, peakMonth, troughMonth };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function compareCarriers(userId, params = {}) {
+  try {
+    const { carrierDots } = params;
+    if (!Array.isArray(carrierDots) || carrierDots.length === 0) {
+      return { error: 'carrierDots array is required' };
+    }
+
+    const carriers = await Promise.all(
+      carrierDots.map(async (dot) => {
+        try {
+          const result = await dataAccess.queryRecords(COLLECTIONS.carriers, {
+            filters: { dot_number: Number(dot) },
+            limit: 1,
+            suppressAuth: true
+          });
+          const carrier = result?.items?.[0];
+          if (!carrier) return { dot, error: 'Not found' };
+          return {
+            dot: carrier.dot_number,
+            name: carrier.legal_name || carrier.name,
+            safety_rating: carrier.safety_rating,
+            fleet_size: carrier.fleet_size || carrier.total_power_units,
+            avg_pay: carrier.avg_pay,
+            location: carrier.phy_city ? `${carrier.phy_city}, ${carrier.phy_state}` : null,
+            operating_status: carrier.operating_status
+          };
+        } catch (err) {
+          return { dot, error: err.message };
+        }
+      })
+    );
+
+    return { carriers };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getDriverMarketValue(userId, params = {}) {
+  try {
+    const { driverId } = params;
+    if (!driverId) return { error: 'driverId is required' };
+
+    const driverResult = await dataAccess.queryRecords(COLLECTIONS.driverProfiles, {
+      filters: { _id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    const driver = driverResult?.items?.[0];
+    if (!driver) return { error: 'Driver not found' };
+
+    const factors = {
+      cdl_class: driver.cdl_class || driver.cdlClass,
+      experience_years: driver.experience_years || driver.yearsExperience,
+      endorsements: driver.endorsements,
+      state: driver.state
+    };
+
+    // Query matching job postings for pay data
+    const jobFilters = { status: 'active' };
+    if (factors.cdl_class) jobFilters.cdl_class = factors.cdl_class;
+
+    const jobsResult = await dataAccess.queryRecords(COLLECTIONS.jobPostings, {
+      filters: jobFilters,
+      limit: 200,
+      suppressAuth: true
+    });
+
+    const jobs = jobsResult?.items || [];
+    const payValues = jobs
+      .map(j => Number(j.pay_rate || j.salary || j.annual_pay || 0))
+      .filter(v => v > 0);
+
+    let min = null;
+    let max = null;
+    let median = null;
+
+    if (payValues.length > 0) {
+      payValues.sort((a, b) => a - b);
+      min = payValues[0];
+      max = payValues[payValues.length - 1];
+      const mid = Math.floor(payValues.length / 2);
+      median = payValues.length % 2 === 0
+        ? Math.round((payValues[mid - 1] + payValues[mid]) / 2)
+        : payValues[mid];
+    }
+
+    return {
+      driverId,
+      estimatedPayRange: { min, max, median },
+      factors,
+      marketDemand: jobs.length
+    };
+  } catch (error) {
+    return { error: error.message };
+  }
+}

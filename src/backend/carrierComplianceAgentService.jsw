@@ -1,0 +1,385 @@
+/**
+ * Carrier Compliance Agent Service
+ * Thin wrapper for compliance agent actions.
+ * Delegates to complianceService and incidentService.
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  complianceEvents: 'complianceEvents',
+  complianceAlerts: 'complianceAlerts',
+  carrierDocuments: 'carrierDocuments',
+  qualificationFiles: 'qualificationFiles',
+  csaScoreHistory: 'csaScoreHistory',
+  incidentReports: 'incidentReports'
+};
+
+// ============================================
+// 1. getComplianceCalendar
+// ============================================
+
+export async function getComplianceCalendar(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const [eventsResult, alertsResult] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.complianceEvents, {
+        filters: { carrier_dot: carrierDot },
+        sort: [{ field: 'due_date', direction: 'asc' }],
+        limit: params.limit || 50,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.complianceAlerts, {
+        filters: { carrier_dot: String(carrierDot), status: 'active' },
+        sort: [{ field: '_createdDate', direction: 'asc' }],
+        limit: params.limit || 50,
+        suppressAuth: true
+      })
+    ]);
+
+    const events = eventsResult.success ? (eventsResult.items || []) : [];
+    const alerts = alertsResult.success ? (alertsResult.items || []) : [];
+
+    // Merge into a unified timeline sorted by date
+    const timeline = [];
+
+    for (const evt of events) {
+      timeline.push({
+        type: 'event',
+        title: evt.title || evt.event_type || 'Compliance Event',
+        due_date: evt.due_date,
+        status: evt.status,
+        details: evt
+      });
+    }
+
+    for (const alert of alerts) {
+      timeline.push({
+        type: 'alert',
+        title: alert.title || alert.alert_type || 'Compliance Alert',
+        due_date: alert.deadline || alert._createdDate,
+        severity: alert.severity,
+        details: alert
+      });
+    }
+
+    // Sort by due_date ascending
+    timeline.sort((a, b) => {
+      const da = a.due_date ? new Date(a.due_date).getTime() : 0;
+      const db = b.due_date ? new Date(b.due_date).getTime() : 0;
+      return da - db;
+    });
+
+    return { timeline, totalCount: timeline.length };
+  } catch (error) {
+    console.error('[CarrierCompliance] getComplianceCalendar error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 2. getDocumentVault
+// ============================================
+
+export async function getDocumentVault(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const filters = { carrier_dot: carrierDot };
+    if (params.document_type) filters.document_type = params.document_type;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.carrierDocuments, {
+      filters,
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit: params.limit || 50,
+      skip: params.offset || 0,
+      suppressAuth: true
+    });
+
+    if (!result.success) return { error: result.error || 'Failed to fetch documents' };
+
+    return {
+      documents: result.items || [],
+      totalCount: result.totalCount || 0
+    };
+  } catch (error) {
+    console.error('[CarrierCompliance] getDocumentVault error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 3. uploadCarrierDocument
+// ============================================
+
+export async function uploadCarrierDocument(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    if (!params.document_type || !params.file_name) {
+      return { error: 'params.document_type and params.file_name are required' };
+    }
+
+    const record = {
+      carrier_dot: carrierDot,
+      document_type: params.document_type,
+      file_name: params.file_name,
+      file_url: params.file_url || '',
+      expiry_date: params.expiry_date || null,
+      uploaded_by: params.uploaded_by || 'agent',
+      uploaded_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.carrierDocuments, record, { suppressAuth: true });
+    if (!result.success) return { error: result.error || 'Failed to upload document' };
+
+    return result.record || result;
+  } catch (error) {
+    console.error('[CarrierCompliance] uploadCarrierDocument error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 4. getDQTracker
+// ============================================
+
+export async function getDQTracker(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    // Try delegate to complianceService first for global view
+    try {
+      const compSvc = await import('backend/complianceService');
+      const globalStatus = await compSvc.getGlobalDQFStatus();
+      if (globalStatus.success) return globalStatus;
+    } catch (_e) {
+      // Fall back to direct query
+    }
+
+    // Fallback: query qualificationFiles for this carrier
+    const result = await dataAccess.queryRecords(COLLECTIONS.qualificationFiles, {
+      filters: { carrier_dot: carrierDot },
+      limit: params.limit || 100,
+      suppressAuth: true
+    });
+
+    if (!result.success) return { error: result.error || 'Failed to fetch DQ files' };
+
+    const files = result.items || [];
+    return {
+      success: true,
+      stats: {
+        total: files.length,
+        complete: files.filter(f => f.completeness_score === 100).length,
+        incomplete: files.filter(f => f.completeness_score < 100).length,
+        critical: files.filter(f => f.completeness_score < 50).length,
+        avgCompleteness: files.length > 0 ? Math.round(files.reduce((s, f) => s + (f.completeness_score || 0), 0) / files.length) : 0
+      },
+      files
+    };
+  } catch (error) {
+    console.error('[CarrierCompliance] getDQTracker error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 5. getDQGaps
+// ============================================
+
+export async function getDQGaps(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    const compSvc = await import('backend/complianceService');
+    return await compSvc.getComplianceActionRequired(params.limit || 20);
+  } catch (error) {
+    console.error('[CarrierCompliance] getDQGaps error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 6. getCSAScores
+// ============================================
+
+export async function getCSAScores(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.csaScoreHistory, {
+      filters: { carrier_dot: String(carrierDot) },
+      sort: [{ field: 'snapshot_date', direction: 'desc' }],
+      limit: params.limit || 12,
+      suppressAuth: true
+    });
+
+    if (!result.success) return { error: result.error || 'Failed to fetch CSA scores' };
+
+    const scores = result.items || [];
+    const latest = scores.length > 0 ? scores[0] : null;
+    const previous = scores.length > 1 ? scores[1] : null;
+
+    // Build trend data
+    let trend = null;
+    if (latest && previous) {
+      trend = {
+        unsafe_driving: (latest.unsafe_driving || 0) - (previous.unsafe_driving || 0),
+        hos_compliance: (latest.hos_compliance || 0) - (previous.hos_compliance || 0),
+        vehicle_maintenance: (latest.vehicle_maintenance || 0) - (previous.vehicle_maintenance || 0),
+        controlled_substances: (latest.controlled_substances || 0) - (previous.controlled_substances || 0),
+        driver_fitness: (latest.driver_fitness || 0) - (previous.driver_fitness || 0)
+      };
+    }
+
+    return { latest, trend, history: scores };
+  } catch (error) {
+    console.error('[CarrierCompliance] getCSAScores error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 7. getCSAAlerts
+// ============================================
+
+export async function getCSAAlerts(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    const compSvc = await import('backend/complianceService');
+    return await compSvc.getFMCSAAlerts({ ...params, carrier_dot: carrierDot });
+  } catch (error) {
+    console.error('[CarrierCompliance] getCSAAlerts error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 8. logIncident
+// ============================================
+
+export async function logIncident(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    const incSvc = await import('backend/incidentService');
+    return await incSvc.createIncidentReport({ ...params, carrier_dot: carrierDot });
+  } catch (error) {
+    console.error('[CarrierCompliance] logIncident error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 9. getIncidentHistory
+// ============================================
+
+export async function getIncidentHistory(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    const incSvc = await import('backend/incidentService');
+    return await incSvc.getIncidentReports(carrierDot, params);
+  } catch (error) {
+    console.error('[CarrierCompliance] getIncidentHistory error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 10. getAuditReadiness
+// ============================================
+
+export async function getAuditReadiness(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    // Gather data from multiple sources in parallel
+    const [dqResult, csaResult, incidentResult, docsResult] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.qualificationFiles, {
+        filters: { carrier_dot: carrierDot },
+        limit: 500,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.csaScoreHistory, {
+        filters: { carrier_dot: String(carrierDot) },
+        sort: [{ field: 'snapshot_date', direction: 'desc' }],
+        limit: 1,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.incidentReports, {
+        filters: { carrier_dot: String(carrierDot) },
+        limit: 500,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.carrierDocuments, {
+        filters: { carrier_dot: carrierDot },
+        limit: 500,
+        suppressAuth: true
+      })
+    ]);
+
+    // 1. DQ File completeness
+    const dqFiles = dqResult.success ? (dqResult.items || []) : [];
+    const dqTotal = dqFiles.length;
+    const dqComplete = dqFiles.filter(f => f.completeness_score === 100).length;
+    const dqScore = dqTotal > 0 ? Math.round((dqComplete / dqTotal) * 100) : 0;
+
+    // 2. CSA score health (lower is better, 0-100 scale inverted)
+    const latestCSA = csaResult.success && csaResult.items?.length > 0 ? csaResult.items[0] : null;
+    let csaScore = 100; // Perfect if no data
+    if (latestCSA) {
+      const categories = [
+        latestCSA.unsafe_driving || 0,
+        latestCSA.hos_compliance || 0,
+        latestCSA.vehicle_maintenance || 0,
+        latestCSA.controlled_substances || 0,
+        latestCSA.driver_fitness || 0
+      ];
+      const avgCSA = categories.reduce((s, v) => s + v, 0) / categories.length;
+      csaScore = Math.max(0, Math.round(100 - avgCSA));
+    }
+
+    // 3. Incident rate (fewer open incidents = better)
+    const incidents = incidentResult.success ? (incidentResult.items || []) : [];
+    const openIncidents = incidents.filter(i => i.investigation_status !== 'closed').length;
+    const incidentScore = openIncidents === 0 ? 100 : Math.max(0, 100 - (openIncidents * 10));
+
+    // 4. Document vault coverage
+    const docs = docsResult.success ? (docsResult.items || []) : [];
+    const expiredDocs = docs.filter(d => d.expiry_date && new Date(d.expiry_date) < new Date()).length;
+    const docScore = docs.length > 0 ? Math.round(((docs.length - expiredDocs) / docs.length) * 100) : 0;
+
+    // Overall readiness (weighted average)
+    const overallScore = Math.round(
+      (dqScore * 0.3) + (csaScore * 0.3) + (incidentScore * 0.2) + (docScore * 0.2)
+    );
+
+    // Gaps list
+    const gaps = [];
+    if (dqScore < 100) gaps.push({ area: 'DQ Files', score: dqScore, detail: `${dqTotal - dqComplete} incomplete files out of ${dqTotal}` });
+    if (csaScore < 80) gaps.push({ area: 'CSA Scores', score: csaScore, detail: 'One or more BASIC categories above threshold' });
+    if (openIncidents > 0) gaps.push({ area: 'Open Incidents', score: incidentScore, detail: `${openIncidents} incidents still under investigation` });
+    if (expiredDocs > 0) gaps.push({ area: 'Expired Documents', score: docScore, detail: `${expiredDocs} documents past expiry date` });
+
+    return {
+      overall_score: overallScore,
+      readiness_level: overallScore >= 90 ? 'audit_ready' : overallScore >= 70 ? 'needs_attention' : 'at_risk',
+      breakdown: {
+        dq_completeness: dqScore,
+        csa_health: csaScore,
+        incident_management: incidentScore,
+        document_coverage: docScore
+      },
+      gaps,
+      summary: {
+        dq_files_total: dqTotal,
+        dq_files_complete: dqComplete,
+        open_incidents: openIncidents,
+        total_documents: docs.length,
+        expired_documents: expiredDocs
+      }
+    };
+  } catch (error) {
+    console.error('[CarrierCompliance] getAuditReadiness error:', error.message);
+    return { error: error.message };
+  }
+}

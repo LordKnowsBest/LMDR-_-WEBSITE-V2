@@ -1,0 +1,409 @@
+/**
+ * Carrier Fleet Agent Service
+ * Thin wrapper for fleet management agent actions.
+ * Delegates to fleetService, equipmentService, capacityPlanningService, eldService.
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  fleetDrivers: 'fleetDrivers',
+  equipmentAssets: 'equipmentAssets',
+  equipmentAssignments: 'equipmentAssignments',
+  driverScores: 'driverScores',
+  eldConnections: 'eldConnections',
+  capacityPlans: 'capacityPlans',
+  driverLocations: 'driverLocations'
+};
+
+// ============================================
+// 1. getFleetRoster
+// ============================================
+
+export async function getFleetRoster(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    const fleetSvc = await import('backend/fleetService');
+    return await fleetSvc.getFleetDrivers(carrierDot, params);
+  } catch (error) {
+    console.error('[CarrierFleet] getFleetRoster error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 2. getDriverScorecard
+// ============================================
+
+export async function getDriverScorecard(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const filters = { carrier_dot: carrierDot };
+    if (params.driverId) {
+      filters.driver_id = params.driverId;
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverScores, {
+      filters,
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit: params.driverId ? 1 : (params.limit || 25),
+      suppressAuth: true
+    });
+
+    if (!result.success) return { error: result.error || 'Failed to fetch driver scores' };
+
+    const scores = result.items || [];
+    if (params.driverId && scores.length > 0) {
+      const s = scores[0];
+      return {
+        driver_id: s.driver_id,
+        safety_score: s.safety_score || 0,
+        compliance_score: s.compliance_score || 0,
+        performance_score: s.performance_score || 0,
+        overall_score: s.overall_score || 0,
+        last_updated: s._updatedDate || s._createdDate
+      };
+    }
+
+    return { scores, totalCount: result.totalCount || scores.length };
+  } catch (error) {
+    console.error('[CarrierFleet] getDriverScorecard error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 3. getEquipmentList
+// ============================================
+
+export async function getEquipmentList(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    const equipSvc = await import('backend/equipmentService');
+    return await equipSvc.getEquipmentList(carrierDot, params);
+  } catch (error) {
+    console.error('[CarrierFleet] getEquipmentList error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 4. getEquipmentStatus
+// ============================================
+
+export async function getEquipmentStatus(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    if (!params.equipmentId) return { error: 'params.equipmentId is required' };
+    const equipSvc = await import('backend/equipmentService');
+    return await equipSvc.getEquipmentDetails(params.equipmentId);
+  } catch (error) {
+    console.error('[CarrierFleet] getEquipmentStatus error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 5. getFleetCapacity
+// ============================================
+
+export async function getFleetCapacity(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    const capSvc = await import('backend/capacityPlanningService');
+    return await capSvc.getCapacityOverview(carrierDot, params.period || 'week');
+  } catch (error) {
+    console.error('[CarrierFleet] getFleetCapacity error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 6. getELDFleetSummary
+// ============================================
+
+export async function getELDFleetSummary(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.eldConnections, {
+      filters: { carrier_dot: carrierDot },
+      limit: 500,
+      suppressAuth: true
+    });
+
+    if (!result.success) return { error: result.error || 'Failed to fetch ELD connections' };
+
+    const connections = result.items || [];
+    const connected = connections.filter(c => c.status === 'connected' || c.is_active === true).length;
+    const disconnected = connections.filter(c => c.status === 'disconnected' || c.is_active === false).length;
+
+    return {
+      total: connections.length,
+      connected,
+      disconnected,
+      other: connections.length - connected - disconnected,
+      connectivity_rate: connections.length > 0 ? Math.round((connected / connections.length) * 100) : 0
+    };
+  } catch (error) {
+    console.error('[CarrierFleet] getELDFleetSummary error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 7. getFleetUtilization
+// ============================================
+
+export async function getFleetUtilization(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const [assetsResult, assignmentsResult] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.equipmentAssets, {
+        filters: { carrier_dot: carrierDot },
+        limit: 500,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.equipmentAssignments, {
+        filters: { carrier_dot: carrierDot },
+        limit: 500,
+        suppressAuth: true
+      })
+    ]);
+
+    const assets = assetsResult.success ? (assetsResult.items || []) : [];
+    const assignments = assignmentsResult.success ? (assignmentsResult.items || []) : [];
+
+    // Active assignments = those without an unassigned_date
+    const activeAssignmentIds = new Set(
+      assignments
+        .filter(a => !a.unassigned_date)
+        .map(a => a.equipment_id)
+    );
+
+    // Group by asset type
+    const byType = {};
+    for (const asset of assets) {
+      const type = asset.asset_type || 'unknown';
+      if (!byType[type]) byType[type] = { total: 0, assigned: 0 };
+      byType[type].total++;
+      if (activeAssignmentIds.has(asset._id || asset.id)) {
+        byType[type].assigned++;
+      }
+    }
+
+    // Calculate percentages
+    const utilization = {};
+    for (const [type, counts] of Object.entries(byType)) {
+      utilization[type] = {
+        total: counts.total,
+        assigned: counts.assigned,
+        available: counts.total - counts.assigned,
+        utilization_pct: counts.total > 0 ? Math.round((counts.assigned / counts.total) * 100) : 0
+      };
+    }
+
+    const totalAssets = assets.length;
+    const totalAssigned = activeAssignmentIds.size;
+
+    return {
+      overall: {
+        total: totalAssets,
+        assigned: totalAssigned,
+        available: totalAssets - totalAssigned,
+        utilization_pct: totalAssets > 0 ? Math.round((totalAssigned / totalAssets) * 100) : 0
+      },
+      by_type: utilization
+    };
+  } catch (error) {
+    console.error('[CarrierFleet] getFleetUtilization error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 8. getFleetCosts
+// ============================================
+
+export async function getFleetCosts(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const [driversResult, assetsResult] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.fleetDrivers, {
+        filters: { carrier_dot: carrierDot },
+        limit: 500,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.equipmentAssets, {
+        filters: { carrier_dot: carrierDot },
+        limit: 500,
+        suppressAuth: true
+      })
+    ]);
+
+    const drivers = driversResult.success ? (driversResult.items || []) : [];
+    const assets = assetsResult.success ? (assetsResult.items || []) : [];
+
+    // Cost estimates (industry averages per month)
+    const AVG_DRIVER_COST_MONTHLY = 7500; // salary + benefits
+    const AVG_TRUCK_MAINT_MONTHLY = 1500;
+    const AVG_TRAILER_MAINT_MONTHLY = 500;
+
+    const activeDrivers = drivers.filter(d => d.status === 'active' || d.status === 'driving').length;
+    const trucks = assets.filter(a => a.asset_type === 'truck' || a.asset_type === 'tractor').length;
+    const trailers = assets.filter(a => a.asset_type === 'trailer').length;
+
+    const driverCosts = activeDrivers * AVG_DRIVER_COST_MONTHLY;
+    const truckMaintenance = trucks * AVG_TRUCK_MAINT_MONTHLY;
+    const trailerMaintenance = trailers * AVG_TRAILER_MAINT_MONTHLY;
+
+    return {
+      driver_count: activeDrivers,
+      truck_count: trucks,
+      trailer_count: trailers,
+      estimated_monthly: {
+        driver_costs: driverCosts,
+        truck_maintenance: truckMaintenance,
+        trailer_maintenance: trailerMaintenance,
+        total: driverCosts + truckMaintenance + trailerMaintenance
+      },
+      note: 'Estimates based on industry averages. Actual costs may vary.'
+    };
+  } catch (error) {
+    console.error('[CarrierFleet] getFleetCosts error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 9. assignDriverToUnit
+// ============================================
+
+export async function assignDriverToUnit(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    if (!params.equipmentId || !params.driverId) {
+      return { error: 'params.equipmentId and params.driverId are required' };
+    }
+    const equipSvc = await import('backend/equipmentService');
+    const result = await equipSvc.assignEquipment(
+      params.equipmentId,
+      params.driverId,
+      params.type || 'primary',
+      params.reason || ''
+    );
+    return result;
+  } catch (error) {
+    console.error('[CarrierFleet] assignDriverToUnit error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 10. updateEquipmentStatus
+// ============================================
+
+export async function updateEquipmentStatus(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+    if (!params.equipmentId) return { error: 'params.equipmentId is required' };
+    const equipSvc = await import('backend/equipmentService');
+    const updates = params.updates || params;
+    // Remove agent-level params before passing to service
+    const { equipmentId, updates: _u, ...cleanUpdates } = updates;
+    return await equipSvc.updateEquipment(params.equipmentId, Object.keys(cleanUpdates).length > 0 ? cleanUpdates : params.updates || {});
+  } catch (error) {
+    console.error('[CarrierFleet] updateEquipmentStatus error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 11. getFleetAlerts
+// ============================================
+
+export async function getFleetAlerts(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const daysAhead = params.daysAhead || 30;
+    const [equipSvc, fleetSvc] = await Promise.all([
+      import('backend/equipmentService'),
+      import('backend/fleetService')
+    ]);
+
+    const [maintenanceDue, expiringCreds] = await Promise.all([
+      equipSvc.getMaintenanceDue(carrierDot, daysAhead),
+      fleetSvc.getExpiringCredentials(carrierDot, daysAhead)
+    ]);
+
+    const alerts = [];
+
+    for (const eq of (maintenanceDue || [])) {
+      alerts.push({
+        type: 'maintenance',
+        severity: 'warning',
+        title: `Maintenance due: ${eq.unit_number || eq._id}`,
+        asset_type: eq.asset_type,
+        due_date: eq.next_service_due?.date || null
+      });
+    }
+
+    for (const drv of (expiringCreds || [])) {
+      alerts.push({
+        type: drv.alertType === 'cdl' ? 'cdl_expiry' : drv.alertType === 'medical' ? 'medical_expiry' : 'credential_expiry',
+        severity: 'warning',
+        title: `Credential expiring: ${drv.name || drv._id}`,
+        alert_subtype: drv.alertType,
+        driver_id: drv._id
+      });
+    }
+
+    return { alerts, totalCount: alerts.length };
+  } catch (error) {
+    console.error('[CarrierFleet] getFleetAlerts error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================
+// 12. getDriverAvailability
+// ============================================
+
+export async function getDriverAvailability(carrierDot, params = {}) {
+  try {
+    if (!carrierDot) return { error: 'carrierDot is required' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.fleetDrivers, {
+      filters: {
+        carrier_dot: carrierDot,
+        status: 'available'
+      },
+      limit: params.limit || 100,
+      suppressAuth: true
+    });
+
+    if (!result.success) return { error: result.error || 'Failed to fetch driver availability' };
+
+    const available = result.items || [];
+
+    // Also get total active drivers for context
+    const totalResult = await dataAccess.queryRecords(COLLECTIONS.fleetDrivers, {
+      filters: { carrier_dot: carrierDot },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    return {
+      available_drivers: available,
+      available_count: available.length,
+      total_drivers: totalResult.totalCount || 0
+    };
+  } catch (error) {
+    console.error('[CarrierFleet] getDriverAvailability error:', error.message);
+    return { error: error.message };
+  }
+}

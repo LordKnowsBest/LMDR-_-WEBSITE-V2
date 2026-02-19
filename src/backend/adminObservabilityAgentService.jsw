@@ -1,0 +1,163 @@
+/**
+ * Admin Observability Agent Service
+ *
+ * Wraps observability, run ledger, and outcome services for
+ * agent-accessible tracing, performance, and replay tools.
+ */
+import * as dataAccess from 'backend/dataAccess';
+
+export async function getTracingDashboard(userId, params = {}) {
+  try {
+    const period = params.period || '24h';
+    const svc = await import('backend/observabilityService');
+
+    const [health, agentBehavior] = await Promise.all([
+      svc.getHealthMetrics(period),
+      svc.getAgentBehavior({ period })
+    ]);
+
+    return { health, agentBehavior, period };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getToolPerformance(userId, params = {}) {
+  try {
+    const { toolName, period } = params;
+    const limit = params.limit || 100;
+    const svc = await import('backend/agentRunLedgerService');
+
+    const runs = await svc.getRecentRuns({ limit });
+    const allSteps = [];
+
+    // Gather steps from each run
+    const runItems = runs?.items || runs || [];
+    for (const run of runItems) {
+      if (!run._id) continue;
+      try {
+        const steps = await svc.getSteps(run._id);
+        const stepItems = steps?.items || steps || [];
+        allSteps.push(...stepItems);
+      } catch (_) {
+        // Skip runs with missing steps
+      }
+    }
+
+    // Group by tool_name and compute metrics
+    const toolMap = {};
+    for (const step of allSteps) {
+      const name = step.tool_name || step.toolName || 'unknown';
+      if (!toolMap[name]) {
+        toolMap[name] = { totalLatency: 0, successCount: 0, errorCount: 0, callCount: 0 };
+      }
+      toolMap[name].callCount++;
+      toolMap[name].totalLatency += Number(step.latency_ms || step.latencyMs || 0);
+      if (step.status === 'success' || step.status === 'completed') {
+        toolMap[name].successCount++;
+      } else if (step.status === 'error' || step.status === 'failed') {
+        toolMap[name].errorCount++;
+      }
+    }
+
+    let tools = Object.entries(toolMap).map(([name, data]) => ({
+      name,
+      avgLatency: data.callCount > 0 ? Math.round(data.totalLatency / data.callCount) : 0,
+      successRate: data.callCount > 0 ? Math.round((data.successCount / data.callCount) * 100) : 0,
+      callCount: data.callCount,
+      errorRate: data.callCount > 0 ? Math.round((data.errorCount / data.callCount) * 100) : 0
+    }));
+
+    if (toolName) {
+      tools = tools.filter(t => t.name === toolName);
+    }
+
+    tools.sort((a, b) => b.callCount - a.callCount);
+
+    return { tools, period: period || 'all' };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getScoringAccuracy(userId, params = {}) {
+  try {
+    const role = params.role || 'all';
+    const days = params.days || 30;
+    const svc = await import('backend/agentOutcomeService');
+
+    const [stats, trends] = await Promise.all([
+      svc.getOutcomeStats(role, days),
+      svc.getOutcomeTrends(days)
+    ]);
+
+    return { stats, trends, period: days };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function recalibrateScoring(userId, params = {}) {
+  try {
+    const { weights } = params;
+    if (!weights || typeof weights !== 'object') {
+      return { error: 'weights object is required' };
+    }
+
+    const evalSvc = await import('backend/agentEvaluationService');
+    const role = params.role || 'all';
+
+    const previousBaseline = await evalSvc.computeWeeklyScorecard(role, 30);
+
+    await dataAccess.insertRecord('agentEvaluations', {
+      type: 'calibration',
+      role,
+      weights: JSON.stringify(weights),
+      previous_baseline: JSON.stringify(previousBaseline),
+      calibrated_by: userId,
+      calibrated_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    return {
+      success: true,
+      previousBaseline,
+      newWeights: weights,
+      calibratedAt: new Date().toISOString()
+    };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getAgentReplay(userId, params = {}) {
+  try {
+    const { runId } = params;
+    if (!runId) return { error: 'runId is required' };
+
+    const svc = await import('backend/agentRunLedgerService');
+
+    const [run, steps, gates] = await Promise.all([
+      svc.getRun(runId),
+      svc.getSteps(runId),
+      svc.getGatesForRun(runId)
+    ]);
+
+    if (!run) return { error: 'Run not found' };
+
+    const stepItems = steps?.items || steps || [];
+    let totalDuration = 0;
+    for (const step of stepItems) {
+      totalDuration += Number(step.latency_ms || step.latencyMs || 0);
+    }
+
+    return {
+      run,
+      steps: stepItems,
+      gates: gates?.items || gates || [],
+      totalSteps: stepItems.length,
+      totalDuration
+    };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
