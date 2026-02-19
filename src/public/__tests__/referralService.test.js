@@ -88,7 +88,9 @@ describe('Referral Service', () => {
             expect(result.success).toBe(true);
             expect(result.referralCode).toBe('ref_EXISTING');
             expect(result.existingCode).toBe(true);
-            expect(mockCreateRecord).not.toHaveBeenCalled();
+            // Observability may log to systemMetrics — verify no referral record was created
+            const referralCalls = mockCreateRecord.mock.calls.filter(c => c[0] !== 'systemMetrics');
+            expect(referralCalls).toHaveLength(0);
         });
 
         test('should fail without driver ID', async () => {
@@ -376,7 +378,9 @@ describe('Match Quality Bonus', () => {
             expect(result.success).toBe(true);
             expect(result.bonusAwarded).toBe(false);
             expect(result.reason).toBe('Match score below threshold');
-            expect(mockCreateRecord).not.toHaveBeenCalled();
+            // Observability may log to systemMetrics — verify no bonus record was created
+            const bonusCalls = mockCreateRecord.mock.calls.filter(c => c[0] !== 'systemMetrics');
+            expect(bonusCalls).toHaveLength(0);
         });
 
         test('should fail without required parameters', async () => {

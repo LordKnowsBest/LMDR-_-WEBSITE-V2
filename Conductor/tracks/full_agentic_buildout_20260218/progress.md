@@ -16,6 +16,7 @@
 | 3 | Carrier & B2B Expansion | **COMPLETE** ✓ | 5 | 56 | Sprints 8-10 | Weeks 8-10 |
 | 4 | Admin & Platform Expansion | **COMPLETE** ✓ | 8 | 60 | Sprints 11-13 | Weeks 11-13 |
 | 5 | Cross-Role & External APIs | **COMPLETE** ✓ | 0 | 43 | Sprints 14-16 | Weeks 14-16 |
+| 6 | Pipeline Execution + Voice | **COMPLETE** ✓ | 0 | 3 (+13 templates) | Sprint 17 | Week 17 |
 
 ---
 
@@ -269,6 +270,56 @@
 
 ---
 
+## Phase 6: Pipeline Execution Agent + 13 Voice Agent Templates — **COMPLETE** ✓
+
+### New Files (7)
+- [x] `src/backend/utils/tcpaGuard.js` — TCPA quiet hours enforcement (2 exports: `isTCPACompliant`, `getNextAllowedWindow`)
+- [x] `src/backend/pipelineExecutionAgent.jsw` — Rule-based decision engine (4 exports: `decide`, `enforceContactSLA`, `getStageProgression`, `getPipelineHealth`)
+- [x] `src/backend/pipelineEventBus.jsw` — Central event dispatch (3 exports: `emitEvent`, `processEvent`, `reprocessFailedEvents`)
+- [x] `src/backend/voiceAgentTemplates.jsw` — VAPI template management (4 exports: `getTemplate`, `getTemplatesByCategory`, `createAssistantFromTemplate`, `seedDefaultTemplates`)
+- [x] `src/backend/pipelineJobs.jsw` — Cron jobs (2 exports: `enforceContactSLAs`, `reprocessFailedPipelineEvents`)
+- [x] `src/public/__tests__/pipelineExecutionAgent.test.js` — 42 tests covering decision logic, TCPA, escalation, integration
+
+### Modified Files (5)
+- [x] `src/backend/configData.js` — 2 collections added (pipelineEvents, voiceAgentTemplates) to all 3 maps
+- [x] `src/backend/jobs.config` — 2 cron entries (enforceContactSLAs */5, reprocessFailedPipelineEvents */15)
+- [x] `src/backend/agentService.jsw` — 3 recruiter tools (initiate_voice_screen, get_pipeline_health, emit_pipeline_event) + `executeTool` exported
+- [x] `src/backend/http-functions.js` — Template-scoped tool routing for VAPI webhooks
+- [x] `src/backend/recruiter_service.jsw` — `emitPipelineEventNonBlocking` redirected to `pipelineEventBus.emitEvent()` with fallback
+
+### Airtable Tables (2)
+- [x] `v2_Pipeline Events` (14 fields) — event stream for pipeline decisions
+- [x] `v2_Voice Agent Templates` (13 fields) — 13 VAPI voice assistant templates
+
+### 13 Voice Agent Templates
+| Category | Templates |
+|----------|-----------|
+| Sourcing (3) | `vat_cold_outreach`, `vat_warm_lead`, `vat_referral` |
+| Screening (3) | `vat_qualification`, `vat_background`, `vat_technical` |
+| Application Support (2) | `vat_application_helper`, `vat_document_collector` |
+| Onboarding (2) | `vat_orientation`, `vat_first_day` |
+| Retention (3) | `vat_satisfaction`, `vat_retention`, `vat_winback` |
+
+### Decision Engine Rules
+| Event | Decision |
+|-------|----------|
+| stage_change → interested | Immediate SMS + voice follow-up in 30 min |
+| stage_change → applied | Confirmation SMS + qualification screen |
+| stage_change → contacted | 24h voice escalation on no-response |
+| stage_change → in_review | Background + technical screening calls |
+| stage_change → offer | Offer email + orientation call |
+| stage_change → hired | Onboarding email + first-day call |
+| no_response | Channel escalation: SMS → email → voice → recruiter queue |
+| call_completed | Parse outcome, advance/reject/schedule follow-up |
+| document_received | All docs → advance to offer; partial → acknowledgment |
+| application_submitted | Auto-qualify + route to screening |
+
+### Tests
+- [x] pipelineExecutionAgent.test.js — 42/42 passing
+- [x] No regressions: 688/688 across 8 suites + 17/17 selfHealing = 705/705 total
+
+---
+
 ## Domain Router Architecture
 
 > All Phase 1+ tools are registered as **actions within domain routers** instead of flat tool definitions. See [router-architecture.md](../full_agentic_buildout_20260218/router-architecture.md) for complete definitions.
@@ -300,12 +351,15 @@
 
 | Metric | Current | Target | Progress |
 |--------|---------|--------|----------|
-| Total Agent Actions | 346 (36 legacy + 83 driver + 63 recruiter + 56 carrier/B2B + 65 admin + 43 cross-role) | ~349 | 99% |
+| Total Agent Actions | 349 (36 legacy + 83 driver + 63 recruiter + 56 carrier/B2B + 65 admin + 43 cross-role + 3 pipeline) | ~349 | 100% |
 | Domain Routers | 30 (7 driver + 6 recruiter + 5 carrier/B2B + 7 admin + 5 cross-role) | 30 | 100% |
-| Backend Services | ~70 (~28 existing + ~20 driver + ~6 recruiter + ~5 carrier/B2B + ~6 admin + 5 cross-role) | ~100 | 70% |
-| Airtable Collections | ~259 (~210 + 30 driver + 10 recruiter + 3 carrier/B2B + 6 cross-role) | ~349 | 74% |
-| Integration Tests | 641 (64 driver + 97 recruiter + 91 carrier/B2B + 157 admin + 197 cross-role + 13 e2e + 17 selfHealing + 5 metaGov) | ~349 | 100%+ |
-| Roles Fully Wired | 4/4 (Driver, Recruiter, Carrier/B2B, Admin) + cross-role | 4/4 | 100% |
+| Backend Services | ~74 (~28 existing + ~20 driver + ~6 recruiter + ~5 carrier/B2B + ~6 admin + 5 cross-role + 4 pipeline/voice) | ~100 | 74% |
+| Airtable Collections | ~261 (~210 + 30 driver + 10 recruiter + 3 carrier/B2B + 6 cross-role + 2 pipeline/voice) | ~349 | 75% |
+| Integration Tests | 705 (64 driver + 97 recruiter + 91 carrier/B2B + 157 admin + 197 cross-role + 42 pipeline + 13 e2e + 17 selfHealing + 7 metaGov + 20 misc) | ~349 | 100%+ |
+| Roles Fully Wired | 4/4 (Driver, Recruiter, Carrier/B2B, Admin) + cross-role + pipeline | 4/4 | 100% |
+| Voice Agent Templates | 13 (3 sourcing + 3 screening + 2 app support + 2 onboarding + 3 retention) | 13 | 100% |
+| TCPA Compliance | Enforced on all outbound contact actions | Required | ✓ |
+| Pipeline Event Bus | Central dispatch with SLA enforcement (5 min) | Required | ✓ |
 
 ---
 
@@ -348,3 +402,8 @@
 | 2026-02-19 | 5 | 5 new thin wrapper services (crossRoleUtility, adminObservability, externalApi, financialExt, lifecycleOps) | PAI |
 | 2026-02-19 | 5 | 3 approval gates (recalibrate_scoring, configure_api_key, create_exit_survey) | PAI |
 | 2026-02-19 | 5 | **Phase 5 COMPLETE** — 197/197 cross-role tests + 624/624 full regression passing, 43 cross-role actions wired, 346 total actions | PAI |
+| 2026-02-19 | 6 | pipelineExecutionAgent.jsw (4 exports), pipelineEventBus.jsw (3 exports), voiceAgentTemplates.jsw (4 exports, 13 templates), pipelineJobs.jsw (2 exports), tcpaGuard.js (2 exports) | PAI |
+| 2026-02-19 | 6 | 2 Airtable tables created (v2_Pipeline Events, v2_Voice Agent Templates), 2 configData.js entries, 2 jobs.config cron entries | PAI |
+| 2026-02-19 | 6 | agentService.jsw: 3 recruiter tools (initiate_voice_screen, get_pipeline_health, emit_pipeline_event) + executeTool exported | PAI |
+| 2026-02-19 | 6 | http-functions.js: template-scoped VAPI tool routing; recruiter_service.jsw: event bus redirect with fallback | PAI |
+| 2026-02-19 | 6 | **Phase 6 COMPLETE** — 42/42 pipeline tests + 705/705 full regression passing, 349 total actions, 13 voice templates | PAI |

@@ -488,7 +488,6 @@ const scoreSalaryFit = (driver, preferences) => {
 
   // Determine the effective offer range
   const effectiveMax = offeredMax !== null && offeredMax !== undefined ? offeredMax : offeredMin;
-  const effectiveMin = offeredMin !== null && offeredMin !== undefined ? offeredMin : offeredMax;
 
   // If offer meets or exceeds expectation, perfect score
   if (effectiveMax >= driverExpectation) {

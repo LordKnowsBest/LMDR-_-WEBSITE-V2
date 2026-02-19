@@ -69,7 +69,9 @@ describe('SavedSearchService', () => {
         alertFrequency: 'invalid',
         alertChannel: 'invalid'
       });
-      const callArgs = mockAirtable.createRecord.mock.calls[0][1];
+      // Filter out observability logging calls to systemMetrics
+      const searchCalls = mockAirtable.createRecord.mock.calls.filter(c => c[0] !== 'systemMetrics');
+      const callArgs = searchCalls[0][1];
       expect(callArgs.alert_frequency).toBe('daily');
       expect(callArgs.alert_channel).toBe('in_app');
     });

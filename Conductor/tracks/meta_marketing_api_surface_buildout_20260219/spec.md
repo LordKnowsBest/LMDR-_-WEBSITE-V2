@@ -201,6 +201,8 @@ Execute low:
 - `metaOptimizationService.jsw`
 - `metaGovernanceService.jsw`
 - `metaAttributionBridgeService.jsw`
+- `metaReliabilityService.jsw`
+- `metaComplianceService.jsw`
 
 ### 5.2 Collection additions (Airtable-routed)
 - `metaIntegrations`
@@ -224,6 +226,10 @@ Execute low:
 - Idempotency keys required for all create/update/delete actions.
 - Retries use exponential backoff and dead-letter queue for non-recoverable API errors.
 - Token refresh runs on schedule plus just-in-time failure recovery.
+- Compliance jobs enforce audit completeness checks and retention windows.
+- Operational runbooks are documented in:
+  - `runbook_meta_token_permission_version.md`
+  - `incident_playbook_campaign_delivery_interruptions.md`
 
 ---
 
@@ -263,6 +269,11 @@ Testing requirements:
 - approval-gate tests for all `execute_high` actions
 - replay tests for idempotency and retry correctness
 - parity tests that recruiter/admin UI triggers match agent tool actions
+- phase-6 production validation artifacts:
+  - `src/public/__tests__/metaProductionReadiness.e2e.test.js`
+  - `src/public/__tests__/metaInsightsLoad.test.js`
+  - `src/public/__tests__/metaSecurityReview.test.js`
+  - `security_review_meta_marketing_api_20260219.md`
 
 ---
 

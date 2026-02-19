@@ -1,4 +1,5 @@
 import * as dataAccess from 'backend/dataAccess';
+import { executeWithRetryAndCircuit } from 'backend/metaReliabilityService';
 
 const COLLECTIONS = {
   campaignMirror: 'metaCampaignMirror',
@@ -120,12 +121,36 @@ function baseAdPayload(recruiterId, params, status) {
   };
 }
 
+function isRetryableMutationResult(result = {}) {
+  if (!result || result.success !== false) {
+    return true;
+  }
+  if (result.retryable === false) {
+    return false;
+  }
+  const message = String(result.error || '').toLowerCase();
+  if (message.includes('not found') || message.includes('missing required field')) {
+    return false;
+  }
+  return true;
+}
+
 async function withIdempotency(action, recruiterId, params, runner) {
   const prior = await findIdempotentResult(action, params.idempotencyKey);
   if (prior) {
     return { success: true, idempotent: true, ...prior };
   }
-  const result = await runner();
+  const result = await executeWithRetryAndCircuit(
+    `meta_campaign.${action}`,
+    runner,
+    {
+      context: {
+        integrationId: params.integrationId || '',
+        payload: { action, campaignId: params.campaignId || '', adId: params.adId || '' }
+      },
+      isRetryableResult: isRetryableMutationResult
+    }
+  );
   await writeMutationAudit(action, recruiterId, params, result);
   return result;
 }

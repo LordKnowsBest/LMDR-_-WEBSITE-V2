@@ -175,7 +175,7 @@
 
   function onApprovalRequired(payload) {
     removeTyping();
-    const { gateId, toolName, toolDescription, args, riskLevel } = payload;
+    const { toolName, toolDescription, args, riskLevel } = payload;
     const container = document.getElementById('vm-agent-messages');
     if (!container) return;
 

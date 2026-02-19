@@ -1,4 +1,5 @@
 import * as dataAccess from 'backend/dataAccess';
+import { consumeRequestBudget, executeWithRetryAndCircuit, readWithCache } from 'backend/metaReliabilityService';
 
 const COLLECTIONS = {
   campaignMirror: 'metaCampaignMirror',
@@ -16,6 +17,10 @@ function nowIso() {
 
 function makeId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function buildTimeRange(params = {}) {
@@ -67,12 +72,27 @@ function mergeInsightTotals(rows = []) {
 
 async function listInsights(filters = {}, limit = 500, intraday = false) {
   const collection = intraday ? COLLECTIONS.insightsIntraday : COLLECTIONS.insightsDaily;
-  const result = await dataAccess.queryRecords(collection, {
-    filters,
-    sort: [{ field: 'timestamp', direction: 'desc' }],
-    limit,
-    suppressAuth: true
+  const budget = await consumeRequestBudget(`meta_insights.read.${collection}`, {
+    limitPerMinute: 180
   });
+  if (!budget.allowed) {
+    return { success: false, error: budget.error || 'Insights budget exceeded', items: [] };
+  }
+
+  const result = await executeWithRetryAndCircuit(
+    `meta_insights.query.${collection}`,
+    () => dataAccess.queryRecords(collection, {
+      filters,
+      sort: [{ field: 'timestamp', direction: 'desc' }],
+      limit,
+      suppressAuth: true
+    }),
+    {
+      context: {
+        payload: { collection, filters, limit }
+      }
+    }
+  );
 
   if (!result.success) {
     return { success: false, error: result.error || 'Failed to query insights', items: [] };
@@ -82,28 +102,44 @@ async function listInsights(filters = {}, limit = 500, intraday = false) {
 
 async function getMirrorEntityIds(entityType, params = {}) {
   const carrierDot = params.carrierDot || '';
-  if (entityType === 'campaign') {
-    const rows = await dataAccess.queryRecords(COLLECTIONS.campaignMirror, {
-      filters: carrierDot ? { carrierDot } : {},
-      limit: 200,
-      suppressAuth: true
-    });
-    return rows.success ? (rows.items || []).map(r => r.campaign_id).filter(Boolean) : [];
+  const cacheKey = `meta_mirror_ids:${entityType}:${carrierDot || 'all'}`;
+  try {
+    return await readWithCache(cacheKey, async () => {
+      if (entityType === 'campaign') {
+        const rows = await dataAccess.queryRecords(COLLECTIONS.campaignMirror, {
+          filters: carrierDot ? { carrierDot } : {},
+          limit: 200,
+          suppressAuth: true
+        });
+        if (!rows.success) {
+          throw new Error(rows.error || 'Failed to load campaign mirror IDs');
+        }
+        return (rows.items || []).map(r => r.campaign_id).filter(Boolean);
+      }
+      if (entityType === 'ad_set') {
+        const rows = await dataAccess.queryRecords(COLLECTIONS.adSetMirror, {
+          filters: carrierDot ? { carrierDot } : {},
+          limit: 400,
+          suppressAuth: true
+        });
+        if (!rows.success) {
+          throw new Error(rows.error || 'Failed to load ad set mirror IDs');
+        }
+        return (rows.items || []).map(r => r.ad_set_id).filter(Boolean);
+      }
+      const rows = await dataAccess.queryRecords(COLLECTIONS.adMirror, {
+        filters: carrierDot ? { carrierDot } : {},
+        limit: 600,
+        suppressAuth: true
+      });
+      if (!rows.success) {
+        throw new Error(rows.error || 'Failed to load ad mirror IDs');
+      }
+      return (rows.items || []).map(r => r.ad_id).filter(Boolean);
+    }, 90 * 1000);
+  } catch (error) {
+    return [];
   }
-  if (entityType === 'ad_set') {
-    const rows = await dataAccess.queryRecords(COLLECTIONS.adSetMirror, {
-      filters: carrierDot ? { carrierDot } : {},
-      limit: 400,
-      suppressAuth: true
-    });
-    return rows.success ? (rows.items || []).map(r => r.ad_set_id).filter(Boolean) : [];
-  }
-  const rows = await dataAccess.queryRecords(COLLECTIONS.adMirror, {
-    filters: carrierDot ? { carrierDot } : {},
-    limit: 600,
-    suppressAuth: true
-  });
-  return rows.success ? (rows.items || []).map(r => r.ad_id).filter(Boolean) : [];
 }
 
 async function getInsightsForEntity(entityType, params = {}, options = {}) {
@@ -119,9 +155,19 @@ async function getInsightsForEntity(entityType, params = {}, options = {}) {
       timestamp: { gte: range.start, lte: range.end }
     };
     const result = await listInsights(filters, 500, intraday);
-    if (result.success) {
-      rows.push(...result.items);
+    if (!result.success) {
+      return {
+        success: false,
+        entityType,
+        timeRange: range,
+        ids,
+        rows,
+        totals: mergeInsightTotals(rows),
+        failedEntityId: id,
+        error: result.error || 'Failed to query insights'
+      };
     }
+    rows.push(...result.items);
   }
 
   return {
@@ -388,18 +434,35 @@ export async function suggestAudienceNarrowing(recruiterId, params = {}) {
 }
 
 export async function processPendingMetaAsyncReports() {
-  const jobs = await dataAccess.queryRecords(COLLECTIONS.asyncReportJobs, {
-    filters: { status: 'queued' },
-    sort: [{ field: 'requested_at', direction: 'asc' }],
-    limit: 25,
-    suppressAuth: true
+  const budget = await consumeRequestBudget('meta_async_reports.poll', {
+    limitPerMinute: 18
   });
+  if (!budget.allowed) {
+    return { success: false, error: budget.error || 'Async report poll budget exceeded', processed: 0 };
+  }
+
+  const jobs = await executeWithRetryAndCircuit(
+    'meta_async_reports.query_queued',
+    () => dataAccess.queryRecords(COLLECTIONS.asyncReportJobs, {
+      filters: { status: 'queued' },
+      sort: [{ field: 'requested_at', direction: 'asc' }],
+      limit: budget.remainingPct <= 25 ? 8 : 25,
+      suppressAuth: true
+    }),
+    { context: { payload: { status: 'queued' } } }
+  );
   if (!jobs.success) {
     return { success: false, error: jobs.error || 'Failed to query pending async reports', processed: 0 };
   }
 
   let processed = 0;
   for (const job of jobs.items || []) {
+    if (budget.remainingPct <= 10) {
+      await sleep(1200);
+    } else if (budget.remainingPct <= 25) {
+      await sleep(350);
+    }
+
     const statusUpdate = await dataAccess.updateRecord(COLLECTIONS.asyncReportJobs, {
       ...job,
       status: 'processing',
@@ -414,12 +477,45 @@ export async function processPendingMetaAsyncReports() {
     const scope = job.report_scope || 'campaign';
     if (scope === 'ad_set') {
       const result = await getInsightsAdSetLevel(job.recruiter_id || '', job.date_range || {});
+      if (!result.success) {
+        await dataAccess.updateRecord(COLLECTIONS.asyncReportJobs, {
+          ...statusUpdate.record,
+          status: 'failed',
+          completed_at: nowIso(),
+          row_count: 0,
+          error_message: result.error || 'Failed to load ad set insights',
+          updated_at: nowIso()
+        }, { suppressAuth: true });
+        continue;
+      }
       rows = result.rows || [];
     } else if (scope === 'ad') {
       const result = await getInsightsAdLevel(job.recruiter_id || '', job.date_range || {});
+      if (!result.success) {
+        await dataAccess.updateRecord(COLLECTIONS.asyncReportJobs, {
+          ...statusUpdate.record,
+          status: 'failed',
+          completed_at: nowIso(),
+          row_count: 0,
+          error_message: result.error || 'Failed to load ad insights',
+          updated_at: nowIso()
+        }, { suppressAuth: true });
+        continue;
+      }
       rows = result.rows || [];
     } else {
       const result = await getInsightsCampaignLevel(job.recruiter_id || '', job.date_range || {});
+      if (!result.success) {
+        await dataAccess.updateRecord(COLLECTIONS.asyncReportJobs, {
+          ...statusUpdate.record,
+          status: 'failed',
+          completed_at: nowIso(),
+          row_count: 0,
+          error_message: result.error || 'Failed to load campaign insights',
+          updated_at: nowIso()
+        }, { suppressAuth: true });
+        continue;
+      }
       rows = result.rows || [];
     }
 

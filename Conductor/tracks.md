@@ -410,6 +410,17 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
+# DevOps & Quality Tracks
+
+## [ ] Track: Chrome DevTools Runtime Verification
+*Link: [./tracks/devtools_observability_20260219/](./tracks/devtools_observability_20260219/)*
+*Priority: High*
+*Status: Planning — spec.md + plan.md + verify_runtime.js complete*
+*Goal: Eliminate blind coding by establishing a standardized Evidence Pack protocol. Every Conductor track must produce a `quality_gate.json` with `pass: true` (console audit, network audit, 5 screenshots, DOM selector assertions) before it can be marked DONE. Uses Chrome DevTools Protocol (CDP) via Puppeteer MCP.*
+*Phases: 4 (Environment Setup → Smoke Test MVP → Conductor Hook → Hardening)*
+
+---
+
 # Cross-Cutting Tracks
 
 > Tracks that span multiple roles or improve conversion/retention metrics.

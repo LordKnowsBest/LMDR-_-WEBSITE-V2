@@ -1,0 +1,287 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  mutationAudit: 'metaMutationAudit',
+  errorEvents: 'metaErrorEvents',
+  rateLimitEvents: 'metaRateLimitEvents',
+  optimizationActions: 'metaOptimizationActions',
+  asyncReportJobs: 'metaAsyncReportJobs'
+};
+
+const DEFAULT_RETENTION_DAYS = {
+  mutationAudit: 365,
+  errorEvents: 180,
+  rateLimitEvents: 90,
+  optimizationActions: 365,
+  asyncReportJobs: 90
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function hoursAgoIso(hours = 24) {
+  return new Date(Date.now() - Number(hours || 24) * 60 * 60 * 1000).toISOString();
+}
+
+function daysAgoIso(days = 30) {
+  return new Date(Date.now() - Number(days || 30) * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function isBlank(value) {
+  return value === null || value === undefined || value === '';
+}
+
+function collectMissingFields(record, requiredFields = []) {
+  return requiredFields.filter(field => isBlank(record[field]));
+}
+
+function buildCollectionRetentionConfig(overrides = {}) {
+  return [
+    {
+      key: COLLECTIONS.mutationAudit,
+      days: Number(overrides.mutationAuditDays || DEFAULT_RETENTION_DAYS.mutationAudit),
+      timestampField: 'created_at'
+    },
+    {
+      key: COLLECTIONS.errorEvents,
+      days: Number(overrides.errorEventDays || DEFAULT_RETENTION_DAYS.errorEvents),
+      timestampField: 'created_at'
+    },
+    {
+      key: COLLECTIONS.rateLimitEvents,
+      days: Number(overrides.rateLimitEventDays || DEFAULT_RETENTION_DAYS.rateLimitEvents),
+      timestampField: 'created_at'
+    },
+    {
+      key: COLLECTIONS.optimizationActions,
+      days: Number(overrides.optimizationActionDays || DEFAULT_RETENTION_DAYS.optimizationActions),
+      timestampField: 'created_at'
+    },
+    {
+      key: COLLECTIONS.asyncReportJobs,
+      days: Number(overrides.asyncReportJobDays || DEFAULT_RETENTION_DAYS.asyncReportJobs),
+      timestampField: 'requested_at'
+    }
+  ];
+}
+
+function toDeleteRecordId(record = {}) {
+  return record._id || record.id || '';
+}
+
+export async function validateMetaAuditTrailCompleteness(options = {}) {
+  const windowHours = Number(options.windowHours || 24);
+  const limit = Number(options.limit || 500);
+  const requiredFields = Array.isArray(options.requiredFields) && options.requiredFields.length
+    ? options.requiredFields
+    : ['action', 'risk_level', 'actor_id', 'correlation_id', 'created_at'];
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.mutationAudit, {
+    filters: { created_at: { gte: hoursAgoIso(windowHours) } },
+    sort: [{ field: 'created_at', direction: 'desc' }],
+    limit,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return {
+      success: false,
+      error: result.error || 'Failed to query mutation audit records',
+      windowHours,
+      total: 0,
+      complete: 0,
+      incomplete: 0
+    };
+  }
+
+  const items = result.items || [];
+  const incompleteRecords = [];
+  let complete = 0;
+
+  for (const record of items) {
+    const missingFields = collectMissingFields(record, requiredFields);
+    if (missingFields.length === 0) {
+      complete++;
+      continue;
+    }
+    incompleteRecords.push({
+      auditId: record._id || record.id || '',
+      action: record.action || '',
+      correlationId: record.correlation_id || '',
+      missingFields
+    });
+  }
+
+  const completenessPct = items.length > 0
+    ? Number(((complete / items.length) * 100).toFixed(2))
+    : 100;
+  const status = completenessPct >= 99 ? 'pass' : (completenessPct >= 95 ? 'warning' : 'fail');
+
+  return {
+    success: true,
+    status,
+    checkedAt: nowIso(),
+    windowHours,
+    requiredFields,
+    total: items.length,
+    complete,
+    incomplete: incompleteRecords.length,
+    completenessPct,
+    incompleteRecords
+  };
+}
+
+export async function enforceMetaEventRetentionPolicies(options = {}) {
+  const dryRun = options.dryRun !== false;
+  const limitPerCollection = Number(options.limitPerCollection || 500);
+  const config = buildCollectionRetentionConfig(options);
+
+  const summary = [];
+  let totalCandidates = 0;
+  let totalDeleted = 0;
+  const failures = [];
+
+  for (const policy of config) {
+    const cutoffIso = daysAgoIso(policy.days);
+    const query = await dataAccess.queryRecords(policy.key, {
+      filters: { [policy.timestampField]: { lt: cutoffIso } },
+      sort: [{ field: policy.timestampField, direction: 'asc' }],
+      limit: limitPerCollection,
+      suppressAuth: true
+    });
+
+    if (!query.success) {
+      failures.push({
+        collection: policy.key,
+        error: query.error || `Failed to query ${policy.key}`
+      });
+      continue;
+    }
+
+    const candidates = query.items || [];
+    totalCandidates += candidates.length;
+    let deleted = 0;
+
+    if (!dryRun) {
+      for (const record of candidates) {
+        const recordId = toDeleteRecordId(record);
+        if (!recordId) {
+          continue;
+        }
+        const remove = await dataAccess.deleteRecord(policy.key, recordId, { suppressAuth: true });
+        if (remove.success) {
+          deleted++;
+        } else {
+          failures.push({
+            collection: policy.key,
+            recordId,
+            error: remove.error || `Failed to delete ${recordId}`
+          });
+        }
+      }
+    }
+
+    totalDeleted += deleted;
+    summary.push({
+      collection: policy.key,
+      retentionDays: policy.days,
+      cutoffIso,
+      candidates: candidates.length,
+      deleted
+    });
+  }
+
+  await dataAccess.insertRecord(COLLECTIONS.errorEvents, {
+    integration_id: '',
+    error_code: 'meta_retention_enforcement',
+    severity: failures.length > 0 ? 'warning' : 'info',
+    message: dryRun
+      ? `Meta retention dry run completed: ${totalCandidates} candidates`
+      : `Meta retention enforcement deleted ${totalDeleted} records`,
+    payload: {
+      dryRun,
+      totalCandidates,
+      totalDeleted,
+      failures: failures.length
+    },
+    created_at: nowIso()
+  }, { suppressAuth: true });
+
+  return {
+    success: failures.length === 0,
+    checkedAt: nowIso(),
+    dryRun,
+    totalCandidates,
+    totalDeleted,
+    summary,
+    failures
+  };
+}
+
+export async function runMetaAuditCompletenessCheck(options = {}) {
+  return validateMetaAuditTrailCompleteness(options);
+}
+
+export async function runMetaRetentionEnforcement(options = {}) {
+  return enforceMetaEventRetentionPolicies({ ...options, dryRun: false });
+}
+
+export function getMetaTokenPermissionVersionRunbook() {
+  return {
+    success: true,
+    updatedAt: nowIso(),
+    runbook: {
+      tokenExpiry: [
+        'Detect expiring token via runMetaTokenHealthChecks scheduler output.',
+        'Run refresh_system_user_token on impacted integration.',
+        'Validate get_token_health and list_ad_accounts for the same integration.',
+        'If refresh fails twice, quarantine integration and open execute_high approval for credential rotation.'
+      ],
+      permissionDrift: [
+        'Detect permission errors from get_meta_api_error_digest (code: meta_permission_denied).',
+        'Validate integration app/user scopes against required campaign read/write permissions.',
+        'Rebind ad account and rerun list_ad_accounts to verify restored access.',
+        'If unresolved, disable integration and escalate to admin owner for manual access grant.'
+      ],
+      versionRollovers: [
+        'Pin target Meta API version and publish migration window at least 14 days ahead.',
+        'Execute read-only smoke suite (insights + account discovery) in pre-prod.',
+        'Execute mutation smoke suite (draft create/update/pause) with idempotency keys.',
+        'Promote version only after audit completeness check passes and error posture is normal.'
+      ]
+    }
+  };
+}
+
+export function getMetaCampaignDeliveryIncidentPlaybook() {
+  return {
+    success: true,
+    updatedAt: nowIso(),
+    playbook: {
+      triggerConditions: [
+        'Spend drops below expected pacing for two consecutive polling windows.',
+        'Delivery status shifts to error/limited for active campaigns.',
+        'Meta API failures or throttles exceed warning threshold in the last hour.'
+      ],
+      triageSteps: [
+        'Confirm integration token health and ad-account binding.',
+        'Check rate-limit posture and temporarily reduce async polling cadence.',
+        'Inspect campaign/ad set/ad status transitions and recent optimization actions.',
+        'Pause auto-optimization actions until stability checks pass.'
+      ],
+      mitigationActions: [
+        'Reapply campaign budget/schedule from last known good snapshot.',
+        'Rotate or rollback recent creative/bid mutations using rollback handlers.',
+        'If unresolved within 30 minutes, quarantine integration to block unsafe writes.',
+        'Escalate to admin governance queue with incident context and recommended action.'
+      ],
+      closureChecklist: [
+        'Delivery and spend return within expected pacing band.',
+        'No critical Meta API errors for 60 minutes.',
+        'Audit trail contains complete before/after snapshots for incident actions.',
+        'Post-incident note recorded with root cause and follow-up owner.'
+      ]
+    }
+  };
+}

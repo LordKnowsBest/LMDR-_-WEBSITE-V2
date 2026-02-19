@@ -1,0 +1,278 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  errorEvents: 'metaErrorEvents',
+  rateLimitEvents: 'metaRateLimitEvents'
+};
+
+const circuitState = new Map();
+const requestBudgetState = new Map();
+const readCache = new Map();
+
+const DEFAULTS = {
+  retries: 3,
+  backoffMs: 180,
+  backoffFactor: 2,
+  circuitThreshold: 5,
+  circuitOpenMs: 2 * 60 * 1000,
+  budgetPerMinute: 120,
+  cacheTtlMs: 60 * 1000
+};
+
+function nowMs() {
+  return Date.now();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function ensureCircuit(operationKey, options = {}) {
+  const current = circuitState.get(operationKey) || {
+    failures: 0,
+    status: 'closed',
+    openedAt: 0
+  };
+
+  if (
+    current.status === 'open' &&
+    nowMs() - current.openedAt > (options.circuitOpenMs || DEFAULTS.circuitOpenMs)
+  ) {
+    current.status = 'half_open';
+    current.failures = 0;
+    circuitState.set(operationKey, current);
+  }
+  return current;
+}
+
+function recordCircuitSuccess(operationKey) {
+  circuitState.set(operationKey, { failures: 0, status: 'closed', openedAt: 0 });
+}
+
+function recordCircuitFailure(operationKey, options = {}) {
+  const entry = ensureCircuit(operationKey, options);
+  entry.failures += 1;
+  if (entry.failures >= (options.circuitThreshold || DEFAULTS.circuitThreshold)) {
+    entry.status = 'open';
+    entry.openedAt = nowMs();
+  }
+  circuitState.set(operationKey, entry);
+  return entry;
+}
+
+async function writeErrorEvent(operationKey, error, context = {}) {
+  try {
+    await dataAccess.insertRecord(COLLECTIONS.errorEvents, {
+      integration_id: context.integrationId || '',
+      error_code: context.errorCode || 'meta_operation_failed',
+      severity: context.severity || 'error',
+      operation_key: operationKey,
+      message: error?.message || String(error || 'Unknown meta operation error'),
+      payload: context.payload || null,
+      created_at: nowIso()
+    }, { suppressAuth: true });
+  } catch (writeError) {
+    console.error('metaReliabilityService writeErrorEvent failed:', writeError);
+  }
+}
+
+async function enqueueDeadLetter(operationKey, error, context = {}) {
+  const message = error?.message || String(error || 'Unknown dead-letter error');
+  try {
+    await dataAccess.insertRecord(COLLECTIONS.errorEvents, {
+      integration_id: context.integrationId || '',
+      error_code: 'meta_dead_letter',
+      severity: 'critical',
+      operation_key: operationKey,
+      message,
+      payload: {
+        ...(context.payload || {}),
+        dead_letter: true,
+        reason: context.deadLetterReason || 'retry_exhausted',
+        timestamp: nowIso()
+      },
+      created_at: nowIso()
+    }, { suppressAuth: true });
+  } catch (writeError) {
+    console.error('metaReliabilityService enqueueDeadLetter failed:', writeError);
+  }
+}
+
+async function writeRateLimitEvent(scopeKey, details = {}) {
+  try {
+    await dataAccess.insertRecord(COLLECTIONS.rateLimitEvents, {
+      integration_id: details.integrationId || '',
+      scope_key: scopeKey,
+      status: details.status || 'normal',
+      throttled: Boolean(details.throttled),
+      remaining_pct: Number(details.remainingPct || 100),
+      limit_per_minute: Number(details.limitPerMinute || 0),
+      count: Number(details.count || 0),
+      created_at: nowIso()
+    }, { suppressAuth: true });
+  } catch (writeError) {
+    console.error('metaReliabilityService writeRateLimitEvent failed:', writeError);
+  }
+}
+
+function defaultRetryableResult(result = {}) {
+  if (!result || result.success !== false) {
+    return true;
+  }
+  if (result.retryable === false) {
+    return false;
+  }
+  return true;
+}
+
+export async function executeWithRetryAndCircuit(operationKey, fn, options = {}) {
+  const retries = Number(options.retries || DEFAULTS.retries);
+  const backoffMs = Number(options.backoffMs || DEFAULTS.backoffMs);
+  const backoffFactor = Number(options.backoffFactor || DEFAULTS.backoffFactor);
+  const circuit = ensureCircuit(operationKey, options);
+
+  if (circuit.status === 'open') {
+    const error = new Error(`Circuit open for ${operationKey}`);
+    await writeErrorEvent(operationKey, error, {
+      ...options.context,
+      errorCode: 'meta_circuit_open',
+      severity: 'warning'
+    });
+    return {
+      success: false,
+      error: error.message,
+      type: 'circuit_open'
+    };
+  }
+
+  let lastError = null;
+  let lastResult = null;
+  const retryabilityResolver = typeof options.isRetryableResult === 'function' ?
+    options.isRetryableResult : defaultRetryableResult;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await fn();
+      const isSuccess = !(result && result.success === false);
+      if (isSuccess) {
+        recordCircuitSuccess(operationKey);
+        return result;
+      }
+      lastResult = result;
+      const isRetryable = retryabilityResolver(result);
+      if (!isRetryable) {
+        return {
+          ...result,
+          type: result.type || 'non_retryable_failure'
+        };
+      }
+      lastError = new Error(result.error || `Failed ${operationKey}`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    recordCircuitFailure(operationKey, options);
+    if (attempt < retries) {
+      const waitMs = backoffMs * Math.pow(backoffFactor, attempt);
+      await sleep(waitMs);
+    }
+  }
+
+  await writeErrorEvent(operationKey, lastError, {
+    ...options.context,
+    errorCode: options.errorCode || 'meta_retry_exhausted',
+    severity: options.severity || 'error'
+  });
+
+  if (options.deadLetter !== false) {
+    await enqueueDeadLetter(operationKey, lastError, {
+      ...(options.context || {}),
+      deadLetterReason: 'retry_exhausted'
+    });
+  }
+
+  return {
+    success: false,
+    error: lastError?.message || lastResult?.error || `Retry exhausted for ${operationKey}`,
+    type: 'retry_exhausted',
+    deadLetterEnqueued: options.deadLetter !== false
+  };
+}
+
+export async function consumeRequestBudget(scopeKey, options = {}) {
+  const limitPerMinute = Number(options.limitPerMinute || DEFAULTS.budgetPerMinute);
+  const now = nowMs();
+  const entry = requestBudgetState.get(scopeKey) || { count: 0, resetAt: now + 60000 };
+
+  if (now > entry.resetAt) {
+    entry.count = 0;
+    entry.resetAt = now + 60000;
+  }
+
+  entry.count += 1;
+  requestBudgetState.set(scopeKey, entry);
+  const remainingPct = Math.max(0, Math.round(((limitPerMinute - entry.count) / limitPerMinute) * 100));
+
+  if (entry.count > limitPerMinute) {
+    await writeRateLimitEvent(scopeKey, {
+      ...options.context,
+      status: 'throttled',
+      throttled: true,
+      remainingPct: 0,
+      limitPerMinute,
+      count: entry.count
+    });
+    return {
+      allowed: false,
+      error: `Request budget exceeded for ${scopeKey}`,
+      remainingPct
+    };
+  }
+
+  if (remainingPct <= 20) {
+    await writeRateLimitEvent(scopeKey, {
+      ...options.context,
+      status: 'near_limit',
+      throttled: false,
+      remainingPct,
+      limitPerMinute,
+      count: entry.count
+    });
+  }
+
+  return { allowed: true, remainingPct, limitPerMinute, count: entry.count };
+}
+
+export async function readWithCache(cacheKey, fetcher, ttlMs = DEFAULTS.cacheTtlMs) {
+  const cached = readCache.get(cacheKey);
+  const now = nowMs();
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+  const value = await fetcher();
+  readCache.set(cacheKey, { value, expiresAt: now + Number(ttlMs || DEFAULTS.cacheTtlMs) });
+  return value;
+}
+
+export function getReliabilityState() {
+  return {
+    circuits: Array.from(circuitState.entries()).reduce((acc, [key, value]) => {
+      acc[key] = value;
+      return acc;
+    }, {}),
+    budgets: Array.from(requestBudgetState.entries()).reduce((acc, [key, value]) => {
+      acc[key] = value;
+      return acc;
+    }, {}),
+    cacheSize: readCache.size
+  };
+}
+
+export function __resetReliabilityStateForTests() {
+  circuitState.clear();
+  requestBudgetState.clear();
+  readCache.clear();
+}

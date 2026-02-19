@@ -26,7 +26,6 @@ import {
 } from 'backend/abandonmentEmailService';
 import { handleGatewayRequest } from 'backend/apiGateway';
 import { handleAgentTurn } from 'backend/agentService';
-import { getVoiceConfig } from 'backend/voiceService';
 import * as dataAccess from 'backend/dataAccess';
 import { processSendGridWebhook } from 'backend/emailCampaignService';
 import {
@@ -35,10 +34,6 @@ import {
 } from 'backend/smsCampaignService';
 import { processJobBoardWebhook } from 'backend/jobBoardService';
 import { connectSocialAccount } from 'backend/socialPostingService';
-
-// Data source configuration imports
-// Note: http-functions.js uses standard imports (not .jsw)
-// The stripeService and abandonmentEmailService handle data source routing internally
 
 // ============================================================================
 // STRIPE WEBHOOK ENDPOINT
