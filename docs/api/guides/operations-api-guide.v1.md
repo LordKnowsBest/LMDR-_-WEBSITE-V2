@@ -11,12 +11,23 @@
 - Parking: Starter+
 - Fuel APIs: Growth+
 
-## Example cURL
-```bash
-curl -X GET "https://www.lastmiledr.app/_functions/api_gateway/v1/fuel/prices?lat=35.1495&lng=-90.0490&radius=25" \
-  -H "Authorization: Bearer lmdr_live_xxx"
-```
+## Parking Detail Fields
+- Parking search includes source attribution under:
+  - `availability.data_source`
+  - `availability.source_label`
+  - `availability.confidence`
+- Parking location detail includes:
+  - `historical_availability[]`
+  - `amenities[]`
+  - `reviews[]`
 
 ## Notes
-- Lat/lng query parameters are required for geo search endpoints.
-- Fuel planning accepts JSON body and returns recommended stops.
+- Lat/lng query parameters are required for geo-search endpoints.
+- Fuel planning accepts a JSON body and returns optimized stop recommendations.
+- Fuel station detail includes card-adjusted pricing and state-level diesel trend average.
+
+## References
+- OpenAPI: `docs/api/openapi.external.v1.yaml`
+- Examples: `docs/api/guides/operations-api-examples.v1.md`
+- Integration guide: `docs/api/guides/operations-integration-guide.v1.md`
+- Postman: `docs/api/postman.operations.v1.collection.json`

@@ -27,3 +27,11 @@ curl -X POST "https://www.lastmiledr.app/_functions/api_gateway/v1/matching/driv
 ## Notes
 - Driver search usage is quota-metered.
 - Profile responses may mask PII based on access rules.
+- Driver profile payload includes `qualification_summary` and `credit_consumed`.
+- Driver search includes `total_matches` (filtered) and `total_matches_unfiltered`.
+
+## References
+- OpenAPI: `docs/api/openapi.external.v1.yaml`
+- Examples: `docs/api/guides/matching-api-examples.v1.md`
+- Integration guide: `docs/api/guides/matching-integration-guide.v1.md`
+- Postman: `docs/api/postman.matching.v1.collection.json`

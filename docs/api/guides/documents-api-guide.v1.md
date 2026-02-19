@@ -22,7 +22,15 @@
 2. Receive `batch_job_id` and status `processing`.
 3. Poll `GET /v1/documents/batch/{job_id}`.
 4. Optional webhook event: `documents.batch.completed`.
+- Batch limit: maximum 25 documents per request.
 
 ## Verification notes
 - `verify` returns check-level results plus confidence.
 - Use returned `extracted_document_id` where available.
+
+## References
+- OpenAPI: `docs/api/openapi.external.v1.yaml`
+- Examples: `docs/api/guides/documents-api-examples.v1.md`
+- HR examples: `docs/api/guides/documents-hr-integration-examples.v1.md`
+- Integration guide: `docs/api/guides/documents-integration-guide.v1.md`
+- Postman: `docs/api/postman.documents.v1.collection.json`

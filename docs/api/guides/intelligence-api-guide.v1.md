@@ -7,15 +7,28 @@
 - `POST /v1/intelligence/carriers/search`
 
 ## Tier Access
-- Starter: carrier intelligence + market.
-- Growth+: sentiment and full intelligence.
+- Starter: carrier intelligence + market intelligence snapshots.
+- Growth+: sentiment endpoint and full enrichment payload access.
 
-## Example cURL
-```bash
-curl -X GET "https://www.lastmiledr.app/_functions/api_gateway/v1/intelligence/market?region=southeast&freight_type=dry_van&operation_type=otr" \
-  -H "Authorization: Bearer lmdr_live_xxx"
-```
+## Filter Support
+- `GET /v1/intelligence/market`
+  - `region`
+  - `freight_type`
+  - `operation_type`
+- `POST /v1/intelligence/carriers/search`
+  - `filters.sentiment`
+  - `filters.fleet_size_min`
+  - `filters.fleet_size_max`
+  - `filters.safety_rating`
+  - `limit`
+  - `offset`
 
-## Notes
-- Market endpoint uses cached aggregation windows.
-- Sentiment is higher cost and tier-restricted.
+## Rate Limit Notes
+- Sentiment requests are higher-cost and subject to stricter throttling.
+- Respect `Retry-After` on `429 rate_limit_exceeded` responses.
+
+## References
+- OpenAPI: `docs/api/openapi.external.v1.yaml`
+- Integration guide: `docs/api/guides/intelligence-integration-guide.v1.md`
+- Code examples: `docs/api/guides/intelligence-api-examples.v1.md`
+- Postman: `docs/api/postman.intelligence.v1.collection.json`
