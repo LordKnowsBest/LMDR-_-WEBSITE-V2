@@ -1,0 +1,466 @@
+import * as dataAccess from 'backend/dataAccess';
+import {
+  suggestBudgetReallocation,
+  suggestCreativeRotation,
+  suggestAudienceNarrowing
+} from 'backend/metaInsightsService';
+import { updateAdSet, updateAdSetBudget } from 'backend/metaAdSetService';
+import { attachCreativeToAd } from 'backend/metaCreativeService';
+
+const COLLECTIONS = {
+  optimizationActions: 'metaOptimizationActions',
+  insightsIntraday: 'metaInsightsIntraday',
+  adSetMirror: 'metaAdSetMirror',
+  adMirror: 'metaAdMirror'
+};
+
+const DEFAULTS = {
+  minConfidence: 0.65,
+  maxDataAgeMinutes: 180,
+  cooldownMinutes: 60,
+  anomalyScoreThreshold: 0.8,
+  anomalyWindowMinutes: 30
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function makeId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function toNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function minutesAgoIso(minutes) {
+  return new Date(Date.now() - minutes * 60 * 1000).toISOString();
+}
+
+function parseMaybeJson(value, fallback = null) {
+  if (!value && value !== 0) return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return fallback;
+  }
+}
+
+async function getByField(collectionKey, field, value) {
+  const result = await dataAccess.queryRecords(collectionKey, {
+    filters: { [field]: value },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!result.success || !result.items.length) return null;
+  return result.items[0];
+}
+
+async function logOptimizationAction(payload = {}) {
+  const actionId = payload.actionId || makeId('meta_opt');
+  const insert = await dataAccess.insertRecord(COLLECTIONS.optimizationActions, {
+    action_id: actionId,
+    recruiter_id: payload.recruiterId || '',
+    action_type: payload.actionType || '',
+    target_id: payload.targetId || '',
+    status: payload.status || 'applied',
+    reason: payload.reason || '',
+    confidence: toNumber(payload.confidence, 0),
+    data_freshness_minutes: toNumber(payload.dataFreshnessMinutes, -1),
+    cooldown_minutes: toNumber(payload.cooldownMinutes, 0),
+    request_payload: payload.requestPayload || null,
+    result_payload: payload.resultPayload || null,
+    rollback_payload: payload.rollbackPayload || null,
+    blocked_reasons: payload.blockedReasons || [],
+    anomaly_stop_triggered: Boolean(payload.anomalyStopTriggered),
+    created_at: nowIso(),
+    updated_at: nowIso()
+  }, { suppressAuth: true });
+
+  return {
+    success: Boolean(insert.success),
+    actionId,
+    record: insert.record || null,
+    error: insert.error || ''
+  };
+}
+
+async function getDataFreshnessMinutes(params = {}) {
+  const filters = {
+    timestamp: { gte: minutesAgoIso(60 * 24 * 7), lte: nowIso() }
+  };
+  if (params.campaignId) filters.campaign_id = params.campaignId;
+  if (params.adSetId) filters.ad_set_id = params.adSetId;
+  if (params.adId) filters.ad_id = params.adId;
+
+  const query = await dataAccess.queryRecords(COLLECTIONS.insightsIntraday, {
+    filters,
+    sort: [{ field: 'timestamp', direction: 'desc' }],
+    limit: 1,
+    suppressAuth: true
+  });
+
+  if (!query.success || !query.items.length) {
+    return { success: false, freshnessMinutes: Number.POSITIVE_INFINITY };
+  }
+
+  const latest = query.items[0];
+  const timestamp = latest.timestamp ? new Date(latest.timestamp).getTime() : NaN;
+  if (!Number.isFinite(timestamp)) {
+    return { success: false, freshnessMinutes: Number.POSITIVE_INFINITY };
+  }
+  return {
+    success: true,
+    freshnessMinutes: Math.max(0, Math.round((Date.now() - timestamp) / 60000))
+  };
+}
+
+async function hasCooldownConflict(actionType, targetId, cooldownMinutes) {
+  if (!targetId) return false;
+  const recent = await dataAccess.queryRecords(COLLECTIONS.optimizationActions, {
+    filters: {
+      action_type: actionType,
+      target_id: targetId,
+      status: 'applied',
+      created_at: { gte: minutesAgoIso(cooldownMinutes), lte: nowIso() }
+    },
+    limit: 1,
+    suppressAuth: true
+  });
+  return Boolean(recent.success && recent.items && recent.items.length > 0);
+}
+
+async function hasAnomalyStop(params = {}, threshold, windowMinutes) {
+  const filters = {
+    timestamp: { gte: minutesAgoIso(windowMinutes), lte: nowIso() }
+  };
+  if (params.campaignId) filters.campaign_id = params.campaignId;
+  if (params.adSetId) filters.ad_set_id = params.adSetId;
+  if (params.adId) filters.ad_id = params.adId;
+
+  const query = await dataAccess.queryRecords(COLLECTIONS.insightsIntraday, {
+    filters,
+    limit: 50,
+    suppressAuth: true
+  });
+  if (!query.success) return false;
+  return (query.items || []).some(row =>
+    row.anomaly_flag === true ||
+    row.pacing_anomaly === true ||
+    toNumber(row.anomaly_score, 0) >= threshold
+  );
+}
+
+async function evaluateSafety(actionType, targetId, params = {}) {
+  const minConfidence = toNumber(params.minConfidence, DEFAULTS.minConfidence);
+  const maxDataAgeMinutes = toNumber(params.maxDataAgeMinutes, DEFAULTS.maxDataAgeMinutes);
+  const cooldownMinutes = toNumber(params.cooldownMinutes, DEFAULTS.cooldownMinutes);
+  const anomalyScoreThreshold = toNumber(params.anomalyScoreThreshold, DEFAULTS.anomalyScoreThreshold);
+  const anomalyWindowMinutes = toNumber(params.anomalyWindowMinutes, DEFAULTS.anomalyWindowMinutes);
+  const confidence = toNumber(params.confidence, 0.75);
+  const reasons = [];
+
+  const freshness = await getDataFreshnessMinutes(params);
+  if (!freshness.success || freshness.freshnessMinutes > maxDataAgeMinutes) {
+    reasons.push('data_freshness_below_threshold');
+  }
+  if (confidence < minConfidence) {
+    reasons.push('confidence_below_threshold');
+  }
+  const cooldownConflict = await hasCooldownConflict(actionType, targetId, cooldownMinutes);
+  if (cooldownConflict) {
+    reasons.push('cooldown_window_active');
+  }
+  const anomalyStopTriggered = await hasAnomalyStop(params, anomalyScoreThreshold, anomalyWindowMinutes);
+  if (anomalyStopTriggered && !params.allowDuringAnomaly) {
+    reasons.push('anomaly_stop_switch_triggered');
+  }
+
+  return {
+    allowed: reasons.length === 0,
+    reasons,
+    anomalyStopTriggered,
+    freshnessMinutes: freshness.freshnessMinutes,
+    cooldownMinutes,
+    confidence
+  };
+}
+
+export async function getRuleDrivenRecommendations(recruiterId, params = {}) {
+  const [budget, creative, audience] = await Promise.all([
+    suggestBudgetReallocation(recruiterId, params),
+    suggestCreativeRotation(recruiterId, params),
+    suggestAudienceNarrowing(recruiterId, params)
+  ]);
+
+  return {
+    success: true,
+    recommendations: {
+      budget: budget.suggestions || [],
+      creative: creative.suggestions || [],
+      audience: audience.suggestions || []
+    }
+  };
+}
+
+export async function applyBudgetReallocation(recruiterId, params = {}) {
+  if (!params.adSetId) {
+    return { success: false, error: 'Missing required field: adSetId' };
+  }
+
+  const safety = await evaluateSafety('budget_reallocation', params.adSetId, params);
+  if (!safety.allowed) {
+    const log = await logOptimizationAction({
+      recruiterId,
+      actionType: 'budget_reallocation',
+      targetId: params.adSetId,
+      status: 'blocked',
+      reason: 'Optimization blocked by safety gates',
+      confidence: safety.confidence,
+      dataFreshnessMinutes: safety.freshnessMinutes,
+      cooldownMinutes: safety.cooldownMinutes,
+      blockedReasons: safety.reasons,
+      anomalyStopTriggered: safety.anomalyStopTriggered,
+      requestPayload: params
+    });
+    return { success: false, blocked: true, reasons: safety.reasons, actionId: log.actionId };
+  }
+
+  const adSet = await getByField(COLLECTIONS.adSetMirror, 'ad_set_id', params.adSetId);
+  if (!adSet) {
+    return { success: false, error: `Ad set not found: ${params.adSetId}` };
+  }
+
+  const currentBudget = toNumber(adSet.daily_budget || adSet.dailyBudget, 0);
+  const deltaPct = toNumber(params.budgetDeltaPct, 0);
+  const nextBudget = params.newDailyBudget != null
+    ? toNumber(params.newDailyBudget, currentBudget)
+    : Math.max(1, Number((currentBudget * (1 + deltaPct / 100)).toFixed(2)));
+
+  const result = await updateAdSetBudget(recruiterId, {
+    ...params,
+    adSetId: params.adSetId,
+    dailyBudget: nextBudget,
+    reason: params.reason || 'optimization_budget_reallocation',
+    idempotencyKey: params.idempotencyKey || `opt_budget_${params.adSetId}_${Date.now()}`
+  });
+
+  const status = result.success ? 'applied' : 'failed';
+  const log = await logOptimizationAction({
+    recruiterId,
+    actionType: 'budget_reallocation',
+    targetId: params.adSetId,
+    status,
+    reason: params.reason || 'Budget reallocation applied',
+    confidence: safety.confidence,
+    dataFreshnessMinutes: safety.freshnessMinutes,
+    cooldownMinutes: safety.cooldownMinutes,
+    requestPayload: { ...params, computedDailyBudget: nextBudget },
+    resultPayload: result,
+    rollbackPayload: {
+      adSetId: params.adSetId,
+      dailyBudget: currentBudget,
+      lifetimeBudget: adSet.lifetime_budget || adSet.lifetimeBudget || 0
+    }
+  });
+
+  return {
+    ...result,
+    actionId: log.actionId,
+    appliedBudget: nextBudget,
+    priorBudget: currentBudget
+  };
+}
+
+export async function applyBidAdjustment(recruiterId, params = {}) {
+  if (!params.adSetId) {
+    return { success: false, error: 'Missing required field: adSetId' };
+  }
+
+  const safety = await evaluateSafety('bid_adjustment', params.adSetId, params);
+  if (!safety.allowed) {
+    const log = await logOptimizationAction({
+      recruiterId,
+      actionType: 'bid_adjustment',
+      targetId: params.adSetId,
+      status: 'blocked',
+      reason: 'Optimization blocked by safety gates',
+      confidence: safety.confidence,
+      dataFreshnessMinutes: safety.freshnessMinutes,
+      cooldownMinutes: safety.cooldownMinutes,
+      blockedReasons: safety.reasons,
+      anomalyStopTriggered: safety.anomalyStopTriggered,
+      requestPayload: params
+    });
+    return { success: false, blocked: true, reasons: safety.reasons, actionId: log.actionId };
+  }
+
+  const adSet = await getByField(COLLECTIONS.adSetMirror, 'ad_set_id', params.adSetId);
+  if (!adSet) {
+    return { success: false, error: `Ad set not found: ${params.adSetId}` };
+  }
+
+  const nextBidStrategy = params.bidStrategy || adSet.bid_strategy || 'LOWEST_COST_WITHOUT_CAP';
+  const nextBidAmount = params.bidAmount != null ? toNumber(params.bidAmount, 0) : toNumber(adSet.bid_amount, 0);
+  const nextGoal = params.optimizationGoal || adSet.optimization_goal || '';
+  const result = await updateAdSet(recruiterId, {
+    ...params,
+    adSetId: params.adSetId,
+    bidStrategy: nextBidStrategy,
+    bidAmount: nextBidAmount,
+    optimizationGoal: nextGoal,
+    reason: params.reason || 'optimization_bid_adjustment',
+    idempotencyKey: params.idempotencyKey || `opt_bid_${params.adSetId}_${Date.now()}`
+  });
+
+  const log = await logOptimizationAction({
+    recruiterId,
+    actionType: 'bid_adjustment',
+    targetId: params.adSetId,
+    status: result.success ? 'applied' : 'failed',
+    reason: params.reason || 'Bid adjustment applied',
+    confidence: safety.confidence,
+    dataFreshnessMinutes: safety.freshnessMinutes,
+    cooldownMinutes: safety.cooldownMinutes,
+    requestPayload: params,
+    resultPayload: result,
+    rollbackPayload: {
+      adSetId: params.adSetId,
+      bidStrategy: adSet.bid_strategy || '',
+      bidAmount: toNumber(adSet.bid_amount, 0),
+      optimizationGoal: adSet.optimization_goal || ''
+    }
+  });
+
+  return { ...result, actionId: log.actionId };
+}
+
+export async function rotateCreativeVariant(recruiterId, params = {}) {
+  if (!params.adId || !params.nextCreativeId) {
+    return { success: false, error: 'Missing required fields: adId and nextCreativeId' };
+  }
+
+  const safety = await evaluateSafety('creative_rotation', params.adId, params);
+  if (!safety.allowed) {
+    const log = await logOptimizationAction({
+      recruiterId,
+      actionType: 'creative_rotation',
+      targetId: params.adId,
+      status: 'blocked',
+      reason: 'Optimization blocked by safety gates',
+      confidence: safety.confidence,
+      dataFreshnessMinutes: safety.freshnessMinutes,
+      cooldownMinutes: safety.cooldownMinutes,
+      blockedReasons: safety.reasons,
+      anomalyStopTriggered: safety.anomalyStopTriggered,
+      requestPayload: params
+    });
+    return { success: false, blocked: true, reasons: safety.reasons, actionId: log.actionId };
+  }
+
+  const ad = await getByField(COLLECTIONS.adMirror, 'ad_id', params.adId);
+  if (!ad) {
+    return { success: false, error: `Ad not found: ${params.adId}` };
+  }
+
+  const priorCreativeId = ad.creative_id || '';
+  const result = await attachCreativeToAd(recruiterId, {
+    ...params,
+    adId: params.adId,
+    creativeId: params.nextCreativeId,
+    reason: params.reason || 'optimization_creative_rotation',
+    idempotencyKey: params.idempotencyKey || `opt_creative_${params.adId}_${Date.now()}`
+  });
+
+  const log = await logOptimizationAction({
+    recruiterId,
+    actionType: 'creative_rotation',
+    targetId: params.adId,
+    status: result.success ? 'applied' : 'failed',
+    reason: params.reason || 'Creative rotation applied',
+    confidence: safety.confidence,
+    dataFreshnessMinutes: safety.freshnessMinutes,
+    cooldownMinutes: safety.cooldownMinutes,
+    requestPayload: params,
+    resultPayload: result,
+    rollbackPayload: {
+      adId: params.adId,
+      priorCreativeId
+    }
+  });
+
+  return { ...result, actionId: log.actionId, priorCreativeId };
+}
+
+export async function rollbackOptimizationAction(recruiterId, params = {}) {
+  if (!params.actionId) {
+    return { success: false, error: 'Missing required field: actionId' };
+  }
+
+  const action = await getByField(COLLECTIONS.optimizationActions, 'action_id', params.actionId);
+  if (!action) {
+    return { success: false, error: `Optimization action not found: ${params.actionId}` };
+  }
+  if (action.status !== 'applied') {
+    return { success: false, error: `Action is not rollback-eligible (status: ${action.status || 'unknown'})` };
+  }
+
+  const rollback = parseMaybeJson(action.rollback_payload, action.rollback_payload);
+  if (!rollback || typeof rollback !== 'object') {
+    return { success: false, error: 'Rollback payload missing or invalid' };
+  }
+
+  let result = { success: false, error: 'Unsupported rollback type' };
+  if (action.action_type === 'budget_reallocation') {
+    result = await updateAdSetBudget(recruiterId, {
+      adSetId: rollback.adSetId,
+      dailyBudget: rollback.dailyBudget,
+      lifetimeBudget: rollback.lifetimeBudget,
+      reason: 'optimization_rollback_budget',
+      idempotencyKey: `opt_rb_budget_${params.actionId}_${Date.now()}`
+    });
+  } else if (action.action_type === 'bid_adjustment') {
+    result = await updateAdSet(recruiterId, {
+      adSetId: rollback.adSetId,
+      bidStrategy: rollback.bidStrategy,
+      bidAmount: rollback.bidAmount,
+      optimizationGoal: rollback.optimizationGoal,
+      reason: 'optimization_rollback_bid',
+      idempotencyKey: `opt_rb_bid_${params.actionId}_${Date.now()}`
+    });
+  } else if (action.action_type === 'creative_rotation') {
+    result = await attachCreativeToAd(recruiterId, {
+      adId: rollback.adId,
+      creativeId: rollback.priorCreativeId,
+      reason: 'optimization_rollback_creative',
+      idempotencyKey: `opt_rb_creative_${params.actionId}_${Date.now()}`
+    });
+  }
+
+  if (!result.success) {
+    return result;
+  }
+
+  await dataAccess.updateRecord(COLLECTIONS.optimizationActions, {
+    ...action,
+    status: 'rolled_back',
+    rolled_back_at: nowIso(),
+    rolled_back_by: recruiterId || '',
+    updated_at: nowIso()
+  }, { suppressAuth: true });
+
+  await logOptimizationAction({
+    recruiterId,
+    actionType: `rollback_${action.action_type}`,
+    targetId: action.target_id || '',
+    status: 'applied',
+    reason: 'Rollback applied',
+    requestPayload: { sourceActionId: params.actionId },
+    resultPayload: result
+  });
+
+  return { success: true, sourceActionId: params.actionId, result };
+}

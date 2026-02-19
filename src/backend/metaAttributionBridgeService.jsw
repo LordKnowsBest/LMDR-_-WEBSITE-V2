@@ -1,0 +1,277 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  attributionLinks: 'metaAttributionLinks',
+  campaignMirror: 'metaCampaignMirror',
+  insightsDaily: 'metaInsightsDaily'
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function toNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function toPct(value) {
+  return Number((toNumber(value, 0) * 100).toFixed(2));
+}
+
+function withinDaysIso(days) {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+async function queryAttribution(params = {}, limit = 500) {
+  const filters = {};
+  if (params.carrierDot) filters.carrier_dot = params.carrierDot;
+  if (params.campaignId) filters.campaign_id = params.campaignId;
+  if (params.source) filters.source = params.source;
+  if (params.dateRange?.start || params.dateRange?.end) {
+    filters.timestamp = {
+      gte: params.dateRange?.start || withinDaysIso(30),
+      lte: params.dateRange?.end || nowIso()
+    };
+  }
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.attributionLinks, {
+    filters,
+    sort: [{ field: 'timestamp', direction: 'desc' }],
+    limit,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, items: [], error: result.error || 'Failed to query attribution links' };
+  }
+  return { success: true, items: result.items || [] };
+}
+
+function aggregateFunnel(rows = []) {
+  const totals = rows.reduce((acc, row) => {
+    acc.impressions += toNumber(row.impressions, 0);
+    acc.clicks += toNumber(row.clicks, 0);
+    acc.leads += toNumber(row.leads, 0);
+    acc.qualified += toNumber(row.qualified_applications || row.qualified, 0);
+    acc.hires += toNumber(row.hires, 0);
+    acc.spend += toNumber(row.spend, 0);
+    return acc;
+  }, {
+    impressions: 0,
+    clicks: 0,
+    leads: 0,
+    qualified: 0,
+    hires: 0,
+    spend: 0
+  });
+
+  return {
+    ...totals,
+    ctr: totals.impressions > 0 ? toPct(totals.clicks / totals.impressions) : 0,
+    cvr: totals.clicks > 0 ? toPct(totals.leads / totals.clicks) : 0,
+    qualifiedRate: totals.leads > 0 ? toPct(totals.qualified / totals.leads) : 0,
+    hireRate: totals.leads > 0 ? toPct(totals.hires / totals.leads) : 0,
+    cpl: totals.leads > 0 ? Number((totals.spend / totals.leads).toFixed(2)) : 0,
+    cph: totals.hires > 0 ? Number((totals.spend / totals.hires).toFixed(2)) : 0
+  };
+}
+
+export async function getPaidMediaToPipelineFunnel(userId, params = {}) {
+  const rowsResult = await queryAttribution(params, 1000);
+  if (!rowsResult.success) return rowsResult;
+
+  const totals = aggregateFunnel(rowsResult.items);
+  return {
+    success: true,
+    timeRange: params.dateRange || { start: withinDaysIso(30), end: nowIso() },
+    funnel: [
+      { stage: 'impressions', value: totals.impressions },
+      { stage: 'clicks', value: totals.clicks },
+      { stage: 'leads', value: totals.leads },
+      { stage: 'qualified', value: totals.qualified },
+      { stage: 'hires', value: totals.hires }
+    ],
+    totals
+  };
+}
+
+export async function getCplToHireTrend(userId, params = {}) {
+  const rowsResult = await queryAttribution(params, 2000);
+  if (!rowsResult.success) return rowsResult;
+
+  const grouped = {};
+  for (const row of rowsResult.items) {
+    const ts = row.timestamp || row.date || nowIso();
+    const key = String(ts).slice(0, 10);
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(row);
+  }
+
+  const points = Object.keys(grouped).sort().map(key => {
+    const totals = aggregateFunnel(grouped[key]);
+    return {
+      date: key,
+      spend: totals.spend,
+      leads: totals.leads,
+      hires: totals.hires,
+      cpl: totals.cpl,
+      cph: totals.cph
+    };
+  });
+
+  return {
+    success: true,
+    points,
+    summary: points.length ? points[points.length - 1] : { cpl: 0, cph: 0, hires: 0, leads: 0, spend: 0 }
+  };
+}
+
+export async function getSourceQualityScore(userId, params = {}) {
+  const rowsResult = await queryAttribution(params, 2000);
+  if (!rowsResult.success) return rowsResult;
+
+  const groups = {};
+  for (const row of rowsResult.items) {
+    const source = row.source || row.utm_source || 'unknown';
+    if (!groups[source]) groups[source] = [];
+    groups[source].push(row);
+  }
+
+  const items = Object.entries(groups).map(([source, rows]) => {
+    const totals = aggregateFunnel(rows);
+    const qualityScore = Number(((
+      (totals.hireRate / 100) * 0.45 +
+      (totals.qualifiedRate / 100) * 0.35 +
+      (totals.cpl > 0 ? Math.min(1, 120 / totals.cpl) : 0.2) * 0.20
+    ) * 100).toFixed(1));
+    return {
+      source,
+      leads: totals.leads,
+      hires: totals.hires,
+      cpl: totals.cpl,
+      cph: totals.cph,
+      hireRate: totals.hireRate,
+      qualifiedRate: totals.qualifiedRate,
+      qualityScore
+    };
+  }).sort((a, b) => b.qualityScore - a.qualityScore);
+
+  return {
+    success: true,
+    items,
+    bestSource: items[0] || null
+  };
+}
+
+export async function suggestChannelMix(userId, params = {}) {
+  const quality = await getSourceQualityScore(userId, params);
+  if (!quality.success) return quality;
+
+  const suggestions = quality.items.slice(0, 5).map(item => ({
+    source: item.source,
+    recommendation: item.qualityScore >= 70 ? 'increase_share' : 'reduce_share',
+    confidence: item.qualityScore >= 70 ? 0.82 : 0.68,
+    rationale: item.qualityScore >= 70
+      ? 'Source quality and hire conversion are above benchmark'
+      : 'Source quality and downstream conversion are below benchmark'
+  }));
+
+  return { success: true, suggestions };
+}
+
+export async function suggestGeoExpansion(userId, params = {}) {
+  const attribution = await queryAttribution(params, 2000);
+  if (!attribution.success) return attribution;
+
+  const geoGroups = {};
+  for (const row of attribution.items) {
+    const geo = row.geo || row.region || row.state || 'unknown';
+    if (!geoGroups[geo]) geoGroups[geo] = [];
+    geoGroups[geo].push(row);
+  }
+
+  const suggestions = Object.entries(geoGroups).map(([geo, rows]) => {
+    const totals = aggregateFunnel(rows);
+    return {
+      geo,
+      recommendation: totals.hireRate >= 5 && totals.cpl <= 90 ? 'expand' : 'hold',
+      confidence: totals.hireRate >= 5 && totals.cpl <= 90 ? 0.79 : 0.61,
+      rationale: totals.hireRate >= 5 && totals.cpl <= 90
+        ? 'High hire yield with efficient CPL'
+        : 'Insufficient quality or efficiency for expansion'
+    };
+  }).sort((a, b) => (b.confidence - a.confidence));
+
+  return { success: true, suggestions };
+}
+
+export async function syncCampaignTaxonomyToPipeline(userId, params = {}) {
+  const campaigns = await dataAccess.queryRecords(COLLECTIONS.campaignMirror, {
+    filters: params.carrierDot ? { carrierDot: params.carrierDot } : {},
+    limit: 400,
+    suppressAuth: true
+  });
+  if (!campaigns.success) {
+    return { success: false, error: campaigns.error || 'Failed to load campaign mirror' };
+  }
+
+  let synced = 0;
+  for (const campaign of campaigns.items || []) {
+    const campaignId = campaign.campaign_id || '';
+    if (!campaignId) continue;
+    const upsert = await dataAccess.upsertRecord(
+      COLLECTIONS.attributionLinks,
+      'campaign_id',
+      campaignId,
+      {
+        campaign_id: campaignId,
+        carrier_dot: campaign.carrierDot || params.carrierDot || '',
+        source: campaign.source || campaign.channel || 'meta_paid',
+        taxonomy_dimension: campaign.category || 'recruitment',
+        campaign_name: campaign.name || '',
+        timestamp: nowIso(),
+        updated_at: nowIso()
+      },
+      { suppressAuth: true }
+    );
+    if (upsert.success) synced++;
+  }
+
+  return { success: true, synced };
+}
+
+export async function backfillMissingAttribution(userId, params = {}) {
+  const rows = await dataAccess.queryRecords(COLLECTIONS.attributionLinks, {
+    filters: { campaign_id: '' },
+    limit: 500,
+    suppressAuth: true
+  });
+  if (!rows.success) {
+    return { success: false, error: rows.error || 'Failed to query attribution links for backfill' };
+  }
+
+  let updated = 0;
+  for (const row of rows.items || []) {
+    const fallbackCampaignId = row.external_campaign_id || row.utm_campaign || 'unknown_campaign';
+    const result = await dataAccess.updateRecord(
+      COLLECTIONS.attributionLinks,
+      {
+        ...row,
+        campaign_id: fallbackCampaignId,
+        source: row.source || row.utm_source || 'meta_paid',
+        backfilled: true,
+        backfilled_at: nowIso(),
+        updated_at: nowIso()
+      },
+      { suppressAuth: true }
+    );
+    if (result.success) updated++;
+  }
+
+  return {
+    success: true,
+    scanned: (rows.items || []).length,
+    updated
+  };
+}

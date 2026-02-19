@@ -3,7 +3,8 @@ import { findMatchingCarriers } from 'backend/carrierMatching';
 import * as dataAccess from 'backend/dataAccess';
 
 const COLLECTIONS = {
-  usage: 'apiUsage'
+  usage: 'apiUsage',
+  subscriptions: 'apiSubscriptions'
 };
 
 export async function searchExternalDrivers(body = {}, authContext = {}) {
@@ -46,7 +47,8 @@ export async function searchExternalDrivers(body = {}, authContext = {}) {
     success: true,
     usageMetric: 'driver_searches',
     data: {
-      total_matches: toNumber(result?.pagination?.totalCount, filteredMatches.length || 0),
+      total_matches: filteredMatches.length,
+      total_matches_unfiltered: toNumber(result?.pagination?.totalCount, filteredMatches.length || 0),
       results: filteredMatches.map((match) => ({
         driver_id: match?.driver?._id || match?.driver?.id || null,
         match_score: toNumber(match.score, 0),
@@ -100,13 +102,16 @@ export async function getExternalDriverProfile(driverId, query = {}, authContext
   }
 
   const profileResponse = canUnmask ? profile : maskDriverContact(profile);
+  const qualificationSummary = buildQualificationSummary(profile);
 
   return {
     success: true,
     data: {
       driver_id: driverId,
       profile: profileResponse,
-      pii_masked: !canUnmask
+      qualification_summary: qualificationSummary,
+      pii_masked: !canUnmask,
+      credit_consumed: canUnmask
     }
   };
 }
@@ -257,24 +262,59 @@ function maskDriverContact(profile) {
   };
 }
 
+function buildQualificationSummary(profile = {}) {
+  return {
+    cdl_class: profile?.cdl_class || profile?.license_class || null,
+    endorsements: normalizeArray(profile?.endorsements),
+    years_experience: toNumber(profile?.years_experience, null),
+    med_cert_status: profile?.med_cert_status || null,
+    violations_count: toNumber(profile?.violations_count, 0),
+    accidents_count: toNumber(profile?.accidents_count, 0)
+  };
+}
+
 async function consumeProfileViewCredit(partnerId) {
   if (!partnerId) {
     return { success: false, message: 'Missing partner context' };
   }
 
-  const periodKey = new Date().toISOString().slice(0, 7);
+  const period = buildCurrentPeriod();
+  const subscription = await getPartnerSubscription(partnerId);
+  const profileViewLimit = resolveProfileViewLimit(subscription);
   const usageResult = await dataAccess.queryRecords(COLLECTIONS.usage, {
-    filters: { partner_id: partnerId, period_key: periodKey },
+    filters: { partner_id: partnerId, period_key: period.key },
     limit: 1,
     suppressAuth: true
   });
   const usage = usageResult?.items?.[0];
+
+  const currentUsed = Number(usage?.quotas_used?.driver_profile_views || 0);
+  if (Number.isFinite(profileViewLimit) && profileViewLimit >= 0 && (currentUsed + 1) > profileViewLimit) {
+    return { success: false, message: 'Profile view quota exceeded' };
+  }
+
   if (!usage?._id) {
+    await dataAccess.insertRecord(COLLECTIONS.usage, {
+      partner_id: partnerId,
+      period_key: period.key,
+      period_start: period.start,
+      period_end: period.end,
+      usage: {
+        total_requests: 0,
+        requests_by_endpoint: {},
+        requests_by_day: [],
+        errors: 0,
+        avg_latency_ms: 0
+      },
+      quotas_used: { driver_profile_views: 1 },
+      billing_amount: 0,
+      updated_at: new Date()
+    }, { suppressAuth: true }).catch(() => null);
     return { success: true };
   }
 
   const nextQuotas = { ...(usage.quotas_used || {}) };
-  nextQuotas.driver_profile_views = Number(nextQuotas.driver_profile_views || 0) + 1;
+  nextQuotas.driver_profile_views = currentUsed + 1;
   await dataAccess.updateRecord(COLLECTIONS.usage, {
     _id: usage._id,
     quotas_used: nextQuotas,
@@ -282,4 +322,38 @@ async function consumeProfileViewCredit(partnerId) {
   }, { suppressAuth: true });
 
   return { success: true };
+}
+
+async function getPartnerSubscription(partnerId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+    filters: { partner_id: partnerId },
+    limit: 1,
+    suppressAuth: true
+  }).catch(() => ({ items: [] }));
+  return result?.items?.[0] || null;
+}
+
+function resolveProfileViewLimit(subscription) {
+  const candidates = [
+    subscription?.quotas?.driver_profile_views_monthly,
+    subscription?.quotas?.driver_searches_monthly
+  ];
+  for (const value of candidates) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+function buildCurrentPeriod() {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const start = new Date(Date.UTC(year, now.getUTCMonth(), 1, 0, 0, 0, 0));
+  const end = new Date(Date.UTC(year, now.getUTCMonth() + 1, 0, 23, 59, 59, 999));
+  return {
+    key: `${year}-${month}`,
+    start,
+    end
+  };
 }
