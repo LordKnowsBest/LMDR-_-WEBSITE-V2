@@ -1,0 +1,288 @@
+/**
+ * Road Utilities Service
+ *
+ * Weigh stations, rest stops, rest stop ratings, and road hazard reports.
+ *
+ * NOTE: Parking is handled by parkingService.jsw.
+ * NOTE: Road conditions are handled by roadConditionService.jsw and weatherService.jsw.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  weighStations: 'weighStations',
+  restStops: 'restStops',
+  restStopRatings: 'restStopRatings',
+  roadHazardReports: 'roadHazardReports'
+};
+
+// Haversine distance (miles)
+function calculateDistance(lat1, lng1, lat2, lng2) {
+  if (!lat1 || !lng1 || !lat2 || !lng2) return Infinity;
+  const R = 3958.8;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ============================================================================
+// WEIGH STATIONS
+// ============================================================================
+
+/**
+ * Get status for a single weigh station.
+ * @param {string} stationId - Weigh station record ID or USDOT identifier
+ * @returns {{ station: Object } | { error: string }}
+ */
+export async function getWeighStationStatus(stationId) {
+  try {
+    if (!stationId) return { error: 'stationId is required' };
+
+    // Try by record ID first
+    let station = await dataAccess.getRecord(COLLECTIONS.weighStations, stationId, { suppressAuth: true });
+
+    // If not found, try by external station_id field
+    if (!station) {
+      const result = await dataAccess.queryRecords(COLLECTIONS.weighStations, {
+        filters: { station_id: stationId },
+        limit: 1,
+        suppressAuth: true
+      });
+      station = (result.items || [])[0];
+    }
+
+    if (!station) return { error: 'Weigh station not found' };
+
+    return { station };
+  } catch (error) {
+    console.error('[RoadUtilities] getWeighStationStatus error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get weigh stations along a route corridor.
+ * @param {string} origin - Origin city/state
+ * @param {string} destination - Destination city/state
+ * @param {Object} filters - { status_filter }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function getWeighStationsOnRoute(origin, destination, filters = {}) {
+  try {
+    if (!origin || !destination) return { error: 'origin and destination are required' };
+
+    const queryFilters = {};
+    if (filters.status_filter && filters.status_filter !== 'all') {
+      queryFilters.status = filters.status_filter;
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.weighStations, {
+      filters: queryFilters,
+      limit: 200,
+      sort: [{ field: 'mile_marker', direction: 'asc' }],
+      suppressAuth: true
+    });
+
+    // Filter by route corridor states
+    const originState = extractStateCode(origin);
+    const destState = extractStateCode(destination);
+    const routeStates = new Set([originState, destState].filter(Boolean));
+
+    let items = result.items || [];
+    if (routeStates.size > 0) {
+      items = items.filter(s => routeStates.has(s.state));
+    }
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('[RoadUtilities] getWeighStationsOnRoute error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// REST STOPS
+// ============================================================================
+
+/**
+ * Find rest stops near a location.
+ * @param {Object} filters - { latitude, longitude, city, state, radius_miles, min_parking_spaces, amenities, lcv_friendly, max_results }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function findRestStops(filters = {}) {
+  try {
+    const lat = Number(filters.latitude);
+    const lng = Number(filters.longitude);
+    const radius = Math.min(Number(filters.radius_miles) || 30, 100);
+    const maxResults = Math.min(Number(filters.max_results) || 20, 50);
+
+    const queryFilters = {};
+    if (filters.state) queryFilters.state = filters.state;
+    if (filters.lcv_friendly) queryFilters.lcv_friendly = true;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.restStops, {
+      filters: queryFilters,
+      limit: 200,
+      suppressAuth: true
+    });
+
+    let items = result.items || [];
+
+    // Filter by distance if coordinates provided
+    if (!isNaN(lat) && !isNaN(lng)) {
+      items = items
+        .map(stop => {
+          const sLat = Number(stop.latitude || stop.lat);
+          const sLng = Number(stop.longitude || stop.lng);
+          const distance = calculateDistance(lat, lng, sLat, sLng);
+          return { ...stop, distance_miles: Math.round(distance * 10) / 10 };
+        })
+        .filter(stop => stop.distance_miles <= radius);
+    }
+
+    // Filter by minimum parking spaces
+    if (filters.min_parking_spaces) {
+      const minSpaces = Number(filters.min_parking_spaces);
+      items = items.filter(s => (Number(s.truck_parking_spaces) || 0) >= minSpaces);
+    }
+
+    // Filter by amenities
+    if (filters.amenities && Array.isArray(filters.amenities) && filters.amenities.length > 0) {
+      items = items.filter(stop => {
+        const stopAmenities = stop.amenities || [];
+        return filters.amenities.every(a => stopAmenities.includes(a));
+      });
+    }
+
+    // Sort by distance
+    items.sort((a, b) => (a.distance_miles || Infinity) - (b.distance_miles || Infinity));
+    items = items.slice(0, maxResults);
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('[RoadUtilities] findRestStops error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// REST STOP RATINGS
+// ============================================================================
+
+/**
+ * Submit a rating for a rest stop.
+ * @param {string} driverId - Driver ID
+ * @param {string} stopId - Rest stop record ID
+ * @param {Object} ratingData - { rating_overall, rating_cleanliness, rating_safety, rating_parking_ease, review_text }
+ * @returns {{ success: boolean, ratingId?: string } | { error: string }}
+ */
+export async function rateRestStop(driverId, stopId, ratingData = {}) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+    if (!stopId) return { error: 'stopId is required' };
+    if (!ratingData.rating_overall || Number(ratingData.rating_overall) < 1 || Number(ratingData.rating_overall) > 5) {
+      return { error: 'rating_overall must be between 1 and 5' };
+    }
+
+    // Rate limit: one rating per stop per 7 days per driver
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const recentResult = await dataAccess.queryRecords(COLLECTIONS.restStopRatings, {
+      filters: {
+        driver_id: driverId,
+        stop_id: stopId,
+        created_at: { gte: sevenDaysAgo }
+      },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if ((recentResult.items || []).length > 0) {
+      return { error: 'You have already rated this rest stop in the last 7 days' };
+    }
+
+    const record = {
+      driver_id: driverId,
+      stop_id: stopId,
+      rating_overall: Number(ratingData.rating_overall),
+      rating_cleanliness: Number(ratingData.rating_cleanliness) || null,
+      rating_safety: Number(ratingData.rating_safety) || null,
+      rating_parking_ease: Number(ratingData.rating_parking_ease) || null,
+      review_text: (ratingData.review_text || '').substring(0, 400),
+      created_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.restStopRatings, record, { suppressAuth: true });
+
+    return { success: true, ratingId: result.record?._id || result._id };
+  } catch (error) {
+    console.error('[RoadUtilities] rateRestStop error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// ROAD HAZARD REPORTS
+// ============================================================================
+
+/**
+ * Submit a road hazard report.
+ * @param {string} driverId - Driver ID
+ * @param {Object} hazardData - { hazard_type, latitude, longitude, description, severity, photo_url }
+ * @returns {{ success: boolean, reportId?: string } | { error: string }}
+ */
+export async function reportRoadHazard(driverId, hazardData = {}) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+    if (!hazardData.hazard_type) return { error: 'hazard_type is required' };
+    if (!hazardData.latitude || !hazardData.longitude) return { error: 'latitude and longitude are required' };
+    if (!hazardData.description) return { error: 'description is required' };
+    if (!hazardData.severity) return { error: 'severity is required' };
+
+    const validTypes = ['debris', 'pothole', 'accident', 'black_ice', 'construction_not_on_map', 'low_bridge', 'weight_restriction_change', 'other'];
+    if (!validTypes.includes(hazardData.hazard_type)) {
+      return { error: `Invalid hazard_type. Must be one of: ${validTypes.join(', ')}` };
+    }
+
+    const validSeverity = ['low', 'medium', 'high'];
+    if (!validSeverity.includes(hazardData.severity)) {
+      return { error: 'severity must be low, medium, or high' };
+    }
+
+    const record = {
+      driver_id: driverId,
+      hazard_type: hazardData.hazard_type,
+      latitude: Number(hazardData.latitude),
+      longitude: Number(hazardData.longitude),
+      description: (hazardData.description || '').substring(0, 300),
+      severity: hazardData.severity,
+      photo_url: hazardData.photo_url || '',
+      status: 'reported',
+      verified_count: 1,
+      expires_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
+      created_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.roadHazardReports, record, { suppressAuth: true });
+
+    return { success: true, reportId: result.record?._id || result._id };
+  } catch (error) {
+    console.error('[RoadUtilities] reportRoadHazard error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+function extractStateCode(cityState) {
+  if (!cityState || typeof cityState !== 'string') return '';
+  const parts = cityState.split(',');
+  if (parts.length >= 2) return parts[parts.length - 1].trim().substring(0, 2).toUpperCase();
+  return cityState.trim().substring(0, 2).toUpperCase();
+}

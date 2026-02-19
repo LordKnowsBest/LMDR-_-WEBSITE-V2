@@ -25,7 +25,22 @@ Reverse Matching.
 ## Group 1: Recruiter Outreach (~14 tools)
 
 **Source Track:** recruiter_outreach_20260120
-**Backend Services:** outreachService.jsw, smsService.jsw, emailService.jsw, jobBoardService.jsw, socialService.jsw
+**Backend Services:** outreachService.jsw, smsService.jsw, emailService.jsw, jobBoardService.jsw, socialService.jsw, voiceCampaignService.jsw, voiceAgentTemplates.jsw
+
+> **Already delivered (Pipeline Execution Agent — Feb 2026):**
+> Three recruiter agent tools already exist in `agentService.jsw` TOOL_DEFINITIONS:
+> - `initiate_voice_screen` — Creates a VAPI assistant from a voice template and initiates an outbound call (risk: execute_high, TCPA check via `tcpaGuard.js`)
+> - `get_pipeline_health` — Returns SLA compliance and conversion metrics from `pipelineExecutionAgent.jsw` (risk: read)
+> - `emit_pipeline_event` — Fires a pipeline event through `pipelineEventBus.jsw` (risk: execute_low)
+>
+> Supporting infrastructure already live:
+> - `pipelineExecutionAgent.jsw` — Rule-based decision engine with < 5 min contact SLA, channel escalation (SMS → email → voice → recruiter queue)
+> - `pipelineEventBus.jsw` — Central event dispatch replacing inline `emitPipelineEventNonBlocking`
+> - `voiceAgentTemplates.jsw` — 13 VAPI voice agent templates across 5 lifecycle groups (sourcing, screening, application support, onboarding, retention)
+> - `pipelineJobs.jsw` — SLA enforcement (every 5 min) and failed event reprocessing (every 15 min)
+> - Airtable tables: `v2_Pipeline Events`, `v2_Voice Agent Templates`
+>
+> Phase 2 outreach tools should integrate with this infrastructure rather than duplicating channel dispatch logic.
 
 ---
 

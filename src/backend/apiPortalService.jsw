@@ -6,6 +6,7 @@ import { fetch } from 'wix-fetch';
 const COLLECTIONS = {
   partners: 'apiPartners',
   usage: 'apiUsage',
+  requestLog: 'apiRequestLog',
   subscriptions: 'apiSubscriptions',
   billingHistory: 'billingHistory',
   webhookDeliveries: 'apiWebhookDeliveries'
@@ -152,6 +153,155 @@ export async function getPartnerUsageDashboard(partnerId, periodKey = null) {
     success: true,
     usage: usage?.items || [],
     subscription: subscription?.items?.[0] || null
+  };
+}
+
+export async function getApiPartnerHistory(partnerId, limit = 50) {
+  const normalizedLimit = Math.min(200, Math.max(1, Number(limit) || 50));
+  const [requests, webhooks, billing] = await Promise.all([
+    dataAccess.queryRecords(COLLECTIONS.requestLog, {
+      filters: { partner_id: partnerId },
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: normalizedLimit,
+      suppressAuth: true
+    }),
+    dataAccess.queryRecords(COLLECTIONS.webhookDeliveries, {
+      filters: { partner_id: partnerId },
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: normalizedLimit,
+      suppressAuth: true
+    }),
+    dataAccess.queryRecords(COLLECTIONS.billingHistory, {
+      filters: { carrier_dot: partnerId },
+      sort: [{ field: 'timestamp', direction: 'desc' }],
+      limit: normalizedLimit,
+      suppressAuth: true
+    })
+  ]);
+
+  return {
+    success: true,
+    request_events: requests?.items || [],
+    webhook_events: webhooks?.items || [],
+    billing_events: billing?.items || []
+  };
+}
+
+export async function getApiRevenueReport(partnerId = null, months = 12) {
+  const normalizedMonths = Math.min(24, Math.max(1, Number(months) || 12));
+  const now = new Date();
+  const rangeStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (normalizedMonths - 1), 1));
+  const partnerFilter = partnerId ? { partner_id: partnerId } : {};
+  const billingFilter = partnerId ? { carrier_dot: partnerId } : {};
+
+  const [subscriptions, billingEvents, partners] = await Promise.all([
+    dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+      filters: partnerFilter,
+      sort: [{ field: 'current_period_end', direction: 'desc' }],
+      limit: 500,
+      suppressAuth: true
+    }),
+    dataAccess.queryRecords(COLLECTIONS.billingHistory, {
+      filters: billingFilter,
+      sort: [{ field: 'timestamp', direction: 'desc' }],
+      limit: 5000,
+      suppressAuth: true
+    }),
+    dataAccess.queryRecords(COLLECTIONS.partners, {
+      sort: [{ field: 'updated_at', direction: 'desc' }],
+      limit: 500,
+      suppressAuth: true
+    })
+  ]);
+
+  const partnerNameById = Object.create(null);
+  for (const partner of (partners?.items || [])) {
+    if (partner?.partner_id) partnerNameById[partner.partner_id] = partner.company_name || partner.partner_id;
+  }
+
+  const monthKeys = [];
+  const monthlyMap = Object.create(null);
+  for (let i = normalizedMonths - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+    monthKeys.push(key);
+    monthlyMap[key] = { month: key, revenue: 0, events: 0 };
+  }
+
+  let periodRevenue = 0;
+  let periodEvents = 0;
+  const revenueByPartner = Object.create(null);
+
+  for (const event of (billingEvents?.items || [])) {
+    const timestamp = parseDate(event?.timestamp);
+    if (!timestamp || timestamp < rangeStart) continue;
+
+    const amount = toAmount(event?.amount);
+    const month = `${timestamp.getUTCFullYear()}-${String(timestamp.getUTCMonth() + 1).padStart(2, '0')}`;
+    if (monthlyMap[month]) {
+      monthlyMap[month].revenue = roundCurrency(monthlyMap[month].revenue + amount);
+      monthlyMap[month].events += 1;
+    }
+
+    periodRevenue = roundCurrency(periodRevenue + amount);
+    periodEvents += 1;
+
+    const partnerKey = String(event?.carrier_dot || '');
+    if (partnerKey) {
+      revenueByPartner[partnerKey] = roundCurrency((revenueByPartner[partnerKey] || 0) + amount);
+    }
+  }
+
+  const tierSummary = {
+    starter: { tier: 'starter', partners: 0, mrr: 0 },
+    growth: { tier: 'growth', partners: 0, mrr: 0 },
+    enterprise: { tier: 'enterprise', partners: 0, mrr: 0 },
+    custom: { tier: 'custom', partners: 0, mrr: 0 }
+  };
+  let activePartners = 0;
+  let mrr = 0;
+
+  for (const subscription of (subscriptions?.items || [])) {
+    const tier = String(subscription?.tier || 'starter').toLowerCase();
+    const status = String(subscription?.status || '').toLowerCase();
+    if (!['active', 'trialing', 'past_due'].includes(status)) continue;
+    activePartners += 1;
+
+    const monthlyPrice = resolveSubscriptionPrice(subscription, tier);
+    mrr = roundCurrency(mrr + monthlyPrice);
+
+    const bucket = tierSummary[tier] || tierSummary.custom;
+    bucket.partners += 1;
+    bucket.mrr = roundCurrency(bucket.mrr + monthlyPrice);
+  }
+
+  const arr = roundCurrency(mrr * 12);
+  const arpu = activePartners > 0 ? roundCurrency(mrr / activePartners) : 0;
+  const topPartners = Object.keys(revenueByPartner)
+    .map((id) => ({
+      partner_id: id,
+      company_name: partnerNameById[id] || id,
+      revenue: revenueByPartner[id]
+    }))
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 10);
+
+  return {
+    success: true,
+    generated_at: new Date().toISOString(),
+    window_months: normalizedMonths,
+    partner_id: partnerId || null,
+    summary: {
+      mrr,
+      arr,
+      arpu,
+      active_partners: activePartners,
+      period_revenue: periodRevenue,
+      period_events: periodEvents
+    },
+    monthly_revenue: monthKeys.map((key) => monthlyMap[key]),
+    tier_breakdown: Object.values(tierSummary),
+    top_partners: topPartners
   };
 }
 
@@ -462,4 +612,32 @@ async function computeWebhookSignature(secret, payload) {
   } catch (error) {
     return null;
   }
+}
+
+function resolveSubscriptionPrice(subscription, tier) {
+  const directPrice = Number(subscription?.price_monthly);
+  if (Number.isFinite(directPrice) && directPrice > 0) return directPrice;
+
+  const fallbackByTier = {
+    starter: 99,
+    growth: 499,
+    enterprise: 999,
+    custom: 0
+  };
+  return fallbackByTier[tier] || 0;
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function toAmount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function roundCurrency(value) {
+  return Math.round(Number(value || 0) * 100) / 100;
 }

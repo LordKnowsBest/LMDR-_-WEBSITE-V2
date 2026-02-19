@@ -1,0 +1,300 @@
+/**
+ * Driver Financial Service
+ *
+ * Expense logging, summaries, exports, and trip cost calculation.
+ * Named per spec: driverFinancialService.jsw (agent router uses this name).
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ * @module backend/driverFinancialService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  expenses: 'driverExpenses'
+};
+
+const VALID_CATEGORIES = [
+  'fuel', 'tolls', 'lumper', 'scales', 'meals', 'lodging',
+  'maintenance', 'insurance', 'equipment', 'communications', 'medical', 'other'
+];
+
+/**
+ * Log a business expense
+ * @param {string} driverId
+ * @param {object} expense - { amount, category, expense_date, description, vendor_name, receipt_url, load_id, is_deductible }
+ * @returns {Promise<object>} { expenseId } or { error }
+ */
+export async function logExpense(driverId, expense = {}) {
+  try {
+    if (!expense.amount || !expense.category || !expense.expense_date) {
+      return { error: 'amount, category, and expense_date are required' };
+    }
+
+    if (!VALID_CATEGORIES.includes(expense.category)) {
+      return { error: `category must be one of: ${VALID_CATEGORIES.join(', ')}` };
+    }
+
+    const record = {
+      driver_id: driverId,
+      amount: Number(expense.amount),
+      category: expense.category,
+      expense_date: expense.expense_date,
+      description: expense.description ? String(expense.description).slice(0, 300) : '',
+      vendor_name: expense.vendor_name || '',
+      receipt_url: expense.receipt_url || '',
+      load_id: expense.load_id || '',
+      is_deductible: expense.is_deductible !== false
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.expenses, record, { suppressAuth: true });
+    return { expenseId: created._id || created.id };
+  } catch (error) {
+    console.error('driverFinancialService.logExpense error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get paginated expense log entries
+ * @param {string} driverId
+ * @param {object} filters - { date_from, date_to, category, min_amount }
+ * @param {object} pagination - { page, page_size }
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getExpenses(driverId, filters = {}, pagination = {}) {
+  try {
+    const queryFilters = { driver_id: driverId };
+
+    if (filters.category) queryFilters.category = filters.category;
+
+    const page = Number(pagination.page) || 1;
+    const pageSize = Math.min(Number(pagination.page_size) || 50, 100);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.expenses, {
+      filters: queryFilters,
+      sort: [{ field: 'expense_date', direction: 'desc' }],
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      suppressAuth: true
+    });
+
+    let items = result.items || [];
+
+    // In-memory date and amount filtering
+    if (filters.date_from) {
+      const from = new Date(filters.date_from);
+      items = items.filter(e => new Date(e.expense_date) >= from);
+    }
+    if (filters.date_to) {
+      const to = new Date(filters.date_to);
+      items = items.filter(e => new Date(e.expense_date) <= to);
+    }
+    if (filters.min_amount) {
+      const minAmt = Number(filters.min_amount);
+      items = items.filter(e => Number(e.amount) >= minAmt);
+    }
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('driverFinancialService.getExpenses error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get aggregated expense summary for a period
+ * @param {string} driverId
+ * @param {string} period - "current_week" | "current_month" | "current_quarter" | "ytd" | "custom"
+ * @param {object} [dateRange] - { date_from, date_to } required if period === "custom"
+ * @returns {Promise<object>} { summary } or { error }
+ */
+export async function getExpenseSummary(driverId, period = 'current_month', dateRange = {}) {
+  try {
+    // Calculate date boundaries from period
+    const now = new Date();
+    let dateFrom, dateTo;
+
+    if (period === 'custom') {
+      if (!dateRange.date_from || !dateRange.date_to) {
+        return { error: 'date_from and date_to required for custom period' };
+      }
+      dateFrom = new Date(dateRange.date_from);
+      dateTo = new Date(dateRange.date_to);
+    } else if (period === 'current_week') {
+      dateFrom = new Date(now);
+      dateFrom.setDate(now.getDate() - now.getDay());
+      dateFrom.setHours(0, 0, 0, 0);
+      dateTo = now;
+    } else if (period === 'current_month') {
+      dateFrom = new Date(now.getFullYear(), now.getMonth(), 1);
+      dateTo = now;
+    } else if (period === 'current_quarter') {
+      const qMonth = Math.floor(now.getMonth() / 3) * 3;
+      dateFrom = new Date(now.getFullYear(), qMonth, 1);
+      dateTo = now;
+    } else {
+      // ytd
+      dateFrom = new Date(now.getFullYear(), 0, 1);
+      dateTo = now;
+    }
+
+    // Fetch all expenses for the driver
+    const result = await dataAccess.queryRecords(COLLECTIONS.expenses, {
+      filters: { driver_id: driverId },
+      limit: 1000,
+      suppressAuth: true
+    });
+
+    const allExpenses = result.items || [];
+    const periodExpenses = allExpenses.filter(e => {
+      const d = new Date(e.expense_date);
+      return d >= dateFrom && d <= dateTo;
+    });
+
+    // Aggregate by category
+    const byCategory = {};
+    let totalSpend = 0;
+    for (const exp of periodExpenses) {
+      const amt = Number(exp.amount) || 0;
+      totalSpend += amt;
+      byCategory[exp.category] = (byCategory[exp.category] || 0) + amt;
+    }
+
+    const days = Math.max(1, Math.ceil((dateTo - dateFrom) / (1000 * 60 * 60 * 24)));
+
+    return {
+      summary: {
+        period,
+        date_from: dateFrom.toISOString().split('T')[0],
+        date_to: dateTo.toISOString().split('T')[0],
+        total_spend: Math.round(totalSpend * 100) / 100,
+        expense_count: periodExpenses.length,
+        daily_average: Math.round((totalSpend / days) * 100) / 100,
+        by_category: byCategory
+      }
+    };
+  } catch (error) {
+    console.error('driverFinancialService.getExpenseSummary error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Export expenses for a date range (returns formatted data, not a file URL)
+ * @param {string} driverId
+ * @param {object} dateRange - { date_from, date_to }
+ * @param {string} [format="csv"]
+ * @param {string[]} [categories]
+ * @returns {Promise<object>} { data, format, count } or { error }
+ */
+export async function exportExpenses(driverId, dateRange = {}, format = 'csv', categories = []) {
+  try {
+    if (!dateRange.date_from || !dateRange.date_to) {
+      return { error: 'date_from and date_to are required' };
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.expenses, {
+      filters: { driver_id: driverId },
+      limit: 5000,
+      sort: [{ field: 'expense_date', direction: 'asc' }],
+      suppressAuth: true
+    });
+
+    const from = new Date(dateRange.date_from);
+    const to = new Date(dateRange.date_to);
+
+    let items = (result.items || []).filter(e => {
+      const d = new Date(e.expense_date);
+      return d >= from && d <= to;
+    });
+
+    if (categories && categories.length > 0) {
+      items = items.filter(e => categories.includes(e.category));
+    }
+
+    return {
+      data: items.map(e => ({
+        date: e.expense_date,
+        category: e.category,
+        amount: Number(e.amount),
+        vendor: e.vendor_name || '',
+        description: e.description || '',
+        deductible: e.is_deductible ? 'Yes' : 'No'
+      })),
+      format,
+      count: items.length
+    };
+  } catch (error) {
+    console.error('driverFinancialService.exportExpenses error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Calculate estimated trip cost / net profit
+ * @param {string} driverId
+ * @param {object} tripParams - { gross_rate, miles, fuel_cost_estimate, toll_estimate, lumper_cost, deadhead_miles, truck_payment_daily, include_per_diem }
+ * @returns {Promise<object>} { breakdown } or { error }
+ */
+export async function calculateTripCost(driverId, tripParams = {}) {
+  try {
+    if (!tripParams.gross_rate || !tripParams.miles) {
+      return { error: 'gross_rate and miles are required' };
+    }
+
+    const grossRate = Number(tripParams.gross_rate);
+    const miles = Number(tripParams.miles);
+    const avgMPG = 6.5;
+
+    // Fuel cost: estimated or calculated
+    const fuelCost = tripParams.fuel_cost_estimate
+      ? Number(tripParams.fuel_cost_estimate)
+      : (miles / avgMPG) * 4.50; // default ~$4.50/gallon diesel
+
+    const tollCost = Number(tripParams.toll_estimate || 0);
+    const lumperCost = Number(tripParams.lumper_cost || 0);
+    const deadheadMiles = Number(tripParams.deadhead_miles || 0);
+    const deadheadFuel = (deadheadMiles / avgMPG) * 4.50;
+    const truckPayment = Number(tripParams.truck_payment_daily || 0);
+
+    // Estimate trip days (500 miles/day average)
+    const tripDays = Math.ceil((miles + deadheadMiles) / 500);
+    const truckPaymentTotal = truckPayment * tripDays;
+
+    // Per diem: $69/day (2024 IRS special rate for transportation workers)
+    const perDiemRate = 69;
+    const perDiemTotal = tripParams.include_per_diem !== false ? perDiemRate * tripDays : 0;
+
+    const totalCosts = fuelCost + deadheadFuel + tollCost + lumperCost + truckPaymentTotal;
+    const netBeforePerDiem = grossRate - totalCosts;
+    const netAfterPerDiem = netBeforePerDiem + perDiemTotal; // per diem is a tax deduction benefit
+    const ratePerMile = miles > 0 ? Math.round((grossRate / miles) * 100) / 100 : 0;
+    const costPerMile = miles > 0 ? Math.round((totalCosts / (miles + deadheadMiles)) * 100) / 100 : 0;
+
+    return {
+      breakdown: {
+        gross_rate: grossRate,
+        total_miles: miles,
+        deadhead_miles: deadheadMiles,
+        estimated_trip_days: tripDays,
+        rate_per_mile: ratePerMile,
+        costs: {
+          fuel: Math.round(fuelCost * 100) / 100,
+          deadhead_fuel: Math.round(deadheadFuel * 100) / 100,
+          tolls: tollCost,
+          lumper: lumperCost,
+          truck_payment: truckPaymentTotal,
+          total: Math.round(totalCosts * 100) / 100
+        },
+        cost_per_mile: costPerMile,
+        net_profit: Math.round(netBeforePerDiem * 100) / 100,
+        per_diem_deduction: perDiemTotal,
+        net_after_per_diem: Math.round(netAfterPerDiem * 100) / 100
+      }
+    };
+  } catch (error) {
+    console.error('driverFinancialService.calculateTripCost error:', error);
+    return { error: error.message };
+  }
+}

@@ -1,4 +1,4 @@
-# External API Platform Progress (2026-02-07)
+# External API Platform Progress (2026-02-19)
 
 ## Implemented
 - API gateway routing and middleware expanded for:
@@ -29,12 +29,49 @@
   - Added OpenAPI spec draft for implemented `/v1/*` surface: `docs/api/openapi.external.v1.yaml`
   - Added Postman collection: `docs/api/postman.external.v1.collection.json`
   - Added initial integration guide: `docs/api/integration-guide.external.v1.md`
+- Phase 8 portal/admin delivery pass:
+  - Added `src/public/admin/API_PORTAL_DASHBOARD.html` (usage snapshot panes + key actions shell)
+  - Added `src/public/admin/ADMIN_API_PARTNERS.html` (partner list/detail shell + tier/status actions)
+  - Added Wix page bridges:
+    - `src/pages/API_PORTAL_DASHBOARD.external.js`
+    - `src/pages/ADMIN_API_PARTNERS.external.js`
+  - Expanded `src/backend/apiPortalService.jsw` with admin mutation helpers:
+    - `setApiPartnerTier(partnerId, tier)`
+    - `setApiPartnerStatus(partnerId, status)`
+- Category guide delivery pass:
+  - Added `docs/api/guides/documents-api-guide.v1.md`
+  - Added `docs/api/guides/engagement-api-guide.v1.md`
+- New validation test added and passing:
+  - `src/public/__tests__/externalApiPlatformPhase8.test.js`
+- Phase 8 completion pass (portal/admin functional expansion):
+  - `API_PORTAL_DASHBOARD.html` now includes:
+    - environment toggle actions (`setEnvironment`)
+    - webhook testing action (`sendWebhookTest`)
+    - billing actions (`getBillingHistory`, `createCheckout`, `createBillingPortal`)
+    - usage trend and endpoint-level usage breakdown visual blocks
+  - `ADMIN_API_PARTNERS.html` now includes:
+    - partner usage retrieval (`getPartnerUsage`)
+    - partner history retrieval UI (`getPartnerHistory`)
+    - partner environment controls (`setPartnerEnvironment`)
+  - Added backend history aggregator `getApiPartnerHistory(partnerId, limit)` in `apiPortalService.jsw`
+  - Added page bridge route support for partner history in `ADMIN_API_PARTNERS.external.js`
+- Revenue reporting delivery (Phase 8.5):
+  - Added backend revenue aggregator `getApiRevenueReport(partnerId, months)` in `apiPortalService.jsw`
+  - Added admin bridge action `getRevenueReport` in `ADMIN_API_PARTNERS.external.js`
+  - Extended `ADMIN_API_PARTNERS.html` with:
+    - revenue timeframe selector
+    - revenue report action trigger
+    - revenue summary/tier panes
+    - monthly revenue trend + top-partners visual blocks
+- Extended validation test and reran external API platform suite:
+  - `src/public/__tests__/externalApiPlatformPhase8.test.js` expanded for new actions/features
+  - 11-suite external platform cluster rerun: 11 passed, 37 tests passed
 
 ## Not Yet Implemented
-- Category-specific integration guides (Safety/Intelligence/Operations/Matching/Documents/Engagement deep dives).
+- Category-specific integration guides (Safety/Intelligence/Operations/Matching deep dives still pending).
 - Full webhook delivery pipeline (signatures, retries, event dispatch).
 - Billing integration for API tiers and overage billing.
-- Frontend developer portal + admin partner management pages.
+- Frontend developer portal + admin partner management now support core partner operations and baseline revenue reporting; deeper analytics depth remains.
 - SDK publishing (Node/Python) and documentation site.
 - Expanded automated test coverage for auth/rate-limit internals and full endpoint matrix.
 

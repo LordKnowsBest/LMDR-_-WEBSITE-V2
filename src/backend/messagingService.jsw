@@ -1,0 +1,236 @@
+/**
+ * Messaging Service
+ *
+ * Direct driver-recruiter conversation messaging.
+ * Manages conversation threads and individual messages.
+ *
+ * NOTE: This is separate from messaging.jsw which handles application-based messaging.
+ * This service supports standalone conversation threads identified by conversationId.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  messages: 'driverMessages',
+  conversations: 'driverConversations',
+  carriers: 'carriers'
+};
+
+// ============================================================================
+// SEND MESSAGE
+// ============================================================================
+
+/**
+ * Send a message within a conversation thread.
+ * Creates a new conversation if conversationId is null and carrier_dot is provided.
+ * @param {string} driverId - Authenticated driver ID
+ * @param {string|null} conversationId - Existing conversation ID or null for new
+ * @param {Object} payload - { carrier_dot, body, attachment_url }
+ * @returns {{ success: boolean, messageId?: string, conversationId?: string } | { error: string }}
+ */
+export async function sendDriverMessage(driverId, conversationId, payload = {}) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+    if (!payload.body || typeof payload.body !== 'string') return { error: 'Message body is required' };
+
+    const body = payload.body.substring(0, 2000).trim();
+    if (!body) return { error: 'Message body cannot be empty' };
+
+    // If no conversation exists, create one
+    if (!conversationId) {
+      if (!payload.carrier_dot) return { error: 'carrier_dot is required for new conversations' };
+
+      const convoResult = await dataAccess.insertRecord(COLLECTIONS.conversations, {
+        driver_id: driverId,
+        carrier_dot: Number(payload.carrier_dot),
+        status: 'active',
+        last_message_at: new Date().toISOString(),
+        created_at: new Date().toISOString()
+      }, { suppressAuth: true });
+
+      conversationId = convoResult.record?._id || convoResult._id;
+    }
+
+    // Verify driver owns this conversation
+    const convo = await dataAccess.getRecord(COLLECTIONS.conversations, conversationId, { suppressAuth: true });
+    if (!convo) return { error: 'Conversation not found' };
+    if (convo.driver_id !== driverId) return { error: 'Permission denied' };
+
+    // Insert message
+    const msgResult = await dataAccess.insertRecord(COLLECTIONS.messages, {
+      conversation_id: conversationId,
+      sender_id: driverId,
+      sender_type: 'driver',
+      body,
+      attachment_url: payload.attachment_url || '',
+      is_read: false,
+      created_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    // Update conversation last_message_at
+    await dataAccess.updateRecord(COLLECTIONS.conversations, {
+      _id: conversationId,
+      last_message_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    return {
+      success: true,
+      messageId: msgResult.record?._id || msgResult._id,
+      conversationId
+    };
+  } catch (error) {
+    console.error('[MessagingService] sendDriverMessage error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// READ MESSAGES
+// ============================================================================
+
+/**
+ * Get paginated messages within a conversation thread.
+ * @param {string} conversationId - Conversation record ID
+ * @param {string} driverId - Authenticated driver ID
+ * @param {Object} pagination - { page, page_size }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function getConversationMessages(conversationId, driverId, pagination = {}) {
+  try {
+    if (!conversationId) return { error: 'conversationId is required' };
+
+    // Verify ownership
+    const convo = await dataAccess.getRecord(COLLECTIONS.conversations, conversationId, { suppressAuth: true });
+    if (!convo) return { error: 'Conversation not found' };
+    if (convo.driver_id !== driverId) return { error: 'Permission denied' };
+
+    const page = Number(pagination.page) || 1;
+    const pageSize = Math.min(Number(pagination.page_size) || 50, 100);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.messages, {
+      filters: { conversation_id: conversationId },
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      sort: [{ field: 'created_at', direction: 'asc' }],
+      suppressAuth: true
+    });
+
+    return {
+      items: result.items || [],
+      totalCount: result.totalCount || 0,
+      page,
+      pageSize
+    };
+  } catch (error) {
+    console.error('[MessagingService] getConversationMessages error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get metadata for a single conversation.
+ * @param {string} conversationId - Conversation record ID
+ * @param {string} driverId - Authenticated driver ID
+ * @returns {{ conversation: Object } | { error: string }}
+ */
+export async function getConversation(conversationId, driverId) {
+  try {
+    if (!conversationId) return { error: 'conversationId is required' };
+
+    const convo = await dataAccess.getRecord(COLLECTIONS.conversations, conversationId, { suppressAuth: true });
+    if (!convo) return { error: 'Conversation not found' };
+    if (convo.driver_id !== driverId) return { error: 'Permission denied' };
+
+    return { conversation: convo };
+  } catch (error) {
+    console.error('[MessagingService] getConversation error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// READ STATE
+// ============================================================================
+
+/**
+ * Mark all unread messages in a conversation as read. Idempotent.
+ * @param {string} conversationId - Conversation record ID
+ * @param {string} driverId - Authenticated driver ID
+ * @returns {{ success: boolean, markedCount: number } | { error: string }}
+ */
+export async function markConversationRead(conversationId, driverId) {
+  try {
+    if (!conversationId) return { error: 'conversationId is required' };
+
+    // Verify ownership
+    const convo = await dataAccess.getRecord(COLLECTIONS.conversations, conversationId, { suppressAuth: true });
+    if (!convo) return { error: 'Conversation not found' };
+    if (convo.driver_id !== driverId) return { error: 'Permission denied' };
+
+    // Find unread messages sent to this driver
+    const unreadResult = await dataAccess.queryRecords(COLLECTIONS.messages, {
+      filters: {
+        conversation_id: conversationId,
+        sender_type: 'recruiter',
+        is_read: false
+      },
+      suppressAuth: true
+    });
+
+    const unreadItems = unreadResult.items || [];
+    if (unreadItems.length > 0) {
+      const updates = unreadItems.map(msg => ({ ...msg, is_read: true }));
+      await dataAccess.bulkUpdateRecords(COLLECTIONS.messages, updates, { suppressAuth: true });
+    }
+
+    return { success: true, markedCount: unreadItems.length };
+  } catch (error) {
+    console.error('[MessagingService] markConversationRead error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get total unread message count across all conversations for a driver.
+ * @param {string} driverId - Authenticated driver ID
+ * @returns {{ unreadCount: number } | { error: string }}
+ */
+export async function getDriverUnreadCount(driverId) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.messages, {
+      filters: {
+        sender_type: 'recruiter',
+        is_read: false
+      },
+      limit: 0,
+      suppressAuth: true
+    });
+
+    // Filter by driver's conversations
+    // Since we can't do a join, we query conversations first
+    const convosResult = await dataAccess.queryRecords(COLLECTIONS.conversations, {
+      filters: { driver_id: driverId },
+      suppressAuth: true
+    });
+    const convoIds = new Set((convosResult.items || []).map(c => c._id));
+
+    // Count unread messages in those conversations
+    const unreadResult = await dataAccess.queryRecords(COLLECTIONS.messages, {
+      filters: {
+        sender_type: 'recruiter',
+        is_read: false
+      },
+      suppressAuth: true
+    });
+    const unreadCount = (unreadResult.items || []).filter(m => convoIds.has(m.conversation_id)).length;
+
+    return { unreadCount };
+  } catch (error) {
+    console.error('[MessagingService] getDriverUnreadCount error:', error.message);
+    return { error: error.message };
+  }
+}

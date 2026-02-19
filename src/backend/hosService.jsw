@@ -1,0 +1,161 @@
+/**
+ * HOS (Hours of Service) Service
+ *
+ * Manages driver HOS logs, summaries, and violation tracking.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ * @module backend/hosService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  logs: 'hosLogs',
+  violations: 'hosViolations'
+};
+
+/**
+ * Get HOS summary for a driver (current duty status, hours remaining, cycle info)
+ * @param {string} driverId
+ * @returns {Promise<object>} { summary } or { error }
+ */
+export async function getHOSSummary(driverId) {
+  try {
+    // Get recent HOS logs (last 8 days for 70-hour cycle)
+    const eightDaysAgo = new Date();
+    eightDaysAgo.setDate(eightDaysAgo.getDate() - 8);
+
+    const logsResult = await dataAccess.queryRecords(COLLECTIONS.logs, {
+      filters: { driver_id: driverId },
+      sort: [{ field: 'start_time', direction: 'desc' }],
+      limit: 200,
+      suppressAuth: true
+    });
+
+    const logs = (logsResult.items || []).filter(
+      l => new Date(l.start_time) >= eightDaysAgo
+    );
+
+    // Calculate hours by status
+    let drivingToday = 0;
+    let onDutyToday = 0;
+    let totalCycle = 0;
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    for (const log of logs) {
+      const start = new Date(log.start_time);
+      const end = log.end_time ? new Date(log.end_time) : new Date();
+      const hours = (end - start) / (1000 * 60 * 60);
+
+      if (log.status === 'driving' || log.status === 'on_duty_not_driving') {
+        totalCycle += hours;
+      }
+      if (start >= todayStart) {
+        if (log.status === 'driving') drivingToday += hours;
+        if (log.status === 'on_duty_not_driving') onDutyToday += hours;
+      }
+    }
+
+    // Get violations count
+    const violationsResult = await dataAccess.queryRecords(COLLECTIONS.violations, {
+      filters: { driver_id: driverId },
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit: 10,
+      suppressAuth: true
+    });
+
+    return {
+      summary: {
+        driving_hours_today: Math.round(drivingToday * 100) / 100,
+        driving_hours_remaining: Math.max(0, Math.round((11 - drivingToday) * 100) / 100),
+        on_duty_hours_today: Math.round(onDutyToday * 100) / 100,
+        on_duty_remaining: Math.max(0, Math.round((14 - drivingToday - onDutyToday) * 100) / 100),
+        cycle_hours_used: Math.round(totalCycle * 100) / 100,
+        cycle_hours_remaining: Math.max(0, Math.round((70 - totalCycle) * 100) / 100),
+        recent_violations: (violationsResult.items || []).length,
+        last_updated: new Date().toISOString()
+      }
+    };
+  } catch (error) {
+    console.error('hosService.getHOSSummary error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Log an HOS duty status entry
+ * @param {string} driverId
+ * @param {object} entry - { status, start_time, end_time, location_city, location_state, odometer, notes }
+ * @returns {Promise<object>} { logId } or { error }
+ */
+export async function logHOSEntry(driverId, entry = {}) {
+  try {
+    if (!entry.status || !entry.start_time) {
+      return { error: 'status and start_time are required' };
+    }
+
+    const validStatuses = ['off_duty', 'sleeper_berth', 'driving', 'on_duty_not_driving', 'personal_conveyance', 'yard_moves'];
+    if (!validStatuses.includes(entry.status)) {
+      return { error: `status must be one of: ${validStatuses.join(', ')}` };
+    }
+
+    const record = {
+      driver_id: driverId,
+      status: entry.status,
+      start_time: entry.start_time,
+      end_time: entry.end_time || '',
+      location_city: entry.location_city || '',
+      location_state: entry.location_state || '',
+      odometer: entry.odometer ? Number(entry.odometer) : 0,
+      notes: entry.notes ? String(entry.notes).slice(0, 200) : ''
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.logs, record, { suppressAuth: true });
+    return { logId: created._id || created.id };
+  } catch (error) {
+    console.error('hosService.logHOSEntry error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get HOS violations for a driver within a date range
+ * @param {string} driverId
+ * @param {object} dateRange - { date_from, date_to }
+ * @param {string} [severity] - "all" | "warning" | "violation"
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getHOSViolations(driverId, dateRange = {}, severity = 'all') {
+  try {
+    const queryFilters = { driver_id: driverId };
+
+    if (severity && severity !== 'all') {
+      queryFilters.severity = severity;
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.violations, {
+      filters: queryFilters,
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    let items = result.items || [];
+
+    // Filter by date range in memory if provided
+    if (dateRange.date_from) {
+      const from = new Date(dateRange.date_from);
+      items = items.filter(v => new Date(v._createdDate) >= from);
+    }
+    if (dateRange.date_to) {
+      const to = new Date(dateRange.date_to);
+      items = items.filter(v => new Date(v._createdDate) <= to);
+    }
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('hosService.getHOSViolations error:', error);
+    return { error: error.message };
+  }
+}

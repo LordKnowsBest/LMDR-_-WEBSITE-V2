@@ -1,0 +1,236 @@
+/**
+ * Driver Profile Service
+ *
+ * Manages driver profile updates, profile completeness scoring,
+ * and improvement suggestions.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  driverProfiles: 'driverProfiles',
+  driverDocuments: 'driverDocuments'
+};
+
+// Profile field weights for strength calculation
+const PROFILE_SECTIONS = {
+  personal: {
+    weight: 20,
+    fields: ['first_name', 'last_name', 'phone', 'home_zip', 'home_state']
+  },
+  cdl: {
+    weight: 25,
+    fields: ['cdl_class', 'cdl_state', 'cdl_expiry', 'cdl_number']
+  },
+  experience: {
+    weight: 20,
+    fields: ['years_experience', 'job_types_preferred', 'bio']
+  },
+  endorsements: {
+    weight: 10,
+    fields: ['endorsements']
+  },
+  documents: {
+    weight: 15,
+    requiredDocs: ['cdl', 'medical_certificate']
+  },
+  preferences: {
+    weight: 10,
+    fields: ['min_pay_weekly', 'willing_to_relocate']
+  }
+};
+
+// ============================================================================
+// PROFILE UPDATES
+// ============================================================================
+
+/**
+ * Partial update to a driver's profile.
+ * @param {string} driverId - Driver ID
+ * @param {Object} fields - Fields to update (partial)
+ * @returns {{ success: boolean, profile?: Object } | { error: string }}
+ */
+export async function updateDriverProfile(driverId, fields = {}) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+    if (!fields || Object.keys(fields).length === 0) return { error: 'No fields to update' };
+
+    // Find existing profile
+    const profileResult = await dataAccess.queryRecords(COLLECTIONS.driverProfiles, {
+      filters: { user_id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    const existing = (profileResult.items || [])[0];
+    if (!existing) return { error: 'Driver profile not found' };
+
+    // Build update payload -- only include allowed fields
+    const allowedFields = [
+      'first_name', 'last_name', 'phone', 'home_zip', 'home_state',
+      'cdl_class', 'cdl_state', 'cdl_expiry', 'endorsements',
+      'years_experience', 'job_types_preferred', 'min_pay_weekly',
+      'willing_to_relocate', 'bio', 'avatar_url'
+    ];
+
+    const updatePayload = { _id: existing._id };
+    for (const key of allowedFields) {
+      if (fields[key] !== undefined) {
+        // Cast numeric fields
+        if (key === 'years_experience' || key === 'min_pay_weekly') {
+          updatePayload[key] = Number(fields[key]);
+        } else if (key === 'endorsements' && Array.isArray(fields[key])) {
+          updatePayload[key] = fields[key].join(', ');
+        } else {
+          updatePayload[key] = fields[key];
+        }
+      }
+    }
+
+    updatePayload.updated_at = new Date().toISOString();
+
+    await dataAccess.updateRecord(COLLECTIONS.driverProfiles, updatePayload, { suppressAuth: true });
+
+    return { success: true };
+  } catch (error) {
+    console.error('[DriverProfile] updateDriverProfile error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// PROFILE STRENGTH
+// ============================================================================
+
+/**
+ * Calculate profile completeness score 0-100.
+ * @param {string} driverId - Driver ID
+ * @returns {{ score: number, breakdown: Object, missingFields: Array } | { error: string }}
+ */
+export async function getProfileStrength(driverId) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+
+    // Fetch profile
+    const profileResult = await dataAccess.queryRecords(COLLECTIONS.driverProfiles, {
+      filters: { user_id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const profile = (profileResult.items || [])[0];
+    if (!profile) return { error: 'Driver profile not found' };
+
+    // Fetch documents
+    const docsResult = await dataAccess.queryRecords(COLLECTIONS.driverDocuments, {
+      filters: { driver_id: driverId },
+      suppressAuth: true
+    });
+    const docTypes = new Set((docsResult.items || []).map(d => d.document_type));
+
+    let totalScore = 0;
+    const breakdown = {};
+    const missingFields = [];
+
+    // Score each section
+    for (const [section, config] of Object.entries(PROFILE_SECTIONS)) {
+      if (section === 'documents') {
+        const requiredCount = config.requiredDocs.length;
+        const presentCount = config.requiredDocs.filter(t => docTypes.has(t)).length;
+        const sectionScore = requiredCount > 0 ? Math.round((presentCount / requiredCount) * config.weight) : config.weight;
+        breakdown[section] = sectionScore;
+        totalScore += sectionScore;
+
+        config.requiredDocs.forEach(t => {
+          if (!docTypes.has(t)) missingFields.push(`document:${t}`);
+        });
+      } else {
+        const totalFields = config.fields.length;
+        let filledCount = 0;
+        config.fields.forEach(field => {
+          const val = profile[field];
+          if (val !== undefined && val !== null && val !== '') {
+            filledCount++;
+          } else {
+            missingFields.push(field);
+          }
+        });
+        const sectionScore = totalFields > 0 ? Math.round((filledCount / totalFields) * config.weight) : config.weight;
+        breakdown[section] = sectionScore;
+        totalScore += sectionScore;
+      }
+    }
+
+    return { score: totalScore, breakdown, missingFields };
+  } catch (error) {
+    console.error('[DriverProfile] getProfileStrength error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// PROFILE SUGGESTIONS
+// ============================================================================
+
+/**
+ * Generate improvement suggestions for the driver's profile.
+ * @param {string} driverId - Driver ID
+ * @returns {{ suggestions: Array } | { error: string }}
+ */
+export async function getProfileSuggestions(driverId) {
+  try {
+    const strengthResult = await getProfileStrength(driverId);
+    if (strengthResult.error) return { error: strengthResult.error };
+
+    const suggestions = [];
+    const { missingFields, breakdown } = strengthResult;
+
+    // Generate suggestions based on missing fields with priority
+    const fieldSuggestions = {
+      'cdl_class': { action: 'Add your CDL class', impact: 8, priority: 'high' },
+      'cdl_expiry': { action: 'Set your CDL expiration date', impact: 5, priority: 'high' },
+      'endorsements': { action: 'List your endorsements (HazMat, Tanker, etc.)', impact: 6, priority: 'medium' },
+      'years_experience': { action: 'Add your years of driving experience', impact: 7, priority: 'high' },
+      'job_types_preferred': { action: 'Set preferred haul types (OTR, regional, local)', impact: 5, priority: 'medium' },
+      'bio': { action: 'Write a short bio for recruiter visibility', impact: 4, priority: 'low' },
+      'phone': { action: 'Add your phone number for recruiter contact', impact: 6, priority: 'high' },
+      'home_zip': { action: 'Set your home ZIP for location-based matching', impact: 5, priority: 'medium' },
+      'min_pay_weekly': { action: 'Set minimum weekly pay preference', impact: 3, priority: 'low' },
+      'avatar_url': { action: 'Upload a profile photo', impact: 2, priority: 'low' },
+      'document:cdl': { action: 'Upload your CDL document', impact: 8, priority: 'high' },
+      'document:medical_certificate': { action: 'Upload your medical certificate', impact: 7, priority: 'high' }
+    };
+
+    for (const field of missingFields) {
+      const suggestion = fieldSuggestions[field];
+      if (suggestion) {
+        suggestions.push({
+          field,
+          ...suggestion
+        });
+      }
+    }
+
+    // Sort by priority (high first), then by impact
+    const priorityOrder = { high: 0, medium: 1, low: 2 };
+    suggestions.sort((a, b) => {
+      const pDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
+      if (pDiff !== 0) return pDiff;
+      return b.impact - a.impact;
+    });
+
+    return { suggestions: suggestions.slice(0, 10) };
+  } catch (error) {
+    console.error('[DriverProfile] getProfileSuggestions error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get numeric profile strength score (0-100) for driver_utility router.
+ * @param {string} driverId
+ */
+export async function getProfileStrengthScore(driverId) {
+  return getProfileStrength(driverId);
+}

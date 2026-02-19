@@ -1,0 +1,208 @@
+/**
+ * Community Service
+ *
+ * Forums: posts, replies, likes, reports, search.
+ * Wraps forumService.jsw data model with the agent-facing API contract.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ * @module backend/communityService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  posts: 'communityPosts',
+  replies: 'communityReplies',
+  likes: 'communityLikes',
+  reports: 'communityReports'
+};
+
+// ─── Forum Posts ──────────────────────────────────────────────────────────────
+
+/**
+ * Get paginated forum posts with optional category/search filter
+ * @param {object} filters - { category, sort_by, search, pinned_only }
+ * @param {object} pagination - { page, page_size }
+ * @returns {Promise<object>} { items, totalCount }
+ */
+export async function getForumPosts(filters = {}, pagination = {}) {
+  try {
+    const queryFilters = {};
+
+    if (filters.category) queryFilters.category = filters.category;
+    if (filters.pinned_only) queryFilters.is_pinned = true;
+    if (filters.search) queryFilters.title = { contains: filters.search };
+
+    const sortField = filters.sort_by === 'popular' ? 'like_count'
+      : filters.sort_by === 'unanswered' ? 'reply_count'
+      : '_createdDate';
+    const sortDir = filters.sort_by === 'unanswered' ? 'asc' : 'desc';
+
+    const page = Number(pagination.page) || 1;
+    const pageSize = Math.min(Number(pagination.page_size) || 20, 50);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.posts, {
+      filters: queryFilters,
+      sort: [{ field: sortField, direction: sortDir }],
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      suppressAuth: true
+    });
+
+    return { items: result.items || [], totalCount: result.totalCount || 0 };
+  } catch (error) {
+    console.error('communityService.getForumPosts error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Create a new forum post
+ * @param {string} driverId
+ * @param {object} payload - { title, body, category, tags }
+ * @returns {Promise<object>} { postId } or { error }
+ */
+export async function createForumPost(driverId, payload = {}) {
+  try {
+    if (!payload.title || !payload.body || !payload.category) {
+      return { error: 'title, body, and category are required' };
+    }
+
+    const record = {
+      author_id: driverId,
+      title: String(payload.title).slice(0, 120),
+      body: String(payload.body).slice(0, 5000),
+      category: payload.category,
+      tags: Array.isArray(payload.tags) ? payload.tags.slice(0, 5).join(',') : '',
+      like_count: 0,
+      reply_count: 0,
+      is_pinned: false
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.posts, record, { suppressAuth: true });
+    return { postId: created._id || created.id };
+  } catch (error) {
+    console.error('communityService.createForumPost error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Reply to a forum post
+ * @param {string} driverId
+ * @param {string} postId
+ * @param {string} body
+ * @param {string} [quoteReplyId]
+ * @returns {Promise<object>} { replyId } or { error }
+ */
+export async function replyToPost(driverId, postId, body, quoteReplyId) {
+  try {
+    if (!postId || !body) return { error: 'postId and body are required' };
+
+    const record = {
+      post_id: postId,
+      author_id: driverId,
+      body: String(body).slice(0, 2000),
+      quote_reply_id: quoteReplyId || ''
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.replies, record, { suppressAuth: true });
+    return { replyId: created._id || created.id };
+  } catch (error) {
+    console.error('communityService.replyToPost error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Toggle like on a post or reply
+ * @param {string} driverId
+ * @param {string} itemId - post or reply record ID
+ * @param {string} itemType - "post" | "reply"
+ * @returns {Promise<object>} { liked, likeCount } or { error }
+ */
+export async function toggleLike(driverId, itemId, itemType = 'post') {
+  try {
+    if (!itemId) return { error: 'itemId is required' };
+
+    const existing = await dataAccess.queryRecords(COLLECTIONS.likes, {
+      filters: { user_id: driverId, item_id: itemId, item_type: itemType },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (existing.items && existing.items.length > 0) {
+      await dataAccess.removeRecord(COLLECTIONS.likes, existing.items[0]._id || existing.items[0].id, { suppressAuth: true });
+      return { liked: false };
+    }
+
+    await dataAccess.insertRecord(COLLECTIONS.likes, {
+      user_id: driverId,
+      item_id: itemId,
+      item_type: itemType
+    }, { suppressAuth: true });
+    return { liked: true };
+  } catch (error) {
+    console.error('communityService.toggleLike error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Report a post or reply for moderation
+ * @param {string} driverId
+ * @param {string} itemId
+ * @param {string} itemType - "post" | "reply"
+ * @param {string} reason
+ * @param {string} [details]
+ * @returns {Promise<object>} { reportId } or { error }
+ */
+export async function reportContent(driverId, itemId, itemType, reason, details) {
+  try {
+    if (!itemId || !reason) return { error: 'itemId and reason are required' };
+
+    const record = {
+      reporter_id: driverId,
+      item_id: itemId,
+      item_type: itemType || 'post',
+      reason: reason,
+      details: details ? String(details).slice(0, 300) : '',
+      status: 'pending'
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.reports, record, { suppressAuth: true });
+    return { reportId: created._id || created.id };
+  } catch (error) {
+    console.error('communityService.reportContent error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Full-text search across posts and replies
+ * @param {string} query
+ * @param {object} filters - { category, date_from, max_results }
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function searchForums(query, filters = {}) {
+  try {
+    if (!query || query.length < 3) return { error: 'query must be at least 3 characters' };
+
+    const queryFilters = { title: { contains: query } };
+    if (filters.category) queryFilters.category = filters.category;
+
+    const maxResults = Math.min(Number(filters.max_results) || 20, 50);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.posts, {
+      filters: queryFilters,
+      limit: maxResults,
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      suppressAuth: true
+    });
+
+    return { items: result.items || [], totalCount: result.totalCount || 0 };
+  } catch (error) {
+    console.error('communityService.searchForums error:', error);
+    return { error: error.message };
+  }
+}

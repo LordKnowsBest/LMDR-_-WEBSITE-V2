@@ -11,7 +11,9 @@ jest.mock('backend/dataAccess', () => ({
 
 jest.mock('backend/observabilityService', () => ({
   runAnomalyDetection: jest.fn(),
-  getHealthMetrics: jest.fn()
+  getHealthMetrics: jest.fn(),
+  recordMetric: jest.fn(),
+  createAnomalyRule: jest.fn()
 }));
 
 jest.mock('backend/compendiumService', () => ({
@@ -27,7 +29,12 @@ jest.mock('backend/agentRunLedgerService', () => ({
 }));
 
 jest.mock('backend/aiRouterService', () => ({
-  updateProviderConfig: jest.fn()
+  updateProviderConfig: jest.fn(),
+  updateCostOptimizerConfig: jest.fn()
+}));
+
+jest.mock('backend/admin_jobs_service', () => ({
+  triggerJob: jest.fn()
 }));
 
 const dataAccess = require('backend/dataAccess');

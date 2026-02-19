@@ -19,8 +19,16 @@ describe('external api platform phase 8 assets', () => {
 
     expect(portal).toContain('API Partner Portal');
     expect(portal).toContain('loadSnapshot');
+    expect(portal).toContain('setEnvironment');
+    expect(portal).toContain('sendWebhookTest');
+    expect(portal).toContain('createCheckout');
+    expect(portal).toContain('endpointBreakdown');
     expect(partners).toContain('API Partners Admin');
     expect(partners).toContain('setPartnerTier');
+    expect(partners).toContain('setEnvironment');
+    expect(partners).toContain('loadHistory');
+    expect(partners).toContain('Load Revenue Report');
+    expect(partners).toContain('revenueReportLoaded');
   });
 
   test('creates page bridge files with expected message actions', () => {
@@ -37,11 +45,15 @@ describe('external api platform phase 8 assets', () => {
     expect(partnersSource).toContain("case 'listPartners'");
     expect(partnersSource).toContain("case 'setPartnerTier'");
     expect(partnersSource).toContain("case 'setPartnerStatus'");
+    expect(partnersSource).toContain("case 'getPartnerHistory'");
+    expect(partnersSource).toContain("case 'getRevenueReport'");
   });
 
   test('apiPortalService exposes tier/status admin update functions', () => {
     const source = fs.readFileSync(portalService, 'utf8');
     expect(source).toContain('export async function setApiPartnerTier');
     expect(source).toContain('export async function setApiPartnerStatus');
+    expect(source).toContain('export async function getApiPartnerHistory');
+    expect(source).toContain('export async function getApiRevenueReport');
   });
 });

@@ -1,0 +1,471 @@
+/**
+ * Driver Cockpit Service
+ *
+ * Central service for the Driver Cockpit: job search, applications,
+ * saved jobs, dashboard summary, and notifications.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  jobPostings: 'jobPostings',
+  driverProfiles: 'driverProfiles',
+  driverCarrierInterests: 'driverCarrierInterests',
+  savedJobs: 'savedJobs',
+  driverNotifications: 'driverNotifications',
+  driverMessages: 'driverMessages',
+  driverMatches: 'driverMatches',
+  driverDocuments: 'driverDocuments'
+};
+
+// ============================================================================
+// JOB SEARCH & DETAILS
+// ============================================================================
+
+/**
+ * Search active job postings with filters and pagination.
+ * @param {string} driverId - Authenticated driver ID
+ * @param {Object} filters - Search filters (query, cdl_class, job_type, pay_type, min_pay, home_time, state, sort_by, sort_order)
+ * @param {Object} pagination - { page, page_size }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function searchJobs(driverId, filters = {}, pagination = {}) {
+  try {
+    const page = Number(pagination.page) || 1;
+    const pageSize = Math.min(Number(pagination.page_size) || 20, 50);
+
+    const queryFilters = { status: 'active' };
+
+    if (filters.cdl_class) queryFilters.cdl_class = filters.cdl_class;
+    if (filters.job_type) queryFilters.job_type = filters.job_type;
+    if (filters.pay_type) queryFilters.pay_type = filters.pay_type;
+    if (filters.home_time) queryFilters.home_time = filters.home_time;
+    if (filters.state) queryFilters.state = filters.state;
+    if (filters.min_pay) queryFilters.weekly_pay = { gte: Number(filters.min_pay) };
+
+    const sortField = filters.sort_by || 'match_score';
+    const sortDir = filters.sort_order || 'desc';
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.jobPostings, {
+      filters: queryFilters,
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      sort: [{ field: sortField, direction: sortDir }],
+      suppressAuth: true
+    });
+
+    return {
+      items: result.items || [],
+      totalCount: result.totalCount || 0,
+      page,
+      pageSize
+    };
+  } catch (error) {
+    console.error('[DriverCockpit] searchJobs error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get full details for a single job posting.
+ * @param {string} jobId - Job posting record ID
+ * @param {string} driverId - Authenticated driver ID
+ * @returns {{ job: Object, hasApplied: boolean, hasSaved: boolean } | { error: string }}
+ */
+export async function getJobDetails(jobId, driverId) {
+  try {
+    if (!jobId) return { error: 'jobId is required' };
+
+    const job = await dataAccess.getRecord(COLLECTIONS.jobPostings, jobId, { suppressAuth: true });
+    if (!job) return { error: 'Job posting not found' };
+
+    // Check application status
+    const appResult = await dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+      filters: { driver_id: driverId, job_id: jobId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const hasApplied = (appResult.items || []).length > 0;
+
+    // Check saved status
+    const savedResult = await dataAccess.queryRecords(COLLECTIONS.savedJobs, {
+      filters: { driver_id: driverId, job_id: jobId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const hasSaved = (savedResult.items || []).length > 0;
+
+    return { job, hasApplied, hasSaved };
+  } catch (error) {
+    console.error('[DriverCockpit] getJobDetails error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// APPLICATIONS
+// ============================================================================
+
+/**
+ * Submit a job application on behalf of the driver.
+ * @param {string} driverId - Driver ID
+ * @param {string} jobId - Job posting record ID
+ * @param {Object} payload - { cover_note, availability_date, acknowledge_requirements }
+ * @returns {{ success: boolean, applicationId?: string } | { error: string }}
+ */
+export async function submitApplication(driverId, jobId, payload = {}) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+    if (!jobId) return { error: 'jobId is required' };
+
+    // Check for duplicate application
+    const existing = await dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+      filters: { driver_id: driverId, job_id: jobId },
+      limit: 1,
+      suppressAuth: true
+    });
+    if ((existing.items || []).length > 0) {
+      return { error: 'You have already applied to this job' };
+    }
+
+    // Get job posting to extract carrier info
+    const job = await dataAccess.getRecord(COLLECTIONS.jobPostings, jobId, { suppressAuth: true });
+    if (!job) return { error: 'Job posting not found' };
+
+    const record = {
+      driver_id: driverId,
+      job_id: jobId,
+      carrier_dot: job.carrier_dot || '',
+      carrier_name: job.carrier_name || '',
+      status: 'submitted',
+      cover_note: (payload.cover_note || '').substring(0, 500),
+      availability_date: payload.availability_date || '',
+      applied_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.driverCarrierInterests, record, { suppressAuth: true });
+
+    return { success: true, applicationId: result.record?._id || result._id };
+  } catch (error) {
+    console.error('[DriverCockpit] submitApplication error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Withdraw a pending application.
+ * @param {string} driverId - Driver ID
+ * @param {string} applicationId - Driver Carrier Interests record ID
+ * @param {string} reason - Withdrawal reason
+ * @returns {{ success: boolean } | { error: string }}
+ */
+export async function withdrawApplication(driverId, applicationId, reason) {
+  try {
+    if (!applicationId) return { error: 'applicationId is required' };
+
+    const record = await dataAccess.getRecord(COLLECTIONS.driverCarrierInterests, applicationId, { suppressAuth: true });
+    if (!record) return { error: 'Application not found' };
+    if (record.driver_id !== driverId) return { error: 'Permission denied' };
+    if (record.status === 'withdrawn') return { error: 'Application already withdrawn' };
+
+    await dataAccess.updateRecord(COLLECTIONS.driverCarrierInterests, {
+      _id: applicationId,
+      status: 'withdrawn',
+      withdrawal_reason: (reason || '').substring(0, 300),
+      withdrawn_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    return { success: true };
+  } catch (error) {
+    console.error('[DriverCockpit] withdrawApplication error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get status for a single application.
+ * @param {string} driverId - Driver ID
+ * @param {string} applicationId - Record ID
+ * @returns {{ application: Object } | { error: string }}
+ */
+export async function getApplicationStatus(driverId, applicationId) {
+  try {
+    if (!applicationId) return { error: 'applicationId is required' };
+
+    const record = await dataAccess.getRecord(COLLECTIONS.driverCarrierInterests, applicationId, { suppressAuth: true });
+    if (!record) return { error: 'Application not found' };
+    if (record.driver_id !== driverId) return { error: 'Permission denied' };
+
+    return { application: record };
+  } catch (error) {
+    console.error('[DriverCockpit] getApplicationStatus error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get full application history for a driver.
+ * @param {string} driverId - Driver ID
+ * @param {Object} filters - { status_filter, carrier_name, date_from, date_to, page, page_size }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function getApplicationHistory(driverId, filters = {}) {
+  try {
+    const page = Number(filters.page) || 1;
+    const pageSize = Math.min(Number(filters.page_size) || 25, 50);
+
+    const queryFilters = { driver_id: driverId };
+
+    if (filters.status_filter && filters.status_filter !== 'all') {
+      if (filters.status_filter === 'active') {
+        queryFilters.status = { in: ['submitted', 'reviewing', 'phone_screen', 'interview', 'offer'] };
+      } else {
+        queryFilters.status = filters.status_filter;
+      }
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+      filters: queryFilters,
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      sort: [{ field: 'applied_at', direction: 'desc' }],
+      suppressAuth: true
+    });
+
+    return {
+      items: result.items || [],
+      totalCount: result.totalCount || 0,
+      page,
+      pageSize
+    };
+  } catch (error) {
+    console.error('[DriverCockpit] getApplicationHistory error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// SAVED JOBS
+// ============================================================================
+
+/**
+ * Save a job posting to the driver's watchlist. Idempotent.
+ * @param {string} driverId - Driver ID
+ * @param {string} jobId - Job posting record ID
+ * @returns {{ success: boolean, savedCount: number } | { error: string }}
+ */
+export async function saveJob(driverId, jobId) {
+  try {
+    if (!jobId) return { error: 'jobId is required' };
+
+    // Idempotent check
+    const existing = await dataAccess.queryRecords(COLLECTIONS.savedJobs, {
+      filters: { driver_id: driverId, job_id: jobId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if ((existing.items || []).length === 0) {
+      await dataAccess.insertRecord(COLLECTIONS.savedJobs, {
+        driver_id: driverId,
+        job_id: jobId,
+        saved_at: new Date().toISOString()
+      }, { suppressAuth: true });
+    }
+
+    // Return total saved count
+    const countResult = await dataAccess.queryRecords(COLLECTIONS.savedJobs, {
+      filters: { driver_id: driverId },
+      limit: 0,
+      suppressAuth: true
+    });
+
+    return { success: true, savedCount: countResult.totalCount || 0 };
+  } catch (error) {
+    console.error('[DriverCockpit] saveJob error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get the driver's saved job watchlist.
+ * @param {string} driverId - Driver ID
+ * @param {Object} filters - { status_filter, page, page_size }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function getSavedJobs(driverId, filters = {}) {
+  try {
+    const page = Number(filters.page) || 1;
+    const pageSize = Math.min(Number(filters.page_size) || 20, 50);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.savedJobs, {
+      filters: { driver_id: driverId },
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      sort: [{ field: 'saved_at', direction: 'desc' }],
+      suppressAuth: true
+    });
+
+    return {
+      items: result.items || [],
+      totalCount: result.totalCount || 0,
+      page,
+      pageSize
+    };
+  } catch (error) {
+    console.error('[DriverCockpit] getSavedJobs error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// DASHBOARD & NOTIFICATIONS
+// ============================================================================
+
+/**
+ * Get aggregated dashboard summary for the Driver Cockpit home screen.
+ * @param {string} driverId - Driver ID
+ * @returns {{ unreadCount: number, activeApps: number, newMatches: number, expiringDocs: number } | { error: string }}
+ */
+export async function getDashboardSummary(driverId) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+
+    // Run aggregation queries in parallel
+    const [unreadResult, appsResult, matchesResult, docsResult] = await Promise.all([
+      // Unread messages
+      dataAccess.queryRecords(COLLECTIONS.driverMessages, {
+        filters: { driver_id: driverId, is_read: false },
+        limit: 0,
+        suppressAuth: true
+      }),
+      // Active applications
+      dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+        filters: { driver_id: driverId, status: { in: ['submitted', 'reviewing', 'phone_screen', 'interview', 'offer'] } },
+        limit: 0,
+        suppressAuth: true
+      }),
+      // New matches (last 7 days)
+      dataAccess.queryRecords(COLLECTIONS.driverMatches, {
+        filters: {
+          driver_id: driverId,
+          created_at: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString() }
+        },
+        limit: 3,
+        sort: [{ field: 'match_score', direction: 'desc' }],
+        suppressAuth: true
+      }),
+      // Expiring documents (within 30 days)
+      dataAccess.queryRecords(COLLECTIONS.driverDocuments, {
+        filters: {
+          driver_id: driverId,
+          expiry_date: { lte: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() }
+        },
+        limit: 0,
+        suppressAuth: true
+      })
+    ]);
+
+    return {
+      unreadCount: unreadResult.totalCount || 0,
+      activeApps: appsResult.totalCount || 0,
+      newMatches: matchesResult.totalCount || 0,
+      topMatches: matchesResult.items || [],
+      expiringDocs: docsResult.totalCount || 0
+    };
+  } catch (error) {
+    console.error('[DriverCockpit] getDashboardSummary error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get driver's notification feed.
+ * @param {string} driverId - Driver ID
+ * @param {Object} filters - { unread_only, type_filter, page, page_size }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function getDriverNotifications(driverId, filters = {}) {
+  try {
+    const page = Number(filters.page) || 1;
+    const pageSize = Math.min(Number(filters.page_size) || 20, 50);
+
+    const queryFilters = { driver_id: driverId };
+    if (filters.unread_only) queryFilters.is_read = false;
+    if (filters.type_filter && Array.isArray(filters.type_filter)) {
+      queryFilters.type = { in: filters.type_filter };
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverNotifications, {
+      filters: queryFilters,
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      suppressAuth: true
+    });
+
+    return {
+      items: result.items || [],
+      totalCount: result.totalCount || 0,
+      page,
+      pageSize
+    };
+  } catch (error) {
+    console.error('[DriverCockpit] getDriverNotifications error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// QUICK RESPONSES
+// ============================================================================
+
+/**
+ * Send a pre-defined quick response in a conversation.
+ * @param {string} driverId - Driver ID
+ * @param {string} conversationId - Target conversation
+ * @param {string} templateKey - Quick response template key
+ * @param {string} addendum - Optional additional text to append
+ */
+export async function sendQuickResponse(driverId, conversationId, templateKey, addendum) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+    if (!conversationId) return { error: 'conversationId is required' };
+    if (!templateKey) return { error: 'templateKey is required' };
+
+    // Look up the template
+    const templateResult = await dataAccess.queryRecords('driverQuickResponses', {
+      filters: { response_id: templateKey, is_active: 'Yes' },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    const template = templateResult.items?.[0];
+    if (!template) return { error: `Quick response template '${templateKey}' not found` };
+
+    // Build message text
+    let messageText = template.template_text || '';
+    if (addendum) messageText += `\n\n${addendum}`;
+
+    // Send via messaging service (dynamic import to avoid circular deps)
+    const messaging = await import('backend/messagingService');
+    const sendResult = await messaging.sendDriverMessage(driverId, conversationId, {
+      body: messageText,
+      quick_response_template: templateKey
+    });
+
+    // Increment usage counter (best-effort)
+    try {
+      await dataAccess.updateRecord('driverQuickResponses', template._id, {
+        usage_count: (Number(template.usage_count) || 0) + 1
+      }, { suppressAuth: true });
+    } catch (_) { /* best-effort */ }
+
+    return sendResult;
+  } catch (error) {
+    console.error('[DriverCockpit] sendQuickResponse error:', error.message);
+    return { error: error.message };
+  }
+}

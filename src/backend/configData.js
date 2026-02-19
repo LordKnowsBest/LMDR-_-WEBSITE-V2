@@ -379,7 +379,38 @@ export const DATA_SOURCE = {
   // Pipeline Execution Agent
   // -------------------------------------------------------------------------
   pipelineEvents: 'airtable',
-  voiceAgentTemplates: 'airtable'
+  voiceAgentTemplates: 'airtable',
+
+  // -------------------------------------------------------------------------
+  // Phase 1 Driver Expansion
+  // -------------------------------------------------------------------------
+  driverSavedJobs: 'airtable',
+  driverMessages: 'airtable',
+  driverConversations: 'airtable',
+  driverActivityFeed: 'airtable',
+  parkingFavorites: 'airtable',
+  weighStationStatus: 'airtable',
+  roadHazardReports: 'airtable',
+  weatherAlertSubs: 'airtable',
+  forumReplies: 'airtable',
+  mentorshipConnections: 'airtable',
+  mentorProfiles: 'airtable',
+  hosRecords: 'airtable',
+  hosViolations: 'airtable',
+  eldLogs: 'airtable',
+  trainingCourses: 'airtable',
+  trainingEnrollments: 'airtable',
+  trainingProgress: 'airtable',
+  driverExpenses: 'airtable',
+  driverSettlements: 'airtable',
+  driverTaxSummary: 'airtable',
+  driverLifecycleEvents: 'airtable',
+  driverSurveys: 'airtable',
+  driverSurveyResponses: 'airtable',
+  driverQuickResponses: 'airtable',
+  reverseAlerts: 'airtable',
+  driverNotifications: 'airtable',
+  driverMatches: 'airtable'
 };
 
 // =============================================================================
@@ -703,7 +734,35 @@ export const WIX_COLLECTION_NAMES = {
 
   // Pipeline Execution Agent
   pipelineEvents: 'PipelineEvents',
-  voiceAgentTemplates: 'VoiceAgentTemplates'
+  voiceAgentTemplates: 'VoiceAgentTemplates',
+
+  // Phase 1 Driver Expansion
+  driverSavedJobs: 'DriverSavedJobs',
+  driverMessages: 'DriverMessages',
+  driverConversations: 'DriverConversations',
+  driverActivityFeed: 'DriverActivityFeed',
+  parkingFavorites: 'ParkingFavorites',
+  weighStationStatus: 'WeighStationStatus',
+  roadHazardReports: 'RoadHazardReports',
+  weatherAlertSubs: 'WeatherAlertSubs',
+  forumReplies: 'ForumReplies',
+  mentorshipConnections: 'MentorshipConnections',
+  hosRecords: 'HOSRecords',
+  hosViolations: 'HOSViolations',
+  eldLogs: 'ELDLogs',
+  trainingCourses: 'TrainingCourses',
+  trainingEnrollments: 'TrainingEnrollments',
+  trainingProgress: 'TrainingProgress',
+  driverExpenses: 'DriverExpenses',
+  driverSettlements: 'DriverSettlements',
+  driverTaxSummary: 'DriverTaxSummary',
+  driverLifecycleEvents: 'DriverLifecycleEvents',
+  driverSurveys: 'DriverSurveys',
+  driverSurveyResponses: 'DriverSurveyResponses',
+  driverQuickResponses: 'DriverQuickResponses',
+  reverseAlerts: 'ReverseAlerts',
+  driverNotifications: 'DriverNotifications',
+  driverMatches: 'DriverMatches'
 };
 
 // =============================================================================
@@ -1006,7 +1065,35 @@ export const AIRTABLE_TABLE_NAMES = {
 
   // Pipeline Execution Agent
   pipelineEvents: 'v2_Pipeline Events',
-  voiceAgentTemplates: 'v2_Voice Agent Templates'
+  voiceAgentTemplates: 'v2_Voice Agent Templates',
+
+  // Phase 1 Driver Expansion
+  driverSavedJobs: 'v2_Driver Saved Jobs',
+  driverMessages: 'v2_Driver Messages',
+  driverConversations: 'v2_Driver Conversations',
+  driverActivityFeed: 'v2_Driver Activity Feed',
+  parkingFavorites: 'v2_Parking Favorites',
+  weighStationStatus: 'v2_Weigh Station Status',
+  roadHazardReports: 'v2_Road Hazard Reports',
+  weatherAlertSubs: 'v2_Weather Alert Subscriptions',
+  forumReplies: 'v2_Forum Replies',
+  mentorshipConnections: 'v2_Mentorship Connections',
+  hosRecords: 'v2_HOS Records',
+  hosViolations: 'v2_HOS Violations',
+  eldLogs: 'v2_ELD Logs',
+  trainingCourses: 'v2_Training Courses',
+  trainingEnrollments: 'v2_Training Enrollments',
+  trainingProgress: 'v2_Training Progress',
+  driverExpenses: 'v2_Driver Expenses',
+  driverSettlements: 'v2_Driver Settlements',
+  driverTaxSummary: 'v2_Driver Tax Summary',
+  driverLifecycleEvents: 'v2_Driver Lifecycle Events',
+  driverSurveys: 'v2_Driver Surveys',
+  driverSurveyResponses: 'v2_Driver Survey Responses',
+  driverQuickResponses: 'v2_Driver Quick Responses',
+  reverseAlerts: 'v2_Reverse Alerts',
+  driverNotifications: 'v2_Driver Notifications',
+  driverMatches: 'v2_Driver Matches'
 };
 
 // =============================================================================

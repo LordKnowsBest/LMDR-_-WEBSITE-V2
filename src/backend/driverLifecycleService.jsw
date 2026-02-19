@@ -1,0 +1,123 @@
+/**
+ * Driver Lifecycle Service
+ *
+ * Timeline events, disposition management, and match feedback.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ * @module backend/driverLifecycleService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  events: 'driverLifecycleEvents',
+  profiles: 'driverProfiles',
+  matchFeedback: 'driverMatchFeedback'
+};
+
+/**
+ * Get the driver's lifecycle event timeline
+ * @param {string} driverId
+ * @param {object} filters - { include_future, event_types }
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getDriverTimeline(driverId, filters = {}) {
+  try {
+    const queryFilters = { driver_id: driverId };
+
+    if (filters.event_types && Array.isArray(filters.event_types) && filters.event_types.length > 0) {
+      queryFilters.event_type = { hasSome: filters.event_types };
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.events, {
+      filters: queryFilters,
+      sort: [{ field: 'event_date', direction: 'desc' }],
+      limit: 200,
+      suppressAuth: true
+    });
+
+    let items = result.items || [];
+
+    // Filter out future events if not requested
+    if (filters.include_future === false) {
+      const now = new Date().toISOString();
+      items = items.filter(e => (e.event_date || e._createdDate) <= now);
+    }
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('driverLifecycleService.getDriverTimeline error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Update driver's job search disposition
+ * @param {string} driverId
+ * @param {string} disposition - "actively_looking" | "passively_open" | "not_looking" | "hired"
+ * @param {string} [availableDate] - ISO date
+ * @param {string} [notes]
+ * @returns {Promise<object>} { updated: true } or { error }
+ */
+export async function updateDisposition(driverId, disposition, availableDate, notes) {
+  try {
+    const validDispositions = ['actively_looking', 'passively_open', 'not_looking', 'hired'];
+    if (!validDispositions.includes(disposition)) {
+      return { error: `disposition must be one of: ${validDispositions.join(', ')}` };
+    }
+
+    // Update driver profile
+    await dataAccess.updateRecord(COLLECTIONS.profiles, {
+      _id: driverId,
+      disposition: disposition,
+      available_date: availableDate || '',
+      disposition_notes: notes ? String(notes).slice(0, 200) : ''
+    }, { suppressAuth: true });
+
+    // Log lifecycle event
+    await dataAccess.insertRecord(COLLECTIONS.events, {
+      driver_id: driverId,
+      event_type: 'disposition_change',
+      event_date: new Date().toISOString(),
+      details: `Disposition changed to ${disposition}`
+    }, { suppressAuth: true });
+
+    return { updated: true, disposition };
+  } catch (error) {
+    console.error('driverLifecycleService.updateDisposition error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Submit structured feedback on a carrier match
+ * @param {string} driverId
+ * @param {string} matchId
+ * @param {object} feedback - { rating, accurate_factors, inaccurate_factors, comments }
+ * @returns {Promise<object>} { feedbackId } or { error }
+ */
+export async function submitMatchFeedback(driverId, matchId, feedback = {}) {
+  try {
+    if (!matchId) return { error: 'matchId is required' };
+    if (!feedback.rating) return { error: 'rating is required' };
+
+    const record = {
+      driver_id: driverId,
+      match_id: matchId,
+      rating: Number(feedback.rating),
+      accurate_factors: Array.isArray(feedback.accurate_factors)
+        ? feedback.accurate_factors.join(',')
+        : '',
+      inaccurate_factors: Array.isArray(feedback.inaccurate_factors)
+        ? feedback.inaccurate_factors.join(',')
+        : '',
+      comments: feedback.comments ? String(feedback.comments).slice(0, 400) : ''
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.matchFeedback, record, { suppressAuth: true });
+    return { feedbackId: created._id || created.id };
+  } catch (error) {
+    console.error('driverLifecycleService.submitMatchFeedback error:', error);
+    return { error: error.message };
+  }
+}

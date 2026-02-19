@@ -1,0 +1,173 @@
+/**
+ * Training Service
+ *
+ * Manages training courses, enrollments, progress, and certifications for drivers.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ * @module backend/trainingService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  courses: 'trainingCourses',
+  enrollments: 'driverCourseEnrollments',
+  certifications: 'driverCertifications'
+};
+
+/**
+ * Get available training courses with optional filters
+ * @param {string} driverId
+ * @param {object} filters - { category, include_completed, provider, max_results }
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getAvailableCourses(driverId, filters = {}) {
+  try {
+    const queryFilters = {};
+
+    if (filters.category && filters.category !== 'all') {
+      queryFilters.category = filters.category;
+    }
+    if (filters.provider) {
+      queryFilters.provider = filters.provider;
+    }
+
+    const maxResults = Math.min(Number(filters.max_results) || 20, 50);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.courses, {
+      filters: queryFilters,
+      limit: maxResults,
+      sort: [{ field: 'title', direction: 'asc' }],
+      suppressAuth: true
+    });
+
+    // Optionally fetch enrollment status for this driver
+    const enrollmentResult = await dataAccess.queryRecords(COLLECTIONS.enrollments, {
+      filters: { driver_id: driverId },
+      limit: 200,
+      suppressAuth: true
+    });
+
+    const enrollmentMap = {};
+    (enrollmentResult.items || []).forEach(e => {
+      enrollmentMap[e.course_id] = e;
+    });
+
+    let courses = (result.items || []).map(course => ({
+      ...course,
+      enrollment_status: enrollmentMap[course._id || course.id]?.status || 'not_enrolled',
+      completion_pct: Number(enrollmentMap[course._id || course.id]?.completion_pct || 0)
+    }));
+
+    if (!filters.include_completed) {
+      courses = courses.filter(c => c.enrollment_status !== 'completed');
+    }
+
+    return { items: courses, totalCount: courses.length };
+  } catch (error) {
+    console.error('trainingService.getAvailableCourses error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Enroll a driver in a training course
+ * @param {string} driverId
+ * @param {string} courseId
+ * @param {boolean} [acceptCost=false]
+ * @returns {Promise<object>} { enrollmentId } or { error }
+ */
+export async function enrollInCourse(driverId, courseId, acceptCost = false) {
+  try {
+    if (!courseId) return { error: 'courseId is required' };
+
+    // Check for existing enrollment
+    const existing = await dataAccess.queryRecords(COLLECTIONS.enrollments, {
+      filters: { driver_id: driverId, course_id: courseId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (existing.items && existing.items.length > 0) {
+      return { error: 'Already enrolled in this course', enrollmentId: existing.items[0]._id || existing.items[0].id };
+    }
+
+    const record = {
+      driver_id: driverId,
+      course_id: courseId,
+      status: 'in_progress',
+      completion_pct: 0,
+      enrolled_at: new Date().toISOString(),
+      cost_accepted: acceptCost
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.enrollments, record, { suppressAuth: true });
+    return { enrollmentId: created._id || created.id };
+  } catch (error) {
+    console.error('trainingService.enrollInCourse error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get training progress for all enrolled courses
+ * @param {string} driverId
+ * @param {string} [statusFilter="all"]
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getTrainingProgress(driverId, statusFilter = 'all') {
+  try {
+    const queryFilters = { driver_id: driverId };
+
+    if (statusFilter && statusFilter !== 'all') {
+      queryFilters.status = statusFilter;
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.enrollments, {
+      filters: queryFilters,
+      sort: [{ field: 'enrolled_at', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    return { items: result.items || [], totalCount: result.totalCount || 0 };
+  } catch (error) {
+    console.error('trainingService.getTrainingProgress error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get all driver certifications
+ * @param {string} driverId
+ * @param {object} filters - { cert_type, include_expired }
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getDriverCertifications(driverId, filters = {}) {
+  try {
+    const queryFilters = { driver_id: driverId };
+
+    if (filters.cert_type && filters.cert_type !== 'all') {
+      queryFilters.cert_type = filters.cert_type;
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.certifications, {
+      filters: queryFilters,
+      sort: [{ field: 'issued_date', direction: 'desc' }],
+      limit: 100,
+      suppressAuth: true
+    });
+
+    let items = result.items || [];
+
+    if (!filters.include_expired) {
+      const now = new Date();
+      items = items.filter(c => !c.expiry_date || new Date(c.expiry_date) > now);
+    }
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('trainingService.getDriverCertifications error:', error);
+    return { error: error.message };
+  }
+}

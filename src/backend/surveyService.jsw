@@ -131,6 +131,93 @@ export async function processResponse(driverId, carrierId, surveyType, responseD
 }
 
 // ============================================================================
+// AGENT-FACING API (driver_lifecycle router)
+// ============================================================================
+
+/**
+ * Get pending surveys for a driver
+ * @param {string} driverId
+ * @param {string} [surveyType="all"]
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getPendingSurveys(driverId, surveyType = 'all') {
+  try {
+    const filters = {
+      driver_id: driverId,
+      status: 'pending'
+    };
+
+    if (surveyType && surveyType !== 'all') {
+      filters.survey_type = surveyType;
+    }
+
+    const result = await queryRecords('driverSurveyRequests', {
+      filters,
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit: 50,
+      suppressAuth: true
+    });
+
+    return { items: result.items || [], totalCount: result.totalCount || 0 };
+  } catch (error) {
+    console.error('surveyService.getPendingSurveys error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Submit a survey response (agent-facing)
+ * @param {string} driverId
+ * @param {string} surveyRequestId
+ * @param {object} responses - key-value map of question IDs to answers
+ * @returns {Promise<object>} { responseId } or { error }
+ */
+export async function submitSurveyResponse(driverId, surveyRequestId, responses = {}) {
+  try {
+    if (!surveyRequestId) return { error: 'surveyRequestId is required' };
+    if (!responses || Object.keys(responses).length === 0) {
+      return { error: 'responses object is required' };
+    }
+
+    const requestResult = await queryRecords('driverSurveyRequests', {
+      filters: { _id: surveyRequestId, driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (!requestResult.items || requestResult.items.length === 0) {
+      return { error: 'Survey request not found' };
+    }
+
+    const request = requestResult.items[0];
+    if (request.status !== 'pending') {
+      return { error: 'Survey already completed' };
+    }
+
+    const record = {
+      driver_id: driverId,
+      survey_request_id: surveyRequestId,
+      survey_type: request.survey_type || 'general',
+      responses: JSON.stringify(responses),
+      submitted_at: new Date().toISOString()
+    };
+
+    const created = await insertRecord('driverSurveyResponses', record, { suppressAuth: true });
+
+    await updateRecord('driverSurveyRequests', {
+      _id: surveyRequestId,
+      status: 'completed',
+      completed_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    return { responseId: created._id || created.id };
+  } catch (error) {
+    console.error('surveyService.submitSurveyResponse error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
 // HELPERS
 // ============================================================================
 

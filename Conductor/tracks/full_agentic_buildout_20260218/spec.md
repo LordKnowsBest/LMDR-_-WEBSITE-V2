@@ -20,6 +20,12 @@ This spec is split into 4 role-based files for manageability. Each file contains
 | [spec-admin-platform.md](./spec-admin-platform.md) | Admin + Platform | 147 | 2,802 |
 | **Total** | **All 4 roles** | **388** | **8,485** |
 
+### Architecture Specifications
+
+| File | Purpose | Routers | Lines |
+|------|---------|---------|-------|
+| [router-architecture.md](./router-architecture.md) | Domain Router pattern — collapses 388 flat tools into ~28 routers | 28 (7+6+7+9) | ~600 |
+
 ### Schema Specifications
 
 | File | Phases | Collections | Lines |
@@ -140,9 +146,22 @@ Every tool follows this schema:
 ## Implementation Sequence
 
 See [plan.md](./plan.md) for full phase-by-phase implementation plan with:
-- Phase 0: Foundation bug fixes (7 known bugs)
+- Phase 0: Foundation bug fixes (7 known bugs) — **COMPLETE**
 - Phases 1-4: Surface expansion (parallelizable after Phase 0)
 - Phase 5: Cross-role intelligence (depends on Phases 1-4)
+
+### Already Delivered: Pipeline Execution Agent (Feb 2026)
+
+Before this track was created, the following recruiter voice/pipeline infrastructure was built and shipped:
+- `pipelineExecutionAgent.jsw` — Rule-based decision engine (< 5 min contact SLA, channel escalation)
+- `pipelineEventBus.jsw` — Central event dispatch (3 exports)
+- `voiceAgentTemplates.jsw` — 13 VAPI voice agent templates across 5 lifecycle groups
+- `pipelineJobs.jsw` — SLA enforcement + event reprocessing crons
+- `tcpaGuard.js` — TCPA quiet hours compliance check
+- 3 recruiter tools in `agentService.jsw`: `initiate_voice_screen`, `get_pipeline_health`, `emit_pipeline_event`
+- 2 Airtable tables: `v2_Pipeline Events`, `v2_Voice Agent Templates`
+
+These are included in the baseline 36-tool count and referenced by Phase 2 recruiter outreach tools.
 
 See [progress.md](./progress.md) for real-time tracking of:
 - Tool registration status per track

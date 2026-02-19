@@ -1,8 +1,8 @@
-# Plan — Full Agentic Buildout (36 to ~305 Tools)
+# Plan — Full Agentic Buildout (36 to ~388 Tools)
 
 ## Status: PHASE 0 IN PROGRESS
 
-**Master plan created 2026-02-18.** This is the single source of truth for expanding the LMDR/VelocityMatch agent surface from 36 tools to ~305 tools across all 4 roles. Phase 0 fixes 7 known bugs in the existing agent loop. Phases 1-4 expand each role surface in parallel. Phase 5 adds cross-role intelligence and external API tools.
+**Master plan created 2026-02-18.** This is the single source of truth for expanding the LMDR/VelocityMatch agent surface from 36 tools to ~388 tools across all 4 roles. Phase 0 fixes 7 known bugs in the existing agent loop. Phases 1-4 expand each role surface in parallel. Phase 5 adds cross-role intelligence and external API tools.
 
 ---
 
@@ -296,7 +296,7 @@ Audit all page codes with `grep -rn "userId.*=.*'" src/pages/ADMIN src/pages/B2B
 
 ## Phase 1 — Driver Surface Expansion (Sprints 2-4 -- 3 weeks)
 
-**Goal:** Expand driver agent from 6 tools to ~80. Make the driver agent a full copilot for CDL drivers.
+**Goal:** Expand driver agent from 6 tools to ~83. Make the driver agent a full copilot for CDL drivers.
 
 ### 1.1 Cockpit Tools (~15 tools)
 
@@ -460,7 +460,7 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 
 ### Phase 1 Exit Criteria
 
-- [ ] ~74 new driver tools registered in `TOOL_DEFINITIONS` (total ~80)
+- [ ] ~77 new driver tools registered in `TOOL_DEFINITIONS` (total ~83)
 - [ ] All tools have `argMapping` and `policy` objects
 - [ ] `petFriendlyService.jsw` and `healthService.jsw` (already exist) wired to agent tools
 - [ ] All `read` tools return data from Airtable via `dataAccess.jsw`
@@ -474,7 +474,9 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 
 **Goal:** Expand recruiter agent from 9 tools to ~65. Cover the full recruiter operating system.
 
-### 2.1 Outreach Tools (~12 tools)
+> **Already delivered (Pipeline Execution Agent — Feb 2026):** Three recruiter tools already exist in `agentService.jsw`: `initiate_voice_screen` (medium risk, TCPA check), `get_pipeline_health` (read), and `emit_pipeline_event` (execute_low). Supporting infrastructure: `pipelineExecutionAgent.jsw` (decision engine), `pipelineEventBus.jsw` (central dispatch), `voiceAgentTemplates.jsw` (13 VAPI voice templates), `pipelineJobs.jsw` (SLA enforcement + event reprocessing crons). These are counted in the existing 36-tool baseline and do not add to the Phase 2 new-tool count, but Phase 2 outreach tools must integrate with them.
+
+### 2.1 Outreach Tools (~15 tools)
 
 | Tool Name | Description | Risk Level |
 |-----------|-------------|------------|
@@ -490,6 +492,11 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 | `get_message_templates` | List available outreach templates | read |
 | `create_message_template` | Create a new outreach template | execute_low |
 | `preview_campaign_reach` | Estimate campaign reach before sending | read |
+| `create_voice_campaign` | Create an automated voice outreach campaign using VAPI templates | execute_high |
+| `get_voice_templates` | List available voice agent templates by category | read |
+| `get_voice_campaign_status` | Get status and call outcomes of a voice campaign | read |
+
+> **Voice integration note:** `create_voice_campaign` builds on `voiceAgentTemplates.jsw → createAssistantFromTemplate()` and `voiceCampaignService.jsw → createCampaign()`. The pipeline event bus (`pipelineEventBus.jsw`) handles channel escalation (SMS → email → voice → recruiter queue) automatically — these tools give recruiters direct access to initiate and monitor voice outreach outside the automated pipeline flow.
 
 ### 2.2 Analytics Tools (~10 tools)
 
@@ -569,16 +576,18 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 - [ ] ~56 new recruiter tools registered (total ~65)
 - [ ] All `execute_high` tools approval-gated (campaigns, messages, BGC, drug test, e-sign, bulk updates)
 - [ ] Outreach tools integrate with existing `autopilotService.jsw` workflow
+- [ ] Voice outreach tools integrate with `voiceAgentTemplates.jsw`, `voiceCampaignService.jsw`, and `pipelineEventBus.jsw`
+- [ ] Pipeline tools integrate with `pipelineExecutionAgent.jsw` (decision engine) and `pipelineEventBus.jsw` (event dispatch)
 - [ ] Onboarding tools integrate with existing `onboardingWorkflowService.jsw`
 - [ ] Retention tools integrate with existing `retentionService.jsw`
 - [ ] Recruiter system prompt updated
-- [ ] Integration tests for outreach chain, onboarding chain, pipeline chain
+- [ ] Integration tests for outreach chain (including voice), onboarding chain, pipeline chain
 
 ---
 
 ## Phase 3 — Carrier & B2B Surface Expansion (Sprints 8-10 -- 3 weeks)
 
-**Goal:** Expand carrier agent from 5 tools to ~60. Cover fleet management, compliance, and B2B operations.
+**Goal:** Expand carrier agent from 5 tools to ~93. Cover fleet management, compliance, and B2B operations.
 
 ### 3.1 Fleet Dashboard Tools (~12 tools)
 
@@ -663,7 +672,7 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 
 ### Phase 3 Exit Criteria
 
-- [ ] ~55 new carrier/B2B tools registered (total ~60)
+- [ ] ~88 new carrier/B2B tools registered (total ~93)
 - [ ] Fleet tools read from existing carrier data collections
 - [ ] B2B tools integrate with existing `b2bAccountService`, `b2bPipelineService`, `b2bMatchSignalService`, `b2bActivityService`, `b2bResearchAgentService`
 - [ ] Stripe tools integrate with existing `stripeService.jsw`
@@ -675,7 +684,7 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 
 ## Phase 4 — Admin & Platform Expansion (Sprints 11-13 -- 3 weeks)
 
-**Goal:** Expand admin agent from 8 tools to ~55. Give admins full platform control through the agent.
+**Goal:** Expand admin agent from 8 tools to ~147. Give admins full platform control through the agent.
 
 ### 4.1 Business Operations Tools (~10 tools)
 
@@ -761,7 +770,7 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 
 ### Phase 4 Exit Criteria
 
-- [ ] ~47 new admin tools registered (total ~55)
+- [ ] ~139 new admin tools registered (total ~147)
 - [ ] All `execute_high` tools approval-gated (invoices, commissions, feature flags, A/B tests, user suspension, email templates, platform config, content moderation, XP rules)
 - [ ] Business ops tools read from existing billing/Stripe data
 - [ ] Feature adoption tools integrate with existing `featureAdoptionService.jsw`
@@ -773,7 +782,7 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 
 ## Phase 5 — Cross-Role Intelligence & External APIs (Sprints 14-16 -- 3 weeks)
 
-**Goal:** Add ~45 cross-role tools covering mutual intelligence, external API gateway, financial tools, and lifecycle management.
+**Goal:** Add ~42 cross-role tools (split across admin role for observability/API tools and multi-role for utility/financial/lifecycle) covering mutual intelligence, external API gateway, financial tools, and lifecycle management.
 
 ### 5.1 Cross-Role Utility Tools (~10 tools)
 
@@ -859,7 +868,36 @@ Cover: profile strength, quick responses, reverse alerts, insights dashboard.
 
 ### Tool Registration Pattern
 
-Every new tool follows this exact pattern in `TOOL_DEFINITIONS`:
+> **Primary pattern (Phase 1+): Domain Router Architecture.** See [router-architecture.md](./router-architecture.md) for complete router definitions, action mappings, and implementation details.
+
+**Phase 1+ tools use domain routers** — ~28 router tools with action enums replace 352 individual tool definitions:
+
+```javascript
+// ACTION_REGISTRY — one entry per action, grouped by router
+ACTION_REGISTRY['driver_cockpit']['get_matches'] = {
+  serviceModule: 'backend/driverJobService',
+  serviceFunction: 'getMatches',
+  argMapping: ['driverId', 'filters'],
+  policy: { risk_level: 'read', requires_approval: false, rate_limit: 20 }
+};
+
+// ROUTER_DEFINITIONS — what the AI actually sees (one per domain)
+driver_cockpit: {
+  name: 'driver_cockpit',
+  description: 'Jobs, messaging, profile, and match tools for drivers',
+  input_schema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['get_matches', 'search_jobs', ...] },
+      params: { type: 'object', description: 'Action-specific parameters' }
+    },
+    required: ['action']
+  },
+  roles: ['driver']
+}
+```
+
+**Legacy tools (existing 36) remain in flat `TOOL_DEFINITIONS`** until an optional cleanup sprint migrates them into routers:
 
 ```javascript
 tool_name: {
@@ -893,22 +931,26 @@ tool_name: {
 ```
 User Message
   -> agentService.handleAgentTurn(role, userId, message, context)
-    -> AI generates tool_use response
-      -> executeTool(toolName, toolInput, runContext)
-        -> argMapping maps input to function params
-          -> serviceModule.serviceFunction(...mappedArgs)
-            -> dataAccess.queryRecords/insertRecord/updateRecord
-              -> Airtable (primary) or Wix (auth-only)
+    -> buildToolList(role) returns ROUTER_DEFINITIONS (Phase 1+) + TOOL_DEFINITIONS (legacy)
+      -> AI generates tool_use response
+        -> executeTool(toolName, toolInput, runContext)
+          -> if toolInput.action exists:          (ROUTER PATH)
+          |    ACTION_REGISTRY[toolName][action] -> serviceModule.serviceFunction(params)
+          -> else:                                 (LEGACY PATH)
+               TOOL_DEFINITIONS[toolName] -> argMapping -> serviceModule.serviceFunction(...args)
+                 -> dataAccess.queryRecords/insertRecord/updateRecord
+                   -> Airtable (primary) or Wix (auth-only)
 ```
 
 ### System Prompt Scaling
 
-As tools grow from 36 to ~305, system prompts must evolve to give the AI enough context to choose tools wisely without exceeding token limits. Strategy:
+As tools grow from 36 to ~388, system prompts must evolve to give the AI enough context to choose tools wisely without exceeding token limits. Strategy:
 
-1. **Role scoping** -- Each role only sees its own tools (driver: ~80, recruiter: ~65, carrier: ~60, admin: ~55)
-2. **Category prefixes** -- Tool names use category prefixes (`fleet_`, `compliance_`, `b2b_`) so the AI can reason about tool groups
-3. **Tool discovery** -- Add a `list_available_tools` meta-tool per role that returns categorized tool list when the user asks what the agent can do
-4. **Prompt compression** -- System prompts describe capabilities by category, not individual tools
+1. **Domain Router Architecture** (PRIMARY) -- Collapse 388 flat tools into ~28 domain routers with `action` enums. Each role sees 6-9 router tools instead of 65-147 flat definitions. **Reduces tool schema tokens by 82-88%.** See [router-architecture.md](./router-architecture.md).
+2. **Role scoping** -- Each role only sees its own routers (driver: 7, recruiter: 6, carrier/B2B: 7, admin: 9)
+3. **Action discovery** -- Each router's `action` enum lists all available operations; the AI picks the router by domain, then the action by name
+4. **Prompt compression** -- System prompts describe capabilities by domain/router, not individual actions
+5. **Tool discovery** -- Optional `list_available_tools` meta-tool per role returns categorized action list with descriptions when the user asks what the agent can do
 
 ### Backend Service Conventions
 
@@ -928,12 +970,14 @@ New backend services follow these rules:
 | Phase | Current Tools | Target Tools | New Tools | New Backend Services | New Airtable Collections |
 |-------|--------------|-------------|-----------|---------------------|-------------------------|
 | 0 | 36 | 36 | 0 (fixes) | 0 | 0 |
-| 1 | 6 (driver) | ~80 | ~74 | ~15 | ~40 |
-| 2 | 9 (recruiter) | ~65 | ~56 | ~12 | ~35 |
-| 3 | 5 (carrier) | ~60 | ~55 | ~14 | ~45 |
-| 4 | 8 (admin) | ~55 | ~47 | ~10 | ~35 |
-| 5 | 3 (cross-role) | ~45 | ~43 | ~8 | ~32 |
-| **Total** | **36** | **~305** | **~275** | **~59** | **~187** |
+| 1 | 6 (driver) | 83 | ~77 | ~21 | ~39 |
+| 2 | 9 (recruiter) | 65 | ~56 | ~15 | ~25 |
+| 3 | 5 (carrier/B2B) | 93 | ~88 | ~14 | ~45 |
+| 4 | 8 (admin) | 147 | ~139 | ~12 | ~23 |
+| 5 | 3 (cross-role) | ~42 | ~42 | ~10 | ~32 |
+| **Total** | **36** | **~388** | **~352** | **~72** | **~164** |
+
+> **Note:** 25 of the 164 specced collections already exist in `configData.js`. Net-new collections to create: **139**. Tool counts match the authoritative per-role spec files (`spec-driver.md`: 83, `spec-recruiter.md`: 65, `spec-carrier-b2b.md`: 93, `spec-admin-platform.md`: 147). Phase 5 tools are distributed across admin (observability, API platform) and multi-role (cross-role utility, financial, lifecycle) rather than a standalone role count.
 
 ---
 
@@ -969,7 +1013,7 @@ Each Phase (1-4):
 
 **Backend Service Author:** Writes new `.jsw` files with service functions.
 **Data Layer:** Creates Airtable tables, adds `configData.js` entries, writes `dataAccess` queries.
-**Tool Defs + Prompts:** Registers tools in `TOOL_DEFINITIONS`, updates system prompts.
+**Tool Defs + Prompts:** Registers actions in `ACTION_REGISTRY`, defines router in `ROUTER_DEFINITIONS`, updates system prompts.
 **Test Suite:** Writes integration tests, validates tool chains, regression checks.
 
 ### Dependency Graph
@@ -977,10 +1021,10 @@ Each Phase (1-4):
 ```
 Phase 0 (bug fixes)
   │
-  ├──> Phase 1 (driver ~80 tools)   ──┐
-  ├──> Phase 2 (recruiter ~65 tools) ──┤
-  ├──> Phase 3 (carrier ~60 tools)   ──┼──> Phase 5 (cross-role ~45 tools)
-  └──> Phase 4 (admin ~55 tools)     ──┘
+  ├──> Phase 1 (driver: 83 actions → 7 routers)    ──┐
+  ├──> Phase 2 (recruiter: 65 actions → 6 routers)  ──┤
+  ├──> Phase 3 (carrier/B2B: 93 actions → 7 routers)──┼──> Phase 5 (cross-role: ~42 actions → 3+ routers)
+  └──> Phase 4 (admin: 147 actions → 9 routers)     ──┘
 ```
 
 Phases 1-4 run in parallel after Phase 0 completes. Phase 5 depends on all four surface phases because cross-role tools reference tools and data from every role.
@@ -989,18 +1033,21 @@ Phases 1-4 run in parallel after Phase 0 completes. Phase 5 depends on all four 
 
 For every phase completion, verify:
 
-- [ ] All new tools registered in `TOOL_DEFINITIONS` with complete policy objects
+- [ ] All new actions registered in `ACTION_REGISTRY[routerName][actionName]` with policy objects
+- [ ] Router added/updated in `ROUTER_DEFINITIONS` with complete `action` enum
 - [ ] All `argMapping` arrays match service function signatures
 - [ ] All risk levels correctly classified (read/suggest/execute_low/execute_high)
-- [ ] All `execute_high` tools have `requires_approval: true`
+- [ ] All `execute_high` actions have `requires_approval: true`
+- [ ] `executeTool()` router dispatch handles all new actions correctly
+- [ ] `buildToolList()` returns router definitions for the role
 - [ ] All new backend services follow `dataAccess.jsw` routing pattern
 - [ ] All new Airtable collections added to `configData.js` (DATA_SOURCE, WIX_COLLECTION_NAMES, AIRTABLE_TABLE_NAMES)
-- [ ] Run ledger logging all new tool steps
+- [ ] Run ledger logging all new tool steps (router name + action name)
 - [ ] Outcome evaluator scoring new tool executions correctly
-- [ ] System prompt updated for the role with new capability descriptions
-- [ ] Integration tests passing for representative tool chains
+- [ ] System prompt updated for the role with new router/domain descriptions
+- [ ] Integration tests passing for representative action chains within each router
 - [ ] No regressions in existing tools (run full test suite)
-- [ ] PostMessage bridge updates if any new tools require frontend interaction
+- [ ] PostMessage bridge updates if any new actions require frontend interaction
 
 ---
 
@@ -1008,12 +1055,13 @@ For every phase completion, verify:
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Tool count exceeds AI context window | Tools dropped from prompt, agent cannot use them | Role scoping keeps per-role count under 80; add tool discovery meta-tool |
-| Airtable rate limits at ~187 collections | Queries throttled or fail | Chunk size limits, 200ms inter-chunk delays, connection pooling |
-| Backend service sprawl | Hard to maintain ~59 new services | Follow naming conventions strictly; group related functions in single service files |
+| Tool count exceeds AI context window | Actions unreachable, agent cannot use them | **Domain Router Architecture** collapses 388 actions into ~28 routers (6-9 per role), cutting tool schema tokens by 82-88%. See [router-architecture.md](./router-architecture.md) |
+| Router action enum too large | AI picks wrong action within a domain | Keep routers under ~35 actions each; split if needed. Action names are self-descriptive |
+| Airtable rate limits at ~349 collections | Queries throttled or fail | Chunk size limits, 200ms inter-chunk delays, connection pooling |
+| Backend service sprawl | Hard to maintain ~72 new services | Follow naming conventions strictly; group related functions in single service files |
 | Approval fatigue on execute_high tools | Users stop approving, bypass gates | Review approval gates per phase; downgrade low-risk actions to execute_low when safe |
 | Phase 5 blocked by slow Phase 1-4 | Cross-role tools delayed | Phase 5 can start with available surfaces; graceful degradation if some roles incomplete |
-| Cost explosion from 305-tool agent | Token usage spikes | Existing cost controls (per-run caps, daily limits, cost alerts) apply to all new tools |
+| Cost explosion from 388-action agent | Token usage spikes | Router architecture saves 82-88% of tool schema tokens; existing per-run caps, daily limits, cost alerts still apply |
 
 ---
 

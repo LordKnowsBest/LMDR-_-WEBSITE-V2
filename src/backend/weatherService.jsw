@@ -1,0 +1,148 @@
+/**
+ * Weather Service
+ *
+ * Weather forecasts, alerts, and road condition data for drivers.
+ * Uses VelocityMatch DataLake base for weather/road data.
+ *
+ * NOTE: Complements roadConditionService.jsw which handles DOT 511 data.
+ * This service provides agent-facing weather and road condition queries.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  weatherForecasts: 'weatherForecasts',
+  weatherAlerts: 'weatherAlerts',
+  roadConditions: 'roadConditions'
+};
+
+// ============================================================================
+// WEATHER FORECAST
+// ============================================================================
+
+/**
+ * Get weather forecast for a location.
+ * @param {Object} location - { latitude, longitude, city, state }
+ * @param {number} days - Forecast window 1-7 (default 3)
+ * @param {string} units - 'imperial' or 'metric' (default imperial)
+ * @returns {{ forecast: Array, location: string, days: number, units: string } | { error: string }}
+ */
+export async function getWeatherForecast(location = {}, days, units) {
+  try {
+    const dayCount = Math.min(Math.max(Number(days) || 3, 1), 7);
+
+    const queryFilters = {};
+    if (location.state) queryFilters.state = location.state;
+
+    // Fetch forecasts within the requested window
+    const cutoff = new Date(Date.now() + dayCount * 24 * 60 * 60 * 1000).toISOString();
+    queryFilters.forecast_date = { lte: cutoff };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.weatherForecasts, {
+      filters: queryFilters,
+      limit: dayCount * 4,
+      sort: [{ field: 'forecast_date', direction: 'asc' }],
+      suppressAuth: true
+    });
+
+    return {
+      forecast: result.items || [],
+      location: location.city || location.state || 'Unknown',
+      days: dayCount,
+      units: units || 'imperial'
+    };
+  } catch (error) {
+    console.error('[WeatherService] getWeatherForecast error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// WEATHER ALERTS
+// ============================================================================
+
+/**
+ * Get active weather alerts for a state or coordinate region.
+ * @param {Object} location - { state, latitude, longitude, severity_min }
+ * @returns {{ alerts: Array } | { error: string }}
+ */
+export async function getWeatherAlerts(location = {}) {
+  try {
+    const queryFilters = {
+      status: 'active'
+    };
+
+    if (location.state) queryFilters.state = location.state;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.weatherAlerts, {
+      filters: queryFilters,
+      sort: [{ field: 'severity', direction: 'desc' }],
+      suppressAuth: true
+    });
+
+    let alerts = result.items || [];
+
+    // Filter by minimum severity if specified
+    if (location.severity_min) {
+      const severityRank = { minor: 1, moderate: 2, severe: 3, extreme: 4 };
+      const minRank = severityRank[location.severity_min] || 2;
+      alerts = alerts.filter(a => (severityRank[a.severity] || 0) >= minRank);
+    }
+
+    return { alerts };
+  } catch (error) {
+    console.error('[WeatherService] getWeatherAlerts error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// ROAD CONDITIONS (Agent-facing wrapper)
+// ============================================================================
+
+/**
+ * Get road conditions for a state or route.
+ * Wraps the underlying road condition data for agent consumption.
+ * @param {string} state - Two-letter state code
+ * @param {string} route - Highway identifier (e.g. "I-80")
+ * @param {string} conditionType - 'all', 'winter', 'construction', 'closure', 'chain_law'
+ * @returns {{ conditions: Array, summary: Object } | { error: string }}
+ */
+export async function getRoadConditions(state, route, conditionType) {
+  try {
+    const queryFilters = {};
+    if (state) queryFilters.state = state.toUpperCase();
+    if (route) queryFilters.highway = route;
+    if (conditionType && conditionType !== 'all') queryFilters.type = conditionType;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.roadConditions, {
+      filters: queryFilters,
+      limit: 100,
+      suppressAuth: true
+    });
+
+    const conditions = result.items || [];
+
+    // Build summary
+    const counts = {};
+    let totalDelay = 0;
+    conditions.forEach(c => {
+      counts[c.type] = (counts[c.type] || 0) + 1;
+      if (c.delay_minutes) totalDelay += Number(c.delay_minutes);
+    });
+
+    const summary = {
+      total_incidents: conditions.length,
+      counts,
+      total_delay_minutes: totalDelay,
+      status: totalDelay > 60 ? 'Critical' : (totalDelay > 15 ? 'Moderate' : 'Clear')
+    };
+
+    return { conditions, summary };
+  } catch (error) {
+    console.error('[WeatherService] getRoadConditions error:', error.message);
+    return { error: error.message };
+  }
+}

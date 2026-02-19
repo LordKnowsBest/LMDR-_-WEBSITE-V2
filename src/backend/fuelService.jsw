@@ -124,6 +124,115 @@ export async function unlinkFuelCard(driverId, cardId) {
     return { success: true };
 }
 
+// ============================================================================
+// AGENT-FACING EXPORTS (Phase 1 Agentic Buildout)
+// ============================================================================
+
+/**
+ * Find diesel prices near a location. Agent-facing wrapper around searchFuelPrices.
+ * @param {Object} location - { latitude, longitude, city, state }
+ * @param {Object} filters - { radius_miles, max_results, sort_by }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function findDieselPrices(location = {}, filters = {}) {
+    try {
+        const lat = Number(location.latitude);
+        const lng = Number(location.longitude);
+        const radius = Math.min(Number(filters.radius_miles) || 50, 150);
+        const maxResults = Math.min(Number(filters.max_results) || 20, 50);
+
+        if (isNaN(lat) || isNaN(lng)) {
+            // Fallback: query by state if no coordinates
+            if (location.state) {
+                const res = await dataAccess.queryRecords(COLLECTION_KEYS.fuelPrices, {
+                    filters: { state: location.state },
+                    limit: maxResults,
+                    suppressAuth: true
+                });
+                return { items: res.items || [], totalCount: (res.items || []).length };
+            }
+            return { error: 'latitude/longitude or state is required' };
+        }
+
+        const result = await searchFuelPrices(lat, lng, radius, {});
+        if (!result.success) return { error: result.error };
+
+        const sortBy = filters.sort_by || 'price';
+        let items = result.items || [];
+
+        if (sortBy === 'distance') {
+            items.sort((a, b) => (a.distance_miles || Infinity) - (b.distance_miles || Infinity));
+        }
+        // Default already sorted by price from searchFuelPrices
+
+        return { items: items.slice(0, maxResults), totalCount: Math.min(items.length, maxResults) };
+    } catch (error) {
+        console.error('[FuelService] findDieselPrices error:', error.message);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Estimate fuel cost for a planned trip.
+ * @param {string} origin - Origin city/state (e.g. "Memphis, TN")
+ * @param {string} destination - Destination city/state
+ * @param {Object} truckConfig - { truck_mpg, tank_capacity_gallons, current_fuel_level_gallons }
+ * @returns {{ estimatedCost: number, estimatedGallons: number, avgPricePerGallon: number } | { error: string }}
+ */
+export async function calculateTripFuelCost(origin, destination, truckConfig = {}) {
+    try {
+        if (!origin) return { error: 'origin is required' };
+        if (!destination) return { error: 'destination is required' };
+
+        const mpg = Number(truckConfig.truck_mpg) || 6.5;
+
+        // Extract state codes
+        const originState = extractStateCode(origin);
+        const destState = extractStateCode(destination);
+        const uniqueStates = [...new Set([originState, destState].filter(Boolean))];
+
+        let totalPrice = 0;
+        let priceCount = 0;
+
+        for (const st of uniqueStates) {
+            const priceResult = await dataAccess.queryRecords(COLLECTION_KEYS.fuelPrices, {
+                filters: { state: st },
+                limit: 50,
+                suppressAuth: true
+            });
+            const prices = (priceResult.items || []).map(p => Number(p.diesel_price)).filter(p => p > 0);
+            if (prices.length > 0) {
+                totalPrice += prices.reduce((a, b) => a + b, 0);
+                priceCount += prices.length;
+            }
+        }
+
+        const avgPricePerGallon = priceCount > 0 ? Math.round((totalPrice / priceCount) * 100) / 100 : 3.85;
+        const estimatedMiles = 500;
+        const estimatedGallons = Math.round((estimatedMiles / mpg) * 10) / 10;
+        const estimatedCost = Math.round(estimatedGallons * avgPricePerGallon * 100) / 100;
+
+        return {
+            estimatedCost,
+            estimatedGallons,
+            avgPricePerGallon,
+            estimatedMiles,
+            mpg,
+            note: 'Distance is estimated. Use with route planner for accurate mileage.'
+        };
+    } catch (error) {
+        console.error('[FuelService] calculateTripFuelCost error:', error.message);
+        return { error: error.message };
+    }
+}
+
+function extractStateCode(cityState) {
+    if (!cityState || typeof cityState !== 'string') return '';
+    const parts = cityState.split(',');
+    if (parts.length >= 2) return parts[parts.length - 1].trim().substring(0, 2).toUpperCase();
+    return cityState.trim().substring(0, 2).toUpperCase();
+}
+
 export async function getFuelPriceTrends(state, days = 30) {
     const res = await dataAccess.queryRecords(COLLECTION_KEYS.fuelPriceTrends, { filters: { state }, sort: [{ field: 'date', direction: 'desc' }], limit: days, suppressAuth: true });
     let trends = res.items || [];

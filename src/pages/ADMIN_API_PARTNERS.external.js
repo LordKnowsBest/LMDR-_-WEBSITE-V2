@@ -4,7 +4,9 @@ import {
   setApiPartnerTier,
   setApiPartnerStatus,
   setPartnerApiEnvironment,
-  getPartnerUsageDashboard
+  getPartnerUsageDashboard,
+  getApiPartnerHistory,
+  getApiRevenueReport
 } from 'backend/apiPortalService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -58,6 +60,12 @@ async function routeMessage(component, message) {
       case 'getPartnerUsage':
         await handleGetPartnerUsage(component, message.partnerId, message.periodKey);
         break;
+      case 'getPartnerHistory':
+        await handleGetPartnerHistory(component, message.partnerId, message.limit);
+        break;
+      case 'getRevenueReport':
+        await handleGetRevenueReport(component, message.partnerId, message.months);
+        break;
       default:
         console.warn('ADMIN_API_PARTNERS: Unknown action', message.action);
     }
@@ -94,6 +102,17 @@ async function handleSetPartnerEnvironment(component, partnerId, environment) {
 async function handleGetPartnerUsage(component, partnerId, periodKey) {
   const result = await getPartnerUsageDashboard(partnerId, periodKey || null);
   safeSend(component, { action: 'partnerUsageLoaded', payload: result });
+}
+
+async function handleGetPartnerHistory(component, partnerId, limit = 50) {
+  const result = await getApiPartnerHistory(partnerId, limit || 50);
+  safeSend(component, { action: 'partnerHistoryLoaded', payload: result });
+}
+
+async function handleGetRevenueReport(component, partnerId, months = 12) {
+  const targetPartner = String(partnerId || '').trim() || null;
+  const result = await getApiRevenueReport(targetPartner, months || 12);
+  safeSend(component, { action: 'revenueReportLoaded', payload: result });
 }
 
 function safeSend(component, payload) {

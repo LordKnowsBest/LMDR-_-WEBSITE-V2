@@ -1,0 +1,170 @@
+/**
+ * Document Service
+ *
+ * Records driver document uploads to the compliance wallet.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  driverDocuments: 'driverDocuments'
+};
+
+const VALID_DOC_TYPES = ['cdl', 'medical_certificate', 'mvr', 'drug_test', 'employment_history', 'void_check', 'insurance', 'other'];
+
+// ============================================================================
+// DOCUMENT UPLOAD
+// ============================================================================
+
+/**
+ * Record a driver document upload event.
+ * @param {string} driverId - Driver ID
+ * @param {Object} payload - { document_type, file_url, file_name, expiry_date, notes }
+ * @returns {{ success: boolean, documentId?: string } | { error: string }}
+ */
+export async function recordDriverDocumentUpload(driverId, payload = {}) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+    if (!payload.document_type) return { error: 'document_type is required' };
+    if (!VALID_DOC_TYPES.includes(payload.document_type)) {
+      return { error: `Invalid document_type. Must be one of: ${VALID_DOC_TYPES.join(', ')}` };
+    }
+    if (!payload.file_url) return { error: 'file_url is required' };
+    if (!payload.file_name) return { error: 'file_name is required' };
+
+    // Expiry required for certain doc types
+    const expiryRequired = ['cdl', 'medical_certificate', 'insurance'];
+    if (expiryRequired.includes(payload.document_type) && !payload.expiry_date) {
+      return { error: `expiry_date is required for ${payload.document_type} documents` };
+    }
+
+    const record = {
+      driver_id: driverId,
+      document_type: payload.document_type,
+      file_url: payload.file_url,
+      file_name: payload.file_name,
+      expiry_date: payload.expiry_date || '',
+      notes: (payload.notes || '').substring(0, 200),
+      status: 'uploaded',
+      uploaded_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.driverDocuments, record, { suppressAuth: true });
+
+    return { success: true, documentId: result.record?._id || result._id };
+  } catch (error) {
+    console.error('[DocumentService] recordDriverDocumentUpload error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// COMPLIANCE DOCUMENT OPERATIONS
+// ============================================================================
+
+/**
+ * Upload a compliance document (alias for recordDriverDocumentUpload with compliance context).
+ * @param {string} driverId
+ * @param {Object} payload - { document_type, file_url, file_name, expiry_date, notes }
+ */
+export async function uploadComplianceDoc(driverId, payload = {}) {
+  return recordDriverDocumentUpload(driverId, payload);
+}
+
+/**
+ * Get all compliance documents for a driver.
+ * @param {string} driverId
+ * @param {Object} filters - { document_type, status }
+ */
+export async function getDriverComplianceDocs(driverId, filters = {}) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+
+    const queryFilters = { driver_id: driverId };
+    if (filters.document_type) queryFilters.document_type = filters.document_type;
+    if (filters.status) queryFilters.status = filters.status;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverDocuments, {
+      filters: queryFilters,
+      limit: 100,
+      suppressAuth: true
+    });
+
+    return { items: result.items || [], totalCount: result.totalCount || 0 };
+  } catch (error) {
+    console.error('[DocumentService] getDriverComplianceDocs error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Check expiry status of a specific document.
+ * @param {string} documentId
+ * @param {string} driverId
+ */
+export async function checkDocumentExpiry(documentId, driverId) {
+  try {
+    if (!documentId) return { error: 'documentId is required' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverDocuments, {
+      filters: { _id: documentId, driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    const doc = result.items?.[0];
+    if (!doc) return { error: 'Document not found' };
+
+    const now = new Date();
+    const expiry = doc.expiry_date ? new Date(doc.expiry_date) : null;
+    const daysUntilExpiry = expiry ? Math.ceil((expiry - now) / (1000 * 60 * 60 * 24)) : null;
+
+    return {
+      documentId,
+      document_type: doc.document_type,
+      expiry_date: doc.expiry_date,
+      days_until_expiry: daysUntilExpiry,
+      is_expired: daysUntilExpiry !== null && daysUntilExpiry < 0,
+      is_expiring_soon: daysUntilExpiry !== null && daysUntilExpiry >= 0 && daysUntilExpiry <= 30,
+      status: doc.status
+    };
+  } catch (error) {
+    console.error('[DocumentService] checkDocumentExpiry error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get documents expiring within a given window.
+ * @param {string} driverId
+ * @param {number} daysWindow - Days ahead to look (default 30)
+ * @param {boolean} includeExpired - Include already-expired docs
+ */
+export async function getExpiringDocuments(driverId, daysWindow = 30, includeExpired = false) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverDocuments, {
+      filters: { driver_id: driverId },
+      limit: 100,
+      suppressAuth: true
+    });
+
+    const now = new Date();
+    const windowEnd = new Date(now.getTime() + Number(daysWindow) * 24 * 60 * 60 * 1000);
+
+    const items = (result.items || []).filter(doc => {
+      if (!doc.expiry_date) return false;
+      const expiry = new Date(doc.expiry_date);
+      if (includeExpired && expiry < now) return true;
+      return expiry >= now && expiry <= windowEnd;
+    });
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('[DocumentService] getExpiringDocuments error:', error.message);
+    return { error: error.message };
+  }
+}

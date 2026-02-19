@@ -1,0 +1,108 @@
+/**
+ * Settlement Service
+ *
+ * Manages driver settlement history and dispute filing.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ * @module backend/settlementService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  settlements: 'driverSettlements',
+  disputes: 'settlementDisputes'
+};
+
+/**
+ * Get settlement history for a driver with optional filters
+ * @param {string} driverId
+ * @param {object} filters - { carrier_dot, date_from, date_to, page, page_size }
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getSettlementHistory(driverId, filters = {}) {
+  try {
+    const queryFilters = { driver_id: driverId };
+
+    if (filters.carrier_dot) {
+      queryFilters.carrier_dot = Number(filters.carrier_dot);
+    }
+
+    const page = Number(filters.page) || 1;
+    const pageSize = Math.min(Number(filters.page_size) || 25, 50);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.settlements, {
+      filters: queryFilters,
+      sort: [{ field: 'settlement_date', direction: 'desc' }],
+      limit: pageSize,
+      skip: (page - 1) * pageSize,
+      suppressAuth: true
+    });
+
+    let items = result.items || [];
+
+    // In-memory date filtering
+    if (filters.date_from) {
+      const from = new Date(filters.date_from);
+      items = items.filter(s => new Date(s.settlement_date) >= from);
+    }
+    if (filters.date_to) {
+      const to = new Date(filters.date_to);
+      items = items.filter(s => new Date(s.settlement_date) <= to);
+    }
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('settlementService.getSettlementHistory error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * File a dispute on a settlement
+ * @param {string} driverId
+ * @param {string} settlementId
+ * @param {object} dispute - { dispute_reason, expected_amount, description, supporting_doc_url }
+ * @returns {Promise<object>} { disputeId } or { error }
+ */
+export async function disputeSettlement(driverId, settlementId, dispute = {}) {
+  try {
+    if (!settlementId) return { error: 'settlementId is required' };
+    if (!dispute.dispute_reason) return { error: 'dispute_reason is required' };
+    if (!dispute.expected_amount) return { error: 'expected_amount is required' };
+    if (!dispute.description) return { error: 'description is required' };
+
+    const validReasons = [
+      'incorrect_miles', 'missing_loads', 'unauthorized_deduction',
+      'rate_discrepancy', 'fuel_advance_error', 'escrow_dispute', 'other'
+    ];
+
+    if (!validReasons.includes(dispute.dispute_reason)) {
+      return { error: `dispute_reason must be one of: ${validReasons.join(', ')}` };
+    }
+
+    // Create dispute record
+    const disputeRecord = {
+      driver_id: driverId,
+      settlement_id: settlementId,
+      dispute_reason: dispute.dispute_reason,
+      expected_amount: Number(dispute.expected_amount),
+      description: String(dispute.description).slice(0, 1000),
+      supporting_doc_url: dispute.supporting_doc_url || '',
+      status: 'open'
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.disputes, disputeRecord, { suppressAuth: true });
+
+    // Update settlement status to disputed
+    await dataAccess.updateRecord(COLLECTIONS.settlements, {
+      _id: settlementId,
+      status: 'disputed'
+    }, { suppressAuth: true });
+
+    return { disputeId: created._id || created.id };
+  } catch (error) {
+    console.error('settlementService.disputeSettlement error:', error);
+    return { error: error.message };
+  }
+}

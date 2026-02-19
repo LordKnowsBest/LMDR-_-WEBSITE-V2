@@ -1355,3 +1355,87 @@ export async function getParkingAlongRoute(routePoints, options = {}) {
 
     return { success: true, items: allResults };
 }
+
+// ============================================================================
+// AGENT-FACING EXPORTS (Phase 1 Agentic Buildout)
+// ============================================================================
+
+/**
+ * Agent-facing parking search. Wraps searchParking with the agent router signature.
+ * @param {Object} filters - { latitude, longitude, city, state, radius_miles, amenities, min_rating, availability, page, page_size }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function findTruckParking(filters = {}) {
+    const lat = Number(filters.latitude);
+    const lng = Number(filters.longitude);
+    const radius = Math.min(Number(filters.radius_miles) || 25, 100);
+
+    if (isNaN(lat) || isNaN(lng)) {
+        return { error: 'latitude and longitude are required' };
+    }
+
+    const result = await searchParking(lat, lng, radius, {
+        amenities: filters.amenities || []
+    });
+
+    if (!result.success) return { error: result.error };
+
+    let items = result.items || [];
+
+    // Additional agent-level filters
+    if (filters.min_rating) {
+        const minRating = Number(filters.min_rating);
+        items = items.filter(i => (Number(i.avg_rating) || 0) >= minRating);
+    }
+
+    if (filters.availability === 'available') {
+        items = items.filter(i => i.available_spaces > 0);
+    }
+
+    const page = Number(filters.page) || 1;
+    const pageSize = Math.min(Number(filters.page_size) || 15, 30);
+    const start = (page - 1) * pageSize;
+    const paged = items.slice(start, start + pageSize);
+
+    return { items: paged, totalCount: items.length };
+}
+
+/**
+ * Save a parking location to driver's favorites. Idempotent.
+ * @param {string} driverId - Driver ID
+ * @param {string} locationId - Parking location record ID
+ * @returns {{ success: boolean, favoriteCount: number } | { error: string }}
+ */
+export async function saveFavoriteParking(driverId, locationId) {
+    try {
+        if (!driverId) return { error: 'driverId is required' };
+        if (!locationId) return { error: 'locationId is required' };
+
+        // Idempotent check
+        const existing = await dataAccess.queryRecords('driverFavoriteParkingLocations', {
+            filters: { driver_id: driverId, location_id: locationId },
+            limit: 1,
+            suppressAuth: true
+        });
+
+        if ((existing.items || []).length === 0) {
+            await dataAccess.insertRecord('driverFavoriteParkingLocations', {
+                driver_id: driverId,
+                location_id: locationId,
+                saved_at: new Date().toISOString()
+            }, { suppressAuth: true });
+        }
+
+        // Return total favorite count
+        const countResult = await dataAccess.queryRecords('driverFavoriteParkingLocations', {
+            filters: { driver_id: driverId },
+            limit: 0,
+            suppressAuth: true
+        });
+
+        return { success: true, favoriteCount: countResult.totalCount || 0 };
+    } catch (error) {
+        console.error('[ParkingService] saveFavoriteParking error:', error.message);
+        return { error: error.message };
+    }
+}

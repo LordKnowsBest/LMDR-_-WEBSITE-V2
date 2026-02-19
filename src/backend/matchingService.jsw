@@ -1,0 +1,180 @@
+/**
+ * Matching Service
+ *
+ * Manages driver-carrier match browsing, interest expression,
+ * and match dismissals.
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  driverMatches: 'driverMatches',
+  carriers: 'carriers',
+  driverCarrierInterests: 'driverCarrierInterests'
+};
+
+// ============================================================================
+// MATCH BROWSING
+// ============================================================================
+
+/**
+ * Get driver's AI-scored match list, ranked by score.
+ * @param {string} driverId - Driver ID
+ * @param {Object} filters - { min_score, job_type, max_results, include_applied }
+ * @returns {{ items: Array, totalCount: number } | { error: string }}
+ */
+export async function getDriverMatches(driverId, filters = {}) {
+  try {
+    if (!driverId) return { error: 'driverId is required' };
+
+    const maxResults = Math.min(Number(filters.max_results) || 20, 50);
+    const minScore = Number(filters.min_score) || 60;
+
+    const queryFilters = {
+      driver_id: driverId,
+      status: { ne: 'dismissed' },
+      match_score: { gte: minScore }
+    };
+
+    if (filters.job_type) queryFilters.job_type = filters.job_type;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverMatches, {
+      filters: queryFilters,
+      limit: maxResults,
+      sort: [{ field: 'match_score', direction: 'desc' }],
+      suppressAuth: true
+    });
+
+    let items = result.items || [];
+
+    // Optionally exclude already-applied carriers
+    if (!filters.include_applied) {
+      const appsResult = await dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+        filters: { driver_id: driverId },
+        suppressAuth: true
+      });
+      const appliedDots = new Set((appsResult.items || []).map(a => a.carrier_dot));
+      items = items.filter(m => !appliedDots.has(m.carrier_dot));
+    }
+
+    return {
+      items,
+      totalCount: items.length
+    };
+  } catch (error) {
+    console.error('[MatchingService] getDriverMatches error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get full details for a single match record with carrier info.
+ * @param {string} matchId - Driver Matches record ID
+ * @param {string} driverId - Driver ID
+ * @returns {{ match: Object, carrier?: Object } | { error: string }}
+ */
+export async function getMatchDetails(matchId, driverId) {
+  try {
+    if (!matchId) return { error: 'matchId is required' };
+
+    const match = await dataAccess.getRecord(COLLECTIONS.driverMatches, matchId, { suppressAuth: true });
+    if (!match) return { error: 'Match not found' };
+    if (match.driver_id !== driverId) return { error: 'Permission denied' };
+
+    // Fetch carrier info
+    let carrier = null;
+    if (match.carrier_dot) {
+      const carrierResult = await dataAccess.queryRecords(COLLECTIONS.carriers, {
+        filters: { dot_number: Number(match.carrier_dot) },
+        limit: 1,
+        suppressAuth: true
+      });
+      carrier = (carrierResult.items || [])[0] || null;
+    }
+
+    return { match, carrier };
+  } catch (error) {
+    console.error('[MatchingService] getMatchDetails error:', error.message);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// INTEREST & DISMISS
+// ============================================================================
+
+/**
+ * Express soft interest in a matched carrier.
+ * @param {string} driverId - Driver ID
+ * @param {string} matchId - Driver Matches record ID
+ * @param {string} message - Optional intro note (max 300 chars)
+ * @returns {{ success: boolean, interestId?: string } | { error: string }}
+ */
+export async function expressDriverInterest(driverId, matchId, message) {
+  try {
+    if (!matchId) return { error: 'matchId is required' };
+
+    const match = await dataAccess.getRecord(COLLECTIONS.driverMatches, matchId, { suppressAuth: true });
+    if (!match) return { error: 'Match not found' };
+    if (match.driver_id !== driverId) return { error: 'Permission denied' };
+
+    // Check for existing interest
+    const existing = await dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+      filters: { driver_id: driverId, carrier_dot: match.carrier_dot, source: 'match_interest' },
+      limit: 1,
+      suppressAuth: true
+    });
+    if ((existing.items || []).length > 0) {
+      return { error: 'You have already expressed interest in this carrier' };
+    }
+
+    const record = {
+      driver_id: driverId,
+      carrier_dot: match.carrier_dot,
+      carrier_name: match.carrier_name || '',
+      match_id: matchId,
+      status: 'interested',
+      source: 'match_interest',
+      message: (message || '').substring(0, 300),
+      applied_at: new Date().toISOString()
+    };
+
+    const result = await dataAccess.insertRecord(COLLECTIONS.driverCarrierInterests, record, { suppressAuth: true });
+
+    return { success: true, interestId: result.record?._id || result._id };
+  } catch (error) {
+    console.error('[MatchingService] expressDriverInterest error:', error.message);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Dismiss a match from the driver's feed.
+ * @param {string} driverId - Driver ID
+ * @param {string} matchId - Driver Matches record ID
+ * @param {string} reason - Dismissal reason
+ * @returns {{ success: boolean } | { error: string }}
+ */
+export async function dismissMatch(driverId, matchId, reason) {
+  try {
+    if (!matchId) return { error: 'matchId is required' };
+
+    const match = await dataAccess.getRecord(COLLECTIONS.driverMatches, matchId, { suppressAuth: true });
+    if (!match) return { error: 'Match not found' };
+    if (match.driver_id !== driverId) return { error: 'Permission denied' };
+
+    await dataAccess.updateRecord(COLLECTIONS.driverMatches, {
+      _id: matchId,
+      status: 'dismissed',
+      dismiss_reason: reason || '',
+      dismissed_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    return { success: true };
+  } catch (error) {
+    console.error('[MatchingService] dismissMatch error:', error.message);
+    return { error: error.message };
+  }
+}

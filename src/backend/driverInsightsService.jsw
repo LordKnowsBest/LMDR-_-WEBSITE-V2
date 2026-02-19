@@ -137,3 +137,81 @@ export async function getDriverStats() {
         return { success: false, error: err.message };
     }
 }
+
+// ─── Agent-facing API (driver_utility router) ─────────────────────────────────
+
+/**
+ * Get profile strength score (lightweight — single number + next action)
+ * @param {string} driverId
+ * @returns {Promise<object>} { score, label, next_action } or { error }
+ */
+export async function getProfileStrengthScore(driverId) {
+    try {
+        const profileResult = await dataAccess.queryRecords('driverProfiles', {
+            filters: { _id: driverId },
+            limit: 1,
+            suppressAuth: true
+        });
+
+        if (!profileResult.items || profileResult.items.length === 0) {
+            return { error: 'Driver profile not found' };
+        }
+
+        const p = profileResult.items[0];
+
+        // Score each section (0-100 total)
+        let score = 0;
+        const missing = [];
+
+        // Personal info (20 pts)
+        if (p.first_name) score += 5; else missing.push('first_name');
+        if (p.last_name) score += 5; else missing.push('last_name');
+        if (p.phone) score += 5; else missing.push('phone');
+        if (p.home_zip || p.home_state) score += 5; else missing.push('home_location');
+
+        // CDL details (25 pts)
+        if (p.cdl_class) score += 10; else missing.push('cdl_class');
+        if (p.cdl_state) score += 5; else missing.push('cdl_state');
+        if (p.years_experience) score += 5; else missing.push('years_experience');
+        if (p.endorsements) score += 5; else missing.push('endorsements');
+
+        // Preferences (15 pts)
+        if (p.job_types_preferred) score += 5; else missing.push('job_types_preferred');
+        if (p.min_pay_weekly) score += 5; else missing.push('min_pay_weekly');
+        if (p.bio) score += 5; else missing.push('bio');
+
+        // Documents (20 pts) — check document collection
+        const docsResult = await dataAccess.queryRecords('driverDocuments', {
+            filters: { driver_id: driverId },
+            limit: 20,
+            suppressAuth: true
+        });
+
+        const docs = docsResult.items || [];
+        const docTypes = new Set(docs.map(d => d.document_type));
+        if (docTypes.has('cdl')) score += 10; else missing.push('cdl_document');
+        if (docTypes.has('medical_certificate')) score += 5; else missing.push('medical_certificate');
+        if (docTypes.has('mvr')) score += 5; else missing.push('mvr');
+
+        // Avatar (5 pts)
+        if (p.avatar_url) score += 5; else missing.push('avatar');
+
+        // Work history (15 pts) — check if bio or experience is filled
+        if (p.willing_to_relocate !== undefined) score += 5;
+        if (Number(p.years_experience || 0) >= 2) score += 5;
+        if (p.cdl_expiry) score += 5; else missing.push('cdl_expiry');
+
+        score = Math.min(100, score);
+
+        const label = score >= 80 ? 'Strong' : score >= 50 ? 'Good' : score >= 30 ? 'Needs Work' : 'Incomplete';
+
+        const nextAction = missing.length > 0
+            ? `Add your ${missing[0].replace(/_/g, ' ')} to boost your profile score`
+            : 'Your profile is complete!';
+
+        return { score, label, next_action: nextAction };
+    } catch (err) {
+        console.error('getProfileStrengthScore error:', err);
+        return { error: err.message };
+    }
+}

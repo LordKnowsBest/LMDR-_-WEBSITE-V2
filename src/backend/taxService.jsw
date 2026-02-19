@@ -1,0 +1,202 @@
+/**
+ * Tax Service
+ *
+ * Tax summary, deduction suggestions, and IRS per diem rates for CDL drivers.
+ * Named per spec: taxService.jsw (agent router uses this name).
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ * @module backend/taxService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  expenses: 'driverExpenses',
+  settlements: 'driverSettlements',
+  profiles: 'driverProfiles',
+  taxRef: 'taxReferenceData'
+};
+
+// 2024-2025 IRS per diem rate for transportation workers
+const STANDARD_PER_DIEM = 69;
+
+// Federal tax brackets 2025 (single)
+const BRACKETS_SINGLE = [
+  { min: 0, max: 11600, rate: 0.10 },
+  { min: 11600, max: 47150, rate: 0.12 },
+  { min: 47150, max: 100525, rate: 0.22 },
+  { min: 100525, max: 191950, rate: 0.24 },
+  { min: 191950, max: 243725, rate: 0.32 },
+  { min: 243725, max: 609350, rate: 0.35 },
+  { min: 609350, max: Infinity, rate: 0.37 }
+];
+
+const SE_TAX_RATE = 0.153; // self-employment tax rate (15.3%)
+
+/**
+ * Get driver tax summary for a given year
+ * @param {string} driverId
+ * @param {number} [taxYear] - defaults to current year
+ * @param {string} [filingStatus="single"]
+ * @returns {Promise<object>} { summary } or { error }
+ */
+export async function getDriverTaxSummary(driverId, taxYear, filingStatus = 'single') {
+  try {
+    const year = Number(taxYear) || new Date().getFullYear();
+    const yearStart = `${year}-01-01`;
+    const yearEnd = `${year}-12-31`;
+
+    // Fetch settlements (income)
+    const settlementsResult = await dataAccess.queryRecords(COLLECTIONS.settlements, {
+      filters: { driver_id: driverId },
+      limit: 1000,
+      suppressAuth: true
+    });
+
+    const yearSettlements = (settlementsResult.items || []).filter(s => {
+      const d = s.settlement_date || s._createdDate;
+      return d >= yearStart && d <= yearEnd;
+    });
+
+    const grossIncome = yearSettlements.reduce((sum, s) => sum + Number(s.gross_pay || 0), 0);
+
+    // Fetch expenses (deductions)
+    const expensesResult = await dataAccess.queryRecords(COLLECTIONS.expenses, {
+      filters: { driver_id: driverId },
+      limit: 5000,
+      suppressAuth: true
+    });
+
+    const yearExpenses = (expensesResult.items || []).filter(e => {
+      return e.expense_date >= yearStart && e.expense_date <= yearEnd && e.is_deductible;
+    });
+
+    const totalExpenses = yearExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+
+    // Estimated per diem (assume 260 qualifying days for full-time OTR)
+    const estimatedDaysAway = Math.min(yearSettlements.length * 7, 300);
+    const perDiemDeduction = estimatedDaysAway * STANDARD_PER_DIEM;
+
+    const taxableIncome = Math.max(0, grossIncome - totalExpenses - perDiemDeduction);
+    const selfEmploymentTax = Math.round(taxableIncome * SE_TAX_RATE);
+
+    // Estimated quarterly payments
+    const quarterlyPayment = Math.round((selfEmploymentTax + estimateFederalTax(taxableIncome)) / 4);
+
+    return {
+      summary: {
+        tax_year: year,
+        filing_status: filingStatus,
+        gross_income: Math.round(grossIncome * 100) / 100,
+        total_business_expenses: Math.round(totalExpenses * 100) / 100,
+        per_diem_deduction: perDiemDeduction,
+        estimated_days_away: estimatedDaysAway,
+        estimated_taxable_income: Math.round(taxableIncome * 100) / 100,
+        estimated_se_tax: selfEmploymentTax,
+        estimated_quarterly_payment: quarterlyPayment,
+        disclaimer: 'This is an estimate only. Consult a tax professional for actual filing.'
+      }
+    };
+  } catch (error) {
+    console.error('taxService.getDriverTaxSummary error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get commonly missed deduction suggestions
+ * @param {string} driverId
+ * @param {number} [taxYear]
+ * @returns {Promise<object>} { suggestions } or { error }
+ */
+export async function getDeductionSuggestions(driverId, taxYear) {
+  try {
+    const year = Number(taxYear) || new Date().getFullYear();
+
+    // Fetch driver profile for context
+    const profileResult = await dataAccess.queryRecords(COLLECTIONS.profiles, {
+      filters: { _id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    // Fetch current year expenses to check what's already tracked
+    const expensesResult = await dataAccess.queryRecords(COLLECTIONS.expenses, {
+      filters: { driver_id: driverId },
+      limit: 5000,
+      suppressAuth: true
+    });
+
+    const yearExpenses = (expensesResult.items || []).filter(
+      e => (e.expense_date || '').startsWith(String(year))
+    );
+
+    const trackedCategories = new Set(yearExpenses.map(e => e.category));
+
+    const allSuggestions = [
+      { name: 'Per Diem (Meals)', category: 'meals', irs_basis: 'IRC 274(n), DOT special rate', estimated_annual: STANDARD_PER_DIEM * 260, priority: 'high' },
+      { name: 'Cell Phone & Service Plan', category: 'communications', irs_basis: 'IRC 162', estimated_annual: 1200, priority: 'medium' },
+      { name: 'Truck Maintenance & Repairs', category: 'maintenance', irs_basis: 'IRC 162', estimated_annual: 5000, priority: 'high' },
+      { name: 'Medical Exam Fees', category: 'medical', irs_basis: 'IRC 213', estimated_annual: 200, priority: 'low' },
+      { name: 'Toll Transponder & Tolls', category: 'tolls', irs_basis: 'IRC 162', estimated_annual: 3000, priority: 'medium' },
+      { name: 'Scale Tickets', category: 'scales', irs_basis: 'IRC 162', estimated_annual: 500, priority: 'low' },
+      { name: 'Truck Insurance Premiums', category: 'insurance', irs_basis: 'IRC 162', estimated_annual: 8000, priority: 'high' },
+      { name: 'Lumper Fees', category: 'lumper', irs_basis: 'IRC 162', estimated_annual: 2000, priority: 'medium' },
+      { name: 'CB Radio & GPS Equipment', category: 'equipment', irs_basis: 'IRC 179', estimated_annual: 800, priority: 'low' },
+      { name: 'Lodging (non per diem)', category: 'lodging', irs_basis: 'IRC 162', estimated_annual: 1500, priority: 'medium' }
+    ];
+
+    const suggestions = allSuggestions.map(s => ({
+      ...s,
+      currently_tracked: trackedCategories.has(s.category),
+      tax_year: year
+    }));
+
+    return { suggestions };
+  } catch (error) {
+    console.error('taxService.getDeductionSuggestions error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get IRS per diem rates
+ * @param {number} [taxYear]
+ * @param {string} [state]
+ * @returns {Promise<object>} { rates } or { error }
+ */
+export async function getPerDiemRates(taxYear, state) {
+  try {
+    const year = Number(taxYear) || new Date().getFullYear();
+
+    return {
+      rates: {
+        tax_year: year,
+        standard_rate: STANDARD_PER_DIEM,
+        high_cost_rate: 74,
+        deductible_percentage: 80,
+        effective_standard: Math.round(STANDARD_PER_DIEM * 0.80 * 100) / 100,
+        effective_high_cost: Math.round(74 * 0.80 * 100) / 100,
+        notes: 'Transportation workers (DOT hours) can deduct 80% of per diem. Standard method: $69/day for most areas, $74/day for high-cost localities.',
+        calculation_formula: 'Annual deduction = (Days away from home) x (Per diem rate) x 0.80',
+        state_note: state ? `Check IRS Publication 1542 for high-cost localities in ${state}` : '',
+        disclaimer: 'Rates are estimates. Verify with IRS Publication 463 for current year.'
+      }
+    };
+  } catch (error) {
+    console.error('taxService.getPerDiemRates error:', error);
+    return { error: error.message };
+  }
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+function estimateFederalTax(taxableIncome) {
+  let tax = 0;
+  for (const bracket of BRACKETS_SINGLE) {
+    if (taxableIncome <= bracket.min) break;
+    const taxable = Math.min(taxableIncome, bracket.max) - bracket.min;
+    tax += taxable * bracket.rate;
+  }
+  return Math.round(tax);
+}

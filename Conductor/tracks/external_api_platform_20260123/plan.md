@@ -352,7 +352,7 @@ Expose CDL OCR extraction and document verification capabilities.
 ### 6.5 Document API Documentation
 - [ ] Task: Write OpenAPI spec for Document APIs
 - [ ] Task: Create code examples for HR integration
-- [ ] Task: Write integration guide for background check systems
+- [x] Task: Write integration guide for background check systems
 - [ ] Task: Create Postman collection
 
 ### 6.6 Testing - Phase 6
@@ -409,7 +409,7 @@ Expose gamification system for partner integration.
 
 ### 7.6 Engagement API Documentation
 - [ ] Task: Write OpenAPI spec for Engagement APIs
-- [ ] Task: Create white-label integration guide
+- [x] Task: Create white-label integration guide
 - [ ] Task: Document partner-scoped user mapping
 - [ ] Task: Create Postman collection
 
@@ -437,14 +437,14 @@ Build self-service developer portal and partner management tools.
 - [x] Task: Implement sandbox environment switching
 
 ### 8.2 Developer Portal - Frontend
-- [ ] Task: Create `API_PORTAL_DASHBOARD.html` in `src/public/admin/`
-- [ ] Task: Build dashboard with usage stats
-- [ ] Task: Build API key management UI
-- [ ] Task: Build usage charts (daily, monthly)
-- [ ] Task: Build endpoint-level usage breakdown
-- [ ] Task: Build webhook management UI
-- [ ] Task: Build sandbox/production environment toggle
-- [ ] Task: Style with LMDR theme
+- [x] Task: Create `API_PORTAL_DASHBOARD.html` in `src/public/admin/`
+- [x] Task: Build dashboard with usage stats
+- [x] Task: Build API key management UI
+- [x] Task: Build usage charts (daily, monthly)
+- [x] Task: Build endpoint-level usage breakdown
+- [x] Task: Build webhook management UI
+- [x] Task: Build sandbox/production environment toggle
+- [x] Task: Style with LMDR theme
 
 ### 8.3 API Documentation Site
 - [ ] Task: Create interactive API documentation page
@@ -464,13 +464,13 @@ Build self-service developer portal and partner management tools.
 - [x] Task: Create billing webhooks for subscription events
 
 ### 8.5 Admin Tools
-- [ ] Task: Create `ADMIN_API_PARTNERS.html` for partner management
-- [ ] Task: Build partner list with status and usage
-- [ ] Task: Build partner detail view with full history
-- [ ] Task: Implement manual tier override capability
-- [ ] Task: Implement partner suspension capability
-- [ ] Task: Build usage analytics dashboard
-- [ ] Task: Build revenue reporting
+- [x] Task: Create `ADMIN_API_PARTNERS.html` for partner management
+- [x] Task: Build partner list with status and usage
+- [x] Task: Build partner detail view with full history
+- [x] Task: Implement manual tier override capability
+- [x] Task: Implement partner suspension capability
+- [x] Task: Build usage analytics dashboard
+- [x] Task: Build revenue reporting
 
 ### 8.6 Partner Onboarding
 - [ ] Task: Create partner onboarding email sequence

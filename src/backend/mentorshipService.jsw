@@ -1,0 +1,147 @@
+/**
+ * Mentorship Service
+ *
+ * Agent-facing API for mentor discovery, mentorship requests, status, and ratings.
+ * Complements the existing mentorService.jsw (which handles mentor profile CRUD).
+ *
+ * Data Source: Airtable (via dataAccess.jsw)
+ * @module backend/mentorshipService
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  mentors: 'communityMentors',
+  requests: 'mentorshipRequests',
+  ratings: 'mentorshipRatings'
+};
+
+/**
+ * Find available mentors with optional specialty/rating filters
+ * @param {object} filters - { specialty, available_only, min_rating, max_results }
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function findMentors(filters = {}) {
+  try {
+    const queryFilters = {};
+
+    if (filters.available_only !== false) {
+      queryFilters.status = 'active';
+    }
+
+    if (filters.specialty && Array.isArray(filters.specialty) && filters.specialty.length > 0) {
+      queryFilters.specialties = { hasSome: filters.specialty };
+    }
+
+    const maxResults = Math.min(Number(filters.max_results) || 15, 50);
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.mentors, {
+      filters: queryFilters,
+      limit: maxResults,
+      sort: [{ field: 'avg_rating', direction: 'desc' }],
+      suppressAuth: true
+    });
+
+    let items = result.items || [];
+
+    if (filters.min_rating && Number(filters.min_rating) > 0) {
+      const minRating = Number(filters.min_rating);
+      items = items.filter(m => Number(m.avg_rating || 0) >= minRating);
+    }
+
+    return { items, totalCount: items.length };
+  } catch (error) {
+    console.error('mentorshipService.findMentors error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Request mentorship from a specific mentor
+ * @param {string} driverId - the mentee
+ * @param {string} mentorId - communityMentors record ID
+ * @param {object} payload - { intro_message, goal }
+ * @returns {Promise<object>} { requestId } or { error }
+ */
+export async function requestMentorship(driverId, mentorId, payload = {}) {
+  try {
+    if (!mentorId) return { error: 'mentorId is required' };
+    if (!payload.intro_message) return { error: 'intro_message is required' };
+
+    // Check for existing pending request
+    const existing = await dataAccess.queryRecords(COLLECTIONS.requests, {
+      filters: { mentee_id: driverId, status: 'pending' },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (existing.items && existing.items.length > 0) {
+      return { error: 'You already have a pending mentorship request' };
+    }
+
+    const record = {
+      mentee_id: driverId,
+      mentor_id: mentorId,
+      intro_message: String(payload.intro_message).slice(0, 500),
+      goal: payload.goal || 'general',
+      status: 'pending'
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.requests, record, { suppressAuth: true });
+    return { requestId: created._id || created.id };
+  } catch (error) {
+    console.error('mentorshipService.requestMentorship error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Get all mentorship relationships for a driver (mentee)
+ * @param {string} driverId
+ * @returns {Promise<object>} { items, totalCount } or { error }
+ */
+export async function getDriverMentorshipStatus(driverId) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.requests, {
+      filters: { mentee_id: driverId },
+      sort: [{ field: '_createdDate', direction: 'desc' }],
+      limit: 50,
+      suppressAuth: true
+    });
+
+    return { items: result.items || [], totalCount: result.totalCount || 0 };
+  } catch (error) {
+    console.error('mentorshipService.getDriverMentorshipStatus error:', error);
+    return { error: error.message };
+  }
+}
+
+/**
+ * Rate a completed mentorship
+ * @param {string} driverId
+ * @param {string} mentorshipId - mentorshipRequests record ID
+ * @param {object} rating - { rating_overall, rating_communication, rating_expertise, rating_helpfulness, review_text }
+ * @returns {Promise<object>} { ratingId } or { error }
+ */
+export async function rateMentor(driverId, mentorshipId, rating = {}) {
+  try {
+    if (!mentorshipId) return { error: 'mentorshipId is required' };
+    if (!rating.rating_overall) return { error: 'rating_overall is required' };
+
+    const record = {
+      mentee_id: driverId,
+      mentorship_id: mentorshipId,
+      rating_overall: Number(rating.rating_overall),
+      rating_communication: Number(rating.rating_communication || 0),
+      rating_expertise: Number(rating.rating_expertise || 0),
+      rating_helpfulness: Number(rating.rating_helpfulness || 0),
+      review_text: rating.review_text ? String(rating.review_text).slice(0, 400) : ''
+    };
+
+    const created = await dataAccess.insertRecord(COLLECTIONS.ratings, record, { suppressAuth: true });
+    return { ratingId: created._id || created.id };
+  } catch (error) {
+    console.error('mentorshipService.rateMentor error:', error);
+    return { error: error.message };
+  }
+}

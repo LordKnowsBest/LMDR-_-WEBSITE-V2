@@ -173,7 +173,12 @@ describe('AgentService E2E', () => {
 
     const result = await handleAgentTurn('driver', 'driver-42', 'Find me carriers near 75001', {});
 
-    expect(findMatchingCarriers).toHaveBeenCalledWith('75001', 150, 65, 'Regional');
+    expect(findMatchingCarriers).toHaveBeenCalledWith({
+      zip: '75001',
+      maxDistance: 150,
+      minCPM: 65,
+      operationType: 'Regional'
+    });
     expect(routeAIRequest).toHaveBeenCalledTimes(2);
     expect(addTurn).toHaveBeenCalledWith(
       'conv-e2e-1',
