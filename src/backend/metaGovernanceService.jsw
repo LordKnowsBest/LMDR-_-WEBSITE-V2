@@ -1,0 +1,293 @@
+import * as dataAccess from 'backend/dataAccess';
+import * as metaAdsAuth from 'backend/metaAdsAuthService';
+
+const COLLECTIONS = {
+  integrations: 'metaIntegrations',
+  policies: 'metaGovernancePolicies',
+  mutationAudit: 'metaMutationAudit',
+  errorEvents: 'metaErrorEvents',
+  rateLimitEvents: 'metaRateLimitEvents'
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function deriveTokenStatus(integration) {
+  const integrationStatus = integration.status || 'unknown';
+  if (integrationStatus === 'disabled') return 'disabled';
+  if (integrationStatus === 'quarantined') return 'quarantined';
+
+  const existing = integration.token_health_status;
+  if (existing) return existing;
+
+  const expiresAt = integration.token_expires_at || integration.expires_at || '';
+  if (!expiresAt) return 'unknown_expiry';
+
+  const expiresMs = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expiresMs)) return 'unknown_expiry';
+
+  const deltaHours = Math.round((expiresMs - Date.now()) / (60 * 60 * 1000));
+  if (deltaHours < 0) return 'expired';
+  if (deltaHours <= 72) return 'expiring_soon';
+  return 'healthy';
+}
+
+function hoursAgoIso(hours = 24) {
+  return new Date(Date.now() - (Number(hours) || 24) * 60 * 60 * 1000).toISOString();
+}
+
+export async function listMetaIntegrations(filters = {}) {
+  const requestFilters = { ...filters };
+  const limit = Number(requestFilters.limit) || 100;
+  delete requestFilters.limit;
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.integrations, {
+    filters: requestFilters,
+    sort: [{ field: 'updated_at', direction: 'desc' }],
+    limit,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to list Meta integrations', items: [] };
+  }
+  return { success: true, items: result.items, totalCount: result.totalCount || result.items.length };
+}
+
+export async function getTokenHealth(integrationId) {
+  return metaAdsAuth.getTokenHealth(integrationId);
+}
+
+export async function getMetaApiErrorDigest(integrationId = '', hours = 24, limit = 50) {
+  const filters = { created_at: { gte: hoursAgoIso(hours) } };
+  if (integrationId) {
+    filters.integration_id = integrationId;
+  }
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.errorEvents, {
+    filters,
+    sort: [{ field: 'created_at', direction: 'desc' }],
+    limit: Number(limit) || 50,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to read error events', items: [] };
+  }
+
+  const digest = {};
+  for (const item of result.items) {
+    const key = item.error_code || item.code || 'unknown_error';
+    digest[key] = (digest[key] || 0) + 1;
+  }
+
+  return {
+    success: true,
+    windowHours: Number(hours) || 24,
+    totalEvents: result.items.length,
+    digest,
+    items: result.items
+  };
+}
+
+export async function getRateLimitPosture(integrationId = '', windowHours = 24) {
+  const filters = { created_at: { gte: hoursAgoIso(windowHours) } };
+  if (integrationId) {
+    filters.integration_id = integrationId;
+  }
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.rateLimitEvents, {
+    filters,
+    sort: [{ field: 'created_at', direction: 'desc' }],
+    limit: 500,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to read rate-limit events', items: [] };
+  }
+
+  let nearLimit = 0;
+  let throttled = 0;
+  for (const event of result.items) {
+    const remainingPct = Number(event.remaining_pct ?? event.remainingPercent ?? 100);
+    if (remainingPct <= 20) nearLimit++;
+    if (event.status === 'throttled' || event.throttled === true) throttled++;
+  }
+
+  return {
+    success: true,
+    windowHours: Number(windowHours) || 24,
+    totalEvents: result.items.length,
+    nearLimitCount: nearLimit,
+    throttledCount: throttled,
+    posture: throttled > 0 ? 'critical' : (nearLimit > 0 ? 'elevated' : 'normal'),
+    items: result.items
+  };
+}
+
+export async function getAuditEvents(filters = {}) {
+  const requestFilters = { ...filters };
+  const limit = Number(requestFilters.limit) || 100;
+  delete requestFilters.limit;
+
+  const result = await dataAccess.queryRecords(COLLECTIONS.mutationAudit, {
+    filters: requestFilters,
+    sort: [{ field: 'created_at', direction: 'desc' }],
+    limit,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to fetch audit events', items: [] };
+  }
+  return { success: true, items: result.items, totalCount: result.totalCount || result.items.length };
+}
+
+async function upsertPolicy(policyKey, payload, userId) {
+  const record = {
+    policy_key: policyKey,
+    ...payload,
+    updated_by: userId || payload.updated_by || '',
+    updated_at: nowIso()
+  };
+
+  const result = await dataAccess.upsertRecord(COLLECTIONS.policies, 'policy_key', policyKey, record, {
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || `Failed to upsert policy: ${policyKey}` };
+  }
+  return { success: true, record: result.record };
+}
+
+export async function refreshSystemUserToken(integrationId, payload = {}) {
+  const actorId = payload.actorId || payload.refreshedBy || '';
+  return metaAdsAuth.refreshSystemUserToken(integrationId, payload, actorId);
+}
+
+export async function syncMetaAdAccounts(integrationId = '') {
+  return metaAdsAuth.syncAdAccounts(integrationId);
+}
+
+export async function runMetaTokenHealthChecks(options = {}) {
+  return metaAdsAuth.runTokenHealthChecks(options);
+}
+
+export async function getMetaGovernanceSummary() {
+  const listResult = await listMetaIntegrations({ limit: 500 });
+  if (!listResult.success) {
+    return { success: false, error: listResult.error || 'Failed to load Meta governance summary' };
+  }
+
+  const items = listResult.items || [];
+  const statusCounts = {
+    active: 0,
+    disabled: 0,
+    quarantined: 0,
+    unknown: 0
+  };
+  const tokenHealthCounts = {
+    healthy: 0,
+    expiring_soon: 0,
+    expired: 0,
+    disabled: 0,
+    quarantined: 0,
+    unknown_expiry: 0
+  };
+
+  for (const integration of items) {
+    const status = integration.status || 'unknown';
+    if (statusCounts[status] !== undefined) {
+      statusCounts[status]++;
+    } else {
+      statusCounts.unknown++;
+    }
+
+    const tokenStatus = deriveTokenStatus(integration);
+    if (tokenHealthCounts[tokenStatus] !== undefined) {
+      tokenHealthCounts[tokenStatus]++;
+    } else {
+      tokenHealthCounts.unknown_expiry++;
+    }
+  }
+
+  const criticalCount =
+    tokenHealthCounts.expired +
+    tokenHealthCounts.quarantined +
+    tokenHealthCounts.disabled;
+  const warningCount = tokenHealthCounts.expiring_soon;
+  const posture = criticalCount > 0 ? 'critical' : (warningCount > 0 ? 'warning' : 'healthy');
+
+  return {
+    success: true,
+    generatedAt: nowIso(),
+    totals: {
+      integrations: items.length,
+      adAccounts: items.reduce((count, integration) => {
+        const list = Array.isArray(integration.ad_accounts) ? integration.ad_accounts.length : 0;
+        return count + (integration.ad_account_id ? 1 : 0) + list;
+      }, 0)
+    },
+    statusCounts,
+    tokenHealthCounts,
+    posture
+  };
+}
+
+export async function setCampaignGuardrails(payload = {}, userId = '') {
+  return upsertPolicy('campaign_guardrails', payload, userId);
+}
+
+export async function setDailyBudgetCaps(payload = {}, userId = '') {
+  return upsertPolicy('daily_budget_caps', payload, userId);
+}
+
+export async function setApprovalThresholds(payload = {}, userId = '') {
+  return upsertPolicy('approval_thresholds', payload, userId);
+}
+
+export async function quarantineIntegration(integrationId, payload = {}, userId = '') {
+  const listResult = await listMetaIntegrations({ integration_id: integrationId, limit: 1 });
+  const integration = listResult.items && listResult.items.length > 0 ? listResult.items[0] : null;
+  if (!integration) {
+    return { success: false, error: `Integration not found: ${integrationId}` };
+  }
+
+  const updated = await dataAccess.updateRecord(COLLECTIONS.integrations, {
+    ...integration,
+    status: 'quarantined',
+    quarantine_reason: payload.reason || '',
+    quarantined_by: userId || payload.actorId || '',
+    quarantined_at: nowIso(),
+    updated_at: nowIso()
+  }, { suppressAuth: true });
+
+  if (!updated.success) {
+    return { success: false, error: updated.error || 'Failed to quarantine integration' };
+  }
+
+  await dataAccess.insertRecord(COLLECTIONS.errorEvents, {
+    integration_id: integrationId,
+    error_code: 'integration_quarantined',
+    severity: 'warning',
+    message: payload.reason || 'Integration manually quarantined',
+    created_at: nowIso()
+  }, { suppressAuth: true });
+
+  return { success: true, integration: updated.record };
+}
+
+export async function rotateCredentials(integrationId, payload = {}, userId = '') {
+  return metaAdsAuth.rotateCredentials(integrationId, payload, userId);
+}
+
+export async function rebindAdAccount(integrationId, payload = {}, userId = '') {
+  return metaAdsAuth.rebindAdAccount(integrationId, payload, userId);
+}
+
+export async function disableIntegration(integrationId, payload = {}, userId = '') {
+  return metaAdsAuth.disableIntegration(integrationId, payload, userId);
+}

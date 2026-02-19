@@ -1,0 +1,273 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  campaignMirror: 'metaCampaignMirror',
+  adMirror: 'metaAdMirror',
+  mutationAudit: 'metaMutationAudit'
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function makeId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function findIdempotentResult(action, idempotencyKey) {
+  if (!idempotencyKey) return null;
+  const existing = await dataAccess.queryRecords(COLLECTIONS.mutationAudit, {
+    filters: { action, idempotency_key: idempotencyKey },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!existing.success || !existing.items.length) return null;
+
+  const prior = existing.items[0];
+  return prior.result_snapshot || null;
+}
+
+async function writeMutationAudit(action, recruiterId, payload, result) {
+  await dataAccess.insertRecord(
+    COLLECTIONS.mutationAudit,
+    {
+      action,
+      risk_level: payload.riskLevel || 'execute_high',
+      actor_id: recruiterId || '',
+      integration_id: payload.integrationId || '',
+      campaign_id: payload.campaignId || '',
+      ad_id: payload.adId || '',
+      idempotency_key: payload.idempotencyKey || '',
+      correlation_id: payload.correlationId || makeId('corr'),
+      reason: payload.reason || '',
+      before_state: payload.beforeState || null,
+      after_state: payload.afterState || null,
+      result_snapshot: result || null,
+      created_at: nowIso()
+    },
+    { suppressAuth: true }
+  );
+}
+
+async function getByField(collectionKey, field, value) {
+  const result = await dataAccess.queryRecords(collectionKey, {
+    filters: { [field]: value },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!result.success || !result.items.length) return null;
+  return result.items[0];
+}
+
+async function upsertCampaign(campaignId, payload) {
+  return dataAccess.upsertRecord(
+    COLLECTIONS.campaignMirror,
+    'campaign_id',
+    campaignId,
+    payload,
+    { suppressAuth: true }
+  );
+}
+
+async function upsertAd(adId, payload) {
+  return dataAccess.upsertRecord(
+    COLLECTIONS.adMirror,
+    'ad_id',
+    adId,
+    payload,
+    { suppressAuth: true }
+  );
+}
+
+function baseCampaignPayload(recruiterId, params, status) {
+  return {
+    campaign_id: params.campaignId || makeId('cmp'),
+    integration_id: params.integrationId || '',
+    ad_account_id: params.adAccountId || '',
+    recruiter_id: recruiterId || '',
+    name: params.name || 'Untitled Meta Campaign',
+    objective: params.objective || 'OUTCOME_TRAFFIC',
+    category: params.category || 'recruitment',
+    buying_type: params.buyingType || 'AUCTION',
+    status,
+    daily_budget: Number(params.dailyBudget || 0),
+    lifetime_budget: Number(params.lifetimeBudget || 0),
+    start_time: params.startTime || '',
+    end_time: params.endTime || '',
+    idempotency_key: params.idempotencyKey || '',
+    updated_at: nowIso(),
+    created_at: params.createdAt || nowIso()
+  };
+}
+
+function baseAdPayload(recruiterId, params, status) {
+  return {
+    ad_id: params.adId || makeId('ad'),
+    integration_id: params.integrationId || '',
+    ad_account_id: params.adAccountId || '',
+    campaign_id: params.campaignId || '',
+    ad_set_id: params.adSetId || '',
+    creative_id: params.creativeId || '',
+    recruiter_id: recruiterId || '',
+    name: params.name || 'Untitled Meta Ad',
+    status,
+    tracking_spec: params.trackingSpec || null,
+    destination_url: params.destinationUrl || '',
+    cta_type: params.ctaType || '',
+    idempotency_key: params.idempotencyKey || '',
+    updated_at: nowIso(),
+    created_at: params.createdAt || nowIso()
+  };
+}
+
+async function withIdempotency(action, recruiterId, params, runner) {
+  const prior = await findIdempotentResult(action, params.idempotencyKey);
+  if (prior) {
+    return { success: true, idempotent: true, ...prior };
+  }
+  const result = await runner();
+  await writeMutationAudit(action, recruiterId, params, result);
+  return result;
+}
+
+export async function createCampaignDraft(recruiterId, params = {}) {
+  return withIdempotency('create_campaign_draft', recruiterId, params, async () => {
+    const payload = baseCampaignPayload(recruiterId, params, 'draft');
+    const upsert = await upsertCampaign(payload.campaign_id, payload);
+    if (!upsert.success) {
+      return { success: false, error: upsert.error || 'Failed to create campaign draft' };
+    }
+    return { success: true, campaign: upsert.record };
+  });
+}
+
+export async function createCampaign(recruiterId, params = {}) {
+  return withIdempotency('create_campaign', recruiterId, params, async () => {
+    const payload = baseCampaignPayload(recruiterId, params, params.status || 'active');
+    const upsert = await upsertCampaign(payload.campaign_id, payload);
+    if (!upsert.success) {
+      return { success: false, error: upsert.error || 'Failed to create campaign' };
+    }
+    return { success: true, campaign: upsert.record };
+  });
+}
+
+export async function updateCampaign(recruiterId, params = {}) {
+  if (!params.campaignId) {
+    return { success: false, error: 'Missing required field: campaignId' };
+  }
+  return withIdempotency('update_campaign', recruiterId, params, async () => {
+    const existing = await getByField(COLLECTIONS.campaignMirror, 'campaign_id', params.campaignId);
+    if (!existing) {
+      return { success: false, error: `Campaign not found: ${params.campaignId}` };
+    }
+
+    const next = {
+      ...existing,
+      ...params,
+      campaign_id: params.campaignId,
+      updated_at: nowIso()
+    };
+    const update = await dataAccess.updateRecord(COLLECTIONS.campaignMirror, next, { suppressAuth: true });
+    if (!update.success) {
+      return { success: false, error: update.error || 'Failed to update campaign' };
+    }
+    return { success: true, campaign: update.record };
+  });
+}
+
+export async function pauseCampaign(recruiterId, params = {}) {
+  return updateCampaign(recruiterId, { ...params, status: 'paused', reason: params.reason || 'manual_pause' });
+}
+
+export async function resumeCampaign(recruiterId, params = {}) {
+  return updateCampaign(recruiterId, { ...params, status: 'active', reason: params.reason || 'manual_resume' });
+}
+
+export async function deleteCampaign(recruiterId, params = {}) {
+  if (!params.campaignId) {
+    return { success: false, error: 'Missing required field: campaignId' };
+  }
+  return withIdempotency('delete_campaign', recruiterId, params, async () => {
+    const existing = await getByField(COLLECTIONS.campaignMirror, 'campaign_id', params.campaignId);
+    if (!existing) {
+      return { success: false, error: `Campaign not found: ${params.campaignId}` };
+    }
+    const next = {
+      ...existing,
+      status: 'deleted',
+      deleted_at: nowIso(),
+      updated_at: nowIso()
+    };
+    const update = await dataAccess.updateRecord(COLLECTIONS.campaignMirror, next, { suppressAuth: true });
+    if (!update.success) {
+      return { success: false, error: update.error || 'Failed to delete campaign' };
+    }
+    return { success: true, campaign: update.record };
+  });
+}
+
+export async function createAd(recruiterId, params = {}) {
+  return withIdempotency('create_ad', recruiterId, params, async () => {
+    const payload = baseAdPayload(recruiterId, params, params.status || 'active');
+    const upsert = await upsertAd(payload.ad_id, payload);
+    if (!upsert.success) {
+      return { success: false, error: upsert.error || 'Failed to create ad' };
+    }
+    return { success: true, ad: upsert.record };
+  });
+}
+
+export async function updateAd(recruiterId, params = {}) {
+  if (!params.adId) {
+    return { success: false, error: 'Missing required field: adId' };
+  }
+  return withIdempotency('update_ad', recruiterId, params, async () => {
+    const existing = await getByField(COLLECTIONS.adMirror, 'ad_id', params.adId);
+    if (!existing) {
+      return { success: false, error: `Ad not found: ${params.adId}` };
+    }
+    const next = {
+      ...existing,
+      ...params,
+      ad_id: params.adId,
+      updated_at: nowIso()
+    };
+    const update = await dataAccess.updateRecord(COLLECTIONS.adMirror, next, { suppressAuth: true });
+    if (!update.success) {
+      return { success: false, error: update.error || 'Failed to update ad' };
+    }
+    return { success: true, ad: update.record };
+  });
+}
+
+export async function pauseAd(recruiterId, params = {}) {
+  return updateAd(recruiterId, { ...params, status: 'paused', reason: params.reason || 'manual_pause' });
+}
+
+export async function resumeAd(recruiterId, params = {}) {
+  return updateAd(recruiterId, { ...params, status: 'active', reason: params.reason || 'manual_resume' });
+}
+
+export async function deleteAd(recruiterId, params = {}) {
+  if (!params.adId) {
+    return { success: false, error: 'Missing required field: adId' };
+  }
+  return withIdempotency('delete_ad', recruiterId, params, async () => {
+    const existing = await getByField(COLLECTIONS.adMirror, 'ad_id', params.adId);
+    if (!existing) {
+      return { success: false, error: `Ad not found: ${params.adId}` };
+    }
+    const next = {
+      ...existing,
+      status: 'deleted',
+      deleted_at: nowIso(),
+      updated_at: nowIso()
+    };
+    const update = await dataAccess.updateRecord(COLLECTIONS.adMirror, next, { suppressAuth: true });
+    if (!update.success) {
+      return { success: false, error: update.error || 'Failed to delete ad' };
+    }
+    return { success: true, ad: update.record };
+  });
+}

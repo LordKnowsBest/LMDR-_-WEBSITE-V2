@@ -1,0 +1,168 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  creativeMirror: 'metaCreativeMirror',
+  adMirror: 'metaAdMirror',
+  mutationAudit: 'metaMutationAudit'
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function makeId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function getCreative(creativeId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.creativeMirror, {
+    filters: { creative_id: creativeId },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!result.success || !result.items.length) return null;
+  return result.items[0];
+}
+
+async function getAd(adId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.adMirror, {
+    filters: { ad_id: adId },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!result.success || !result.items.length) return null;
+  return result.items[0];
+}
+
+async function findIdempotentResult(action, idempotencyKey) {
+  if (!idempotencyKey) return null;
+  const existing = await dataAccess.queryRecords(COLLECTIONS.mutationAudit, {
+    filters: { action, idempotency_key: idempotencyKey },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!existing.success || !existing.items.length) return null;
+  return existing.items[0].result_snapshot || null;
+}
+
+async function writeAudit(action, recruiterId, params, result) {
+  await dataAccess.insertRecord(COLLECTIONS.mutationAudit, {
+    action,
+    risk_level: 'execute_high',
+    actor_id: recruiterId || '',
+    integration_id: params.integrationId || '',
+    ad_id: params.adId || '',
+    creative_id: params.creativeId || '',
+    idempotency_key: params.idempotencyKey || '',
+    correlation_id: params.correlationId || makeId('corr'),
+    result_snapshot: result || null,
+    created_at: nowIso()
+  }, { suppressAuth: true });
+}
+
+async function withIdempotency(action, recruiterId, params, runner) {
+  const prior = await findIdempotentResult(action, params.idempotencyKey);
+  if (prior) {
+    return { success: true, idempotent: true, ...prior };
+  }
+  const result = await runner();
+  await writeAudit(action, recruiterId, params, result);
+  return result;
+}
+
+function baseCreativePayload(recruiterId, params, status) {
+  return {
+    creative_id: params.creativeId || makeId('creative'),
+    integration_id: params.integrationId || '',
+    ad_account_id: params.adAccountId || '',
+    campaign_id: params.campaignId || '',
+    ad_set_id: params.adSetId || '',
+    recruiter_id: recruiterId || '',
+    name: params.name || 'Untitled Creative',
+    status,
+    headline: params.headline || '',
+    body: params.body || '',
+    description: params.description || '',
+    cta_type: params.ctaType || '',
+    destination_url: params.destinationUrl || '',
+    media_assets: Array.isArray(params.mediaAssets) ? params.mediaAssets : [],
+    thumbnail_url: params.thumbnailUrl || '',
+    idempotency_key: params.idempotencyKey || '',
+    updated_at: nowIso(),
+    created_at: params.createdAt || nowIso()
+  };
+}
+
+export async function createCreativeDraft(recruiterId, params = {}) {
+  return withIdempotency('create_creative_draft', recruiterId, params, async () => {
+    const payload = baseCreativePayload(recruiterId, params, 'draft');
+    const upsert = await dataAccess.upsertRecord(
+      COLLECTIONS.creativeMirror,
+      'creative_id',
+      payload.creative_id,
+      payload,
+      { suppressAuth: true }
+    );
+    if (!upsert.success) return { success: false, error: upsert.error || 'Failed to create creative draft' };
+    return { success: true, creative: upsert.record };
+  });
+}
+
+export async function createCreative(recruiterId, params = {}) {
+  return withIdempotency('create_creative', recruiterId, params, async () => {
+    const payload = baseCreativePayload(recruiterId, params, params.status || 'active');
+    const upsert = await dataAccess.upsertRecord(
+      COLLECTIONS.creativeMirror,
+      'creative_id',
+      payload.creative_id,
+      payload,
+      { suppressAuth: true }
+    );
+    if (!upsert.success) return { success: false, error: upsert.error || 'Failed to create creative' };
+    return { success: true, creative: upsert.record };
+  });
+}
+
+export async function updateCreative(recruiterId, params = {}) {
+  if (!params.creativeId) return { success: false, error: 'Missing required field: creativeId' };
+  return withIdempotency('update_creative', recruiterId, params, async () => {
+    const existing = await getCreative(params.creativeId);
+    if (!existing) return { success: false, error: `Creative not found: ${params.creativeId}` };
+
+    const next = {
+      ...existing,
+      ...params,
+      creative_id: params.creativeId,
+      updated_at: nowIso()
+    };
+    const update = await dataAccess.updateRecord(COLLECTIONS.creativeMirror, next, { suppressAuth: true });
+    if (!update.success) return { success: false, error: update.error || 'Failed to update creative' };
+    return { success: true, creative: update.record };
+  });
+}
+
+export async function archiveCreative(recruiterId, params = {}) {
+  return updateCreative(recruiterId, { ...params, status: 'archived', archived_at: nowIso(), reason: params.reason || 'manual_archive' });
+}
+
+export async function attachCreativeToAd(recruiterId, params = {}) {
+  if (!params.adId || !params.creativeId) {
+    return { success: false, error: 'Missing required fields: adId and creativeId' };
+  }
+  return withIdempotency('attach_creative_to_ad', recruiterId, params, async () => {
+    const ad = await getAd(params.adId);
+    if (!ad) return { success: false, error: `Ad not found: ${params.adId}` };
+
+    const update = await dataAccess.updateRecord(
+      COLLECTIONS.adMirror,
+      {
+        ...ad,
+        creative_id: params.creativeId,
+        updated_at: nowIso()
+      },
+      { suppressAuth: true }
+    );
+    if (!update.success) return { success: false, error: update.error || 'Failed to attach creative to ad' };
+    return { success: true, ad: update.record, creativeId: params.creativeId };
+  });
+}

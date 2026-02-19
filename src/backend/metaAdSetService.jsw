@@ -1,0 +1,174 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  adSetMirror: 'metaAdSetMirror',
+  mutationAudit: 'metaMutationAudit'
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function makeId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function getAdSet(adSetId) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.adSetMirror, {
+    filters: { ad_set_id: adSetId },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!result.success || !result.items.length) return null;
+  return result.items[0];
+}
+
+async function findIdempotentResult(action, idempotencyKey) {
+  if (!idempotencyKey) return null;
+  const existing = await dataAccess.queryRecords(COLLECTIONS.mutationAudit, {
+    filters: { action, idempotency_key: idempotencyKey },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!existing.success || !existing.items.length) return null;
+  return existing.items[0].result_snapshot || null;
+}
+
+async function writeAudit(action, recruiterId, params, result) {
+  await dataAccess.insertRecord(COLLECTIONS.mutationAudit, {
+    action,
+    risk_level: 'execute_high',
+    actor_id: recruiterId || '',
+    integration_id: params.integrationId || '',
+    campaign_id: params.campaignId || '',
+    ad_set_id: params.adSetId || '',
+    idempotency_key: params.idempotencyKey || '',
+    correlation_id: params.correlationId || makeId('corr'),
+    before_state: params.beforeState || null,
+    after_state: params.afterState || null,
+    result_snapshot: result || null,
+    created_at: nowIso()
+  }, { suppressAuth: true });
+}
+
+async function withIdempotency(action, recruiterId, params, runner) {
+  const prior = await findIdempotentResult(action, params.idempotencyKey);
+  if (prior) {
+    return { success: true, idempotent: true, ...prior };
+  }
+  const result = await runner();
+  await writeAudit(action, recruiterId, params, result);
+  return result;
+}
+
+function basePayload(recruiterId, params, status) {
+  return {
+    ad_set_id: params.adSetId || makeId('adset'),
+    integration_id: params.integrationId || '',
+    ad_account_id: params.adAccountId || '',
+    campaign_id: params.campaignId || '',
+    recruiter_id: recruiterId || '',
+    name: params.name || 'Untitled Ad Set',
+    status,
+    daily_budget: Number(params.dailyBudget || 0),
+    lifetime_budget: Number(params.lifetimeBudget || 0),
+    bid_strategy: params.bidStrategy || '',
+    optimization_goal: params.optimizationGoal || '',
+    targeting: params.targeting || {},
+    schedule: params.schedule || {
+      start_time: params.startTime || '',
+      end_time: params.endTime || ''
+    },
+    idempotency_key: params.idempotencyKey || '',
+    updated_at: nowIso(),
+    created_at: params.createdAt || nowIso()
+  };
+}
+
+export async function createAdSetDraft(recruiterId, params = {}) {
+  return withIdempotency('create_ad_set_draft', recruiterId, params, async () => {
+    const payload = basePayload(recruiterId, params, 'draft');
+    const upsert = await dataAccess.upsertRecord(
+      COLLECTIONS.adSetMirror,
+      'ad_set_id',
+      payload.ad_set_id,
+      payload,
+      { suppressAuth: true }
+    );
+    if (!upsert.success) return { success: false, error: upsert.error || 'Failed to create ad set draft' };
+    return { success: true, adSet: upsert.record };
+  });
+}
+
+export async function createAdSet(recruiterId, params = {}) {
+  return withIdempotency('create_ad_set', recruiterId, params, async () => {
+    const payload = basePayload(recruiterId, params, params.status || 'active');
+    const upsert = await dataAccess.upsertRecord(
+      COLLECTIONS.adSetMirror,
+      'ad_set_id',
+      payload.ad_set_id,
+      payload,
+      { suppressAuth: true }
+    );
+    if (!upsert.success) return { success: false, error: upsert.error || 'Failed to create ad set' };
+    return { success: true, adSet: upsert.record };
+  });
+}
+
+export async function updateAdSet(recruiterId, params = {}) {
+  if (!params.adSetId) return { success: false, error: 'Missing required field: adSetId' };
+  return withIdempotency('update_ad_set', recruiterId, params, async () => {
+    const existing = await getAdSet(params.adSetId);
+    if (!existing) return { success: false, error: `Ad set not found: ${params.adSetId}` };
+
+    const next = {
+      ...existing,
+      ...params,
+      ad_set_id: params.adSetId,
+      updated_at: nowIso()
+    };
+    const update = await dataAccess.updateRecord(COLLECTIONS.adSetMirror, next, { suppressAuth: true });
+    if (!update.success) return { success: false, error: update.error || 'Failed to update ad set' };
+    return { success: true, adSet: update.record };
+  });
+}
+
+export async function updateAdSetTargeting(recruiterId, params = {}) {
+  return updateAdSet(recruiterId, {
+    ...params,
+    targeting: params.targeting || {},
+    reason: params.reason || 'targeting_update'
+  });
+}
+
+export async function updateAdSetBudget(recruiterId, params = {}) {
+  return updateAdSet(recruiterId, {
+    ...params,
+    dailyBudget: Number(params.dailyBudget || 0),
+    lifetimeBudget: Number(params.lifetimeBudget || 0),
+    reason: params.reason || 'budget_update'
+  });
+}
+
+export async function updateAdSetSchedule(recruiterId, params = {}) {
+  return updateAdSet(recruiterId, {
+    ...params,
+    schedule: params.schedule || {
+      start_time: params.startTime || '',
+      end_time: params.endTime || ''
+    },
+    reason: params.reason || 'schedule_update'
+  });
+}
+
+export async function pauseAdSet(recruiterId, params = {}) {
+  return updateAdSet(recruiterId, { ...params, status: 'paused', reason: params.reason || 'manual_pause' });
+}
+
+export async function resumeAdSet(recruiterId, params = {}) {
+  return updateAdSet(recruiterId, { ...params, status: 'active', reason: params.reason || 'manual_resume' });
+}
+
+export async function deleteAdSet(recruiterId, params = {}) {
+  return updateAdSet(recruiterId, { ...params, status: 'deleted', deleted_at: nowIso(), reason: params.reason || 'manual_delete' });
+}

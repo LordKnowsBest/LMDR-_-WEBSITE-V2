@@ -1,0 +1,428 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  integrations: 'metaIntegrations',
+  adAccounts: 'metaAdAccounts',
+  mutationAudit: 'metaMutationAudit',
+  errorEvents: 'metaErrorEvents'
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function makeCorrelationId(prefix = 'meta') {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function writeMutationAudit(event) {
+  const payload = {
+    action: event.action || 'unknown',
+    risk_level: event.riskLevel || 'execute_low',
+    actor_id: event.actorId || '',
+    integration_id: event.integrationId || '',
+    correlation_id: event.correlationId || makeCorrelationId('audit'),
+    before_state: event.beforeState || null,
+    after_state: event.afterState || null,
+    reason: event.reason || '',
+    created_at: nowIso()
+  };
+  await dataAccess.insertRecord(COLLECTIONS.mutationAudit, payload, { suppressAuth: true });
+}
+
+async function getIntegrationRecord(integrationId) {
+  if (!integrationId) return null;
+
+  const byId = await dataAccess.queryRecords(COLLECTIONS.integrations, {
+    filters: { _id: integrationId },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (byId.success && byId.items.length > 0) {
+    return byId.items[0];
+  }
+
+  const byIntegrationId = await dataAccess.queryRecords(COLLECTIONS.integrations, {
+    filters: { integration_id: integrationId },
+    limit: 1,
+    suppressAuth: true
+  });
+  return byIntegrationId.success && byIntegrationId.items.length > 0 ? byIntegrationId.items[0] : null;
+}
+
+function getTokenHealthSummary(integration) {
+  if (!integration) {
+    return { status: 'missing', expiresInHours: null };
+  }
+
+  const expiresAt = integration.token_expires_at || integration.expires_at;
+  if (!expiresAt) {
+    return { status: 'unknown_expiry', expiresInHours: null };
+  }
+
+  const expiresMs = new Date(expiresAt).getTime();
+  const deltaHours = Math.round((expiresMs - Date.now()) / (60 * 60 * 1000));
+
+  if (integration.status === 'disabled') {
+    return { status: 'disabled', expiresInHours: deltaHours };
+  }
+  if (integration.status === 'quarantined') {
+    return { status: 'quarantined', expiresInHours: deltaHours };
+  }
+  if (deltaHours < 0) {
+    return { status: 'expired', expiresInHours: deltaHours };
+  }
+  if (deltaHours <= 72) {
+    return { status: 'expiring_soon', expiresInHours: deltaHours };
+  }
+  return { status: 'healthy', expiresInHours: deltaHours };
+}
+
+export async function listMetaIntegrations(filters = {}) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.integrations, {
+    filters,
+    sort: [{ field: 'updated_at', direction: 'desc' }],
+    limit: Number(filters.limit) || 100,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to list integrations', items: [] };
+  }
+
+  return { success: true, items: result.items, totalCount: result.totalCount || result.items.length };
+}
+
+function normalizeAdAccountRows(integration) {
+  const integrationId = integration.integration_id || integration._id || '';
+  const normalized = [];
+  const pushRow = (account) => {
+    if (!account) return;
+    const accountId = typeof account === 'string'
+      ? account
+      : (account.ad_account_id || account.account_id || account.id || '');
+    if (!accountId) return;
+    normalized.push({
+      ad_account_id: String(accountId),
+      integration_id: integrationId,
+      status: account.status || integration.status || 'active',
+      account_name: account.account_name || account.name || integration.account_name || '',
+      currency: account.currency || integration.currency || 'USD',
+      timezone: account.timezone || integration.timezone || '',
+      synced_at: nowIso()
+    });
+  };
+
+  pushRow(integration.ad_account_id);
+  const accountList = Array.isArray(integration.ad_accounts) ? integration.ad_accounts : [];
+  for (const account of accountList) {
+    pushRow(account);
+  }
+
+  return normalized;
+}
+
+export async function syncAdAccounts(integrationId = '') {
+  const filters = integrationId ? { integration_id: integrationId } : {};
+  const integrationsResult = await listMetaIntegrations(filters);
+  if (!integrationsResult.success) {
+    return { success: false, error: integrationsResult.error || 'Failed to list integrations for ad account sync' };
+  }
+
+  let synced = 0;
+  let failed = 0;
+
+  for (const integration of integrationsResult.items) {
+    const rows = normalizeAdAccountRows(integration);
+    for (const row of rows) {
+      const result = await dataAccess.upsertRecord(
+        COLLECTIONS.adAccounts,
+        'ad_account_id',
+        row.ad_account_id,
+        row,
+        { suppressAuth: true }
+      );
+      if (result.success) {
+        synced++;
+      } else {
+        failed++;
+      }
+    }
+  }
+
+  await writeMutationAudit({
+    action: 'sync_ad_accounts',
+    integrationId: integrationId || 'all',
+    actorId: 'system_job',
+    riskLevel: 'execute_low',
+    beforeState: null,
+    afterState: { synced, failed },
+    reason: integrationId ? 'manual_integration_sync' : 'scheduled_full_sync'
+  });
+
+  return {
+    success: true,
+    integrationsScanned: integrationsResult.items.length,
+    adAccountsSynced: synced,
+    failed
+  };
+}
+
+export async function listAdAccounts(integrationId = '') {
+  const filters = integrationId ? { integration_id: integrationId } : {};
+  const result = await dataAccess.queryRecords(COLLECTIONS.adAccounts, {
+    filters,
+    sort: [{ field: 'account_name', direction: 'asc' }],
+    limit: 500,
+    suppressAuth: true
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to list ad accounts', items: [] };
+  }
+  return { success: true, items: result.items, totalCount: result.totalCount || result.items.length };
+}
+
+export async function getTokenHealth(integrationId) {
+  const integration = await getIntegrationRecord(integrationId);
+  if (!integration) {
+    return { success: false, error: `Integration not found: ${integrationId}` };
+  }
+
+  const health = getTokenHealthSummary(integration);
+  return {
+    success: true,
+    integrationId: integration.integration_id || integration._id,
+    status: health.status,
+    expiresInHours: health.expiresInHours,
+    tokenExpiresAt: integration.token_expires_at || integration.expires_at || null,
+    updatedAt: integration.updated_at || integration._updatedDate || null
+  };
+}
+
+export async function refreshSystemUserToken(integrationId, payload = {}, actorId = '') {
+  const integration = await getIntegrationRecord(integrationId);
+  if (!integration) {
+    return { success: false, error: `Integration not found: ${integrationId}` };
+  }
+
+  const next = {
+    ...integration,
+    token_expires_at: payload.expiresAt || payload.token_expires_at || integration.token_expires_at,
+    status: payload.status || 'active',
+    last_token_refresh_at: nowIso(),
+    updated_at: nowIso()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTIONS.integrations, next, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to refresh token metadata' };
+  }
+
+  await writeMutationAudit({
+    action: 'refresh_system_user_token',
+    integrationId: integration.integration_id || integration._id,
+    actorId,
+    riskLevel: 'execute_low',
+    beforeState: { token_expires_at: integration.token_expires_at, status: integration.status },
+    afterState: { token_expires_at: next.token_expires_at, status: next.status },
+    reason: payload.reason || ''
+  });
+
+  return { success: true, integration: result.record };
+}
+
+export async function rotateCredentials(integrationId, payload = {}, actorId = '') {
+  const integration = await getIntegrationRecord(integrationId);
+  if (!integration) {
+    return { success: false, error: `Integration not found: ${integrationId}` };
+  }
+
+  const next = {
+    ...integration,
+    app_id: payload.appId || integration.app_id,
+    app_secret_hint: payload.appSecretHint || integration.app_secret_hint || 'rotated',
+    token_expires_at: payload.expiresAt || payload.token_expires_at || integration.token_expires_at,
+    credentials_rotated_at: nowIso(),
+    updated_at: nowIso()
+  };
+
+  const result = await dataAccess.updateRecord(COLLECTIONS.integrations, next, { suppressAuth: true });
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to rotate credentials' };
+  }
+
+  await writeMutationAudit({
+    action: 'rotate_credentials',
+    integrationId: integration.integration_id || integration._id,
+    actorId,
+    riskLevel: 'execute_high',
+    beforeState: {
+      app_id: integration.app_id || '',
+      token_expires_at: integration.token_expires_at || ''
+    },
+    afterState: {
+      app_id: next.app_id || '',
+      token_expires_at: next.token_expires_at || ''
+    },
+    reason: payload.reason || ''
+  });
+
+  return { success: true, integration: result.record };
+}
+
+export async function rebindAdAccount(integrationId, payload = {}, actorId = '') {
+  const integration = await getIntegrationRecord(integrationId);
+  if (!integration) {
+    return { success: false, error: `Integration not found: ${integrationId}` };
+  }
+
+  const adAccountId = payload.adAccountId || payload.ad_account_id;
+  if (!adAccountId) {
+    return { success: false, error: 'Missing required field: adAccountId' };
+  }
+
+  const next = {
+    ...integration,
+    ad_account_id: adAccountId,
+    account_rebound_at: nowIso(),
+    updated_at: nowIso()
+  };
+
+  const updateResult = await dataAccess.updateRecord(COLLECTIONS.integrations, next, { suppressAuth: true });
+  if (!updateResult.success) {
+    return { success: false, error: updateResult.error || 'Failed to rebind ad account' };
+  }
+
+  await dataAccess.upsertRecord(
+    COLLECTIONS.adAccounts,
+    'ad_account_id',
+    adAccountId,
+    {
+      ad_account_id: adAccountId,
+      integration_id: integration.integration_id || integration._id,
+      status: 'active',
+      updated_at: nowIso()
+    },
+    { suppressAuth: true }
+  );
+
+  await writeMutationAudit({
+    action: 'rebind_ad_account',
+    integrationId: integration.integration_id || integration._id,
+    actorId,
+    riskLevel: 'execute_high',
+    beforeState: { ad_account_id: integration.ad_account_id || '' },
+    afterState: { ad_account_id: adAccountId },
+    reason: payload.reason || ''
+  });
+
+  return { success: true, integration: updateResult.record, adAccountId };
+}
+
+export async function disableIntegration(integrationId, payload = {}, actorId = '') {
+  const integration = await getIntegrationRecord(integrationId);
+  if (!integration) {
+    return { success: false, error: `Integration not found: ${integrationId}` };
+  }
+
+  const next = {
+    ...integration,
+    status: 'disabled',
+    disabled_at: nowIso(),
+    disabled_reason: payload.reason || payload.disabled_reason || '',
+    updated_at: nowIso()
+  };
+
+  const updateResult = await dataAccess.updateRecord(COLLECTIONS.integrations, next, { suppressAuth: true });
+  if (!updateResult.success) {
+    return { success: false, error: updateResult.error || 'Failed to disable integration' };
+  }
+
+  await writeMutationAudit({
+    action: 'disable_integration',
+    integrationId: integration.integration_id || integration._id,
+    actorId,
+    riskLevel: 'execute_high',
+    beforeState: { status: integration.status || 'unknown' },
+    afterState: { status: 'disabled' },
+    reason: next.disabled_reason
+  });
+
+  return { success: true, integration: updateResult.record };
+}
+
+export async function runTokenHealthChecks(options = {}) {
+  const refreshThresholdHours = Number(options.refreshThresholdHours) || 72;
+  const result = await listMetaIntegrations({});
+  if (!result.success) {
+    return { success: false, error: result.error || 'Failed to load integrations for token check' };
+  }
+
+  let healthy = 0;
+  let expiringSoon = 0;
+  let expired = 0;
+  let refreshed = 0;
+  let failures = 0;
+
+  for (const integration of result.items) {
+    const integrationId = integration.integration_id || integration._id || '';
+    const health = await getTokenHealth(integrationId);
+    if (!health.success) {
+      failures++;
+      continue;
+    }
+
+    const status = health.status;
+    if (status === 'healthy') healthy++;
+    if (status === 'expiring_soon') expiringSoon++;
+    if (status === 'expired') expired++;
+
+    const shouldAttemptRefresh =
+      (status === 'expiring_soon' || status === 'expired') &&
+      (Number(health.expiresInHours) <= refreshThresholdHours) &&
+      (integration.auto_refresh_enabled === true) &&
+      Boolean(integration.next_token_expires_at);
+
+    if (shouldAttemptRefresh) {
+      const refreshResult = await refreshSystemUserToken(
+        integrationId,
+        {
+          token_expires_at: integration.next_token_expires_at,
+          status: 'active',
+          reason: `proactive_auto_refresh_${status}`
+        },
+        'system_job'
+      );
+      if (refreshResult.success) {
+        refreshed++;
+      } else {
+        failures++;
+      }
+    } else if (status === 'expiring_soon' || status === 'expired') {
+      await dataAccess.insertRecord(COLLECTIONS.errorEvents, {
+        integration_id: integrationId,
+        error_code: status === 'expired' ? 'meta_token_expired' : 'meta_token_expiring_soon',
+        severity: status === 'expired' ? 'critical' : 'warning',
+        message: `Token ${status.replace('_', ' ')} for integration ${integrationId}`,
+        created_at: nowIso()
+      }, { suppressAuth: true });
+    }
+
+    await dataAccess.updateRecord(COLLECTIONS.integrations, {
+      ...integration,
+      last_token_health_check_at: nowIso(),
+      token_health_status: status
+    }, { suppressAuth: true });
+  }
+
+  return {
+    success: true,
+    scanned: result.items.length,
+    healthy,
+    expiringSoon,
+    expired,
+    refreshed,
+    failures
+  };
+}
