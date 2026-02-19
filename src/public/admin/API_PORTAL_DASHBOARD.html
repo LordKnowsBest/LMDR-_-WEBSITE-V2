@@ -66,10 +66,30 @@
       <button id="getBillingHistory" class="px-3 py-2 bg-slate-700 rounded text-sm">Billing History</button>
       <button id="createBillingPortal" class="px-3 py-2 bg-vm-blue rounded text-sm">Billing Portal</button>
       <button id="createCheckout" class="px-3 py-2 bg-vm-blue rounded text-sm">Create Growth Checkout</button>
+      <button id="createOverageInvoice" class="px-3 py-2 bg-vm-blue rounded text-sm">Create Overage Invoice</button>
+      <button id="ensureProducts" class="px-3 py-2 bg-slate-700 rounded text-sm">Ensure Stripe Tier Products</button>
       <label class="text-xs text-slate-400 flex-1 min-w-[220px]">Webhook URL (optional)
         <input id="webhookUrl" class="block mt-1 w-full bg-slate-900 border border-slate-700 rounded px-2 py-1" placeholder="https://example.com/webhook" />
       </label>
       <button id="sendWebhookTest" class="px-3 py-2 bg-vm-coral rounded text-sm">Send Test</button>
+    </div>
+    <div class="flex flex-wrap gap-2 items-end mt-3">
+      <label class="text-xs text-slate-400">Target Tier
+        <select id="targetTier" class="block mt-1 bg-slate-900 border border-slate-700 rounded px-2 py-1">
+          <option value="starter">starter</option>
+          <option value="growth">growth</option>
+          <option value="enterprise">enterprise</option>
+        </select>
+      </label>
+      <label class="text-xs text-slate-400">Billing Cycle
+        <select id="targetPlanType" class="block mt-1 bg-slate-900 border border-slate-700 rounded px-2 py-1">
+          <option value="monthly">monthly</option>
+          <option value="annual">annual</option>
+        </select>
+      </label>
+      <button id="changePlan" class="px-3 py-2 bg-vm-mint text-slate-900 rounded text-sm font-semibold">Change Subscription Plan</button>
+      <button id="loadOnboardingSequence" class="px-3 py-2 bg-slate-700 rounded text-sm">Load Onboarding Sequence</button>
+      <button id="initOnboarding" class="px-3 py-2 bg-slate-700 rounded text-sm">Init Onboarding</button>
     </div>
   </section>
 
@@ -103,6 +123,19 @@
     <div class="bg-vm-panel border border-vm-edge rounded-xl p-4">
       <h2 class="font-semibold mb-2">Billing / Webhooks</h2>
       <pre id="billingPane" class="text-xs text-slate-300 whitespace-pre-wrap">No data</pre>
+    </div>
+  </section>
+
+  <section class="bg-vm-panel border border-vm-edge rounded-xl p-4 mt-4">
+    <h2 class="font-semibold mb-2">Onboarding Checklist</h2>
+    <div id="onboardingChecklist" class="space-y-2 text-xs text-slate-300">
+      <div data-step="sandbox_key">[ ] Create sandbox key</div>
+      <div data-step="webhook_test">[ ] Send webhook test</div>
+      <div data-step="first_call">[ ] First API call logged</div>
+      <div data-step="billing_ready">[ ] Billing profile configured</div>
+    </div>
+    <div class="mt-2 text-xs text-slate-400">
+      Guide: <a class="underline text-vm-mint" href="https://www.lastmiledr.app/docs/api/getting-started.external.v1.md" target="_blank" rel="noopener">getting-started.external.v1.md</a>
     </div>
   </section>
 
@@ -153,6 +186,13 @@
         .sort((a, b) => b.calls - a.calls);
     }
 
+    function markChecklistStep(stepKey, done) {
+      const row = document.querySelector('[data-step=\"' + stepKey + '\"]');
+      if (!row) return;
+      row.textContent = (done ? '[x] ' : '[ ] ') + row.textContent.replace(/^\[[x ]\]\s*/, '');
+      row.classList.toggle('text-emerald-300', Boolean(done));
+    }
+
     function renderUsage(snapshot) {
       const usageRecords = snapshot?.usage || [];
       const trend = usageRecords
@@ -162,6 +202,10 @@
       const endpointBreakdown = summarizeEndpointCounts(usageRecords);
       renderBars('usageTrend', trend, 'period', 'calls');
       renderBars('endpointBreakdown', endpointBreakdown, 'endpoint', 'calls');
+
+      const totalCalls = usageRecords.reduce((sum, item) => sum + toNumber(item.total_calls || item.calls), 0);
+      markChecklistStep('first_call', totalCalls > 0);
+      markChecklistStep('billing_ready', Boolean(snapshot?.billing?.summary || snapshot?.subscription));
     }
 
     window.addEventListener('message', (event) => {
@@ -187,6 +231,7 @@
           $('environment').value = data.payload.environment;
         }
         renderUsage(data.payload || {});
+        markChecklistStep('sandbox_key', (data.payload?.api_keys || []).some((item) => item.environment === 'sandbox' && item.is_active));
       }
 
       if (data.action === 'environmentSet') {
@@ -201,8 +246,18 @@
         data.action === 'billingHistoryLoaded' ||
         data.action === 'webhookTestResult' ||
         data.action === 'checkoutCreated' ||
-        data.action === 'billingPortalCreated'
+        data.action === 'billingPortalCreated' ||
+        data.action === 'overageInvoiceCreated' ||
+        data.action === 'planChanged' ||
+        data.action === 'tierProductsEnsured'
       ) {
+        show('billingPane', data.payload);
+        if (data.action === 'webhookTestResult') {
+          markChecklistStep('webhook_test', Boolean(data.payload?.success));
+        }
+      }
+
+      if (data.action === 'onboardingSequenceLoaded' || data.action === 'onboardingInitialized') {
         show('billingPane', data.payload);
       }
 
@@ -225,6 +280,20 @@
       tier: 'growth',
       planType: 'monthly'
     }));
+    $('createOverageInvoice').addEventListener('click', () => post('createOverageInvoice', {
+      partnerId: partnerId(),
+      periodKey: periodKey(),
+      autoFinalize: true
+    }));
+    $('ensureProducts').addEventListener('click', () => post('ensureTierProducts'));
+    $('changePlan').addEventListener('click', () => post('changePlan', {
+      partnerId: partnerId(),
+      tier: $('targetTier').value,
+      planType: $('targetPlanType').value,
+      immediate: true
+    }));
+    $('loadOnboardingSequence').addEventListener('click', () => post('getOnboardingSequence'));
+    $('initOnboarding').addEventListener('click', () => post('initOnboarding', { partnerId: partnerId() }));
     $('sendWebhookTest').addEventListener('click', () => post('sendWebhookTest', {
       partnerId: partnerId(),
       webhookUrl: $('webhookUrl').value.trim() || null

@@ -8,7 +8,12 @@ import {
   sendPartnerWebhookTest,
   createPartnerApiCheckout,
   createPartnerBillingPortal,
-  getPartnerBillingHistory
+  getPartnerBillingHistory,
+  createPartnerOverageInvoice,
+  changePartnerApiSubscription,
+  createApiTierProducts,
+  getApiOnboardingEmailSequence,
+  initializePartnerOnboarding
 } from 'backend/apiPortalService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -74,6 +79,21 @@ async function routeMessage(component, message) {
       case 'getBillingHistory':
         await handleGetBillingHistory(component, message.partnerId, message.limit);
         break;
+      case 'createOverageInvoice':
+        await handleCreateOverageInvoice(component, message.partnerId, message.periodKey, message.autoFinalize);
+        break;
+      case 'changePlan':
+        await handleChangePlan(component, message.partnerId, message.tier, message.planType, message.immediate);
+        break;
+      case 'ensureTierProducts':
+        await handleEnsureTierProducts(component);
+        break;
+      case 'getOnboardingSequence':
+        await handleGetOnboardingSequence(component);
+        break;
+      case 'initOnboarding':
+        await handleInitOnboarding(component, message.partnerId);
+        break;
       default:
         console.warn('API_PORTAL_DASHBOARD: Unknown action', message.action);
     }
@@ -130,6 +150,31 @@ async function handleCreateBillingPortal(component, partnerId) {
 async function handleGetBillingHistory(component, partnerId, limit = 50) {
   const result = await getPartnerBillingHistory(partnerId, limit || 50);
   safeSend(component, { action: 'billingHistoryLoaded', payload: result });
+}
+
+async function handleCreateOverageInvoice(component, partnerId, periodKey, autoFinalize = true) {
+  const result = await createPartnerOverageInvoice(partnerId, periodKey || null, autoFinalize !== false);
+  safeSend(component, { action: 'overageInvoiceCreated', payload: result });
+}
+
+async function handleChangePlan(component, partnerId, tier, planType = 'monthly', immediate = true) {
+  const result = await changePartnerApiSubscription(partnerId, tier || 'starter', planType || 'monthly', immediate !== false);
+  safeSend(component, { action: 'planChanged', payload: result });
+}
+
+async function handleEnsureTierProducts(component) {
+  const result = await createApiTierProducts();
+  safeSend(component, { action: 'tierProductsEnsured', payload: result });
+}
+
+async function handleGetOnboardingSequence(component) {
+  const result = await getApiOnboardingEmailSequence();
+  safeSend(component, { action: 'onboardingSequenceLoaded', payload: result });
+}
+
+async function handleInitOnboarding(component, partnerId) {
+  const result = await initializePartnerOnboarding(partnerId);
+  safeSend(component, { action: 'onboardingInitialized', payload: result });
 }
 
 function safeSend(component, payload) {

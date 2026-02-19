@@ -76,7 +76,7 @@ import {
 
 import { getRecruiterHealthStatus } from 'backend/recruiterHealthService.jsw';
 import { routeAIRequest } from 'backend/aiRouterService';
-import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
+import { handleAgentTurn, resumeAfterApproval, executeTool } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
 import { getCampaigns, createCampaign, startCampaign, getCampaignStatus } from 'backend/voiceCampaignService';
 
@@ -213,7 +213,12 @@ const MESSAGE_REGISTRY = {
     'getCampaigns',
     'createCampaign',
     'startCampaign',
-    'getCampaignStatus'
+    'getCampaignStatus',
+    'getPaidMediaState',
+    'createPaidMediaDraft',
+    'updatePaidMediaAdSet',
+    'createPaidMediaCreative',
+    'launchPaidMediaCampaign'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -292,7 +297,12 @@ const MESSAGE_REGISTRY = {
     'campaignsLoaded',
     'campaignCreated',
     'campaignStarted',
-    'campaignStatusLoaded'
+    'campaignStatusLoaded',
+    'paidMediaStateLoaded',
+    'paidMediaDraftCreated',
+    'paidMediaAdSetUpdated',
+    'paidMediaCreativeCreated',
+    'paidMediaLaunchResult'
   ]
 };
 
@@ -671,6 +681,31 @@ async function handleHtmlMessage(msg, component) {
       case 'getCampaignStatus': {
         const result = await getCampaignStatus(msg.data?.campaignId);
         sendToHtml(component, 'campaignStatusLoaded', result);
+        break;
+      }
+      case 'getPaidMediaState': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleGetPaidMediaState(recruiterId, msg.data, component);
+        break;
+      }
+      case 'createPaidMediaDraft': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleCreatePaidMediaDraft(recruiterId, msg.data, component);
+        break;
+      }
+      case 'updatePaidMediaAdSet': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleUpdatePaidMediaAdSet(recruiterId, msg.data, component);
+        break;
+      }
+      case 'createPaidMediaCreative': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleCreatePaidMediaCreative(recruiterId, msg.data, component);
+        break;
+      }
+      case 'launchPaidMediaCampaign': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleLaunchPaidMediaCampaign(recruiterId, msg.data, component);
         break;
       }
 
@@ -1771,4 +1806,140 @@ async function handleGetSystemHealth(data, component) {
       error: error.message
     });
   }
+}
+
+async function executePaidMediaAction(recruiterId, action, params = {}) {
+  return executeTool(
+    'recruiter_paid_media',
+    { action, params },
+    { userId: recruiterId, runId: `recruiter_paid_media_${Date.now()}` }
+  );
+}
+
+function buildPaidMediaContext(data = {}) {
+  return {
+    carrierDot: data.carrierDot || currentCarrierDOT || '',
+    integrationId: data.integrationId || '',
+    adAccountId: data.adAccountId || '',
+    idempotencyKey: data.idempotencyKey || `paid_media_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+  };
+}
+
+async function handleGetPaidMediaState(recruiterId, data, component) {
+  const payload = data || {};
+  sendToHtml(component, 'paidMediaStateLoaded', {
+    success: true,
+    recruiterId,
+    carrierDot: payload.carrierDot || currentCarrierDOT || '',
+    integrationId: payload.integrationId || '',
+    adAccountId: payload.adAccountId || '',
+    generatedAt: new Date().toISOString()
+  });
+}
+
+async function handleCreatePaidMediaDraft(recruiterId, data, component) {
+  const payload = data || {};
+  const context = buildPaidMediaContext(payload);
+  const campaignDraft = await executePaidMediaAction(recruiterId, 'create_campaign_draft', {
+    campaignId: payload.campaignId || '',
+    name: payload.name || '',
+    objective: payload.objective || '',
+    category: payload.category || 'recruitment',
+    dailyBudget: Number(payload.dailyBudget || 0),
+    startTime: payload.startTime || '',
+    endTime: payload.endTime || '',
+    integrationId: context.integrationId,
+    adAccountId: context.adAccountId,
+    idempotencyKey: `${context.idempotencyKey}_campaign`
+  });
+
+  if (!campaignDraft.success) {
+    sendToHtml(component, 'paidMediaDraftCreated', campaignDraft);
+    return;
+  }
+
+  const campaignId = campaignDraft.campaign?.campaign_id || payload.campaignId || '';
+  const adSetDraft = await executePaidMediaAction(recruiterId, 'create_ad_set_draft', {
+    adSetId: payload.adSetId || '',
+    campaignId,
+    name: payload.adSetName || `${payload.name || 'Campaign'} - Primary Ad Set`,
+    dailyBudget: Number(payload.dailyBudget || 0),
+    targeting: payload.targeting || {
+      regions: payload.regions || [],
+      audience: payload.audience || 'broad',
+      placements: payload.placements || []
+    },
+    schedule: payload.schedule || {
+      start_time: payload.startTime || '',
+      end_time: payload.endTime || ''
+    },
+    integrationId: context.integrationId,
+    adAccountId: context.adAccountId,
+    idempotencyKey: `${context.idempotencyKey}_adset`
+  });
+
+  sendToHtml(component, 'paidMediaDraftCreated', {
+    success: campaignDraft.success && adSetDraft.success,
+    campaign: campaignDraft.campaign || null,
+    adSet: adSetDraft.adSet || null,
+    errors: [campaignDraft.error, adSetDraft.error].filter(Boolean)
+  });
+}
+
+async function handleUpdatePaidMediaAdSet(recruiterId, data, component) {
+  const payload = data || {};
+  const context = buildPaidMediaContext(payload);
+  const result = await executePaidMediaAction(recruiterId, 'update_ad_set_budget', {
+    adSetId: payload.adSetId || '',
+    dailyBudget: Number(payload.dailyBudget || 0),
+    lifetimeBudget: Number(payload.lifetimeBudget || 0),
+    schedule: payload.schedule || null,
+    targeting: payload.targeting || null,
+    integrationId: context.integrationId,
+    adAccountId: context.adAccountId,
+    idempotencyKey: `${context.idempotencyKey}_adset_update`
+  });
+
+  sendToHtml(component, 'paidMediaAdSetUpdated', result);
+}
+
+async function handleCreatePaidMediaCreative(recruiterId, data, component) {
+  const payload = data || {};
+  const context = buildPaidMediaContext(payload);
+  const creativeResult = await executePaidMediaAction(recruiterId, 'create_creative_draft', {
+    creativeId: payload.creativeId || '',
+    campaignId: payload.campaignId || '',
+    adSetId: payload.adSetId || '',
+    name: payload.creativeName || `${payload.name || 'Campaign'} Creative`,
+    headline: payload.headline || '',
+    body: payload.body || '',
+    ctaType: payload.ctaType || 'APPLY_NOW',
+    destinationUrl: payload.destinationUrl || '',
+    mediaAssets: payload.mediaAssets || [],
+    integrationId: context.integrationId,
+    adAccountId: context.adAccountId,
+    idempotencyKey: `${context.idempotencyKey}_creative`
+  });
+
+  sendToHtml(component, 'paidMediaCreativeCreated', creativeResult);
+}
+
+async function handleLaunchPaidMediaCampaign(recruiterId, data, component) {
+  const payload = data || {};
+  const context = buildPaidMediaContext(payload);
+  const launchResult = await executePaidMediaAction(recruiterId, 'create_campaign', {
+    campaignId: payload.campaignId || '',
+    name: payload.name || '',
+    objective: payload.objective || '',
+    category: payload.category || 'recruitment',
+    dailyBudget: Number(payload.dailyBudget || 0),
+    startTime: payload.startTime || '',
+    endTime: payload.endTime || '',
+    status: 'active',
+    integrationId: context.integrationId,
+    adAccountId: context.adAccountId,
+    idempotencyKey: `${context.idempotencyKey}_launch`
+  });
+
+  sendToHtml(component, 'paidMediaLaunchResult', launchResult);
 }

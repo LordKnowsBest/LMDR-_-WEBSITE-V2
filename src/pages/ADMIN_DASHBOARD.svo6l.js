@@ -7,6 +7,7 @@ import {
     getAIHealthCheck,
     resolveAlert
 } from 'backend/admin_dashboard_service';
+import { getMetaGovernanceSummary } from 'backend/metaGovernanceService';
 import {
     getFeatureStats,
     getFeatureLifecycleReport,
@@ -87,6 +88,10 @@ async function routeMessage(component, message) {
 
             case 'getAIUsage':
                 await handleGetAIUsage(component, message.period);
+                break;
+
+            case 'getMetaGovernanceSummary':
+                await handleGetMetaGovernanceSummary(component);
                 break;
 
             case 'resolveAlert':
@@ -200,6 +205,11 @@ async function handleResolveAlert(component, alertId) {
     // Refresh dashboard after resolving
     const data = await getDashboardOverview();
     safeSend(component, { action: 'dashboardLoaded', payload: data });
+}
+
+async function handleGetMetaGovernanceSummary(component) {
+    const data = await getMetaGovernanceSummary();
+    safeSend(component, { action: 'metaGovernanceSummaryLoaded', payload: data });
 }
 
 async function handleGetFeatureStats(component, featureId, timeRange, groupBy) {
