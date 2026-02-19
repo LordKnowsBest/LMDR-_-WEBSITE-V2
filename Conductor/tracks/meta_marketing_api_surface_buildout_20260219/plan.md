@@ -58,26 +58,26 @@
 ## Phase 3: Monitoring, Insights, and Reporting
 
 ### 3.1 Insights Service
-- [ ] Task: Create `metaInsightsService.jsw` for campaign/ad set/ad insights fetches
-- [ ] Task: Support timeframe filters, breakdown dimensions, and attribution windows
-- [ ] Task: Add async report job orchestration and polling (`metaAsyncReportJobs`)
-- [ ] Task: Persist timeseries into `metaInsightsDaily` and `metaInsightsIntraday`
+- [x] Task: Create `metaInsightsService.jsw` for campaign/ad set/ad insights fetches
+- [x] Task: Support timeframe filters, breakdown dimensions, and attribution windows
+- [x] Task: Add async report job orchestration and polling (`metaAsyncReportJobs`)
+- [x] Task: Persist timeseries into `metaInsightsDaily` and `metaInsightsIntraday`
 
 ### 3.2 Recruiter Analytics Surface
-- [ ] Task: Add spend/reach/results dashboard cards with trend charts
-- [ ] Task: Add placement and creative performance slices
-- [ ] Task: Add frequency fatigue, pacing, and anomaly panels
-- [ ] Task: Add report export and async job status UX
+- [x] Task: Add spend/reach/results dashboard cards with trend charts
+- [x] Task: Add placement and creative performance slices
+- [x] Task: Add frequency fatigue, pacing, and anomaly panels
+- [x] Task: Add report export and async job status UX
 
 ### 3.3 Agent Router - Analytics
-- [ ] Task: Register `recruiter_paid_media_analytics` router
-- [ ] Task: Implement read actions for insights and report jobs
-- [ ] Task: Implement suggest actions for reallocation/creative/audience changes
+- [x] Task: Register `recruiter_paid_media_analytics` router
+- [x] Task: Implement read actions for insights and report jobs
+- [x] Task: Implement suggest actions for reallocation/creative/audience changes
 
 ### 3.4 Testing - Phase 3
-- [ ] Task: Unit tests for insights query building and normalization
-- [ ] Task: Async report lifecycle tests (create/status/download)
-- [ ] Task: End-to-end tests for analytics dashboard data loads
+- [x] Task: Unit tests for insights query building and normalization
+- [x] Task: Async report lifecycle tests (create/status/download)
+- [x] Task: End-to-end tests for analytics dashboard data loads
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Monitoring and Reports'
 
 ---
@@ -85,21 +85,21 @@
 ## Phase 4: Agentic Optimization Loop
 
 ### 4.1 Optimization Service
-- [ ] Task: Create `metaOptimizationService.jsw` with rule-driven recommendations
-- [ ] Task: Implement guarded auto-actions (budget shifts, creative rotation, bid adjustment)
-- [ ] Task: Log all optimization actions to `metaOptimizationActions`
-- [ ] Task: Add rollback handlers for reversible changes
+- [x] Task: Create `metaOptimizationService.jsw` with rule-driven recommendations
+- [x] Task: Implement guarded auto-actions (budget shifts, creative rotation, bid adjustment)
+- [x] Task: Log all optimization actions to `metaOptimizationActions`
+- [x] Task: Add rollback handlers for reversible changes
 
 ### 4.2 Agent Actions and Safeguards
-- [ ] Task: Add execute_low actions for applying optimization suggestions
-- [ ] Task: Add data-freshness and confidence thresholds before action execution
-- [ ] Task: Add cooldown windows to prevent action thrashing
-- [ ] Task: Add anomaly stop-switch for volatile performance periods
+- [x] Task: Add execute_low actions for applying optimization suggestions
+- [x] Task: Add data-freshness and confidence thresholds before action execution
+- [x] Task: Add cooldown windows to prevent action thrashing
+- [x] Task: Add anomaly stop-switch for volatile performance periods
 
 ### 4.3 Testing - Phase 4
-- [ ] Task: Recommendation quality tests with scenario fixtures
-- [ ] Task: Safety gate tests for confidence/freshness/cooldown checks
-- [ ] Task: Rollback tests for each optimization mutation type
+- [x] Task: Recommendation quality tests with scenario fixtures
+- [x] Task: Safety gate tests for confidence/freshness/cooldown checks
+- [x] Task: Rollback tests for each optimization mutation type
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: Agentic Optimization'
 
 ---
@@ -107,21 +107,21 @@
 ## Phase 5: Cross-Surface Parity and Admin Operations
 
 ### 5.1 Admin Governance Surface
-- [ ] Task: Add approval inbox for pending execute_high actions
-- [ ] Task: Add policy editor for thresholds/guardrails
-- [ ] Task: Add error digest and rate-limit posture dashboard
-- [ ] Task: Add integration quarantine and recovery controls
+- [x] Task: Add approval inbox for pending execute_high actions
+- [x] Task: Add policy editor for thresholds/guardrails
+- [x] Task: Add error digest and rate-limit posture dashboard
+- [x] Task: Add integration quarantine and recovery controls
 
 ### 5.2 Cross-Role Funnel Layer
-- [ ] Task: Create `metaAttributionBridgeService.jsw` for campaign-to-pipeline joins
-- [ ] Task: Register `cross_role_paid_media_pipeline` router
-- [ ] Task: Add CPL-to-hire and source quality views to recruiter analytics
-- [ ] Task: Add taxonomy sync action for campaign naming -> pipeline dimensions
+- [x] Task: Create `metaAttributionBridgeService.jsw` for campaign-to-pipeline joins
+- [x] Task: Register `cross_role_paid_media_pipeline` router
+- [x] Task: Add CPL-to-hire and source quality views to recruiter analytics
+- [x] Task: Add taxonomy sync action for campaign naming -> pipeline dimensions
 
 ### 5.3 Testing - Phase 5
-- [ ] Task: Approval workflow integration tests (agent -> admin -> execution)
-- [ ] Task: Attribution join correctness tests
-- [ ] Task: Router parity tests across recruiter/admin roles
+- [x] Task: Approval workflow integration tests (agent -> admin -> execution)
+- [x] Task: Attribution join correctness tests
+- [x] Task: Router parity tests across recruiter/admin roles
 - [ ] Task: Conductor - User Manual Verification 'Phase 5: Surface Parity'
 
 ---

@@ -132,7 +132,7 @@ Planned v2 additions:
 
 ### 4.2 `recruiter_paid_media_analytics` router (role: recruiter)
 
-Read actions:
+Current v1 actions (implemented):
 - `get_insights_campaign_level`
 - `get_insights_adset_level`
 - `get_insights_ad_level`
@@ -143,13 +143,9 @@ Read actions:
 - `get_creative_performance`
 - `get_placement_performance`
 - `get_frequency_fatigue_alerts`
-
-Suggest actions:
 - `suggest_budget_reallocation`
 - `suggest_creative_rotation`
 - `suggest_audience_narrowing`
-
-Execute low:
 - `apply_budget_reallocation`
 - `apply_bid_adjustment`
 - `rotate_creative_variant`
@@ -176,6 +172,8 @@ Execute high:
 - `disable_integration`
 
 ### 4.4 `cross_role_paid_media_pipeline` router (roles: recruiter, admin)
+
+Current v1 actions (implemented):
 
 Read:
 - `get_paid_media_to_pipeline_funnel`
@@ -274,8 +272,8 @@ Testing requirements:
 - Phase 2: campaign/ad set/ad draft + launch lifecycle
 - Phase 3: insights and async reporting
 - Phase 4: optimization loop + auto-actions with safeguards
-- Phase 5: recruiter/admin UI parity + workflow wiring
-- Phase 6: pipeline attribution bridge + production hardening
+- Phase 5: recruiter/admin UI parity + pipeline attribution bridge
+- Phase 6: production hardening and compliance
 
 Detailed execution checklist is in `plan.md`.
 

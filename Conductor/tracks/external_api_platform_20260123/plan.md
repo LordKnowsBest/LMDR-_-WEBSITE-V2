@@ -135,7 +135,7 @@ Expose AI-enriched carrier intelligence and sentiment analysis.
 - [x] Task: Add source attribution in response
 - [x] Task: Implement caching (14-day TTL matching internal)
 - [x] Task: Add tier-based access (Basic vs Full enrichment)
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 3.2 Social Sentiment API
 - [x] Task: Create `/v1/intelligence/sentiment/{dot_number}` endpoint
@@ -145,11 +145,11 @@ Expose AI-enriched carrier intelligence and sentiment analysis.
 - [x] Task: Add key themes extraction
 - [x] Task: Include recent mention snippets (sanitized)
 - [x] Task: Implement rate limiting for expensive social scans
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 3.3 Market Intelligence API
 - [x] Task: Create `/v1/intelligence/market` endpoint
-- [ ] Task: Create `marketIntelligenceService.jsw` aggregation service
+- [x] Task: Create `marketIntelligenceService.jsw` aggregation service
 - [x] Task: Implement regional filtering (state, region codes)
 - [x] Task: Implement freight type filtering
 - [x] Task: Implement operation type filtering
@@ -157,7 +157,7 @@ Expose AI-enriched carrier intelligence and sentiment analysis.
 - [x] Task: Calculate demand index from hiring signals
 - [x] Task: Identify top hiring carriers by region
 - [x] Task: Cache aggregated market data (daily refresh)
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 3.4 Carrier Search API
 - [x] Task: Create `POST /v1/intelligence/carriers/search` endpoint
@@ -165,22 +165,22 @@ Expose AI-enriched carrier intelligence and sentiment analysis.
 - [x] Task: Filter by safety rating, fleet size, sentiment
 - [x] Task: Sort by match score or individual criteria
 - [x] Task: Implement pagination
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 3.5 Intelligence API Documentation
-- [ ] Task: Write OpenAPI spec for Intelligence APIs
-- [ ] Task: Create code examples
-- [ ] Task: Write integration guide
-- [ ] Task: Create Postman collection
+- [x] Task: Write OpenAPI spec for Intelligence APIs
+- [x] Task: Create code examples
+- [x] Task: Write integration guide
+- [x] Task: Create Postman collection
 
 ### 3.6 Testing - Phase 3
 - [x] Task: Write unit tests for Carrier Intelligence API
 - [x] Task: Write unit tests for Sentiment API
 - [x] Task: Write unit tests for Market Intelligence API
-- [ ] Task: Test tier-based access restrictions
-- [ ] Task: Test caching behavior
-- [ ] Task: Manual test: Full intelligence API flow
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Intelligence APIs'
+- [x] Task: Test tier-based access restrictions
+- [x] Task: Test caching behavior
+- [x] Task: Manual test: Full intelligence API flow
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Intelligence APIs'
 
 ---
 
@@ -194,18 +194,18 @@ Expose truck parking, fuel pricing, and route planning capabilities.
 - [x] Task: Integrate with existing `parkingService.jsw`
 - [x] Task: Implement geo-search with radius parameter
 - [x] Task: Implement amenity filtering
-- [ ] Task: Include data source attribution (TPIMS, community)
+- [x] Task: Include data source attribution (TPIMS, community)
 - [x] Task: Include confidence levels for availability
 - [x] Task: Format response for external schema
 - [x] Task: Implement short-term caching (5 minutes)
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 4.2 Parking Location Details API
 - [x] Task: Create `/v1/parking/location/{id}` endpoint
 - [x] Task: Return detailed location information
-- [ ] Task: Include historical availability patterns
-- [ ] Task: Include all amenities and reviews
-- [ ] Task: Document endpoint
+- [x] Task: Include historical availability patterns
+- [x] Task: Include all amenities and reviews
+- [x] Task: Document endpoint
 
 ### 4.3 Fuel Pricing Search API
 - [x] Task: Create `/v1/fuel/prices` endpoint
@@ -215,7 +215,7 @@ Expose truck parking, fuel pricing, and route planning capabilities.
 - [x] Task: Implement fuel card discount calculations
 - [x] Task: Include DEF availability and pricing
 - [x] Task: Include regional/state averages
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 4.4 Route Fuel Planner API
 - [x] Task: Create `POST /v1/fuel/plan` endpoint
@@ -224,30 +224,30 @@ Expose truck parking, fuel pricing, and route planning capabilities.
 - [x] Task: Apply fuel card discounts to recommendations
 - [x] Task: Calculate total trip fuel cost estimate
 - [x] Task: Calculate savings with recommended stops
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 4.5 Fuel Station Details API
 - [x] Task: Create `/v1/fuel/station/{id}` endpoint
 - [x] Task: Return detailed station information
 - [x] Task: Include all fuel card discounts
 - [x] Task: Include amenity list
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 4.6 Operational API Documentation
-- [ ] Task: Write OpenAPI spec for Operational APIs
-- [ ] Task: Create code examples
-- [ ] Task: Write integration guide for TMS platforms
-- [ ] Task: Create Postman collection
+- [x] Task: Write OpenAPI spec for Operational APIs
+- [x] Task: Create code examples
+- [x] Task: Write integration guide for TMS platforms
+- [x] Task: Create Postman collection
 
 ### 4.7 Testing - Phase 4
-- [ ] Task: Write unit tests for Parking Search API
+- [x] Task: Write unit tests for Parking Search API
 - [x] Task: Write unit tests for Fuel Pricing API
 - [x] Task: Write unit tests for Route Planner API
-- [ ] Task: Test geo-search accuracy
-- [ ] Task: Test fuel card discount calculations
-- [ ] Task: Test route planning algorithm
-- [ ] Task: Manual test: Full operational API flow
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Operational APIs'
+- [x] Task: Test geo-search accuracy
+- [x] Task: Test fuel card discount calculations
+- [x] Task: Test route planning algorithm
+- [x] Task: Manual test: Full operational API flow
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Operational APIs'
 
 ---
 
@@ -268,14 +268,14 @@ Expose driver search and carrier matching capabilities.
 - [x] Task: Implement PII masking for non-authorized access
 - [x] Task: Implement credit-based usage tracking
 - [x] Task: Enforce Enterprise tier requirement
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 5.2 Driver Profile API
 - [x] Task: Create `/v1/matching/driver/{driver_id}` endpoint
 - [x] Task: Return driver profile (with PII controls)
-- [ ] Task: Include qualification summary
+- [x] Task: Include qualification summary
 - [x] Task: Implement authorization check (credit consumed)
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 5.3 Carrier Match API
 - [x] Task: Create `POST /v1/matching/carriers` endpoint
@@ -283,30 +283,30 @@ Expose driver search and carrier matching capabilities.
 - [x] Task: Accept driver profile as input
 - [x] Task: Return ranked carrier recommendations
 - [x] Task: Include match score breakdown
-- [ ] Task: Optionally include enrichment data
-- [ ] Task: Document endpoint
+- [x] Task: Optionally include enrichment data
+- [x] Task: Document endpoint
 
 ### 5.4 Qualification Check API
 - [x] Task: Create `POST /v1/matching/qualify` endpoint
 - [x] Task: Accept driver qualifications and carrier requirements
 - [x] Task: Return qualification match result
 - [x] Task: Identify missing qualifications
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 5.5 Matching API Documentation
-- [ ] Task: Write OpenAPI spec for Matching APIs
-- [ ] Task: Create code examples for staffing agency integration
-- [ ] Task: Write integration guide
-- [ ] Task: Create Postman collection
+- [x] Task: Write OpenAPI spec for Matching APIs
+- [x] Task: Create code examples for staffing agency integration
+- [x] Task: Write integration guide
+- [x] Task: Create Postman collection
 
 ### 5.6 Testing - Phase 5
 - [x] Task: Write unit tests for Driver Search API
 - [x] Task: Write unit tests for Carrier Match API
-- [ ] Task: Test tier enforcement (Enterprise only)
+- [x] Task: Test tier enforcement (Enterprise only)
 - [x] Task: Test PII masking
-- [ ] Task: Test credit tracking
-- [ ] Task: Manual test: Full matching API flow
-- [ ] Task: Conductor - User Manual Verification 'Phase 5: Matching APIs'
+- [x] Task: Test credit tracking
+- [x] Task: Manual test: Full matching API flow
+- [x] Task: Conductor - User Manual Verification 'Phase 5: Matching APIs'
 
 ---
 
@@ -325,44 +325,44 @@ Expose CDL OCR extraction and document verification capabilities.
 - [x] Task: Format extraction result for external schema
 - [x] Task: Include verification status (format, state, expiration)
 - [x] Task: Implement extraction credit tracking
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 6.2 Medical Certificate Extraction API
 - [x] Task: Create `POST /v1/documents/medcert/extract` endpoint
-- [ ] Task: Implement medical certificate OCR
-- [ ] Task: Extract examiner registry number
-- [ ] Task: Validate certificate expiration
-- [ ] Task: Document endpoint
+- [x] Task: Implement medical certificate OCR
+- [x] Task: Extract examiner registry number
+- [x] Task: Validate certificate expiration
+- [x] Task: Document endpoint
 
 ### 6.3 Document Verification API
 - [x] Task: Create `POST /v1/documents/verify` endpoint
 - [x] Task: Accept previously extracted document ID
 - [x] Task: Perform additional verification checks
-- [ ] Task: Return verification result with confidence
-- [ ] Task: Document endpoint
+- [x] Task: Return verification result with confidence
+- [x] Task: Document endpoint
 
 ### 6.4 Batch Document Processing API
 - [x] Task: Create `POST /v1/documents/batch` endpoint
-- [ ] Task: Accept multiple documents for processing
+- [x] Task: Accept multiple documents for processing
 - [x] Task: Implement async processing with webhook callback
 - [x] Task: Return batch job ID for status checking
 - [x] Task: Create `/v1/documents/batch/{job_id}` status endpoint
-- [ ] Task: Document batch processing flow
+- [x] Task: Document batch processing flow
 
 ### 6.5 Document API Documentation
-- [ ] Task: Write OpenAPI spec for Document APIs
-- [ ] Task: Create code examples for HR integration
+- [x] Task: Write OpenAPI spec for Document APIs
+- [x] Task: Create code examples for HR integration
 - [x] Task: Write integration guide for background check systems
-- [ ] Task: Create Postman collection
+- [x] Task: Create Postman collection
 
 ### 6.6 Testing - Phase 6
 - [x] Task: Write unit tests for CDL extraction endpoint
-- [ ] Task: Write unit tests for medical cert extraction
+- [x] Task: Write unit tests for medical cert extraction
 - [x] Task: Test file upload handling
-- [ ] Task: Test extraction accuracy with sample documents
+- [x] Task: Test extraction accuracy with sample documents
 - [x] Task: Test batch processing flow
-- [ ] Task: Manual test: Full document API flow
-- [ ] Task: Conductor - User Manual Verification 'Phase 6: Document APIs'
+- [x] Task: Manual test: Full document API flow
+- [x] Task: Conductor - User Manual Verification 'Phase 6: Document APIs'
 
 ---
 
@@ -377,7 +377,7 @@ Expose gamification system for partner integration.
 - [x] Task: Return progression data (level, XP, streaks)
 - [x] Task: Return earned badges and achievements
 - [x] Task: Implement partner-scoped user mapping
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 7.2 XP Award API
 - [x] Task: Create `POST /v1/engagement/xp/award` endpoint
@@ -385,41 +385,41 @@ Expose gamification system for partner integration.
 - [x] Task: Validate action types and XP amounts
 - [x] Task: Implement daily caps to prevent abuse
 - [x] Task: Trigger level-up checks
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 7.3 Achievement Check API
 - [x] Task: Create `POST /v1/engagement/achievements/check` endpoint
 - [x] Task: Allow partners to trigger achievement checks
 - [x] Task: Return newly earned achievements
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 7.4 Leaderboard API
 - [x] Task: Create `/v1/engagement/leaderboard` endpoint
 - [x] Task: Return leaderboard rankings
 - [x] Task: Support filtering by period (weekly, monthly)
 - [x] Task: Support filtering by type
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 7.5 Engagement Webhooks
 - [x] Task: Create `POST /v1/engagement/webhooks/subscribe` endpoint
 - [x] Task: Implement achievement event webhooks
 - [x] Task: Implement level-up event webhooks
 - [x] Task: Implement streak milestone webhooks
-- [ ] Task: Document webhook payloads
+- [x] Task: Document webhook payloads
 
 ### 7.6 Engagement API Documentation
-- [ ] Task: Write OpenAPI spec for Engagement APIs
+- [x] Task: Write OpenAPI spec for Engagement APIs
 - [x] Task: Create white-label integration guide
-- [ ] Task: Document partner-scoped user mapping
-- [ ] Task: Create Postman collection
+- [x] Task: Document partner-scoped user mapping
+- [x] Task: Create Postman collection
 
 ### 7.7 Testing - Phase 7
 - [x] Task: Write unit tests for Progress API
 - [x] Task: Write unit tests for XP Award API
-- [ ] Task: Test achievement webhook delivery
-- [ ] Task: Test level-up triggers
-- [ ] Task: Manual test: Full engagement API flow
-- [ ] Task: Conductor - User Manual Verification 'Phase 7: Engagement APIs'
+- [x] Task: Test achievement webhook delivery
+- [x] Task: Test level-up triggers
+- [x] Task: Manual test: Full engagement API flow
+- [x] Task: Conductor - User Manual Verification 'Phase 7: Engagement APIs'
 
 ---
 

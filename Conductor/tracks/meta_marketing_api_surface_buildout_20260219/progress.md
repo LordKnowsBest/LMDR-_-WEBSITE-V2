@@ -13,9 +13,9 @@
 |------|------|--------|------------|
 | 1 | Integration Foundation | In Progress | 98% |
 | 2 | Campaign Lifecycle | In Progress | 92% |
-| 3 | Monitoring and Reporting | Not Started | 0% |
-| 4 | Agentic Optimization | Not Started | 0% |
-| 5 | Cross-Surface Parity | Not Started | 0% |
+| 3 | Monitoring and Reporting | In Progress | 88% |
+| 4 | Agentic Optimization | In Progress | 90% |
+| 5 | Cross-Surface Parity | In Progress | 92% |
 | 6 | Hardening and Production Readiness | Not Started | 0% |
 
 ---
@@ -25,10 +25,10 @@
 | Router | Planned Actions | Implemented | Tested | Status |
 |--------|-----------------|-------------|--------|--------|
 | `recruiter_paid_media` | 24 | 24 | 5 | In Progress |
-| `recruiter_paid_media_analytics` | 13 | 0 | 0 | Not Started |
+| `recruiter_paid_media_analytics` | 16 | 16 | 7 | In Progress |
 | `admin_meta_ads_governance` | 13 | 13 | 5 | In Progress |
-| `cross_role_paid_media_pipeline` | 7 | 0 | 0 | Not Started |
-| **Total** | **57** | **37** | **10** | **In Progress** |
+| `cross_role_paid_media_pipeline` | 7 | 7 | 4 | In Progress |
+| **Total** | **67** | **60** | **21** | **In Progress** |
 
 ---
 
@@ -37,8 +37,8 @@
 | Surface | Feature Parity Goal | Status |
 |--------|----------------------|--------|
 | Recruiter Outreach | Campaign/ad set/ad create-edit-launch parity | In Progress |
-| Recruiter Analytics | Insights/reporting/alerts parity | Not Started |
-| Admin Platform | Governance, approvals, token ops parity | In Progress |
+| Recruiter Analytics | Insights/reporting/alerts parity | In Progress |
+| Admin Platform | Governance, approvals, token ops parity | In Progress (approval inbox + policy editor + posture controls live) |
 | Agentic Layer | Router/action + approval + audit parity | In Progress |
 
 ---
@@ -51,10 +51,10 @@
 | `metaCampaignService.jsw` | In Progress (draft/create/update/pause/resume/delete + ad lifecycle + idempotent mutation audit) |
 | `metaAdSetService.jsw` | In Progress (draft/create/update + targeting/budget/schedule + lifecycle state controls) |
 | `metaCreativeService.jsw` | In Progress (draft/create/update/archive + creative-to-ad linking) |
-| `metaInsightsService.jsw` | Not Started |
-| `metaOptimizationService.jsw` | Not Started |
+| `metaInsightsService.jsw` | In Progress (insights reads, breakdowns, async report lifecycle, snapshot sync, recommendation suggestors) |
+| `metaOptimizationService.jsw` | In Progress (rule-driven recommendation aggregation + guarded apply actions + rollback handlers + action logging) |
 | `metaGovernanceService.jsw` | Complete (Phase 1 + scheduled wrappers + admin summary rollup for dashboard cards) |
-| `metaAttributionBridgeService.jsw` | Not Started |
+| `metaAttributionBridgeService.jsw` | In Progress (funnel joins, CPL-to-hire trend, source quality, channel/geo suggestions, taxonomy sync, attribution backfill) |
 
 ---
 
@@ -68,15 +68,15 @@
 | `metaAdSetMirror` | In Use (`metaAdSetService.jsw`) |
 | `metaAdMirror` | In Use (`metaCampaignService.jsw` + `metaCreativeService.jsw`) |
 | `metaCreativeMirror` | In Use (`metaCreativeService.jsw`) |
-| `metaInsightsDaily` | Not Started |
-| `metaInsightsIntraday` | Not Started |
-| `metaAsyncReportJobs` | Not Started |
-| `metaOptimizationActions` | Not Started |
+| `metaInsightsDaily` | In Use (`metaInsightsService.syncMetaInsightsSnapshot`) |
+| `metaInsightsIntraday` | In Use (`metaInsightsService.syncMetaInsightsSnapshot`) |
+| `metaAsyncReportJobs` | In Use (`createAsyncReportJob` + `processPendingMetaAsyncReports`) |
+| `metaOptimizationActions` | In Use (`metaOptimizationService.jsw` apply/blocked/rollback audit trail) |
 | `metaGovernancePolicies` | Mapped in config (`configData.js`) |
 | `metaMutationAudit` | Mapped in config (`configData.js`) |
 | `metaErrorEvents` | Mapped in config (`configData.js`) |
 | `metaRateLimitEvents` | Mapped in config (`configData.js`) |
-| `metaAttributionLinks` | Not Started |
+| `metaAttributionLinks` | In Use (`metaAttributionBridgeService.jsw` joins + taxonomy sync + backfill) |
 
 ---
 
@@ -84,10 +84,10 @@
 
 | Suite | Planned | Passing |
 |------|---------|---------|
-| Unit tests | 4 | 4 |
-| Integration tests | 2 | 2 |
+| Unit tests | 7 | 7 |
+| Integration tests | 6 | 6 |
 | Scheduler jobs | 2 | 2 |
-| UI bridge tests | 1 | 1 |
+| UI bridge tests | 2 | 2 |
 | E2E tests | 0 | 0 |
 
 ---
@@ -113,3 +113,18 @@
 | 2026-02-19 | Implemented Recruiter OS paid-media campaign wizard/ad-set planner/creative builder with launch confirmation in `src/public/recruiter/os/js/views/ros-view-campaigns.js` |
 | 2026-02-19 | Added Recruiter Console paid-media bridge actions/messages and router dispatch in `src/pages/Recruiter Console.zriuj.js` |
 | 2026-02-19 | Extended UI bridge coverage in `src/public/__tests__/recruiterOS.bridge.test.js` and updated recruiter router parity assertions in `src/public/__tests__/recruiterRouters.test.js` |
+| 2026-02-19 | Implemented `metaInsightsService.jsw` for campaign/ad set/ad insight reads, breakdown queries, async report lifecycle, and recommendation suggestors |
+| 2026-02-19 | Added scheduler jobs in `src/backend/jobs.config` for `syncMetaInsightsSnapshot` and `processPendingMetaAsyncReports` |
+| 2026-02-19 | Registered `recruiter_paid_media_analytics` router (13 actions) in `agentService.jsw` and wired Recruiter Console bridge handlers |
+| 2026-02-19 | Replaced Recruiter OS attribution placeholder with analytics dashboard + async report UX in `src/public/recruiter/os/js/views/ros-view-attribution.js` |
+| 2026-02-19 | Added tests: `metaInsightsService.test.js`, `recruiterPaidMediaAnalyticsRouter.test.js`; all targeted suites passing |
+| 2026-02-19 | Implemented `metaOptimizationService.jsw` with safety-gated apply actions (`applyBudgetReallocation`, `applyBidAdjustment`, `rotateCreativeVariant`) and rollback handler support |
+| 2026-02-19 | Extended `recruiter_paid_media_analytics` router to 16 actions by adding execute_low apply actions with dispatch tests |
+| 2026-02-19 | Added `metaOptimizationService.test.js` for recommendation quality, safety gates, and rollback behavior; targeted suites passing |
+| 2026-02-19 | Implemented `metaAttributionBridgeService.jsw` and registered `cross_role_paid_media_pipeline` router (7 actions) for recruiter/admin usage |
+| 2026-02-19 | Wired Recruiter Analytics attribution view to render CPL-to-hire and source-quality insights from cross-role pipeline actions |
+| 2026-02-19 | Added tests: `metaAttributionBridgeService.test.js`, `crossRolePaidMediaPipelineRouter.test.js`; cross-role/recruiter/bridge suites passing |
+| 2026-02-19 | Extended `ADMIN_DASHBOARD` with Meta governance approval inbox, policy editor controls, error/rate-limit posture cards, and quarantine/recovery controls |
+| 2026-02-19 | Added `ADMIN_DASHBOARD` page bridge handlers for governance operations (`set_*`, quarantine, refresh token, rebind, disable) via `admin_meta_ads_governance` router |
+| 2026-02-19 | Updated admin dashboard tests (`adminDashboard.test.js`, `adminDashboard.html.test.js`) and revalidated with targeted suite run |
+| 2026-02-19 | Added approval-workflow integration coverage in `metaGovernanceRouter.test.js` (gate request -> approve/reject -> resume execution semantics) |

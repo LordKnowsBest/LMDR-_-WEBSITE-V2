@@ -168,11 +168,80 @@
 - Extended validation test and reran external API platform suite:
   - `src/public/__tests__/externalApiPlatformPhase8.test.js` expanded for new actions/features
   - 11-suite external platform cluster rerun: 11 passed, 37 tests passed
+- Phase 3 completion pass (intelligence APIs closure):
+  - Added shared market aggregation service:
+    - `src/backend/marketIntelligenceService.jsw`
+  - Wired intelligence market endpoint to shared service:
+    - `src/backend/externalIntelligenceApi.jsw`
+  - Added intelligence docs artifacts:
+    - `docs/api/guides/intelligence-api-examples.v1.md`
+    - `docs/api/guides/intelligence-integration-guide.v1.md`
+    - `docs/api/postman.intelligence.v1.collection.json`
+    - updated `docs/api/openapi.external.v1.yaml`
+    - updated `docs/api/guides/intelligence-api-guide.v1.md`
+  - Added intelligence test coverage:
+    - `src/public/__tests__/marketIntelligenceService.test.js`
+    - updated `src/public/__tests__/externalIntelligenceApi.test.js`
+    - updated `src/public/__tests__/apiGateway.external.test.js`
+  - Added verification artifact:
+    - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase3_20260219.md`
+- Phase 4 completion pass (operational APIs closure):
+  - Expanded parking wrapper behavior:
+    - source attribution labels in payload (`source_label`)
+    - historical availability projection in location detail
+    - review mapping in location detail
+  - Added operations docs artifacts:
+    - `docs/api/guides/operations-api-examples.v1.md`
+    - `docs/api/guides/operations-integration-guide.v1.md`
+    - `docs/api/postman.operations.v1.collection.json`
+    - updated `docs/api/guides/operations-api-guide.v1.md`
+    - updated `docs/api/openapi.external.v1.yaml`
+  - Added operations test coverage:
+    - `src/public/__tests__/externalParkingApi.test.js`
+    - updated `src/public/__tests__/externalFuelApi.test.js`
+  - Added verification artifact:
+    - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase4_20260219.md`
+- Phase 5 completion pass (matching APIs closure):
+  - Updated matching service payload:
+    - `src/backend/externalMatchingApi.jsw` now returns `qualification_summary` and `credit_consumed`
+  - Added matching docs artifacts:
+    - `docs/api/guides/matching-api-examples.v1.md`
+    - `docs/api/guides/matching-integration-guide.v1.md`
+    - `docs/api/postman.matching.v1.collection.json`
+    - updated `docs/api/guides/matching-api-guide.v1.md`
+    - updated `docs/api/openapi.external.v1.yaml`
+  - Added/expanded matching tests:
+    - updated `src/public/__tests__/externalMatchingApi.test.js`
+    - updated `src/public/__tests__/apiGateway.external.test.js`
+  - Added verification artifact:
+    - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase5_20260219.md`
+- Phase 6 completion pass (document APIs closure):
+  - Added document docs artifacts:
+    - `docs/api/guides/documents-api-examples.v1.md`
+    - `docs/api/guides/documents-integration-guide.v1.md`
+    - `docs/api/guides/documents-hr-integration-examples.v1.md`
+    - `docs/api/postman.documents.v1.collection.json`
+    - updated `docs/api/guides/documents-api-guide.v1.md`
+    - updated `docs/api/openapi.external.v1.yaml`
+  - Validation coverage confirmed in:
+    - `src/public/__tests__/externalDocumentApi.test.js`
+  - Added verification artifact:
+    - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase6_20260219.md`
+- Phase 7 completion pass (engagement APIs closure):
+  - Added engagement docs artifacts:
+    - `docs/api/guides/engagement-api-examples.v1.md`
+    - `docs/api/postman.engagement.v1.collection.json`
+    - updated `docs/api/guides/engagement-api-guide.v1.md`
+    - updated `docs/api/openapi.external.v1.yaml`
+  - Webhook/level-up coverage confirmed in:
+    - `src/public/__tests__/externalEngagementApi.test.js`
+  - Added verification artifact:
+    - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase7_20260219.md`
+- Sequential regression pass after Phases 5-7 closure:
+  - 9-suite external API run: 9 passed, 40 tests passed
 
 ## Not Yet Implemented
-- Category-specific integration guides (Intelligence/Operations/Matching deep dives still pending).
-- Full webhook delivery pipeline (signatures, retries, event dispatch).
-- Expanded automated test coverage for auth/rate-limit internals and full endpoint matrix.
+- Post-launch operational tasks remain (monitoring, analytics, optimization, partner success, compliance/security, future enhancements).
 
 ## Phase 8 Status
 - Phase 8 is now fully implemented in-repo (backend + frontend + docs + tests + verification artifacts).
@@ -183,6 +252,21 @@
 ## Phase 2 Status
 - Phase 2 safety APIs are now complete in-repo (endpoints + docs + tests + verification artifacts).
 
+## Phase 3 Status
+- Phase 3 intelligence APIs are now complete in-repo (shared aggregation service + endpoint docs + examples + Postman + tier/caching tests + verification artifact).
+
+## Phase 4 Status
+- Phase 4 operational APIs are now complete in-repo (parking/fuel endpoint parity + docs + tests + verification artifact).
+
+## Phase 5 Status
+- Phase 5 matching APIs are now complete in-repo (service parity + docs + tests + verification artifact).
+
+## Phase 6 Status
+- Phase 6 document APIs are now complete in-repo (endpoint parity + docs + tests + verification artifact).
+
+## Phase 7 Status
+- Phase 7 engagement APIs are now complete in-repo (endpoint parity + docs + tests + verification artifact).
+
 ## Current Parity Position
 - Core backend API surface is in place and callable through `/v1/*`.
-- Product is in **backend feature parity (partial)** state: implementation exists for all major categories, but launch-critical docs/billing/portal hardening remain.
+- Product is in **backend feature parity (full for Phases 1-8)** state; remaining checklist is Post-Launch operations/compliance roadmap work.
