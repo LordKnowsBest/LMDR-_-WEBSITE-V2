@@ -1,73 +1,83 @@
-# LMDR API Gateway Security Audit Report
+# API Security Audit Report
 
 **Date:** 2026-03-03
+**Scope:** `src/backend/apiGateway.jsw`, `src/backend/apiAuthService.jsw`, `src/backend/permissions.json`
 **Auditor:** Jules (AI Security Engineer)
-**Scope:** `src/backend/apiGateway.jsw`, `src/backend/apiAuthService.jsw`, `src/backend/rateLimitService.jsw`
 
 ## Executive Summary
 
-The API Gateway has robust foundational security controls (mandatory auth, hashed keys, subscription checks) but contains **three critical vulnerabilities** that undermine these protections:
-1.  **IP Whitelisting Bypass:** The IP check logic fails open if the client IP is not detected (e.g., stripped headers).
-2.  **Rate Limit Bypass:** A specific HTTP header (`x-lmdr-bypass-rate-limit`) completely disables rate limiting without any authorization check.
-3.  **Unprotected Key Rotation:** The `rotateApiKey` function is publicly exposed and lacks authorization, allowing anyone to rotate a partner's API key if they know the Partner ID.
+The LMDR API Gateway contains **CRITICAL** security vulnerabilities that allow unauthorized access, rate limit bypassing, and potential Denial of Service (DoS) attacks. While basic authentication (API Key) and encryption (SHA-256) are present, the authorization and access control layers are severely compromised by "fail-open" logic and permissive configurations.
 
----
+## Control Checklist
 
-## 1. Authentication & Authorization Checklist
+| Control | Status | Location | Details |
+| :--- | :--- | :--- | :--- |
+| **Authentication Enforcement** | **PASS** | `apiGateway.jsw:58` | `validateApiKey` is called on every request. |
+| **API Key Hashing** | **PASS** | `apiAuthService.jsw:45` | Keys are hashed with SHA-256 + Pepper before comparison. |
+| **Secure Key Comparison** | **PASS** | `apiAuthService.jsw:64` | Comparison is done on hashes, preventing timing attacks on raw keys. |
+| **IP Whitelisting** | **FAIL** | `apiAuthService.jsw:149` | **Fails Open**: If IP is missing (null) or whitelist is empty, access is granted. |
+| **Rate Limiting (Enforcement)** | **WARN** | `rateLimitService.jsw` | enforced in-memory (per instance), not distributed. |
+| **Rate Limiting (Bypass)** | **FAIL** | `apiGateway.jsw:306` | **Critical**: `x-lmdr-bypass-rate-limit: true` header bypasses all limits. |
+| **Authorization (Key Rotation)** | **FAIL** | `apiAuthService.jsw:100` | `rotateApiKey` is public (Anonymous) and lacks internal auth checks. |
+| **Subscription Tier Checks** | **PASS** | `apiGateway.jsw` | `assertTier` is used correctly on sensitive endpoints. |
+| **CORS Configuration** | **WARN** | `apiGateway.jsw:32` | `Access-Control-Allow-Origin: *` is permissive. |
+| **DoS Protection** | **FAIL** | `apiAuthService.jsw:181` | Partner lookup fetches *all* partners (up to 1000) on cache miss. |
 
-| Status | Control | File | Line | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| **PASS** | `validateApiKey` called on every route | `src/backend/apiGateway.jsw` | 44-47 | Auth is the first step in request handling. |
-| **PASS** | API Keys Hashed (SHA-256 + Pepper) | `src/backend/apiAuthService.jsw` | 43-47 | Keys are hashed before storage/comparison. |
-| **PASS** | Subscription Tier Enforcement | `src/backend/apiGateway.jsw` | 338, 350, etc. | `assertTier` helper ensures correct access level. |
-| **FAIL** | IP Whitelisting Logic Integrity | `src/backend/apiAuthService.jsw` | 149 | `if (!ipAddress) return true;` fails open. |
-| **FAIL** | Secure Key Rotation Endpoint | `src/backend/apiAuthService.jsw` | 98 | `rotateApiKey` is public and lacks caller auth check. |
-| **WARN** | Auth Error Information Leakage | `src/backend/apiAuthService.jsw` | 65-71 | Distinguishes between "Invalid API key" and "IP not allowed". |
-| **PASS** | Secure Random Key Generation | `src/backend/apiAuthService.jsw` | 224 | Uses `crypto.getRandomValues`. |
+## Detailed Findings
 
-## 2. Rate Limiting & Abuse Prevention
+### 1. Critical: Rate Limit Bypass Header
+**Location:** `src/backend/apiGateway.jsw`
+**Line:** 306
+```javascript
+function shouldBypassRateLimit(request) {
+  const headerValue = String(getHeader(request, 'x-lmdr-bypass-rate-limit') || '').toLowerCase();
+  return headerValue === 'true';
+}
+```
+**Impact:** Any attacker who discovers this header can flood the API without restriction, bypassing billing quotas and protective limits.
+**Recommendation:** Remove this bypass mechanism immediately or restrict it to a specific, secret-protected internal key.
 
-| Status | Control | File | Line | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| **PASS** | Rate Limiting Enabled | `src/backend/apiGateway.jsw` | 54 | `checkAndTrackUsage` called for every request. |
-| **FAIL** | Rate Limit Bypass Protection | `src/backend/apiGateway.jsw` | 398 | `x-lmdr-bypass-rate-limit: true` bypasses checks freely. |
-| **WARN** | Rate Limit Scalability | `src/backend/rateLimitService.jsw` | 13 | Uses in-memory `Map` (`minuteBuckets`), won't scale horizontally. |
-| **PASS** | Quota Enforcement | `src/backend/rateLimitService.jsw` | 80 | Monthly quotas (e.g., driver searches) enforced. |
+### 2. Critical: IP Whitelisting Fails Open
+**Location:** `src/backend/apiAuthService.jsw`
+**Line:** 149
+```javascript
+function isIpAllowed(partner, ipAddress) {
+  if (!ipAddress) return true; // Vulnerability 1
+  const whitelist = ...;
+  if (!whitelist.length) return true; // Vulnerability 2
+  // ...
+}
+```
+**Impact:** If the `x-forwarded-for` header is missing or stripped, the IP check is skipped. If a partner has an empty whitelist, they are not protected.
+**Recommendation:** Change logic to `return false` if `ipAddress` is missing. Treat empty whitelist as "deny all" or explicitly document "allow all" behavior.
 
-## 3. Data Protection & Configuration
+### 3. Critical: Unauthorized Key Rotation
+**Location:** `src/backend/apiAuthService.jsw` & `src/backend/permissions.json`
+**Impact:** The `rotateApiKey` function is exposed to `Anonymous` users via wildcard permissions. It accepts a `partnerId` and rotates keys without verifying if the caller owns that partner ID.
+**Proof:**
+```json
+"web-methods": {
+  "*": {
+    "*": {
+      "anonymous": { "invoke": true }
+    }
+  }
+}
+```
+**Recommendation:** Restrict `apiAuthService.jsw` to `SiteOwner` or `Admin` in `permissions.json`. Add internal checks to verify `wix-users.currentUser` matches the `partnerId`.
 
-| Status | Control | File | Line | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| **WARN** | CORS Policy | `src/backend/apiGateway.jsw` | 25 | `Access-Control-Allow-Origin: *` allows all origins. |
-| **WARN** | Constant-Time Key Comparison | `src/backend/apiAuthService.jsw` | 145 | Hashed keys compared via standard string equality, not `crypto.timingSafeEqual`. |
-| **PASS** | No Hardcoded Secrets | `src/backend/apiAuthService.jsw` | 1 | Uses `wix-secrets-backend`. |
-| **PASS** | Suspicious Comments Check | Multiple | N/A | No `TODO`, `HACK`, or `FIXME` markers found near critical auth code. |
+### 4. High: Denial of Service Vector (Inefficient Lookup)
+**Location:** `src/backend/apiAuthService.jsw`
+**Line:** 181
+**Impact:** On cache miss, the system fetches up to 1000 partners from the database and iterates in memory. This is computationally expensive and slow.
+**Recommendation:** Create a separate `apiKeys` collection indexed by `key_hash` for O(1) lookups.
 
----
+### 5. Medium: Missing Logging for Auth Failures
+**Observation:** `logRequest` is called in `finally`, but specific auth failure reasons (e.g., "invalid_signature" vs "expired") are not detailed in a dedicated security log, only the HTTP status code.
+**Recommendation:** specific security events should be logged to a separate `securityEvents` collection.
 
-## 4. Critical Findings Detail
+## Verification
+A proof-of-concept script `scripts/verify_api_security.js` was created and executed, confirming the "fail open" behaviors and bypass vulnerabilities.
 
-### 1. IP Whitelist Fails Open (FAIL)
-**File:** `src/backend/apiAuthService.jsw` (Line 149)
-**Code:** `if (!ipAddress) return true;`
-**Risk:** High. An attacker can bypass IP restrictions by stripping `X-Forwarded-For` or `X-Real-IP` headers (if the platform allows) or if the platform fails to provide them.
-**Remediation:** Change default behavior to `return false` if IP is required but missing.
-
-### 2. Rate Limit Bypass Header (FAIL)
-**File:** `src/backend/apiGateway.jsw` (Line 398) & `src/backend/rateLimitService.jsw` (Line 50)
-**Code:** `const headerValue = ... 'x-lmdr-bypass-rate-limit' ... return headerValue === 'true';`
-**Risk:** High. Any user (or attacker) who discovers this header can flood the API without restriction, potentially causing Denial of Service (DoS) or incurring high costs.
-**Remediation:** Remove this bypass mechanism or restrict it to internal admin calls only (verified by a secret or specific admin permission).
-
-### 3. Unprotected Key Rotation (FAIL)
-**File:** `src/backend/apiAuthService.jsw` (Line 98)
-**Function:** `rotateApiKey(partnerId, keyId)`
-**Risk:** Critical. This function is exported as a web module method, making it publicly callable. It takes `partnerId` as an argument and trusts it without verifying if the *caller* is that partner (or an admin).
-**Remediation:** Implement `checkUser()` or similar to verify the caller owns the `partnerId`. Remove the export if it's not intended for public client-side use.
-
----
-
-## 5. Verification
-A verification script `scripts/verify_api_security.js` was created and executed to confirm these findings.
-**Command:** `node scripts/verify_api_security.js`
-**Result:** Confirmed IP whitelist bypass and rate limit bypass logic are active.
+## Conclusion
+The API Gateway is currently **UNSECURE** against sophisticated attacks and internal abuse. Immediate remediation of the findings above is required.
