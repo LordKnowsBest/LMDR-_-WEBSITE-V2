@@ -9,7 +9,7 @@
 
 import { insertRecord, queryRecords, updateRecord, getRecord } from 'backend/dataAccess';
 import * as lifecycleService from 'backend/lifecycleService';
-import { sendEmail } from 'backend/emailService'; // Hypothetical email sender
+import { sendSurveyEmail } from 'backend/emailService';
 import { awardDriverXP } from 'backend/gamificationService';
 
 // ============================================================================
@@ -43,23 +43,73 @@ const DEFAULT_QUESTIONS = {
 // ============================================================================
 
 /**
- * Check for drivers who need a survey triggered
- * Designed to be run by a scheduled job (e.g., daily)
+ * Check for drivers who need a survey triggered.
+ * Runs daily via scheduled job (08:00 UTC).
+ *
+ * Scans HIRED_ACTIVE lifecycle events and sends:
+ *  - DAY_7 survey: hired 6–8 days ago, no DAY_7 survey sent yet
+ *  - DAY_30 survey: hired 28–32 days ago, no DAY_30 survey sent yet
  */
 export async function checkSurveyTriggers() {
-  console.log('🔍 Checking survey triggers...');
-  
-  // In a real implementation, this would query:
-  // 1. Drivers who are 'Active'
-  // 2. Calculate days since 'HIRE' event
-  // 3. Check if survey already sent
-  // For prototype, we'll stub this logic.
-  
-  return { success: true, surveysSent: 0 };
+  console.log('[surveyService] Checking survey triggers...');
+
+  const now = Date.now();
+  let surveysSent = 0;
+  let errors = 0;
+
+  const triggers = [
+    { surveyType: SURVEY_TYPES.DAY_7,  minDays: 6, maxDays: 8  },
+    { surveyType: SURVEY_TYPES.DAY_30, minDays: 28, maxDays: 32 }
+  ];
+
+  try {
+    for (const { surveyType, minDays, maxDays } of triggers) {
+      const windowStart = new Date(now - maxDays * 86400000).toISOString();
+      const windowEnd   = new Date(now - minDays * 86400000).toISOString();
+
+      const hireResult = await queryRecords('lifecycleEvents', {
+        filters: {
+          event_type: lifecycleService.EVENT_TYPES.HIRE,
+          event_date: { gte: windowStart, lte: windowEnd }
+        },
+        limit: 500,
+        suppressAuth: true
+      });
+
+      for (const hireEvent of (hireResult.items || [])) {
+        try {
+          const { driver_id, carrier_id } = hireEvent;
+          if (!driver_id) continue;
+
+          // Check if survey request already created
+          const existing = await queryRecords('driverSurveyRequests', {
+            filters: { driver_id, survey_type: surveyType },
+            limit: 1,
+            suppressAuth: true
+          });
+          if ((existing.items || []).length > 0) continue;
+
+          await sendSurvey(driver_id, carrier_id, surveyType);
+          surveysSent++;
+        } catch (driverErr) {
+          console.warn(`[surveyService] Trigger error for driver ${hireEvent.driver_id}:`, driverErr.message);
+          errors++;
+        }
+      }
+    }
+
+    console.log(`[surveyService] Survey trigger check complete — sent: ${surveysSent}, errors: ${errors}`);
+    return { success: true, surveysSent, errors };
+  } catch (error) {
+    console.error('[surveyService] checkSurveyTriggers error:', error);
+    return { success: false, error: error.message };
+  }
 }
 
 /**
- * Send a specific survey to a driver
+ * Send a specific survey to a driver.
+ * Creates a driverSurveyRequests record, logs the lifecycle event,
+ * and sends a Wix triggered email.
  *
  * @param {string} driverId
  * @param {string} carrierId
@@ -67,20 +117,57 @@ export async function checkSurveyTriggers() {
  */
 export async function sendSurvey(driverId, carrierId, surveyType) {
   try {
-    // 1. Get Survey Definition (or use default)
     const questions = DEFAULT_QUESTIONS[surveyType] || [];
+    const expiresAt = new Date(Date.now() + 7 * 86400000).toISOString(); // 7 days to complete
 
-    // 2. Log the "Survey Sent" event
+    // 1. Create the survey request record
+    const surveyRequest = await insertRecord('driverSurveyRequests', {
+      driver_id:   driverId,
+      carrier_id:  carrierId,
+      survey_type: surveyType,
+      status:      'pending',
+      questions:   JSON.stringify(questions),
+      expires_at:  expiresAt,
+      sent_at:     new Date().toISOString()
+    }, { suppressAuth: true });
+
+    // 2. Log the lifecycle event
     await lifecycleService.logEvent(driverId, carrierId, lifecycleService.EVENT_TYPES.SURVEY_SENT, {
       surveyType,
+      surveyRequestId: surveyRequest.record?._id || surveyRequest._id,
       questionCount: questions.length
     });
 
-    // 3. Send Notification (Email/SMS/Push)
-    // await sendEmail(driverId, 'Survey Available', ...);
-    
-    console.log(`✅ Survey ${surveyType} sent to driver ${driverId}`);
-    return { success: true };
+    // 3. Send Wix triggered email
+    // Look up driver profile for name and Wix user ID
+    const driverResult = await queryRecords('driverProfiles', {
+      filters: { _id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const driver = (driverResult.items || [])[0];
+    const wixUserId = driver?.wix_user_id || driver?.member_id || driverId;
+    const driverName = driver?.display_name || driver?.driver_name || 'Driver';
+
+    // Look up carrier name
+    const carrierResult = await queryRecords('carriers', {
+      filters: { _id: carrierId },
+      limit: 1,
+      suppressAuth: true
+    });
+    const carrier = (carrierResult.items || [])[0];
+    const carrierName = carrier?.legal_name || carrier?.title || 'your carrier';
+
+    await sendSurveyEmail(wixUserId, {
+      surveyType,
+      driverName,
+      carrierName,
+      surveyUrl: 'https://www.lastmiledr.app/driver/surveys',
+      expiresIn: '7 days'
+    });
+
+    console.log(`[surveyService] Survey ${surveyType} sent to driver ${driverId}`);
+    return { success: true, surveyRequestId: surveyRequest.record?._id || surveyRequest._id };
 
   } catch (error) {
     console.error(`[surveyService] sendSurvey error:`, error);
