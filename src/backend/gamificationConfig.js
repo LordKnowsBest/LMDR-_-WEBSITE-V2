@@ -99,7 +99,25 @@ export const DRIVER_XP_ACTIONS = {
   // Pet-Friendly & Health Actions
   pet_location_added: { xp: 30, description: 'Add a new pet-friendly location' },
   pet_review_left: { xp: 15, description: 'Leave a review for a pet-friendly spot' },
-  health_tip_approved: { xp: 25, description: 'Community health tip approved' }
+  health_tip_approved: { xp: 25, description: 'Community health tip approved' },
+
+  // Phase 7 — Screening & Background Check
+  bgc_consent_submitted: { xp: 25, oneTime: true, description: 'Submit BGC consent form' },
+  drug_test_completed: { xp: 25, oneTime: true, description: 'Complete drug test' },
+  screening_passed: { xp: 25, oneTime: true, description: 'Pass screening & background check' },
+
+  // Phase 9 — Hire → First Dispatch
+  hire_completed: { xp: 150, oneTime: true, description: 'Complete hire / onboarding workflow' },
+  first_dispatch: { xp: 250, oneTime: true, description: 'Receive first dispatch assignment' },
+  post_hire_survey_completed: { xp: 100, oneTime: true, description: 'Complete 30-day post-hire survey' },
+
+  // Retention Milestones (post-hire)
+  retention_30_day: { xp: 300, oneTime: true, description: 'Still employed at 30-day milestone' },
+  retention_90_day: { xp: 500, oneTime: true, description: 'Still employed at 90-day milestone' },
+
+  // Road Utility Community Actions
+  rest_stop_rated: { xp: 15, weeklyLimit: 5, description: 'Rate a rest stop' },
+  road_hazard_reported: { xp: 20, dailyLimit: 3, description: 'Report a road hazard' }
 };
 
 // =============================================================================
