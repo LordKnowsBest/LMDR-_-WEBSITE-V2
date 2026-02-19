@@ -310,6 +310,16 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Goal: Multi-channel driver engagement - SMS Campaign Manager, Email Drip Campaigns, Job Board Distribution, Social Posting.*
 *Business Impact: 5x driver engagement through automated outreach.*
 
+### [ ] Track: Graph API Organic Posting — Facebook Page & Instagram Feed
+*Link: [./tracks/graph_api_org_posting_20260219/](./tracks/graph_api_org_posting_20260219/)*
+*Depends on: meta_marketing_api_surface_buildout_20260219 (for existing Meta app credentials)*
+*Priority: High*
+*Status: Planning — spec.md + plan.md complete, Phase 0 (research) done*
+*Goal: Implement organic (non-paid) timeline posting to Facebook Pages and Instagram professional accounts using Meta Graph API + Instagram Graph API. Separate from the existing paid Marketing API track.*
+*Platforms: Facebook Page timeline (text, link, photo, video) + Instagram feed (image, carousel, video, Reels)*
+*Key Architecture: Unified `post.facebook()` / `post.instagram()` / `post.both()` dispatcher; post queue with status tracking; token lifecycle management; GCP-migration-ready secrets abstraction.*
+*Phases: 5 (MVP one-post each → Full types + queue → Scheduling + rate limits → Hardening → Migration-ready)*
+
 ## Business Development New Features
 
 ### [ ] Track: B2B Business Development Suite - Carrier Acquisition
