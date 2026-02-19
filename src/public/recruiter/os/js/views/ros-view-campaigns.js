@@ -228,7 +228,7 @@
       refreshList();
     }
     if (action === 'campaignCreated') {
-      hideCreate();
+      ROS.views.campaigns.hideCreate();
       loadCampaigns();
       if (ROS.chat) ROS.chat.flashMsg('Campaign created successfully');
     }

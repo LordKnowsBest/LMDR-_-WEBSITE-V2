@@ -41,7 +41,7 @@ function formatAISummary(text) {
   const isBulleted = lines.some(l => l.startsWith('•'));
   if (isBulleted) {
     const items = lines
-      .map(l => l.replace(/^[•\-]\s*/, ''))
+      .map(l => l.replace(/^[•-]\s*/, ''))
       .filter(Boolean)
       .map(l => {
         // Bold **word** → <strong>word</strong>, then escape the rest

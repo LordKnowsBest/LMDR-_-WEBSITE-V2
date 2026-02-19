@@ -16,7 +16,7 @@ import {
     getFunnelConversion,
     updateFeatureStatus
 } from 'backend/featureAdoptionService';
-import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
+import { handleAgentTurn, resumeAfterApproval, executeTool } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
 import { getLatestEvaluation } from 'backend/agentEvaluationService';
 
@@ -92,6 +92,39 @@ async function routeMessage(component, message) {
 
             case 'getMetaGovernanceSummary':
                 await handleGetMetaGovernanceSummary(component);
+                break;
+            case 'getMetaApprovalInbox':
+                await handleGetMetaApprovalInbox(component, message);
+                break;
+            case 'getMetaPolicyEditorData':
+                await handleGetMetaPolicyEditorData(component);
+                break;
+            case 'getMetaErrorDigest':
+                await handleGetMetaErrorDigest(component, message);
+                break;
+            case 'getMetaRateLimitPosture':
+                await handleGetMetaRateLimitPosture(component, message);
+                break;
+            case 'setMetaApprovalThresholds':
+                await handleSetMetaApprovalThresholds(component, message);
+                break;
+            case 'setMetaCampaignGuardrails':
+                await handleSetMetaCampaignGuardrails(component, message);
+                break;
+            case 'setMetaDailyBudgetCaps':
+                await handleSetMetaDailyBudgetCaps(component, message);
+                break;
+            case 'quarantineMetaIntegration':
+                await handleQuarantineMetaIntegration(component, message);
+                break;
+            case 'refreshMetaSystemUserToken':
+                await handleRefreshMetaSystemUserToken(component, message);
+                break;
+            case 'rebindMetaAdAccount':
+                await handleRebindMetaAdAccount(component, message);
+                break;
+            case 'disableMetaIntegration':
+                await handleDisableMetaIntegration(component, message);
                 break;
 
             case 'resolveAlert':
@@ -210,6 +243,131 @@ async function handleResolveAlert(component, alertId) {
 async function handleGetMetaGovernanceSummary(component) {
     const data = await getMetaGovernanceSummary();
     safeSend(component, { action: 'metaGovernanceSummaryLoaded', payload: data });
+}
+
+function getCurrentAdminId() {
+    return wixUsers.currentUser.loggedIn ? wixUsers.currentUser.id : 'anonymous-admin';
+}
+
+async function executeMetaGovernanceAction(adminId, action, params = {}) {
+    return executeTool(
+        'admin_meta_ads_governance',
+        { action, params },
+        { userId: adminId, runId: `admin_meta_governance_${Date.now()}` }
+    );
+}
+
+async function handleGetMetaApprovalInbox(component, message) {
+    try {
+        const { getApprovalGatesByDateRange } = await import('backend/agentRunLedgerService');
+        const days = Number(message.days || 7);
+        const gates = await getApprovalGatesByDateRange(days);
+        const pending = (gates || []).filter(g => !g.decision && (g.risk_level || g.riskLevel) === 'execute_high');
+        safeSend(component, {
+            action: 'metaApprovalInboxLoaded',
+            payload: {
+                success: true,
+                pending,
+                totalPending: pending.length,
+                windowDays: days
+            }
+        });
+    } catch (error) {
+        safeSend(component, {
+            action: 'metaApprovalInboxLoaded',
+            payload: { success: false, pending: [], totalPending: 0, error: error.message }
+        });
+    }
+}
+
+async function handleGetMetaPolicyEditorData(component) {
+    const adminId = getCurrentAdminId();
+    const [integrations, posture, errors] = await Promise.all([
+        executeMetaGovernanceAction(adminId, 'list_meta_integrations', { limit: 100 }),
+        executeMetaGovernanceAction(adminId, 'get_rate_limit_posture', { windowHours: 24 }),
+        executeMetaGovernanceAction(adminId, 'get_meta_api_error_digest', { hours: 24, limit: 50 })
+    ]);
+    safeSend(component, {
+        action: 'metaPolicyEditorLoaded',
+        payload: { success: true, integrations, posture, errors }
+    });
+}
+
+async function handleGetMetaErrorDigest(component, message) {
+    const adminId = getCurrentAdminId();
+    const result = await executeMetaGovernanceAction(adminId, 'get_meta_api_error_digest', {
+        integrationId: message.integrationId || '',
+        hours: Number(message.hours || 24),
+        limit: Number(message.limit || 50)
+    });
+    safeSend(component, { action: 'metaErrorDigestLoaded', payload: result });
+}
+
+async function handleGetMetaRateLimitPosture(component, message) {
+    const adminId = getCurrentAdminId();
+    const result = await executeMetaGovernanceAction(adminId, 'get_rate_limit_posture', {
+        integrationId: message.integrationId || '',
+        windowHours: Number(message.windowHours || 24)
+    });
+    safeSend(component, { action: 'metaRateLimitPostureLoaded', payload: result });
+}
+
+async function handleSetMetaApprovalThresholds(component, message) {
+    const adminId = getCurrentAdminId();
+    const result = await executeMetaGovernanceAction(adminId, 'set_approval_thresholds', message.payload || message.data || {});
+    safeSend(component, { action: 'metaGovernanceActionResult', payload: { action: 'set_approval_thresholds', result } });
+}
+
+async function handleSetMetaCampaignGuardrails(component, message) {
+    const adminId = getCurrentAdminId();
+    const result = await executeMetaGovernanceAction(adminId, 'set_campaign_guardrails', message.payload || message.data || {});
+    safeSend(component, { action: 'metaGovernanceActionResult', payload: { action: 'set_campaign_guardrails', result } });
+}
+
+async function handleSetMetaDailyBudgetCaps(component, message) {
+    const adminId = getCurrentAdminId();
+    const result = await executeMetaGovernanceAction(adminId, 'set_daily_budget_caps', message.payload || message.data || {});
+    safeSend(component, { action: 'metaGovernanceActionResult', payload: { action: 'set_daily_budget_caps', result } });
+}
+
+async function handleQuarantineMetaIntegration(component, message) {
+    const adminId = getCurrentAdminId();
+    const data = message.payload || message.data || {};
+    const result = await executeMetaGovernanceAction(adminId, 'quarantine_integration', {
+        integrationId: data.integrationId || message.integrationId || '',
+        reason: data.reason || message.reason || ''
+    });
+    safeSend(component, { action: 'metaGovernanceActionResult', payload: { action: 'quarantine_integration', result } });
+}
+
+async function handleRefreshMetaSystemUserToken(component, message) {
+    const adminId = getCurrentAdminId();
+    const data = message.payload || message.data || {};
+    const result = await executeMetaGovernanceAction(adminId, 'refresh_system_user_token', {
+        integrationId: data.integrationId || message.integrationId || '',
+        reason: data.reason || ''
+    });
+    safeSend(component, { action: 'metaGovernanceActionResult', payload: { action: 'refresh_system_user_token', result } });
+}
+
+async function handleRebindMetaAdAccount(component, message) {
+    const adminId = getCurrentAdminId();
+    const data = message.payload || message.data || {};
+    const result = await executeMetaGovernanceAction(adminId, 'rebind_ad_account', {
+        integrationId: data.integrationId || message.integrationId || '',
+        adAccountId: data.adAccountId || message.adAccountId || ''
+    });
+    safeSend(component, { action: 'metaGovernanceActionResult', payload: { action: 'rebind_ad_account', result } });
+}
+
+async function handleDisableMetaIntegration(component, message) {
+    const adminId = getCurrentAdminId();
+    const data = message.payload || message.data || {};
+    const result = await executeMetaGovernanceAction(adminId, 'disable_integration', {
+        integrationId: data.integrationId || message.integrationId || '',
+        reason: data.reason || message.reason || ''
+    });
+    safeSend(component, { action: 'metaGovernanceActionResult', payload: { action: 'disable_integration', result } });
 }
 
 async function handleGetFeatureStats(component, featureId, timeRange, groupBy) {

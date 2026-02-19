@@ -205,7 +205,7 @@
 
       if (group.type === 'multi') {
         group.options.forEach(opt => {
-          const filterKey = groupKey === 'cdlClass' ? `cdl_${opt}` : `${groupKey}_${opt.replace(/[\/\s]/g,'_')}`;
+          const filterKey = groupKey === 'cdlClass' ? `cdl_${opt}` : `${groupKey}_${opt.replace(/[/\\s]/g,'_')}`;
           html += `<button class="filter-orb px-3 py-1.5 text-[10px] font-bold rounded-full neu-x text-tan transition-all"
                     data-filter-group="${groupKey}" data-filter-value="${opt}" id="orb-${filterKey}"
                     onclick="ROS.views._search.toggleOrb(this,'${groupKey}','${escapeHtml(opt)}')">${escapeHtml(opt)}</button>`;

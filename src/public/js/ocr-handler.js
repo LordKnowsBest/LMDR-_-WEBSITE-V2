@@ -233,12 +233,12 @@
       };
 
       // Load image from file
-      var reader = new FileReader();
-      reader.onload = function(e) {
+      var imageReader = new FileReader();
+      imageReader.onload = function(e) {
         img.src = e.target.result;
       };
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
+      imageReader.onerror = reject;
+      imageReader.readAsDataURL(file);
     });
   }
 
@@ -543,7 +543,7 @@
     // CDL document fields
     if (docType === 'CDL_FRONT' || docType === 'CDL_BACK') {
       if (extracted.licenseNumber && fields.cdlNumber) {
-        var field = getElement(fields.cdlNumber);
+        let field = getElement(fields.cdlNumber);
         if (field && !field.value) {
           field.value = extracted.licenseNumber;
           field.classList.add(classes.autoFilled);
@@ -552,7 +552,7 @@
       }
 
       if (extracted.expirationDate && fields.cdlExpiration) {
-        var field = getElement(fields.cdlExpiration);
+        let field = getElement(fields.cdlExpiration);
         if (field && !field.value) {
           field.value = extracted.expirationDate;
           field.classList.add(classes.autoFilled);
@@ -561,7 +561,7 @@
       }
 
       if (extracted.state && fields.cdlState) {
-        var field = getElement(fields.cdlState);
+        let field = getElement(fields.cdlState);
         if (field && !field.value) {
           field.value = extracted.state;
           field.classList.add(classes.autoFilled);
@@ -570,7 +570,7 @@
       }
 
       if (extracted.cdlClass && fields.cdlClass) {
-        var field = getElement(fields.cdlClass);
+        let field = getElement(fields.cdlClass);
         if (field && !field.value) {
           field.value = extracted.cdlClass;
           field.classList.add(classes.autoFilled);
@@ -579,7 +579,7 @@
       }
 
       if (extracted.fullName && fields.driverName) {
-        var field = getElement(fields.driverName);
+        let field = getElement(fields.driverName);
         if (field && !field.value) {
           field.value = extracted.fullName;
           field.classList.add(classes.autoFilled);
@@ -588,7 +588,7 @@
       }
 
       if (extracted.dob && fields.driverDOB) {
-        var field = getElement(fields.driverDOB);
+        let field = getElement(fields.driverDOB);
         if (field && !field.value) {
           field.value = extracted.dob;
           field.classList.add(classes.autoFilled);
@@ -607,7 +607,7 @@
     // Med Card fields
     if (docType === 'MED_CARD') {
       if (extracted.certificateExpirationDate && fields.medCardExpiration) {
-        var field = getElement(fields.medCardExpiration);
+        let field = getElement(fields.medCardExpiration);
         if (field && !field.value) {
           field.value = extracted.certificateExpirationDate;
           field.classList.add(classes.autoFilled);
@@ -616,7 +616,7 @@
       }
 
       if (extracted.examinerName && fields.examinerName) {
-        var field = getElement(fields.examinerName);
+        let field = getElement(fields.examinerName);
         if (field && !field.value) {
           field.value = extracted.examinerName;
           field.classList.add(classes.autoFilled);
@@ -625,7 +625,7 @@
       }
 
       if (extracted.registryNumber && fields.registryNumber) {
-        var field = getElement(fields.registryNumber);
+        let field = getElement(fields.registryNumber);
         if (field && !field.value) {
           field.value = extracted.registryNumber;
           field.classList.add(classes.autoFilled);

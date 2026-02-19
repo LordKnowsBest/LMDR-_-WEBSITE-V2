@@ -85,10 +85,10 @@ function compressImageForUpload(file) {
 
     img.onerror = function () { reject(new Error('Failed to load image for compression')); };
 
-    var reader = new FileReader();
-    reader.onload = function (e) { img.src = e.target.result; };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    var imageReader = new FileReader();
+    imageReader.onload = function (e) { img.src = e.target.result; };
+    imageReader.onerror = reject;
+    imageReader.readAsDataURL(file);
   });
 }
 
@@ -656,4 +656,3 @@ function updateCardToApplied(carrierDOT) {
     }
   }
 }
-

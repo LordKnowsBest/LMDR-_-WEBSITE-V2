@@ -218,7 +218,12 @@ const MESSAGE_REGISTRY = {
     'createPaidMediaDraft',
     'updatePaidMediaAdSet',
     'createPaidMediaCreative',
-    'launchPaidMediaCampaign'
+    'launchPaidMediaCampaign',
+    'getPaidMediaInsights',
+    'createPaidMediaReportJob',
+    'getPaidMediaReportStatus',
+    'downloadPaidMediaReport',
+    'getPaidMediaOptimizationSuggestions'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -302,7 +307,12 @@ const MESSAGE_REGISTRY = {
     'paidMediaDraftCreated',
     'paidMediaAdSetUpdated',
     'paidMediaCreativeCreated',
-    'paidMediaLaunchResult'
+    'paidMediaLaunchResult',
+    'paidMediaInsightsLoaded',
+    'paidMediaReportJobCreated',
+    'paidMediaReportStatusLoaded',
+    'paidMediaReportDownloaded',
+    'paidMediaSuggestionsLoaded'
   ]
 };
 
@@ -706,6 +716,31 @@ async function handleHtmlMessage(msg, component) {
       case 'launchPaidMediaCampaign': {
         const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
         await handleLaunchPaidMediaCampaign(recruiterId, msg.data, component);
+        break;
+      }
+      case 'getPaidMediaInsights': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleGetPaidMediaInsights(recruiterId, msg.data, component);
+        break;
+      }
+      case 'createPaidMediaReportJob': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleCreatePaidMediaReportJob(recruiterId, msg.data, component);
+        break;
+      }
+      case 'getPaidMediaReportStatus': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleGetPaidMediaReportStatus(recruiterId, msg.data, component);
+        break;
+      }
+      case 'downloadPaidMediaReport': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleDownloadPaidMediaReport(recruiterId, msg.data, component);
+        break;
+      }
+      case 'getPaidMediaOptimizationSuggestions': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleGetPaidMediaOptimizationSuggestions(recruiterId, msg.data, component);
         break;
       }
 
@@ -1942,4 +1977,96 @@ async function handleLaunchPaidMediaCampaign(recruiterId, data, component) {
   });
 
   sendToHtml(component, 'paidMediaLaunchResult', launchResult);
+}
+
+async function executePaidMediaAnalyticsAction(recruiterId, action, params = {}) {
+  return executeTool(
+    'recruiter_paid_media_analytics',
+    { action, params },
+    { userId: recruiterId, runId: `recruiter_paid_media_analytics_${Date.now()}` }
+  );
+}
+
+async function executePaidMediaPipelineAction(recruiterId, action, params = {}) {
+  return executeTool(
+    'cross_role_paid_media_pipeline',
+    { action, params },
+    { userId: recruiterId, runId: `cross_role_paid_media_pipeline_${Date.now()}` }
+  );
+}
+
+async function handleGetPaidMediaInsights(recruiterId, data, component) {
+  const params = data || {};
+  const [campaign, adSet, ad, breakdown, funnel, cplTrend, sourceQuality] = await Promise.all([
+    executePaidMediaAnalyticsAction(recruiterId, 'get_insights_campaign_level', params),
+    executePaidMediaAnalyticsAction(recruiterId, 'get_insights_adset_level', params),
+    executePaidMediaAnalyticsAction(recruiterId, 'get_insights_ad_level', params),
+    executePaidMediaAnalyticsAction(recruiterId, 'get_insights_with_breakdowns', {
+      ...params,
+      breakdownBy: params.breakdownBy || 'placement'
+    }),
+    executePaidMediaPipelineAction(recruiterId, 'get_paid_media_to_pipeline_funnel', params),
+    executePaidMediaPipelineAction(recruiterId, 'get_cpl_to_hire_trend', params),
+    executePaidMediaPipelineAction(recruiterId, 'get_source_quality_score', params)
+  ]);
+
+  sendToHtml(component, 'paidMediaInsightsLoaded', {
+    success: campaign.success && adSet.success && ad.success && breakdown.success,
+    campaign,
+    adSet,
+    ad,
+    breakdown,
+    pipeline: {
+      funnel,
+      cplTrend,
+      sourceQuality
+    }
+  });
+}
+
+async function handleCreatePaidMediaReportJob(recruiterId, data, component) {
+  const params = data || {};
+  const result = await executePaidMediaAnalyticsAction(recruiterId, 'create_async_report_job', {
+    reportScope: params.reportScope || 'campaign',
+    format: params.format || 'json',
+    dateRange: params.dateRange || {},
+    breakdownBy: params.breakdownBy || ''
+  });
+  sendToHtml(component, 'paidMediaReportJobCreated', result);
+}
+
+async function handleGetPaidMediaReportStatus(recruiterId, data, component) {
+  const params = data || {};
+  const result = await executePaidMediaAnalyticsAction(recruiterId, 'get_async_report_status', {
+    jobId: params.jobId || ''
+  });
+  sendToHtml(component, 'paidMediaReportStatusLoaded', result);
+}
+
+async function handleDownloadPaidMediaReport(recruiterId, data, component) {
+  const params = data || {};
+  const result = await executePaidMediaAnalyticsAction(recruiterId, 'download_report', {
+    jobId: params.jobId || ''
+  });
+  sendToHtml(component, 'paidMediaReportDownloaded', result);
+}
+
+async function handleGetPaidMediaOptimizationSuggestions(recruiterId, data, component) {
+  const params = data || {};
+  const [budget, creative, audience, fatigue, placement] = await Promise.all([
+    executePaidMediaAnalyticsAction(recruiterId, 'suggest_budget_reallocation', params),
+    executePaidMediaAnalyticsAction(recruiterId, 'suggest_creative_rotation', params),
+    executePaidMediaAnalyticsAction(recruiterId, 'suggest_audience_narrowing', params),
+    executePaidMediaAnalyticsAction(recruiterId, 'get_frequency_fatigue_alerts', params),
+    executePaidMediaAnalyticsAction(recruiterId, 'get_placement_performance', params)
+  ]);
+
+  sendToHtml(component, 'paidMediaSuggestionsLoaded', {
+    success: budget.success && creative.success && audience.success && fatigue.success && placement.success,
+    budget,
+    creative,
+    audience,
+    fatigue,
+    placement
+  });
 }
