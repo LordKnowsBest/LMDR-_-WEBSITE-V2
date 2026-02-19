@@ -424,6 +424,46 @@ describe('Recruiter OS Bridge Tests (Recruiter Console Page Code)', () => {
     });
   });
 
+  describe('Phase 2 paid media bridge wiring', () => {
+    const PAID_MEDIA_INBOUND = [
+      'getPaidMediaState',
+      'createPaidMediaDraft',
+      'updatePaidMediaAdSet',
+      'createPaidMediaCreative',
+      'launchPaidMediaCampaign'
+    ];
+    const PAID_MEDIA_OUTBOUND = [
+      'paidMediaStateLoaded',
+      'paidMediaDraftCreated',
+      'paidMediaAdSetUpdated',
+      'paidMediaCreativeCreated',
+      'paidMediaLaunchResult'
+    ];
+
+    test('imports executeTool for paid media router dispatch', () => {
+      expect(sourceCode).toContain("executeTool } from 'backend/agentService'");
+      expect(sourceCode).toContain("executeTool(");
+      expect(sourceCode).toContain("'recruiter_paid_media'");
+    });
+
+    test.each(PAID_MEDIA_INBOUND)('inbound paid media message "%s" is registered', (msg) => {
+      expect(sourceCode).toContain(`'${msg}'`);
+      expect(sourceCode).toContain(`case '${msg}':`);
+    });
+
+    test.each(PAID_MEDIA_OUTBOUND)('outbound paid media message "%s" is registered', (msg) => {
+      expect(sourceCode).toContain(`'${msg}'`);
+    });
+
+    test('defines paid media handlers', () => {
+      expect(sourceCode).toContain('async function handleGetPaidMediaState(');
+      expect(sourceCode).toContain('async function handleCreatePaidMediaDraft(');
+      expect(sourceCode).toContain('async function handleUpdatePaidMediaAdSet(');
+      expect(sourceCode).toContain('async function handleCreatePaidMediaCreative(');
+      expect(sourceCode).toContain('async function handleLaunchPaidMediaCampaign(');
+    });
+  });
+
   // ─────────────────────────────────────────────────────────────────────────
   // Handler: recruiterOSReady
   // ─────────────────────────────────────────────────────────────────────────

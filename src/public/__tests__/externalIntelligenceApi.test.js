@@ -20,11 +20,15 @@ jest.mock('backend/externalFmcsaApi', () => ({
 jest.mock('backend/aiEnrichment', () => ({
   enrichCarrier: jest.fn()
 }));
+jest.mock('backend/marketIntelligenceService', () => ({
+  getMarketIntelligenceSnapshot: jest.fn()
+}));
 
 const dataAccess = require('backend/dataAccess');
 const { getCarrierSafetyData } = require('backend/fmcsaService');
 const { scanSocialMedia } = require('backend/socialScanner');
 const { enrichCarrier } = require('backend/aiEnrichment');
+const { getMarketIntelligenceSnapshot } = require('backend/marketIntelligenceService');
 
 describe('externalIntelligenceApi', () => {
   beforeEach(() => {
@@ -71,35 +75,20 @@ describe('externalIntelligenceApi', () => {
     expect(result.data.recent_mentions.length).toBe(3);
   });
 
-  test('returns market intelligence with top hiring carriers and caches daily result', async () => {
-    dataAccess.queryRecords.mockResolvedValue({
-      items: [
-        {
-          dot_number: '111111',
-          legal_name: 'Carrier One',
-          pay_cpm_range: '$0.60-$0.70 CPM',
-          sign_on_bonus: '$2000',
-          hiring_status: 'Actively Hiring',
-          data_confidence: 'high'
-        },
-        {
-          dot_number: '222222',
-          legal_name: 'Carrier Two',
-          pay_cpm_range: '$0.55-$0.65 CPM',
-          sign_on_bonus: '$1000',
-          hiring_status: 'Actively Hiring',
-          data_confidence: 'medium'
-        }
-      ]
+  test('returns market intelligence from aggregation service', async () => {
+    getMarketIntelligenceSnapshot.mockResolvedValue({
+      success: true,
+      data: {
+        market_data: { avg_cpm: 0.62 },
+        top_hiring_carriers: [{ dot_number: 111111 }]
+      }
     });
 
-    const first = await getExternalMarketIntelligence({});
-    const second = await getExternalMarketIntelligence({});
+    const result = await getExternalMarketIntelligence({ region: 'southeast' });
 
-    expect(first.success).toBe(true);
-    expect(first.data.top_hiring_carriers.length).toBeGreaterThan(0);
-    expect(first.data.market_data.avg_sign_on_bonus).toBe(1500);
-    expect(second.success).toBe(true);
-    expect(dataAccess.queryRecords).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+    expect(result.data.top_hiring_carriers.length).toBe(1);
+    expect(result.data.market_data.avg_cpm).toBe(0.62);
+    expect(getMarketIntelligenceSnapshot).toHaveBeenCalledWith({ region: 'southeast' });
   });
 });
