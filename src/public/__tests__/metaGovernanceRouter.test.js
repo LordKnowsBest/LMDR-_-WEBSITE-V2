@@ -15,7 +15,7 @@ jest.mock('backend/agentRunLedgerService', () => ({
   logStep: jest.fn().mockResolvedValue({ stepId: 'step-meta-1' }),
   createGate: jest.fn().mockResolvedValue({ gateId: 'gate-meta-1' }),
   resolveGate: jest.fn(),
-  completeRun: jest.fn()
+  completeRun: jest.fn().mockResolvedValue(undefined)
 }));
 
 jest.mock('backend/metaGovernanceService', () => ({
@@ -35,8 +35,9 @@ jest.mock('backend/metaGovernanceService', () => ({
 }));
 
 const metaGovernanceService = require('backend/metaGovernanceService');
-const { executeTool, ACTION_REGISTRY, ROUTER_DEFINITIONS } = require('backend/agentService');
-const { createGate } = require('backend/agentRunLedgerService');
+const { executeTool, resumeAfterApproval, ACTION_REGISTRY, ROUTER_DEFINITIONS } = require('backend/agentService');
+const { createGate, resolveGate } = require('backend/agentRunLedgerService');
+const { routeAIRequest } = require('backend/aiRouterService');
 
 describe('admin_meta_ads_governance router', () => {
   const ctx = { runId: 'run-meta-1', userId: 'admin-1' };
@@ -109,5 +110,69 @@ describe('admin_meta_ads_governance router', () => {
       'admin-1'
     );
     expect(result).toMatchObject({ success: true });
+  });
+
+  test('approval workflow integration: approved gate resumes and executes pending execute_high action', async () => {
+    routeAIRequest.mockResolvedValue({
+      content: 'Approved action executed.',
+      contentBlocks: [{ type: 'text', text: 'Approved action executed.' }],
+      tokensUsed: 22
+    });
+
+    const approvalContext = {
+      conversationId: 'conv_meta_1',
+      runId: 'run-meta-1',
+      gateId: 'gate-meta-1',
+      pendingToolBlock: {
+        id: 'tool-use-1',
+        name: 'admin_meta_ads_governance',
+        input: {
+          action: 'disable_integration',
+          params: { integrationId: 'int_123', reason: 'policy breach' }
+        }
+      },
+      pendingMessages: [],
+      role: 'admin'
+    };
+
+    const result = await resumeAfterApproval(approvalContext, 'approved', 'admin-1');
+
+    expect(resolveGate).toHaveBeenCalledWith('gate-meta-1', 'approved', 'admin-1');
+    expect(metaGovernanceService.disableIntegration).toHaveBeenCalledWith(
+      'int_123',
+      { integrationId: 'int_123', reason: 'policy breach' },
+      'admin-1'
+    );
+    expect(result.response).toContain('Approved action executed');
+  });
+
+  test('approval workflow integration: rejected gate does not execute pending action', async () => {
+    routeAIRequest.mockResolvedValue({
+      content: 'Understood, I will not execute that change.',
+      contentBlocks: [{ type: 'text', text: 'Understood, I will not execute that change.' }],
+      tokensUsed: 12
+    });
+
+    const approvalContext = {
+      conversationId: 'conv_meta_2',
+      runId: 'run-meta-2',
+      gateId: 'gate-meta-2',
+      pendingToolBlock: {
+        id: 'tool-use-2',
+        name: 'admin_meta_ads_governance',
+        input: {
+          action: 'rotate_credentials',
+          params: { integrationId: 'int_789' }
+        }
+      },
+      pendingMessages: [],
+      role: 'admin'
+    };
+
+    const result = await resumeAfterApproval(approvalContext, 'rejected', 'admin-1');
+
+    expect(resolveGate).toHaveBeenCalledWith('gate-meta-2', 'rejected', 'admin-1');
+    expect(metaGovernanceService.rotateCredentials).not.toHaveBeenCalled();
+    expect(result.response).toContain('not execute');
   });
 });

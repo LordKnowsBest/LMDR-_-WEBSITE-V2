@@ -56,6 +56,7 @@ describe('externalFuelApi', () => {
     expect(result.success).toBe(true);
     expect(result.data.regional_averages.avg_effective_diesel).toBe(3.475);
     expect(result.data.regional_averages.by_state.length).toBe(2);
+    expect(result.data.results[0].pricing.discount_per_gallon).toBe(0.1);
   });
 
   test('plans route with optimized stops and pricing', async () => {
@@ -80,6 +81,9 @@ describe('externalFuelApi', () => {
     expect(result.success).toBe(true);
     expect(result.data.recommended_stops.length).toBeGreaterThan(0);
     expect(result.data.total_fuel_cost_estimate).toBeGreaterThan(0);
+    expect(result.data.route_summary.stops_recommended).toBeGreaterThan(0);
+    expect(result.data.total_savings_with_card).toBeGreaterThan(0);
+    expect(result.data.recommended_stops[0]).toHaveProperty('mile_marker');
   });
 
   test('returns detailed station payload with card discounts and amenities', async () => {

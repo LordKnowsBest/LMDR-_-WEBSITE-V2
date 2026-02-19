@@ -464,6 +464,41 @@ describe('Recruiter OS Bridge Tests (Recruiter Console Page Code)', () => {
     });
   });
 
+  describe('Phase 3 paid media analytics bridge wiring', () => {
+    const ANALYTICS_INBOUND = [
+      'getPaidMediaInsights',
+      'createPaidMediaReportJob',
+      'getPaidMediaReportStatus',
+      'downloadPaidMediaReport',
+      'getPaidMediaOptimizationSuggestions'
+    ];
+    const ANALYTICS_OUTBOUND = [
+      'paidMediaInsightsLoaded',
+      'paidMediaReportJobCreated',
+      'paidMediaReportStatusLoaded',
+      'paidMediaReportDownloaded',
+      'paidMediaSuggestionsLoaded'
+    ];
+
+    test.each(ANALYTICS_INBOUND)('inbound analytics message "%s" is registered', (msg) => {
+      expect(sourceCode).toContain(`'${msg}'`);
+      expect(sourceCode).toContain(`case '${msg}':`);
+    });
+
+    test.each(ANALYTICS_OUTBOUND)('outbound analytics message "%s" is registered', (msg) => {
+      expect(sourceCode).toContain(`'${msg}'`);
+    });
+
+    test('defines analytics handlers', () => {
+      expect(sourceCode).toContain('async function handleGetPaidMediaInsights(');
+      expect(sourceCode).toContain('async function handleCreatePaidMediaReportJob(');
+      expect(sourceCode).toContain('async function handleGetPaidMediaReportStatus(');
+      expect(sourceCode).toContain('async function handleDownloadPaidMediaReport(');
+      expect(sourceCode).toContain('async function handleGetPaidMediaOptimizationSuggestions(');
+      expect(sourceCode).toContain("recruiter_paid_media_analytics");
+    });
+  });
+
   // ─────────────────────────────────────────────────────────────────────────
   // Handler: recruiterOSReady
   // ─────────────────────────────────────────────────────────────────────────

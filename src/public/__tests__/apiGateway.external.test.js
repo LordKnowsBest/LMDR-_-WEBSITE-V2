@@ -64,6 +64,7 @@ const { checkAndTrackUsage } = require('backend/rateLimitService');
 const { getExternalCarrierSafety, batchExternalCarrierSafety } = require('backend/externalFmcsaApi');
 const { getExternalCurrentCSA, getExternalCSAHistory } = require('backend/externalCsaApi');
 const { getExternalMarketIntelligence, getExternalSentiment } = require('backend/externalIntelligenceApi');
+const { searchExternalDrivers } = require('backend/externalMatchingApi');
 const { authorizeProductAccess } = require('backend/apiProductAccessService');
 const dataAccess = require('backend/dataAccess');
 
@@ -140,6 +141,25 @@ describe('apiGateway external routes', () => {
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('forbidden_tier');
     expect(getExternalSentiment).not.toHaveBeenCalled();
+  });
+
+  test('blocks matching driver search for non-enterprise tiers', async () => {
+    validateApiKey.mockResolvedValueOnce({
+      success: true,
+      tier: 'growth',
+      partner: { partner_id: 'ptn_1' },
+      subscription: { tier: 'growth' },
+      apiKey: { key_id: 'key_1' }
+    });
+
+    const req = makeRequest('/v1/matching/drivers/search', 'POST');
+    req.body.json = async () => ({ carrier_dot: '123456' });
+    req.body.text = async () => JSON.stringify({ carrier_dot: '123456' });
+
+    const res = await handleGatewayRequest(req);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('forbidden_tier');
+    expect(searchExternalDrivers).not.toHaveBeenCalled();
   });
 
   test('blocks when product authorization denies access', async () => {

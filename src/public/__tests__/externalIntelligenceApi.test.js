@@ -59,6 +59,33 @@ describe('externalIntelligenceApi', () => {
     expect(result.data.enrichment.sentiment.overall).toBe('positive');
   });
 
+  test('rebuilds enrichment when cached record is older than ttl', async () => {
+    const staleDate = new Date(Date.now() - (20 * 24 * 60 * 60 * 1000)).toISOString();
+    dataAccess.queryRecords.mockResolvedValueOnce({
+      items: [{
+        dot_number: '123456',
+        enriched_date: staleDate
+      }]
+    });
+    getCarrierSafetyData.mockResolvedValue({ legal_name: 'ACME CARRIER' });
+    enrichCarrier.mockResolvedValue({
+      dot_number: '123456',
+      pay_cpm_range: '$0.60-$0.75 CPM',
+      sign_on_bonus: '$3000',
+      home_time: 'weekly',
+      benefits: 'health, 401k',
+      driver_sentiment: 'Positive',
+      hiring_status: 'Actively Hiring',
+      sources_found: '["reddit"]',
+      data_confidence: 'High',
+      enriched_date: new Date().toISOString()
+    });
+
+    const result = await getExternalCarrierIntelligence('123456', { accessLevel: 'full' });
+    expect(result.success).toBe(true);
+    expect(enrichCarrier).toHaveBeenCalled();
+  });
+
   test('returns sentiment with platform breakdown and themes', async () => {
     getCarrierSafetyData.mockResolvedValue({ legal_name: 'ACME CARRIER' });
     scanSocialMedia.mockResolvedValue(

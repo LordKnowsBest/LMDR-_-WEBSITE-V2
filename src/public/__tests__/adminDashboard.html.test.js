@@ -39,7 +39,12 @@ const INBOUND_MESSAGES = [
     'atRiskFeaturesResult',
     'funnelConversionResult',
     'updateFeatureStatusResult',
-    'funnelsListResult'
+    'funnelsListResult',
+    'metaApprovalInboxLoaded',
+    'metaPolicyEditorLoaded',
+    'metaErrorDigestLoaded',
+    'metaRateLimitPostureLoaded',
+    'metaGovernanceActionResult'
 ];
 
 const OUTBOUND_MESSAGES = [
@@ -53,7 +58,18 @@ const OUTBOUND_MESSAGES = [
     'getAtRiskFeatures',
     'getFunnelsList',
     'getFunnelConversion',
-    'updateFeatureStatus'
+    'updateFeatureStatus',
+    'getMetaApprovalInbox',
+    'getMetaPolicyEditorData',
+    'getMetaErrorDigest',
+    'getMetaRateLimitPosture',
+    'setMetaApprovalThresholds',
+    'setMetaCampaignGuardrails',
+    'setMetaDailyBudgetCaps',
+    'quarantineMetaIntegration',
+    'refreshMetaSystemUserToken',
+    'rebindMetaAdAccount',
+    'disableMetaIntegration'
 ];
 
 const DOM_ELEMENT_MAP = {
@@ -590,7 +606,12 @@ describe('ADMIN_DASHBOARD.html DOM Tests', () => {
 
     describe('DOM element coverage', () => {
         test('HTML contains all element IDs referenced by handlers', () => {
-            const criticalIds = ['statDrivers', 'statCarriers', 'statMatches', 'alertsList', 'healthIndicator'];
+            const criticalIds = [
+                'statDrivers', 'statCarriers', 'statMatches', 'alertsList', 'healthIndicator',
+                'metaApprovalInboxList', 'metaApprovalInboxCount', 'metaLaunchThresholdInput',
+                'metaBudgetCapInput', 'metaIntegrationIdInput', 'metaAdAccountIdInput',
+                'metaErrorEventsCount', 'metaThrottledCount'
+            ];
             criticalIds.forEach(id => {
                 const hasId =
                     htmlSource.includes(`id="${id}"`) ||

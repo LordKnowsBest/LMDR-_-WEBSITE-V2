@@ -82,6 +82,19 @@ describe('externalDocumentApi', () => {
     expect(status.data.total).toBe(2);
   });
 
+  test('rejects batch requests larger than 25 documents', async () => {
+    const documents = Array.from({ length: 26 }, () => ({
+      base64_data: 'abcd',
+      mime_type: 'image/png',
+      type: 'cdl'
+    }));
+
+    const result = await processExternalDocumentBatch({ documents });
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('invalid_request');
+    expect(result.message).toContain('Maximum 25 documents');
+  });
+
   test('med cert extraction path returns document payload', async () => {
     protectedOCRExtraction.mockResolvedValue({
       success: true,

@@ -213,6 +213,26 @@ jest.mock('backend/metaCreativeService', () => ({
   archiveCreative: jest.fn().mockResolvedValue({ success: true }),
   attachCreativeToAd: jest.fn().mockResolvedValue({ success: true })
 }));
+jest.mock('backend/metaInsightsService', () => ({
+  getInsightsCampaignLevel: jest.fn().mockResolvedValue({ success: true }),
+  getInsightsAdSetLevel: jest.fn().mockResolvedValue({ success: true }),
+  getInsightsAdLevel: jest.fn().mockResolvedValue({ success: true }),
+  getInsightsWithBreakdowns: jest.fn().mockResolvedValue({ success: true }),
+  createAsyncReportJob: jest.fn().mockResolvedValue({ success: true }),
+  getAsyncReportStatus: jest.fn().mockResolvedValue({ success: true }),
+  downloadReport: jest.fn().mockResolvedValue({ success: true }),
+  getCreativePerformance: jest.fn().mockResolvedValue({ success: true }),
+  getPlacementPerformance: jest.fn().mockResolvedValue({ success: true }),
+  getFrequencyFatigueAlerts: jest.fn().mockResolvedValue({ success: true }),
+  suggestBudgetReallocation: jest.fn().mockResolvedValue({ success: true }),
+  suggestCreativeRotation: jest.fn().mockResolvedValue({ success: true }),
+  suggestAudienceNarrowing: jest.fn().mockResolvedValue({ success: true })
+}));
+jest.mock('backend/metaOptimizationService', () => ({
+  applyBudgetReallocation: jest.fn().mockResolvedValue({ success: true, actionId: 'opt_1' }),
+  applyBidAdjustment: jest.fn().mockResolvedValue({ success: true, actionId: 'opt_2' }),
+  rotateCreativeVariant: jest.fn().mockResolvedValue({ success: true, actionId: 'opt_3' })
+}));
 
 // ── Import after mocks ──
 const { executeTool, ACTION_REGISTRY, ROUTER_DEFINITIONS } = require('backend/agentService');
@@ -222,17 +242,21 @@ const { executeTool, ACTION_REGISTRY, ROUTER_DEFINITIONS } = require('backend/ag
 // ============================================================================
 
 describe('ACTION_REGISTRY completeness — recruiter routers', () => {
-  test('has exactly 7 recruiter routers', () => {
+  test('has exactly 8 recruiter routers', () => {
     const routerNames = Object.keys(ACTION_REGISTRY).filter(k => k.startsWith('recruiter_'));
-    expect(routerNames).toHaveLength(7);
+    expect(routerNames).toHaveLength(8);
     expect(routerNames.sort()).toEqual([
-      'recruiter_analytics', 'recruiter_onboarding', 'recruiter_outreach', 'recruiter_paid_media',
+      'recruiter_analytics', 'recruiter_onboarding', 'recruiter_outreach', 'recruiter_paid_media', 'recruiter_paid_media_analytics',
       'recruiter_pipeline', 'recruiter_retention', 'recruiter_reverse_match'
     ]);
   });
 
   test('recruiter_paid_media has 24 actions', () => {
     expect(Object.keys(ACTION_REGISTRY.recruiter_paid_media)).toHaveLength(24);
+  });
+
+  test('recruiter_paid_media_analytics has 16 actions', () => {
+    expect(Object.keys(ACTION_REGISTRY.recruiter_paid_media_analytics)).toHaveLength(16);
   });
 
   test('recruiter_outreach has 15 actions', () => {
@@ -259,11 +283,11 @@ describe('ACTION_REGISTRY completeness — recruiter routers', () => {
     expect(Object.keys(ACTION_REGISTRY.recruiter_reverse_match)).toHaveLength(8);
   });
 
-  test('total recruiter actions = 87', () => {
+  test('total recruiter actions = 103', () => {
     const total = Object.keys(ACTION_REGISTRY)
       .filter(k => k.startsWith('recruiter_'))
       .reduce((sum, k) => sum + Object.keys(ACTION_REGISTRY[k]).length, 0);
-    expect(total).toBe(87);
+    expect(total).toBe(103);
   });
 
   test('every action has required policy fields', () => {
@@ -299,9 +323,9 @@ describe('ACTION_REGISTRY completeness — recruiter routers', () => {
 // ============================================================================
 
 describe('ROUTER_DEFINITIONS — recruiter routers', () => {
-  test('has 7 recruiter routers matching ACTION_REGISTRY', () => {
+  test('has 8 recruiter routers matching ACTION_REGISTRY', () => {
     const recruiterRouters = Object.keys(ROUTER_DEFINITIONS).filter(k => k.startsWith('recruiter_'));
-    expect(recruiterRouters).toHaveLength(7);
+    expect(recruiterRouters).toHaveLength(8);
     for (const router of recruiterRouters) {
       expect(ACTION_REGISTRY).toHaveProperty(router);
     }
@@ -359,6 +383,52 @@ describe('recruiter_paid_media router dispatch', () => {
     await executeTool('recruiter_paid_media', { action: 'attach_creative_to_ad', params: { adId: 'ad1', creativeId: 'cr1' } }, ctx);
     const { attachCreativeToAd } = require('backend/metaCreativeService');
     expect(attachCreativeToAd).toHaveBeenCalledWith('recruiter123', { adId: 'ad1', creativeId: 'cr1' });
+  });
+});
+
+// ============================================================================
+// ROUTER DISPATCH — recruiter_paid_media_analytics (13 actions)
+// ============================================================================
+
+describe('recruiter_paid_media_analytics router dispatch', () => {
+  const ctx = { runId: 'run1', userId: 'recruiter123' };
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('get_insights_campaign_level dispatches to metaInsightsService.getInsightsCampaignLevel', async () => {
+    await executeTool('recruiter_paid_media_analytics', { action: 'get_insights_campaign_level', params: { dateRange: {} } }, ctx);
+    const { getInsightsCampaignLevel } = require('backend/metaInsightsService');
+    expect(getInsightsCampaignLevel).toHaveBeenCalledWith('recruiter123', { dateRange: {} });
+  });
+
+  test('create_async_report_job dispatches to metaInsightsService.createAsyncReportJob', async () => {
+    await executeTool('recruiter_paid_media_analytics', { action: 'create_async_report_job', params: { reportScope: 'campaign' } }, ctx);
+    const { createAsyncReportJob } = require('backend/metaInsightsService');
+    expect(createAsyncReportJob).toHaveBeenCalledWith('recruiter123', { reportScope: 'campaign' });
+  });
+
+  test('suggest_audience_narrowing dispatches to metaInsightsService.suggestAudienceNarrowing', async () => {
+    await executeTool('recruiter_paid_media_analytics', { action: 'suggest_audience_narrowing', params: { dateRange: {} } }, ctx);
+    const { suggestAudienceNarrowing } = require('backend/metaInsightsService');
+    expect(suggestAudienceNarrowing).toHaveBeenCalledWith('recruiter123', { dateRange: {} });
+  });
+
+  test('apply_budget_reallocation dispatches to metaOptimizationService.applyBudgetReallocation', async () => {
+    await executeTool('recruiter_paid_media_analytics', { action: 'apply_budget_reallocation', params: { adSetId: 'as1', budgetDeltaPct: 10 } }, ctx);
+    const { applyBudgetReallocation } = require('backend/metaOptimizationService');
+    expect(applyBudgetReallocation).toHaveBeenCalledWith('recruiter123', { adSetId: 'as1', budgetDeltaPct: 10 });
+  });
+
+  test('apply_bid_adjustment dispatches to metaOptimizationService.applyBidAdjustment', async () => {
+    await executeTool('recruiter_paid_media_analytics', { action: 'apply_bid_adjustment', params: { adSetId: 'as1', bidStrategy: 'LOWEST_COST_WITH_BID_CAP' } }, ctx);
+    const { applyBidAdjustment } = require('backend/metaOptimizationService');
+    expect(applyBidAdjustment).toHaveBeenCalledWith('recruiter123', { adSetId: 'as1', bidStrategy: 'LOWEST_COST_WITH_BID_CAP' });
+  });
+
+  test('rotate_creative_variant dispatches to metaOptimizationService.rotateCreativeVariant', async () => {
+    await executeTool('recruiter_paid_media_analytics', { action: 'rotate_creative_variant', params: { adId: 'ad1', nextCreativeId: 'cr2' } }, ctx);
+    const { rotateCreativeVariant } = require('backend/metaOptimizationService');
+    expect(rotateCreativeVariant).toHaveBeenCalledWith('recruiter123', { adId: 'ad1', nextCreativeId: 'cr2' });
   });
 });
 

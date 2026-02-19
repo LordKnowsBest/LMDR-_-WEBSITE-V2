@@ -70,6 +70,8 @@ describe('externalMatchingApi', () => {
 
     expect(result.success).toBe(true);
     expect(result.data.results.length).toBe(1);
+    expect(result.data.total_matches).toBe(1);
+    expect(result.data.total_matches_unfiltered).toBe(2);
     expect(result.data.results[0].driver_id).toBe('d1');
   });
 
@@ -103,9 +105,13 @@ describe('externalMatchingApi', () => {
         phone: '5551234567'
       }
     });
-    dataAccess.queryRecords.mockResolvedValue({
-      items: [{ _id: 'usage_1', quotas_used: { driver_profile_views: 1 } }]
-    });
+    dataAccess.queryRecords
+      .mockResolvedValueOnce({
+        items: [{ _id: 'sub_1', quotas: { driver_searches_monthly: 100 } }]
+      })
+      .mockResolvedValueOnce({
+        items: [{ _id: 'usage_1', quotas_used: { driver_profile_views: 1 } }]
+      });
     dataAccess.updateRecord.mockResolvedValue({ success: true });
 
     const result = await getExternalDriverProfile('d1', {
@@ -115,8 +121,38 @@ describe('externalMatchingApi', () => {
 
     expect(result.success).toBe(true);
     expect(result.data.pii_masked).toBe(false);
+    expect(result.data.credit_consumed).toBe(true);
     expect(result.data.profile.email).toBe('driver@example.com');
+    expect(result.data.qualification_summary.cdl_class).toBeNull();
     expect(dataAccess.updateRecord).toHaveBeenCalled();
+  });
+
+  test('returns quota_exceeded when profile view limit is reached', async () => {
+    getDriverProfile.mockResolvedValue({
+      success: true,
+      driver: {
+        _id: 'd1',
+        full_name: 'Test Driver',
+        email: 'driver@example.com',
+        phone: '5551234567'
+      }
+    });
+    dataAccess.queryRecords
+      .mockResolvedValueOnce({
+        items: [{ _id: 'sub_1', quotas: { driver_profile_views_monthly: 2 } }]
+      })
+      .mockResolvedValueOnce({
+        items: [{ _id: 'usage_1', quotas_used: { driver_profile_views: 2 } }]
+      });
+
+    const result = await getExternalDriverProfile('d1', {
+      carrier_dot: '123456',
+      unmask_pii: 'true'
+    }, { tier: 'enterprise', partner: { partner_id: 'ptn_1' } });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('quota_exceeded');
+    expect(dataAccess.updateRecord).not.toHaveBeenCalled();
   });
 
   test('returns carrier match payload with score breakdown', async () => {

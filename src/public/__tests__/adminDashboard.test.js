@@ -216,6 +216,18 @@ describe('ADMIN_DASHBOARD Page Code', () => {
             expect(sourceCode).toContain('#html2');
             expect(sourceCode).toContain('#htmlEmbed1');
         });
+
+        test('includes Meta governance parity handlers for phase 5', () => {
+            expect(sourceCode).toContain("case 'getMetaApprovalInbox'");
+            expect(sourceCode).toContain("case 'getMetaPolicyEditorData'");
+            expect(sourceCode).toContain("case 'setMetaApprovalThresholds'");
+            expect(sourceCode).toContain("case 'setMetaCampaignGuardrails'");
+            expect(sourceCode).toContain("case 'setMetaDailyBudgetCaps'");
+            expect(sourceCode).toContain("case 'quarantineMetaIntegration'");
+            expect(sourceCode).toContain("case 'refreshMetaSystemUserToken'");
+            expect(sourceCode).toContain("case 'rebindMetaAdAccount'");
+            expect(sourceCode).toContain("case 'disableMetaIntegration'");
+        });
     });
 
     // =========================================================================
