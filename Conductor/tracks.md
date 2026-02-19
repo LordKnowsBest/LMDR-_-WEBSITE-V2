@@ -88,6 +88,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Priority: High*
 *Goal: Unify Tailwind configs, icons, buttons, and theme logic across the platform.*
 *Status: In Progress — approach pivoted to inline Tailwind config (external lmdr-config.js fails in Wix iframes)*
+*Evidence Pack: Not run*
 *Progress (audited 2026-01-31):*
 - *Phase 1 (Tailwind Unification): Complete — lmdr-config.js + theme-utils.js created as reference; inline config is the runtime pattern*
 - *Phase 2 (Dashboards): Partial — 10/10 recruiter files tokenized, only 2/11 admin files tokenized*
@@ -103,6 +104,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Planning Complete, In Progress (10 of 56+ files modified)*
 *Standard: docs/MOBILE_OPTIMIZATION_GUIDE.md*
 *Phases: 5 (Pilot Landing Pages → Driver Portal → Recruiter Portal → Carrier & Admin → Verification)*
+*Evidence Pack: Not run*
 
 ## [x] Track: Gamification System - Driver & Recruiter Progression
 *Link: [./tracks/gamification_strategy_20260123/](./tracks/gamification_strategy_20260123/)*
@@ -129,6 +131,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Business Impact: Revenue Diversification - Target $300K ARR Year 1, 25 API partners, 1M+ monthly API calls.*
 *Phases: 8 (Gateway Infrastructure → Safety APIs → Intelligence APIs → Operational APIs → Matching APIs → Document APIs → Engagement APIs → Developer Portal)*
 *Pricing: Starter $99/mo, Growth $499/mo, Enterprise $999/mo + usage-based add-ons*
+*Evidence Pack: Not run*
 
 ---
 
@@ -158,6 +161,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Priority: High*
 *Status: Phases 1-4 Implemented — Phase 5 Mobile QA Pending*
 *Goal: Increase driver engagement through Profile Strength Meter, Quick Response Templates, Reverse Alerts, and Insights Panel.*
+*Evidence Pack: Not run*
 *Completed:*
 - *PostMessage bridge fix (payload→data key mismatch) — entire dashboard was non-functional*
 - *Restored missing utility functions: stripHtml, goToProfile, goToMatching, promptWithdraw, closeWithdrawModal, confirmWithdraw, useQuickReply*
@@ -211,6 +215,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Priority: High*
 *Status: In Progress — Phase 3 (Match Explanation) & Phase 4 (System Health) Complete*
 *Goal: Cross-pollinate features between roles through Mutual Interest Indicator, Retention Dashboard for Carriers, Match Explanation for Drivers, and System Health for Recruiters.*
+*Evidence Pack: Not run*
 *Completed:*
 - *matchExplanationService.jsw (Driver match "Why?" explanations)*
 - *recruiterHealthService.jsw (System health monitoring for recruiters)*
@@ -231,6 +236,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Integration Fixes Applied — Optimization & QA Pending*
 *Goal: Daily-use tools for drivers on the road - Parking Finder, Fuel Optimizer, Weigh Station Status, Rest Stop Ratings, Weather Alerts, Road Conditions.*
 *Business Impact: Transform platform to daily-use operating system.*
+*Evidence Pack: Not run*
 *Completed Services:*
 - *parkingService.jsw (Phase 1 + TPIMS Phase 1.5 - 9 state APIs integrated)*
 - *fuelService.jsw (Phase 2 - fuel card discounts, route optimization)*
@@ -319,6 +325,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Platforms: Facebook Page timeline (text, link, photo, video) + Instagram feed (image, carousel, video, Reels)*
 *Key Architecture: Unified `post.facebook()` / `post.instagram()` / `post.both()` dispatcher; post queue with status tracking; token lifecycle management; GCP-migration-ready secrets abstraction.*
 *Phases: 5 (MVP one-post each → Full types + queue → Scheduling + rate limits → Hardening → Migration-ready)*
+*Evidence Pack: Not applicable (backend only)*
 
 ## Business Development New Features
 
@@ -339,6 +346,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Goal: Wire the complete carrier path from Stripe checkout through onboarding, dashboard, compliance suite, and daily operations. Fixes dead ends where paying carriers land on broken/empty pages.*
 *Business Impact: Every paying carrier ($149-$499/mo) hits this flow. Broken post-checkout = immediate churn.*
 *Phases: 5 (Post-Checkout Onboarding → Unified Carrier Identity → Compliance Page Bridges → Navigation System → Retention/Analytics Wiring)*
+*Evidence Pack: Not run*
 
 ## [x] Track: Carrier Fleet Dashboard
 *Link: [./tracks/carrier_fleet_dashboard_20260120/](./tracks/carrier_fleet_dashboard_20260120/)*
@@ -362,6 +370,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: Implementation Complete — Page Code Bridges + Manual QA Pending*
 *Goal: DOT compliance management - Compliance Calendar, Document Vault, Qualification File Tracker, CSA Score Monitor, Incident Reporting.*
 *Business Impact: Avoid $10k+ DOT violations.*
+*Evidence Pack: Not run*
 *Completed:*
 - *complianceCalendarService.jsw (Phase 1 - CRUD, reminders, dashboard, recurring events)*
 - *documentVaultService.jsw (Phase 2 - upload, versioning, expiration tracking, verification)*
@@ -412,10 +421,10 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 # DevOps & Quality Tracks
 
-## [ ] Track: Chrome DevTools Runtime Verification
+## [/] Track: Chrome DevTools Runtime Verification
 *Link: [./tracks/devtools_observability_20260219/](./tracks/devtools_observability_20260219/)*
 *Priority: High*
-*Status: Planning — spec.md + plan.md + verify_runtime.js complete*
+*Status: In Progress — Phases 3-4 Complete (agent workflow + hardening), Phase 1 ready for first browser run*
 *Goal: Eliminate blind coding by establishing a standardized Evidence Pack protocol. Every Conductor track must produce a `quality_gate.json` with `pass: true` (console audit, network audit, 5 screenshots, DOM selector assertions) before it can be marked DONE. Uses Chrome DevTools Protocol (CDP) via Puppeteer MCP.*
 *Phases: 4 (Environment Setup → Smoke Test MVP → Conductor Hook → Hardening)*
 

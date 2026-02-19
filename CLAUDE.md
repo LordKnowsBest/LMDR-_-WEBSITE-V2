@@ -135,6 +135,27 @@ Configured in `src/backend/jobs.config`:
 - `runBackfillMigration` runs every 30 min (`30 * * * *`) - Ensures submitted drivers are searchable
 - `processAbandonmentEmails` runs every 15 min (`15 * * * *`) - Checkout abandonment email sequences
 
+## Evidence Pack Verification
+
+**Required for all tracks with frontend pages.** Before marking a Conductor track DONE, run the DevTools Evidence Pack verification.
+
+**How to run:**
+```bash
+claude --agent evidence-pack
+```
+
+**What it checks:**
+- Zero P0 console errors across 5 critical paths
+- All required DOM selectors visible
+- All pages reach ready state within timeout
+- Zero HTTP 500 errors on LMDR endpoints
+- All 5 screenshots captured and non-blank
+- Zero Velo worker fatal errors
+
+**Artifacts:** Written to `artifacts/devtools/{run_id}/` including `quality_gate.json`, `console_audit.json`, `network_audit.json`, and 5 screenshots.
+
+**Quality gate:** `quality_gate.json` must show `pass: true`. Attach the `run_id` to the track's `metadata.json` `verification_run` field.
+
 ## Web Module Permissions
 
 Permissions are defined in `src/backend/permissions.json`. Current config allows all users (anonymous, member, owner) to invoke all web methods.
