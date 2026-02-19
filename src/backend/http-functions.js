@@ -17,6 +17,7 @@ import {
   logStripeEvent,
   updatePaymentStatus
 } from 'backend/stripeService';
+import { processAutoCommission } from 'backend/adminCommissionService';
 import { updateLeadStatus } from 'backend/carrierLeadsService';
 import { sendPaymentReceivedEmail } from 'backend/emailService';
 import {
@@ -188,32 +189,99 @@ async function handleStripeEvent(event) {
   switch (type) {
     // Subscription lifecycle events
     case 'customer.subscription.created':
-      return await handleSubscriptionCreated(data.object);
+      return await handleSubscriptionCreated(data.object, event);
 
     case 'customer.subscription.updated':
-      return await handleSubscriptionUpdated(data.object);
+      return await handleSubscriptionUpdated(data.object, event);
 
     case 'customer.subscription.deleted':
-      return await handleSubscriptionDeleted(data.object);
+      return await handleSubscriptionDeleted(data.object, event);
 
     // Payment events
     case 'invoice.paid':
-      return await handleInvoicePaid(data.object);
+      return await handleInvoicePaid(data.object, event);
 
     case 'invoice.payment_failed':
-      return await handlePaymentFailed(data.object);
+      return await handlePaymentFailed(data.object, event);
 
     // Checkout events
     case 'checkout.session.completed':
-      return await handleCheckoutCompleted(data.object);
+      return await handleCheckoutCompleted(data.object, event);
 
     case 'checkout.session.expired':
-      return await handleCheckoutExpired(data.object);
+      return await handleCheckoutExpired(data.object, event);
 
     default:
       console.log(`[Webhook] Unhandled event type: ${type}`);
       return { status: 'unhandled', carrierDot: null };
   }
+}
+
+async function hasProcessedCommissionEvent(uniqueKey) {
+  if (!uniqueKey) return false;
+  try {
+    const result = await dataAccess.queryRecords('auditLog', {
+      filters: {
+        action: 'auto_commission_event',
+        entity_id: uniqueKey
+      },
+      limit: 1,
+      suppressAuth: true
+    });
+    return result.success && (result.items || []).length > 0;
+  } catch (error) {
+    console.error('[Webhook] Commission idempotency lookup failed:', error);
+    return false;
+  }
+}
+
+async function markCommissionEventProcessed(uniqueKey, details = {}) {
+  if (!uniqueKey) return;
+  try {
+    await dataAccess.insertRecord('auditLog', {
+      action: 'auto_commission_event',
+      entity_type: 'stripe_event',
+      entity_id: uniqueKey,
+      details: JSON.stringify(details).slice(0, 500),
+      timestamp: new Date().toISOString()
+    }, { suppressAuth: true });
+  } catch (error) {
+    console.error('[Webhook] Commission idempotency write failed:', error);
+  }
+}
+
+function toCommissionDealData(base = {}) {
+  return {
+    sales_rep_id: base.sales_rep_id || base.salesRepId || '',
+    carrier_dot: base.carrier_dot || base.carrierDot || '',
+    carrier_name: base.carrier_name || base.carrierName || '',
+    deal_value: Number(base.deal_value || base.dealValue || 0),
+    notes: base.notes || ''
+  };
+}
+
+async function triggerAutoCommission(eventId, eventType, dealData, sourceTag) {
+  const uniqueKey = `${eventId}:${eventType}:${sourceTag}`;
+  if (await hasProcessedCommissionEvent(uniqueKey)) {
+    console.log(`[Webhook] Auto commission already processed for ${uniqueKey}`);
+    return { success: true, skipped: true, reason: 'already_processed' };
+  }
+
+  const normalized = toCommissionDealData(dealData);
+  if (!normalized.deal_value || normalized.deal_value <= 0) {
+    return { success: false, skipped: true, reason: 'missing_deal_value' };
+  }
+
+  const result = await processAutoCommission(eventType, normalized);
+  if (result?.success) {
+    await markCommissionEventProcessed(uniqueKey, {
+      eventType,
+      sourceTag,
+      carrierDot: normalized.carrier_dot || '',
+      dealValue: normalized.deal_value
+    });
+  }
+  return result;
 }
 
 /**
@@ -254,7 +322,7 @@ async function handleSubscriptionCreated(subscription) {
 /**
  * Handle subscription updated (status changes, cancellations)
  */
-async function handleSubscriptionUpdated(subscription) {
+async function handleSubscriptionUpdated(subscription, event) {
   const partnerId = subscription.metadata?.partner_id;
   if (partnerId) {
     const result = await upsertApiSubscriptionFromStripe(subscription, subscription.customer);
@@ -280,6 +348,23 @@ async function handleSubscriptionUpdated(subscription) {
     await recordBillingEvent(carrierDot, 'subscription_cancel_scheduled', {
       description: 'Subscription scheduled for cancellation at period end'
     });
+  }
+
+  const previousAttrs = event?.data?.previous_attributes || {};
+  const isUpgrade = Boolean(previousAttrs.items || previousAttrs.plan || subscription.metadata?.commission_event === 'upgrade');
+  if (isUpgrade) {
+    await triggerAutoCommission(
+      event?.id || `subscription_update_${subscription.id}`,
+      'upgrade',
+      {
+        sales_rep_id: subscription.metadata?.sales_rep_id,
+        carrier_dot: carrierDot,
+        carrier_name: subscription.metadata?.carrier_name || '',
+        deal_value: subscription.items?.data?.[0]?.price?.unit_amount || 0,
+        notes: `Upgrade via customer.subscription.updated (${subscription.id})`
+      },
+      'customer.subscription.updated'
+    );
   }
 
   return {
@@ -326,7 +411,7 @@ async function handleSubscriptionDeleted(subscription) {
 /**
  * Handle successful payment - reset quota for new billing period
  */
-async function handleInvoicePaid(invoice) {
+async function handleInvoicePaid(invoice, event) {
   // Only process subscription invoices
   if (!invoice.subscription) {
     return { status: 'skipped', carrierDot: null };
@@ -372,6 +457,21 @@ async function handleInvoicePaid(invoice) {
     invoiceId: invoice.id,
     description: `Payment for ${invoice.lines?.data[0]?.description || 'subscription'}`
   });
+
+  if (invoice.billing_reason === 'subscription_cycle') {
+    await triggerAutoCommission(
+      event?.id || `invoice_paid_${invoice.id}`,
+      'renewal',
+      {
+        sales_rep_id: invoice.lines?.data?.[0]?.metadata?.sales_rep_id || invoice.subscription_details?.metadata?.sales_rep_id,
+        carrier_dot: carrierDot,
+        carrier_name: invoice.lines?.data?.[0]?.metadata?.carrier_name || '',
+        deal_value: invoice.amount_paid || 0,
+        notes: `Renewal via invoice.paid (${invoice.id})`
+      },
+      'invoice.paid'
+    );
+  }
 
   return {
     status: 'paid',
@@ -428,7 +528,7 @@ async function handlePaymentFailed(invoice) {
 /**
  * Handle checkout session completed
  */
-async function handleCheckoutCompleted(session) {
+async function handleCheckoutCompleted(session, event) {
   const carrierDot = session.metadata?.carrier_dot;
   const customerEmail = session.customer_email;
   console.log(`[Webhook] Checkout completed for carrier ${carrierDot}`);
@@ -475,6 +575,24 @@ async function handleCheckoutCompleted(session) {
     if (recoveryResult.wasAbandoned) {
       console.log(`[Webhook] Recovered abandoned checkout for ${customerEmail}`);
     }
+  }
+
+  if (session.payment_status === 'paid') {
+    const commissionEvent = session.metadata?.commission_event === 'placement' ||
+      session.metadata?.payment_type === 'placement' ? 'placement' : 'new_subscription';
+
+    await triggerAutoCommission(
+      event?.id || `checkout_completed_${session.id}`,
+      commissionEvent,
+      {
+        sales_rep_id: session.metadata?.sales_rep_id,
+        carrier_dot: carrierDot,
+        carrier_name: session.metadata?.carrier_name || '',
+        deal_value: session.amount_total || 0,
+        notes: `Checkout completion (${session.id})`
+      },
+      'checkout.session.completed'
+    );
   }
 
   return {

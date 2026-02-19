@@ -168,6 +168,21 @@ export const DATA_SOURCE = {
   apiProducts: 'airtable',
   apiAlertSubscriptions: 'airtable',
   apiWebhookDeliveries: 'airtable',
+  metaIntegrations: 'airtable',
+  metaAdAccounts: 'airtable',
+  metaCampaignMirror: 'airtable',
+  metaAdSetMirror: 'airtable',
+  metaAdMirror: 'airtable',
+  metaCreativeMirror: 'airtable',
+  metaInsightsDaily: 'airtable',
+  metaInsightsIntraday: 'airtable',
+  metaAsyncReportJobs: 'airtable',
+  metaOptimizationActions: 'airtable',
+  metaGovernancePolicies: 'airtable',
+  metaMutationAudit: 'airtable',
+  metaErrorEvents: 'airtable',
+  metaRateLimitEvents: 'airtable',
+  metaAttributionLinks: 'airtable',
 
   // -------------------------------------------------------------------------
   // Gamification System (Airtable-only, no Wix fallback)
@@ -410,7 +425,32 @@ export const DATA_SOURCE = {
   driverQuickResponses: 'airtable',
   reverseAlerts: 'airtable',
   driverNotifications: 'airtable',
-  driverMatches: 'airtable'
+  driverMatches: 'airtable',
+
+  // ── Phase 2: Recruiter Surface Expansion ──
+  backgroundChecks: 'airtable',
+  drugTests: 'airtable',
+  orientationSlots: 'airtable',
+  eSignRequests: 'airtable',
+  outreachTemplates: 'airtable',
+  retentionWatchlist: 'airtable',
+  retentionInterventions: 'airtable',
+  matchSubscriptions: 'airtable',
+  matchSubscriptionAlerts: 'airtable',
+  recruiterScorecards: 'airtable',
+
+  // ── Phase 3: Carrier & B2B Surface Expansion ──
+  driverRecognitions: 'airtable',
+  feedbackRequests: 'airtable',
+  b2bTasks: 'airtable',
+
+  // ── Phase 5: Cross-Role Intelligence & External APIs ──
+  marketIntelligence: 'airtable',
+  driverMatchFeedback: 'airtable',
+  driverSurveyRequests: 'airtable',
+  settlementDisputes: 'airtable',
+  taxReferenceData: 'airtable',
+  exitSurveys: 'airtable'
 };
 
 // =============================================================================
@@ -604,6 +644,21 @@ export const WIX_COLLECTION_NAMES = {
   apiProducts: 'ApiProducts',
   apiAlertSubscriptions: 'ApiAlertSubscriptions',
   apiWebhookDeliveries: 'ApiWebhookDeliveries',
+  metaIntegrations: 'MetaIntegrations',
+  metaAdAccounts: 'MetaAdAccounts',
+  metaCampaignMirror: 'MetaCampaignMirror',
+  metaAdSetMirror: 'MetaAdSetMirror',
+  metaAdMirror: 'MetaAdMirror',
+  metaCreativeMirror: 'MetaCreativeMirror',
+  metaInsightsDaily: 'MetaInsightsDaily',
+  metaInsightsIntraday: 'MetaInsightsIntraday',
+  metaAsyncReportJobs: 'MetaAsyncReportJobs',
+  metaOptimizationActions: 'MetaOptimizationActions',
+  metaGovernancePolicies: 'MetaGovernancePolicies',
+  metaMutationAudit: 'MetaMutationAudit',
+  metaErrorEvents: 'MetaErrorEvents',
+  metaRateLimitEvents: 'MetaRateLimitEvents',
+  metaAttributionLinks: 'MetaAttributionLinks',
 
   // Recruiter Analytics
   sourceAttribution: 'SourceAttribution',
@@ -762,7 +817,32 @@ export const WIX_COLLECTION_NAMES = {
   driverQuickResponses: 'DriverQuickResponses',
   reverseAlerts: 'ReverseAlerts',
   driverNotifications: 'DriverNotifications',
-  driverMatches: 'DriverMatches'
+  driverMatches: 'DriverMatches',
+
+  // ── Phase 2: Recruiter Surface Expansion ──
+  backgroundChecks: 'BackgroundChecks',
+  drugTests: 'DrugTests',
+  orientationSlots: 'OrientationSlots',
+  eSignRequests: 'ESignRequests',
+  outreachTemplates: 'OutreachTemplates',
+  retentionWatchlist: 'RetentionWatchlist',
+  retentionInterventions: 'RetentionInterventions',
+  matchSubscriptions: 'MatchSubscriptions',
+  matchSubscriptionAlerts: 'MatchSubscriptionAlerts',
+  recruiterScorecards: 'RecruiterScorecards',
+
+  // ── Phase 3: Carrier & B2B Surface Expansion ──
+  driverRecognitions: 'DriverRecognitions',
+  feedbackRequests: 'FeedbackRequests',
+  b2bTasks: 'B2BTasks',
+
+  // ── Phase 5: Cross-Role Intelligence & External APIs ──
+  marketIntelligence: 'MarketIntelligence',
+  driverMatchFeedback: 'DriverMatchFeedback',
+  driverSurveyRequests: 'DriverSurveyRequests',
+  settlementDisputes: 'SettlementDisputes',
+  taxReferenceData: 'TaxReferenceData',
+  exitSurveys: 'ExitSurveys'
 };
 
 // =============================================================================
@@ -890,6 +970,21 @@ export const AIRTABLE_TABLE_NAMES = {
   apiProducts: 'v2_API Products',
   apiAlertSubscriptions: 'v2_API Alert Subscriptions',
   apiWebhookDeliveries: 'v2_API Webhook Deliveries',
+  metaIntegrations: 'v2_Meta Integrations',
+  metaAdAccounts: 'v2_Meta Ad Accounts',
+  metaCampaignMirror: 'v2_Meta Campaign Mirror',
+  metaAdSetMirror: 'v2_Meta Ad Set Mirror',
+  metaAdMirror: 'v2_Meta Ad Mirror',
+  metaCreativeMirror: 'v2_Meta Creative Mirror',
+  metaInsightsDaily: 'v2_Meta Insights Daily',
+  metaInsightsIntraday: 'v2_Meta Insights Intraday',
+  metaAsyncReportJobs: 'v2_Meta Async Report Jobs',
+  metaOptimizationActions: 'v2_Meta Optimization Actions',
+  metaGovernancePolicies: 'v2_Meta Governance Policies',
+  metaMutationAudit: 'v2_Meta Mutation Audit',
+  metaErrorEvents: 'v2_Meta Error Events',
+  metaRateLimitEvents: 'v2_Meta Rate Limit Events',
+  metaAttributionLinks: 'v2_Meta Attribution Links',
 
   // Gamification System (Airtable-only)
   driverProgression: 'v2_Driver Progression',
@@ -1093,7 +1188,32 @@ export const AIRTABLE_TABLE_NAMES = {
   driverQuickResponses: 'v2_Driver Quick Responses',
   reverseAlerts: 'v2_Reverse Alerts',
   driverNotifications: 'v2_Driver Notifications',
-  driverMatches: 'v2_Driver Matches'
+  driverMatches: 'v2_Driver Matches',
+
+  // ── Phase 2: Recruiter Surface Expansion ──
+  backgroundChecks: 'v2_Background Checks',
+  drugTests: 'v2_Drug Tests',
+  orientationSlots: 'v2_Orientation Slots',
+  eSignRequests: 'v2_E-Sign Requests',
+  outreachTemplates: 'v2_Outreach Templates',
+  retentionWatchlist: 'v2_Retention Watchlist',
+  retentionInterventions: 'v2_Retention Interventions',
+  matchSubscriptions: 'v2_Match Subscriptions',
+  matchSubscriptionAlerts: 'v2_Match Subscription Alerts',
+  recruiterScorecards: 'v2_Recruiter Scorecards',
+
+  // ── Phase 3: Carrier & B2B Surface Expansion ──
+  driverRecognitions: 'v2_Driver Recognitions',
+  feedbackRequests: 'v2_Feedback Requests',
+  b2bTasks: 'v2_B2B Tasks',
+
+  // ── Phase 5: Cross-Role Intelligence & External APIs ──
+  marketIntelligence: 'v2_Market Intelligence',
+  driverMatchFeedback: 'v2_Driver Match Feedback',
+  driverSurveyRequests: 'v2_Driver Survey Requests',
+  settlementDisputes: 'v2_Settlement Disputes',
+  taxReferenceData: 'v2_Tax Reference Data',
+  exitSurveys: 'v2_Exit Surveys'
 };
 
 // =============================================================================

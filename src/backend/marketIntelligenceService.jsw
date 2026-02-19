@@ -1,0 +1,161 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTION = 'carrierEnrichments';
+const MARKET_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const marketCache = new Map();
+
+export async function getMarketIntelligenceSnapshot(filters = {}) {
+  const cacheKey = buildMarketCacheKey(filters);
+  const cached = marketCache.get(cacheKey);
+  if (cached && (Date.now() - cached.cachedAt) < MARKET_CACHE_TTL_MS) {
+    return { success: true, data: cached.payload };
+  }
+
+  const result = await dataAccess.queryRecords(COLLECTION, {
+    limit: 250,
+    suppressAuth: true
+  });
+
+  const items = applyMarketFilters(result?.items || [], filters);
+  if (!items.length) {
+    const emptyPayload = {
+      query: {
+        region: filters.region || null,
+        freight_type: filters.freight_type || null,
+        operation_type: filters.operation_type || null
+      },
+      market_data: {
+        avg_cpm: null,
+        cpm_range: { p25: null, p50: null, p75: null },
+        avg_sign_on_bonus: null,
+        demand_index: null,
+        demand_trend: 'stable',
+        driver_shortage_severity: 'unknown'
+      },
+      top_hiring_carriers: [],
+      regional_insights: {
+        hot_lanes: [],
+        seasonal_factors: null
+      },
+      data_date: new Date().toISOString().slice(0, 10)
+    };
+    marketCache.set(cacheKey, { payload: emptyPayload, cachedAt: Date.now() });
+    return { success: true, data: emptyPayload };
+  }
+
+  const cpmValues = items
+    .map((item) => parseCpmRange(item.pay_cpm_range))
+    .map((range) => range.max || range.min || null)
+    .filter((value) => Number.isFinite(value));
+
+  cpmValues.sort((a, b) => a - b);
+
+  const payload = {
+    query: {
+      region: filters.region || null,
+      freight_type: filters.freight_type || null,
+      operation_type: filters.operation_type || null
+    },
+    market_data: {
+      avg_cpm: average(cpmValues),
+      cpm_range: {
+        p25: percentile(cpmValues, 0.25),
+        p50: percentile(cpmValues, 0.5),
+        p75: percentile(cpmValues, 0.75)
+      },
+      avg_sign_on_bonus: averageSignOnBonus(items),
+      demand_index: 7.0,
+      demand_trend: 'stable',
+      driver_shortage_severity: 'medium'
+    },
+    top_hiring_carriers: buildTopHiringCarriers(items),
+    regional_insights: {
+      hot_lanes: [],
+      seasonal_factors: null
+    },
+    data_date: new Date().toISOString().slice(0, 10)
+  };
+  marketCache.set(cacheKey, { payload, cachedAt: Date.now() });
+
+  return { success: true, data: payload };
+}
+
+function applyMarketFilters(items, filters) {
+  let filtered = Array.isArray(items) ? [...items] : [];
+  const region = String(filters.region || '').toLowerCase();
+  const freightType = String(filters.freight_type || '').toLowerCase();
+  const operationType = String(filters.operation_type || '').toLowerCase();
+
+  if (region) {
+    filtered = filtered.filter((item) => {
+      const hay = `${item.phy_state || ''} ${item.region || ''} ${item.primary_region || ''}`.toLowerCase();
+      return hay.includes(region);
+    });
+  }
+  if (freightType) {
+    filtered = filtered.filter((item) => String(item.freight_types || '').toLowerCase().includes(freightType));
+  }
+  if (operationType) {
+    filtered = filtered.filter((item) => String(item.route_types || '').toLowerCase().includes(operationType));
+  }
+  return filtered;
+}
+
+function buildMarketCacheKey(filters) {
+  const region = String(filters.region || '').toLowerCase();
+  const freightType = String(filters.freight_type || '').toLowerCase();
+  const operationType = String(filters.operation_type || '').toLowerCase();
+  const day = new Date().toISOString().slice(0, 10);
+  return `${day}|${region}|${freightType}|${operationType}`;
+}
+
+function parseCpmRange(value) {
+  const text = String(value || '');
+  const matches = text.match(/(\d+(\.\d+)?)/g) || [];
+  if (!matches.length) {
+    return { min: null, max: null };
+  }
+  const numbers = matches.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+  if (!numbers.length) {
+    return { min: null, max: null };
+  }
+  const normalized = numbers.map((n) => n > 10 ? n / 100 : n);
+  return { min: Math.min(...normalized), max: Math.max(...normalized) };
+}
+
+function parseBonus(value) {
+  const text = String(value || '');
+  const numberMatch = text.replace(/,/g, '').match(/(\d+(\.\d+)?)/);
+  if (!numberMatch) return null;
+  return Number(numberMatch[1]);
+}
+
+function averageSignOnBonus(items) {
+  const values = items
+    .map((item) => parseBonus(item.sign_on_bonus))
+    .filter((value) => Number.isFinite(value));
+  return average(values);
+}
+
+function buildTopHiringCarriers(items) {
+  return items
+    .filter((item) => String(item.hiring_status || '').toLowerCase().includes('active'))
+    .slice(0, 10)
+    .map((item) => ({
+      dot_number: Number(item.dot_number),
+      carrier_name: item.legal_name || item.carrier_name || null,
+      hiring_status: item.hiring_status || 'unknown',
+      confidence: String(item.data_confidence || 'low').toLowerCase()
+    }));
+}
+
+function average(values) {
+  if (!values.length) return null;
+  return Number((values.reduce((acc, n) => acc + n, 0) / values.length).toFixed(3));
+}
+
+function percentile(values, p) {
+  if (!values.length) return null;
+  const index = Math.min(values.length - 1, Math.max(0, Math.floor(values.length * p)));
+  return Number(values[index].toFixed(3));
+}

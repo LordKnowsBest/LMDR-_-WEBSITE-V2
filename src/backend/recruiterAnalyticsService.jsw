@@ -1106,7 +1106,7 @@ function simulateMLForecast(features, months) {
     const replacement = Math.ceil(features.fleet_size * features.turnover_rate_12mo * (months/12));
     const growth = Math.ceil(features.fleet_size * 0.05); // 5% growth target
     const total = replacement + growth;
-    
+
     return {
         totalHires: total,
         replacementHires: replacement,
@@ -1117,5 +1117,250 @@ function simulateMLForecast(features, months) {
         recommendation: 'Increase job posting budget by 20% starting Feb 15.',
         rampStartDate: new Date(new Date().setDate(new Date().getDate() + 15))
     };
+}
+
+// ============================================================================
+// TIME-TO-FILL ANALYTICS
+// ============================================================================
+
+/**
+ * Calculate average time from application to hire
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {Object} filters - { jobType, dateFrom, dateTo, page, page_size }
+ * @returns {Promise<Object>} { success, averageDays, byStage, trend }
+ */
+export async function getTimeToFill(carrierDot, filters = {}) {
+    try {
+        const queryFilters = { carrier_dot: carrierDot };
+        if (filters.dateFrom) {
+            queryFilters.entered_at = { ge: new Date(filters.dateFrom) };
+        }
+
+        const events = await dataAccess.getAllRecords(COLLECTIONS.FUNNEL, { filters: queryFilters });
+
+        // Group events by driver
+        const driverTimelines = {};
+        events.forEach(e => {
+            const did = e.driver_id;
+            if (!did) return;
+            if (!driverTimelines[did]) driverTimelines[did] = [];
+            driverTimelines[did].push(e);
+        });
+
+        const fillTimes = [];
+        const byStage = {};
+
+        // Initialize stage durations
+        Object.values(STAGES).forEach(s => {
+            if (s !== STAGES.DROPPED) byStage[s] = { totalHours: 0, count: 0 };
+        });
+
+        Object.values(driverTimelines).forEach(timeline => {
+            timeline.sort((a, b) => new Date(a.entered_at) - new Date(b.entered_at));
+
+            const first = timeline[0];
+            const hired = timeline.find(e => e.to_stage === STAGES.HIRED);
+
+            if (hired && first) {
+                const days = (new Date(hired.entered_at) - new Date(first.entered_at)) / (1000 * 60 * 60 * 24);
+                fillTimes.push(days);
+            }
+
+            // Accumulate stage durations
+            timeline.forEach(e => {
+                if (e.time_in_stage_hours && e.to_stage && byStage[e.to_stage]) {
+                    byStage[e.to_stage].totalHours += e.time_in_stage_hours;
+                    byStage[e.to_stage].count += 1;
+                }
+            });
+        });
+
+        // Calculate averages per stage
+        const byStageAvg = {};
+        Object.entries(byStage).forEach(([stage, data]) => {
+            byStageAvg[stage] = data.count > 0
+                ? parseFloat((data.totalHours / data.count / 24).toFixed(1))
+                : 0;
+        });
+
+        const averageDays = fillTimes.length > 0
+            ? parseFloat((fillTimes.reduce((a, b) => a + b, 0) / fillTimes.length).toFixed(1))
+            : 0;
+
+        return {
+            success: true,
+            averageDays,
+            hireCount: fillTimes.length,
+            byStage: byStageAvg,
+            trend: fillTimes.slice(-10).map((d, i) => ({ index: i, days: parseFloat(d.toFixed(1)) }))
+        };
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getTimeToFill error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// RECRUITER SCORECARD
+// ============================================================================
+
+/**
+ * Calculate recruiter performance metrics
+ * @param {string} recruiterId - Recruiter ID
+ * @param {Object} dateRange - { start, end }
+ * @returns {Promise<Object>} { success, totalHires, responseTime, conversionRate, activePipeline, campaignsRun, retention90Day }
+ */
+export async function getRecruiterScorecard(recruiterId, dateRange = {}) {
+    try {
+        // 1. Get recruiter's carrier associations
+        const carrierLinks = await dataAccess.getAllRecords('recruiterCarriers', {
+            filters: { recruiter_id: recruiterId }
+        });
+
+        const carrierDots = carrierLinks.map(l => l.carrier_dot).filter(Boolean);
+
+        let totalHires = 0;
+        let totalApplications = 0;
+        let activePipeline = 0;
+        let campaignsRun = 0;
+        let stageTimeSum = 0;
+        let stageTimeCount = 0;
+
+        // 2. Aggregate funnel events across all carriers
+        for (const dot of carrierDots) {
+            const funnelFilters = { carrier_dot: dot };
+            if (dateRange.start) {
+                funnelFilters.entered_at = { ge: new Date(dateRange.start) };
+            }
+
+            const events = await dataAccess.getAllRecords(COLLECTIONS.FUNNEL, { filters: funnelFilters });
+
+            events.forEach(e => {
+                if (e.to_stage === STAGES.HIRED) totalHires++;
+                if (e.to_stage === STAGES.APPLICATION) totalApplications++;
+                if (!e.exited_at && e.to_stage !== STAGES.DROPPED && e.to_stage !== STAGES.HIRED) {
+                    activePipeline++;
+                }
+                if (e.time_in_stage_hours) {
+                    stageTimeSum += e.time_in_stage_hours;
+                    stageTimeCount++;
+                }
+            });
+        }
+
+        // 3. Count campaigns run by this recruiter
+        const campaignTypes = ['emailCampaigns', 'smsCampaigns', 'voiceCampaigns'];
+        for (const coll of campaignTypes) {
+            try {
+                const campaigns = await dataAccess.getAllRecords(coll, {
+                    filters: { recruiter_id: recruiterId }
+                });
+                campaignsRun += campaigns.length;
+            } catch (_) {
+                // Collection may not have data yet
+            }
+        }
+
+        const conversionRate = totalApplications > 0
+            ? parseFloat(((totalHires / totalApplications) * 100).toFixed(1))
+            : 0;
+
+        const responseTime = stageTimeCount > 0
+            ? parseFloat((stageTimeSum / stageTimeCount).toFixed(1))
+            : 0;
+
+        return {
+            success: true,
+            totalHires,
+            responseTime,
+            conversionRate,
+            activePipeline,
+            campaignsRun,
+            retention90Day: null // Requires 90-day lookback — placeholder
+        };
+    } catch (error) {
+        console.error('[RecruiterAnalytics] getRecruiterScorecard error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// EXPORT ANALYTICS
+// ============================================================================
+
+/**
+ * Generate analytics export in JSON or CSV format
+ * @param {string} recruiterId - Recruiter ID
+ * @param {Object} params - { reportType, carrierDot, dateRange, format }
+ * @returns {Promise<Object>} { success, data, format, generatedAt }
+ */
+export async function exportAnalytics(recruiterId, params = {}) {
+    try {
+        const { reportType = 'funnel', carrierDot, dateRange, format = 'json' } = params;
+
+        let rawData = null;
+
+        switch (reportType) {
+            case 'funnel':
+                rawData = await getFunnelMetrics(carrierDot, dateRange);
+                break;
+            case 'attribution':
+                rawData = await getAttributionBreakdown(carrierDot, dateRange);
+                break;
+            case 'spend':
+                rawData = await calculateCostPerHire(carrierDot, dateRange);
+                break;
+            case 'scorecard':
+                rawData = await getRecruiterScorecard(recruiterId, dateRange || {});
+                break;
+            default:
+                return { success: false, error: `Unknown report type: ${reportType}` };
+        }
+
+        if (!rawData || !rawData.success) {
+            return { success: false, error: rawData?.error || 'Failed to generate report data' };
+        }
+
+        if (format === 'csv') {
+            const csvData = convertToCsv(reportType, rawData);
+            return { success: true, data: csvData, format: 'csv', generatedAt: new Date().toISOString() };
+        }
+
+        return { success: true, data: rawData, format: 'json', generatedAt: new Date().toISOString() };
+    } catch (error) {
+        console.error('[RecruiterAnalytics] exportAnalytics error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+function convertToCsv(reportType, data) {
+    switch (reportType) {
+        case 'funnel': {
+            const rows = (data.stages || []).map(s => `${s.stage},${s.count},${s.order}`);
+            return ['stage,count,order', ...rows].join('\n');
+        }
+        case 'attribution': {
+            const rows = Object.entries(data.bySource || {}).map(([source, count]) => `${source},${count}`);
+            return ['source,count', ...rows].join('\n');
+        }
+        case 'spend': {
+            const rows = Object.entries(data.byChannel || {}).map(([ch, d]) =>
+                `${ch},${d.spendDollars || 0},${d.hires || 0},${d.cph || 0}`
+            );
+            return ['channel,spend,hires,cph', ...rows].join('\n');
+        }
+        case 'scorecard': {
+            return [
+                'metric,value',
+                `totalHires,${data.totalHires || 0}`,
+                `responseTime,${data.responseTime || 0}`,
+                `conversionRate,${data.conversionRate || 0}`,
+                `activePipeline,${data.activePipeline || 0}`,
+                `campaignsRun,${data.campaignsRun || 0}`
+            ].join('\n');
+        }
+        default:
+            return JSON.stringify(data);
+    }
 }
 

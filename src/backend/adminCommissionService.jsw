@@ -534,3 +534,59 @@ export async function markCommissionsPaid(commissionIds, payoutReference) {
         return { success: false, error: error.message };
     }
 }
+
+/**
+ * Scheduled job: release hold flags for pending commissions whose hold window has elapsed.
+ * This does not auto-approve commissions; it only marks them as hold_released for workflow visibility.
+ */
+export async function processCommissionHolds() {
+    try {
+        const nowIso = new Date().toISOString();
+        const pendingResult = await dataAccess.queryRecords(COLLECTIONS.commissions, {
+            filters: {
+                status: 'pending',
+                hold_until: { lte: nowIso }
+            },
+            limit: 5000,
+            suppressAuth: true
+        });
+
+        if (!pendingResult.success) {
+            return { success: false, error: pendingResult.error || 'Failed to query pending commissions' };
+        }
+
+        const items = pendingResult.items || [];
+        let updated = 0;
+        let failed = 0;
+
+        for (const commission of items) {
+            try {
+                await dataAccess.updateRecord(COLLECTIONS.commissions, {
+                    ...commission,
+                    hold_released: true,
+                    hold_released_at: nowIso
+                }, { suppressAuth: true });
+                updated++;
+            } catch (error) {
+                failed++;
+            }
+        }
+
+        await dataAccess.insertRecord(COLLECTIONS.auditLog, {
+            action: 'commission_hold_release_scan',
+            entity_type: 'commission',
+            entity_id: '',
+            details: `Released holds for ${updated} commissions; ${failed} failed`,
+            timestamp: nowIso
+        }, { suppressAuth: true });
+
+        return {
+            success: true,
+            scanned: items.length,
+            released: updated,
+            failed
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}

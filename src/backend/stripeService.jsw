@@ -498,6 +498,158 @@ export async function getApiBillingSummary(partnerId, periodKey = null) {
   }
 }
 
+export async function ensureApiStripeProducts() {
+  try {
+    const secrets = await getStripeSecrets();
+    const products = [
+      {
+        tier: 'starter',
+        name: 'LMDR API Starter',
+        monthlyPriceId: secrets.priceApiStarterMonthly || null,
+        annualPriceId: secrets.priceApiStarterAnnual || null
+      },
+      {
+        tier: 'growth',
+        name: 'LMDR API Growth',
+        monthlyPriceId: secrets.priceApiGrowthMonthly || null,
+        annualPriceId: secrets.priceApiGrowthAnnual || null
+      },
+      {
+        tier: 'enterprise',
+        name: 'LMDR API Enterprise',
+        monthlyPriceId: secrets.priceApiEnterpriseMonthly || null,
+        annualPriceId: secrets.priceApiEnterpriseAnnual || null
+      }
+    ];
+
+    return {
+      success: true,
+      products,
+      configured: products.every((item) => Boolean(item.monthlyPriceId && item.annualPriceId))
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function generateApiOverageInvoice(partnerId, periodKey = null, autoFinalize = true) {
+  try {
+    const subscription = await getApiSubscriptionByPartner(partnerId);
+    if (!subscription?.stripe_customer_id) {
+      return { success: false, error: 'No Stripe customer found for partner' };
+    }
+
+    const summary = await getApiBillingSummary(partnerId, periodKey);
+    if (!summary?.success) {
+      return { success: false, error: summary?.error || 'Unable to compute billing summary' };
+    }
+    if (Number(summary.overage_amount || 0) <= 0) {
+      return { success: true, skipped: true, reason: 'No overage charges for period', summary };
+    }
+
+    const amountCents = Math.max(1, Math.round(Number(summary.overage_amount || 0) * 100));
+    const period = summary.period_key || (periodKey || new Date().toISOString().slice(0, 7));
+    const invoiceItem = await stripeRequest('/invoiceitems', 'POST', {
+      customer: subscription.stripe_customer_id,
+      amount: String(amountCents),
+      currency: 'usd',
+      description: `LMDR API overage (${period})`,
+      'metadata[partner_id]': partnerId,
+      'metadata[type]': 'api_overage',
+      'metadata[period_key]': period
+    });
+
+    const invoice = await stripeRequest('/invoices', 'POST', {
+      customer: subscription.stripe_customer_id,
+      auto_advance: autoFinalize ? 'true' : 'false',
+      collection_method: 'charge_automatically',
+      'metadata[partner_id]': partnerId,
+      'metadata[type]': 'api_overage',
+      'metadata[period_key]': period
+    });
+
+    await recordBillingEvent(partnerId, 'api_overage_invoice_created', {
+      amount: Number(summary.overage_amount || 0),
+      invoice_id: invoice?.id || null,
+      invoice_item_id: invoiceItem?.id || null,
+      period_key: period
+    });
+
+    return {
+      success: true,
+      period_key: period,
+      amount: Number(summary.overage_amount || 0),
+      invoice_id: invoice?.id || null,
+      invoice_item_id: invoiceItem?.id || null
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function changeApiSubscriptionPlan(partnerId, newTier, planType = 'monthly', immediate = true) {
+  try {
+    const normalizedTier = String(newTier || '').toLowerCase();
+    if (!CONFIG.apiPlans[normalizedTier]) {
+      return { success: false, error: 'newTier must be starter, growth, or enterprise' };
+    }
+
+    const normalizedPlanType = String(planType || 'monthly').toLowerCase() === 'annual' ? 'annual' : 'monthly';
+    const subscription = await getApiSubscriptionByPartner(partnerId);
+    if (!subscription?.stripe_subscription_id) {
+      return { success: false, error: 'No Stripe subscription found for partner' };
+    }
+
+    const priceId = await getApiPriceId(normalizedTier, normalizedPlanType);
+    if (!priceId) return { success: false, error: 'API tier price is not configured' };
+
+    const stripeSub = await stripeRequest(`/subscriptions/${subscription.stripe_subscription_id}`, 'GET');
+    const itemId = stripeSub?.items?.data?.[0]?.id;
+    if (!itemId) {
+      return { success: false, error: 'Unable to resolve Stripe subscription item' };
+    }
+
+    await stripeRequest(`/subscriptions/${subscription.stripe_subscription_id}`, 'POST', {
+      [`items[0][id]`]: itemId,
+      [`items[0][price]`]: priceId,
+      proration_behavior: immediate ? 'create_prorations' : 'none'
+    });
+
+    const tierConfig = CONFIG.apiPlans[normalizedTier];
+    await dataAccess.updateRecord(CONFIG.apiSubscriptionsKey, {
+      _id: subscription._id,
+      tier: normalizedTier,
+      plan_type: normalizedPlanType,
+      price_monthly: tierConfig.monthlyPrice,
+      api_products: tierConfig.apiProducts,
+      rate_limits: {
+        requests_per_minute: tierConfig.requestsPerMinute,
+        requests_per_month: tierConfig.requestsPerMonth
+      },
+      quotas: {
+        driver_searches_monthly: tierConfig.driverSearchesMonthly,
+        document_extractions_monthly: tierConfig.documentExtractionsMonthly
+      },
+      updated_at: new Date()
+    }, { suppressAuth: true });
+
+    await recordBillingEvent(partnerId, 'api_plan_changed', {
+      amount: tierConfig.monthlyPrice,
+      tier: normalizedTier,
+      plan_type: normalizedPlanType
+    });
+
+    return {
+      success: true,
+      partner_id: partnerId,
+      tier: normalizedTier,
+      plan_type: normalizedPlanType
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 async function getApiPriceId(tier, planType) {
   const secrets = await getStripeSecrets();
   const keyMap = {

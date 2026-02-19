@@ -1,6 +1,13 @@
 import * as dataAccess from 'backend/dataAccess';
 import { generateApiKey, hashApiKey, rotateApiKey } from 'backend/apiAuthService';
-import { createApiCheckoutSession, createApiPortalSession, getApiBillingSummary } from 'backend/stripeService';
+import {
+  createApiCheckoutSession,
+  createApiPortalSession,
+  getApiBillingSummary,
+  ensureApiStripeProducts,
+  generateApiOverageInvoice,
+  changeApiSubscriptionPlan
+} from 'backend/stripeService';
 import { fetch } from 'wix-fetch';
 
 const COLLECTIONS = {
@@ -9,8 +16,143 @@ const COLLECTIONS = {
   requestLog: 'apiRequestLog',
   subscriptions: 'apiSubscriptions',
   billingHistory: 'billingHistory',
-  webhookDeliveries: 'apiWebhookDeliveries'
+  webhookDeliveries: 'apiWebhookDeliveries',
+  onboarding: 'apiPartnerOnboarding',
+  changelog: 'apiChangelog'
 };
+
+const API_DOC_ENDPOINTS = [
+  {
+    key: 'safety_carrier_lookup',
+    method: 'GET',
+    path: '/v1/safety/carrier/{dot_number}',
+    category: 'safety',
+    tier: 'starter',
+    description: 'Carrier safety profile with BASIC score, status, and red flags.',
+    sample_query: { dot_number: '1234567' }
+  },
+  {
+    key: 'intelligence_market',
+    method: 'GET',
+    path: '/v1/intelligence/market',
+    category: 'intelligence',
+    tier: 'growth',
+    description: 'Regional market benchmark and demand signals.',
+    sample_query: { region: 'TX' }
+  },
+  {
+    key: 'fuel_prices',
+    method: 'GET',
+    path: '/v1/fuel/prices',
+    category: 'operations',
+    tier: 'growth',
+    description: 'Nearby fuel prices with discount-aware ranking.',
+    sample_query: { lat: 32.7767, lng: -96.797, radius_miles: 50 }
+  },
+  {
+    key: 'matching_search_drivers',
+    method: 'POST',
+    path: '/v1/matching/drivers/search',
+    category: 'matching',
+    tier: 'enterprise',
+    description: 'Enterprise driver search with filters and scoring.',
+    sample_body: { class: 'A', endorsements: ['HAZMAT'], radius_miles: 150 }
+  },
+  {
+    key: 'documents_cdl_extract',
+    method: 'POST',
+    path: '/v1/documents/cdl/extract',
+    category: 'documents',
+    tier: 'growth',
+    description: 'Extract CDL data fields from uploaded or base64 image.',
+    sample_body: { mime_type: 'image/jpeg', base64_data: '...base64...' }
+  },
+  {
+    key: 'engagement_user_progress',
+    method: 'GET',
+    path: '/v1/engagement/user/{user_id}/progress',
+    category: 'engagement',
+    tier: 'enterprise',
+    description: 'Partner-scoped progression profile and achievements.',
+    sample_query: { user_id: 'usr_123' }
+  }
+];
+
+const API_DOC_EXAMPLES = {
+  curl: [
+    'curl -X GET "https://www.lastmiledr.app/_functions/api_gateway/v1/safety/carrier/1234567" \\',
+    '  -H "Authorization: Bearer lmdr_live_xxx"'
+  ].join('\n'),
+  javascript: [
+    'const res = await fetch(',
+    "  'https://www.lastmiledr.app/_functions/api_gateway/v1/fuel/prices?lat=32.7&lng=-96.7&radius_miles=25',",
+    '  { headers: { Authorization: "Bearer lmdr_live_xxx" } }',
+    ');',
+    'const json = await res.json();'
+  ].join('\n'),
+  python: [
+    'import requests',
+    "url = 'https://www.lastmiledr.app/_functions/api_gateway/v1/intelligence/market'",
+    "headers = {'Authorization': 'Bearer lmdr_live_xxx'}",
+    "params = {'region': 'TX'}",
+    'data = requests.get(url, headers=headers, params=params, timeout=30).json()'
+  ].join('\n')
+};
+
+const DEFAULT_CHANGELOG_ENTRIES = [
+  {
+    version: 'v1.3.0',
+    date: '2026-02-19',
+    type: 'feature',
+    title: 'Developer portal and admin partner tooling expanded',
+    details: 'Added revenue reporting, usage breakdowns, webhook test controls, and partner status/tier/environment actions.'
+  },
+  {
+    version: 'v1.2.0',
+    date: '2026-02-07',
+    type: 'feature',
+    title: 'OpenAPI and Postman baseline published',
+    details: 'Published initial OpenAPI and Postman artifacts for implemented /v1 routes.'
+  },
+  {
+    version: 'v1.1.0',
+    date: '2026-02-05',
+    type: 'feature',
+    title: 'Webhook retries and CSA alert dispatch hardening',
+    details: 'Added retry job orchestration and integrated CSA event dispatch to webhook pipeline.'
+  }
+];
+
+const ONBOARDING_EMAIL_SEQUENCE = [
+  {
+    step: 1,
+    key: 'welcome',
+    delay_hours: 0,
+    subject: 'Welcome to LMDR External API Platform',
+    body: 'Your partner account is active. Start with sandbox credentials and run your first /v1 request.'
+  },
+  {
+    step: 2,
+    key: 'keys_and_auth',
+    delay_hours: 24,
+    subject: 'Configure API keys and auth',
+    body: 'Create scoped keys, validate Authorization headers, and verify request_id logging.'
+  },
+  {
+    step: 3,
+    key: 'webhooks_and_billing',
+    delay_hours: 72,
+    subject: 'Enable webhooks and billing controls',
+    body: 'Run a webhook test, validate retries, and review usage/overage billing summary.'
+  },
+  {
+    step: 4,
+    key: 'production_readiness',
+    delay_hours: 120,
+    subject: 'Production readiness checklist',
+    body: 'Confirm first API call, rate-limit handling, and rollout plan for production traffic.'
+  }
+];
 
 export async function registerApiPartner(input = {}) {
   const companyName = String(input.company_name || '').trim();
@@ -305,6 +447,215 @@ export async function getApiRevenueReport(partnerId = null, months = 12) {
   };
 }
 
+export async function getApiDocumentationCatalog() {
+  return {
+    success: true,
+    generated_at: new Date().toISOString(),
+    base_url: 'https://www.lastmiledr.app/_functions/api_gateway',
+    endpoints: API_DOC_ENDPOINTS,
+    code_examples: API_DOC_EXAMPLES,
+    references: {
+      openapi: '/docs/api/openapi.external.v1.yaml',
+      postman: '/docs/api/postman.external.v1.collection.json',
+      integration_guide: '/docs/api/integration-guide.external.v1.md'
+    }
+  };
+}
+
+export async function getApiOnboardingEmailSequence() {
+  return {
+    success: true,
+    sequence: ONBOARDING_EMAIL_SEQUENCE
+  };
+}
+
+export async function initializePartnerOnboarding(partnerId) {
+  const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
+    suppressAuth: true
+  });
+  if (!partner) return { success: false, error: 'Partner not found' };
+
+  const existing = await dataAccess.queryRecords(COLLECTIONS.onboarding, {
+    filters: { partner_id: partnerId },
+    sort: [{ field: 'created_at', direction: 'desc' }],
+    limit: 1,
+    suppressAuth: true
+  });
+  const current = existing?.items?.[0];
+  if (current?._id) {
+    return { success: true, onboarding: current, already_exists: true };
+  }
+
+  const now = new Date();
+  const base = {
+    partner_id: partnerId,
+    contact_email: partner.contact_email || null,
+    status: 'active',
+    current_step: 0,
+    first_api_call_at: partner.first_api_call_at || null,
+    last_email_step_sent: 0,
+    next_email_due_at: now,
+    completed_steps: [],
+    created_at: now,
+    updated_at: now
+  };
+  const inserted = await dataAccess.insertRecord(COLLECTIONS.onboarding, base, { suppressAuth: true });
+  return { success: true, onboarding: inserted?.record || base };
+}
+
+export async function processPartnerOnboardingFollowUps(limit = 100) {
+  const now = new Date();
+  const sequence = ONBOARDING_EMAIL_SEQUENCE;
+  const enrollments = await dataAccess.queryRecords(COLLECTIONS.onboarding, {
+    filters: { status: 'active' },
+    sort: [{ field: 'updated_at', direction: 'asc' }],
+    limit: Math.min(500, Math.max(1, Number(limit) || 100)),
+    suppressAuth: true
+  });
+
+  const processed = [];
+  for (const row of (enrollments?.items || [])) {
+    const nextStep = Number(row.current_step || 0) + 1;
+    const template = sequence.find((item) => item.step === nextStep);
+    if (!template) continue;
+
+    const dueAt = parseDate(row.next_email_due_at) || now;
+    if (dueAt > now) continue;
+
+    const message = {
+      partner_id: row.partner_id,
+      email: row.contact_email || null,
+      step: template.step,
+      template_key: template.key,
+      subject: template.subject,
+      body: template.body,
+      sent_at: now.toISOString()
+    };
+    processed.push(message);
+
+    const nextTemplate = sequence.find((item) => item.step === (template.step + 1));
+    const nextDue = nextTemplate ? new Date(now.getTime() + (nextTemplate.delay_hours * 60 * 60 * 1000)) : null;
+    await dataAccess.updateRecord(COLLECTIONS.onboarding, {
+      _id: row._id,
+      current_step: template.step,
+      last_email_step_sent: template.step,
+      completed_steps: [...(row.completed_steps || []), template.key],
+      next_email_due_at: nextDue,
+      status: nextTemplate ? 'active' : 'completed',
+      updated_at: now
+    }, { suppressAuth: true });
+  }
+
+  return {
+    success: true,
+    processed_count: processed.length,
+    processed
+  };
+}
+
+export async function runApiSandboxRequest(endpointKey, payload = {}) {
+  const endpoint = API_DOC_ENDPOINTS.find((item) => item.key === endpointKey);
+  if (!endpoint) {
+    return { success: false, error: 'Unknown endpoint key' };
+  }
+
+  const started = Date.now();
+  const response = buildSandboxResponse(endpoint, payload);
+  return {
+    success: true,
+    sandbox: true,
+    endpoint_key: endpoint.key,
+    method: endpoint.method,
+    path: endpoint.path,
+    response_time_ms: Date.now() - started,
+    response
+  };
+}
+
+export async function getApiChangelog(limit = 20) {
+  const normalizedLimit = Math.min(100, Math.max(1, Number(limit) || 20));
+
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.changelog, {
+      sort: [{ field: 'date', direction: 'desc' }],
+      limit: normalizedLimit,
+      suppressAuth: true
+    });
+    const items = (result?.items || []).map((item) => ({
+      version: item.version || null,
+      date: formatDate(item.date || item.created_at),
+      type: item.type || 'change',
+      title: item.title || '',
+      details: item.details || ''
+    }));
+    if (items.length) {
+      return { success: true, items };
+    }
+  } catch (_error) {
+    // Fallback to static changelog below when collection is unavailable.
+  }
+
+  return {
+    success: true,
+    items: DEFAULT_CHANGELOG_ENTRIES.slice(0, normalizedLimit)
+  };
+}
+
+export async function getApiHealthStatus(windowHours = 24) {
+  const normalizedHours = Math.min(168, Math.max(1, Number(windowHours) || 24));
+  const windowStart = new Date(Date.now() - (normalizedHours * 60 * 60 * 1000));
+
+  const [requests, webhookDeliveries] = await Promise.all([
+    dataAccess.queryRecords(COLLECTIONS.requestLog, {
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: 5000,
+      suppressAuth: true
+    }),
+    dataAccess.queryRecords(COLLECTIONS.webhookDeliveries, {
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: 1000,
+      suppressAuth: true
+    })
+  ]);
+
+  const recentRequests = (requests?.items || []).filter((item) => {
+    const createdAt = parseDate(item?.created_at);
+    return createdAt && createdAt >= windowStart;
+  });
+  const totalRequests = recentRequests.length;
+  const failedRequests = recentRequests.filter((item) => Number(item?.response_status || 0) >= 500).length;
+  const errorRate = totalRequests > 0 ? roundCurrency((failedRequests / totalRequests) * 100) : 0;
+  const avgLatencyMs = totalRequests > 0 ?
+    roundCurrency(recentRequests.reduce((sum, item) => sum + Number(item?.response_time_ms || 0), 0) / totalRequests) :
+    0;
+  const successRate = totalRequests > 0 ? roundCurrency(((totalRequests - failedRequests) / totalRequests) * 100) : 100;
+  const estimatedUptime = roundCurrency(Math.max(0, Math.min(100, successRate)));
+
+  const recentWebhookEvents = (webhookDeliveries?.items || []).filter((item) => {
+    const createdAt = parseDate(item?.created_at);
+    return createdAt && createdAt >= windowStart;
+  });
+  const webhookFailures = recentWebhookEvents.filter((item) => String(item?.status || '').toLowerCase() === 'failed').length;
+  const webhookFailureRate = recentWebhookEvents.length > 0 ?
+    roundCurrency((webhookFailures / recentWebhookEvents.length) * 100) :
+    0;
+
+  return {
+    success: true,
+    generated_at: new Date().toISOString(),
+    window_hours: normalizedHours,
+    status: (estimatedUptime >= 99.5 && errorRate < 1.5) ? 'operational' : 'degraded',
+    summary: {
+      total_requests: totalRequests,
+      failed_requests: failedRequests,
+      error_rate_percent: errorRate,
+      avg_latency_ms: avgLatencyMs,
+      estimated_uptime_percent: estimatedUptime,
+      webhook_failure_rate_percent: webhookFailureRate
+    }
+  };
+}
+
 export async function getPartnerPortalSnapshot(partnerId, periodKey = null) {
   const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
     suppressAuth: true
@@ -514,6 +865,18 @@ export async function createPartnerBillingPortal(partnerId) {
   return createApiPortalSession(partnerId);
 }
 
+export async function createApiTierProducts() {
+  return ensureApiStripeProducts();
+}
+
+export async function createPartnerOverageInvoice(partnerId, periodKey = null, autoFinalize = true) {
+  return generateApiOverageInvoice(partnerId, periodKey, autoFinalize);
+}
+
+export async function changePartnerApiSubscription(partnerId, tier, planType = 'monthly', immediate = true) {
+  return changeApiSubscriptionPlan(partnerId, tier, planType, immediate);
+}
+
 export async function sendPartnerWebhookTest(partnerId, webhookUrl = null) {
   const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
     suppressAuth: true
@@ -640,4 +1003,79 @@ function toAmount(value) {
 
 function roundCurrency(value) {
   return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function formatDate(value) {
+  const d = parseDate(value);
+  if (!d) return null;
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function buildSandboxResponse(endpoint, payload = {}) {
+  const base = {
+    generated_at: new Date().toISOString(),
+    sandbox: true
+  };
+
+  if (endpoint.key === 'safety_carrier_lookup') {
+    return {
+      ...base,
+      carrier: {
+        dot_number: String(payload?.dot_number || endpoint.sample_query?.dot_number || '1234567'),
+        legal_name: 'Sandbox Logistics LLC',
+        safety_rating: 'satisfactory',
+        basic_scores: { unsafe_driving: 48, hos_compliance: 37, vehicle_maintenance: 52 }
+      }
+    };
+  }
+  if (endpoint.key === 'intelligence_market') {
+    return {
+      ...base,
+      market: {
+        region: String(payload?.region || endpoint.sample_query?.region || 'TX'),
+        avg_cpm: 2.39,
+        demand_index: 71,
+        top_hiring_carriers: ['Sandbox Freight', 'Demo Transport']
+      }
+    };
+  }
+  if (endpoint.key === 'fuel_prices') {
+    return {
+      ...base,
+      stations: [
+        { station_id: 'stn_001', name: 'Sample Travel Center', diesel_cash: 3.64, diesel_discounted: 3.44 },
+        { station_id: 'stn_002', name: 'Demo Fuel Stop', diesel_cash: 3.71, diesel_discounted: 3.52 }
+      ]
+    };
+  }
+  if (endpoint.key === 'matching_search_drivers') {
+    return {
+      ...base,
+      total: 2,
+      items: [
+        { driver_id: 'drv_001', match_score: 91, cdl_class: 'A', endorsements: ['HAZMAT'] },
+        { driver_id: 'drv_002', match_score: 86, cdl_class: 'A', endorsements: ['TANKER'] }
+      ]
+    };
+  }
+  if (endpoint.key === 'documents_cdl_extract') {
+    return {
+      ...base,
+      extraction: {
+        document_id: 'doc_001',
+        status: 'verified',
+        confidence: 0.94,
+        fields: { first_name: 'ALEX', last_name: 'DRIVER', license_number: 'S1234567' }
+      }
+    };
+  }
+
+  return {
+    ...base,
+    progress: { level: 12, xp: 4200, streak_days: 18 },
+    achievements: ['Safety Star', 'Consistency Pro']
+  };
 }
