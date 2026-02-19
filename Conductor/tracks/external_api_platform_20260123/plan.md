@@ -68,15 +68,15 @@ Expose FMCSA and CSA monitoring capabilities as external APIs.
 - [x] Task: Format response to external API schema
 - [x] Task: Implement caching layer (7-day TTL)
 - [x] Task: Add usage metering for billing
-- [ ] Task: Document endpoint in OpenAPI spec
+- [x] Task: Document endpoint in OpenAPI spec
 
 ### 2.2 FMCSA Batch Lookup API
 - [x] Task: Create `POST /v1/safety/carriers/batch` endpoint
 - [x] Task: Implement batch processing (max 100 DOT numbers)
 - [x] Task: Implement parallel fetching with rate limiting
 - [x] Task: Return partial results on partial failures
-- [ ] Task: Add batch-specific rate limits
-- [ ] Task: Document batch endpoint
+- [x] Task: Add batch-specific rate limits
+- [x] Task: Document batch endpoint
 
 ### 2.3 CSA Score Monitor API
 - [x] Task: Create `/v1/safety/csa/{dot_number}/history` endpoint
@@ -85,13 +85,13 @@ Expose FMCSA and CSA monitoring capabilities as external APIs.
 - [x] Task: Implement historical data retrieval (6 months)
 - [x] Task: Calculate and include trend analysis
 - [x] Task: Format response with recommendations
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 2.4 CSA Current Scores API
 - [x] Task: Create `/v1/safety/csa/{dot_number}` endpoint (current only)
 - [x] Task: Implement lightweight response for current scores
 - [x] Task: Add alert status indicators
-- [ ] Task: Document endpoint
+- [x] Task: Document endpoint
 
 ### 2.5 Compliance Alerts API
 - [x] Task: Create `POST /v1/safety/alerts/subscribe` endpoint
@@ -102,23 +102,23 @@ Expose FMCSA and CSA monitoring capabilities as external APIs.
 - [x] Task: Implement webhook delivery service
 - [x] Task: Implement webhook retry logic (3 attempts, exponential backoff)
 - [x] Task: Create webhook signature generation (HMAC-SHA256)
-- [ ] Task: Document webhook payload formats
+- [x] Task: Document webhook payload formats
 
 ### 2.6 Safety API Documentation
-- [ ] Task: Write OpenAPI 3.0 spec for all Safety APIs
-- [ ] Task: Create code examples (cURL, JavaScript, Python)
-- [ ] Task: Write integration guide for Safety APIs
-- [ ] Task: Create Postman collection for Safety APIs
+- [x] Task: Write OpenAPI 3.0 spec for all Safety APIs
+- [x] Task: Create code examples (cURL, JavaScript, Python)
+- [x] Task: Write integration guide for Safety APIs
+- [x] Task: Create Postman collection for Safety APIs
 
 ### 2.7 Testing - Phase 2
-- [ ] Task: Write unit tests for FMCSA API endpoint
-- [ ] Task: Write unit tests for CSA API endpoints
-- [ ] Task: Write unit tests for alert subscription
+- [x] Task: Write unit tests for FMCSA API endpoint
+- [x] Task: Write unit tests for CSA API endpoints
+- [x] Task: Write unit tests for alert subscription
 - [x] Task: Write unit tests for webhook delivery
-- [ ] Task: Test batch API with edge cases
-- [ ] Task: Test webhook retry logic
-- [ ] Task: Manual test: Full safety API flow
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Safety APIs'
+- [x] Task: Test batch API with edge cases
+- [x] Task: Test webhook retry logic
+- [x] Task: Manual test: Full safety API flow
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Safety APIs'
 
 ---
 

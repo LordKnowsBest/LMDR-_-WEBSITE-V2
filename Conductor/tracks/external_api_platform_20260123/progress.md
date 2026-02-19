@@ -149,12 +149,28 @@
     - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase1_20260219.md`
   - Phase 1 focused suite run:
     - 3 suites passed, 12 tests passed
+- Phase 2 completion pass (Safety APIs closure):
+  - Added safety API wrapper unit tests:
+    - `src/public/__tests__/externalSafetyApis.test.js`
+  - Expanded safety route coverage in:
+    - `src/public/__tests__/apiGateway.external.test.js`
+    - FMCSA lookup, CSA current/history, batch edge limits, alert subscription/list
+  - Added safety code examples:
+    - `docs/api/guides/safety-api-examples.v1.md`
+  - Added Safety Postman collection:
+    - `docs/api/postman.safety.v1.collection.json`
+  - Updated safety integration guide with webhook payload format docs:
+    - `docs/api/guides/safety-api-guide.v1.md`
+  - Added manual verification artifact:
+    - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase2_20260219.md`
+  - Phase 2 focused suite run:
+    - 3 suites passed, 15 tests passed
 - Extended validation test and reran external API platform suite:
   - `src/public/__tests__/externalApiPlatformPhase8.test.js` expanded for new actions/features
   - 11-suite external platform cluster rerun: 11 passed, 37 tests passed
 
 ## Not Yet Implemented
-- Category-specific integration guides (Safety/Intelligence/Operations/Matching deep dives still pending).
+- Category-specific integration guides (Intelligence/Operations/Matching deep dives still pending).
 - Full webhook delivery pipeline (signatures, retries, event dispatch).
 - Expanded automated test coverage for auth/rate-limit internals and full endpoint matrix.
 
@@ -163,6 +179,9 @@
 
 ## Phase 1 Status
 - Phase 1 is now fully implemented in-repo (gateway + auth + rate limiting + index plan + verification artifacts).
+
+## Phase 2 Status
+- Phase 2 safety APIs are now complete in-repo (endpoints + docs + tests + verification artifacts).
 
 ## Current Parity Position
 - Core backend API surface is in place and callable through `/v1/*`.
