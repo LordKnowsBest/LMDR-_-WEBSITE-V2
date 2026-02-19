@@ -67,14 +67,21 @@ describe('Rest Stop Service Tests', () => {
     test('submitReview should insert valid review', async () => {
         // Mock no existing review
         wixData.query.mockReturnValue({
+            ne: jest.fn().mockReturnThis(),
             eq: jest.fn().mockReturnThis(),
             gt: jest.fn().mockReturnThis(),
             find: jest.fn().mockResolvedValue({ items: [] })
         });
+        wixData.get.mockResolvedValue({ _id: 'loc1', location: { lat: 35.1, lng: -90.1 } });
 
         wixData.insert.mockResolvedValue({ _id: 'newReview' });
 
-        const reviewData = { overall_rating: 5, text: 'Awesome', ratings: { clean: 5 } };
+        const reviewData = {
+            overall_rating: 5,
+            text: 'Awesome',
+            ratings: { clean: 5 },
+            userLocation: { lat: 35.11, lng: -90.09 }
+        };
         const result = await submitReview('loc1', reviewData);
 
         expect(result.success).toBe(true);
@@ -82,7 +89,41 @@ describe('Rest Stop Service Tests', () => {
             location_id: 'loc1',
             driver_id: 'user123',
             overall_rating: 5,
-            ratings: { clean: 5 }
+            ratings: { clean: 5 },
+            is_verified: true
+        }), expect.anything());
+    });
+
+    test('submitReview requires GPS user location', async () => {
+        wixData.query.mockReturnValue({
+            eq: jest.fn().mockReturnThis(),
+            gt: jest.fn().mockReturnThis(),
+            find: jest.fn().mockResolvedValue({ items: [] })
+        });
+        const result = await submitReview('loc1', { overall_rating: 4, text: 'ok' });
+        expect(result.success).toBe(false);
+        expect(result.error).toMatch(/GPS verification required/);
+    });
+
+    test('submitReview applies moderation flags', async () => {
+        wixData.query.mockReturnValue({
+            eq: jest.fn().mockReturnThis(),
+            gt: jest.fn().mockReturnThis(),
+            find: jest.fn().mockResolvedValue({ items: [] })
+        });
+        wixData.get.mockResolvedValue({ _id: 'loc1', location: { lat: 35.1, lng: -90.1 } });
+        wixData.insert.mockResolvedValue({ _id: 'newReview' });
+        await submitReview('loc1', {
+            overall_rating: 1,
+            text: 'This place is shit http://a.com http://b.com',
+            userLocation: { lat: 35.1, lng: -90.1 },
+            photos: ['https://img.example/1.jpg', 'https://img.example/1.jpg']
+        });
+
+        expect(wixData.insert).toHaveBeenCalledWith('RestStopReviews', expect.objectContaining({
+            is_flagged: true,
+            moderation_flags: expect.arrayContaining(['profanity', 'spam_links']),
+            photos: expect.any(Array)
         }), expect.anything());
     });
 
@@ -95,6 +136,7 @@ describe('Rest Stop Service Tests', () => {
 
         // Mock query for listing reviews
         const listQuery = {
+            ne: jest.fn().mockReturnThis(),
             eq: jest.fn().mockReturnThis(),
             descending: jest.fn().mockReturnThis(),
             limit: jest.fn().mockReturnThis(),
@@ -103,6 +145,7 @@ describe('Rest Stop Service Tests', () => {
 
         // Mock query for stats (simulated separate call)
         const statsQuery = {
+            ne: jest.fn().mockReturnThis(),
             eq: jest.fn().mockReturnThis(),
             find: jest.fn().mockResolvedValue({ items: mockReviews, totalCount: 2 })
         };

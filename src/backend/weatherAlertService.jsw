@@ -6,6 +6,7 @@ import { seedDriverSubscriptions } from 'backend/seeds/seedMockData';
 const COLLECTION_KEYS = {
   weatherAlerts: 'weatherAlerts',
   driverWeatherSubscriptions: 'driverNotificationPreferences',
+  memberNotifications: 'memberNotifications',
   roadUtilityCache: 'roadUtilityCache'
 };
 
@@ -83,7 +84,45 @@ async function checkChainLawsForRoute(routePoints) {
 }
 
 export async function subscribeToAlerts(driverId, preferences) {
-  return { success: true };
+  if (!driverId) return { success: false, error: 'Driver ID required' };
+  try {
+    const normalized = normalizePreferences(preferences);
+    const existing = await dataAccess.queryRecords(COLLECTION_KEYS.driverWeatherSubscriptions, {
+      filters: { driver_id: driverId },
+      limit: 1,
+      suppressAuth: true
+    });
+
+    if (existing.success && existing.items?.length) {
+      const row = existing.items[0];
+      const updated = {
+        ...row,
+        alert_types: normalized.alert_types,
+        min_severity: normalized.min_severity,
+        push_enabled: normalized.push_enabled,
+        email_enabled: normalized.email_enabled,
+        location: normalized.location || row.location || null,
+        updated_at: new Date()
+      };
+      const res = await dataAccess.updateRecord(COLLECTION_KEYS.driverWeatherSubscriptions, updated, { suppressAuth: true });
+      return { success: Boolean(res.success), preferences: updated, error: res.error };
+    }
+
+    const record = {
+      driver_id: driverId,
+      alert_types: normalized.alert_types,
+      min_severity: normalized.min_severity,
+      push_enabled: normalized.push_enabled,
+      email_enabled: normalized.email_enabled,
+      location: normalized.location || null,
+      created_at: new Date(),
+      updated_at: new Date()
+    };
+    const inserted = await dataAccess.insertRecord(COLLECTION_KEYS.driverWeatherSubscriptions, record, { suppressAuth: true });
+    return { success: Boolean(inserted.success), preferences: inserted.record || record, error: inserted.error };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 }
 
 export async function processNewAlerts() {
@@ -112,23 +151,28 @@ export async function processNewAlerts() {
     }
 
     let sentCount = 0;
+    let notificationCount = 0;
     for (const driver of subscribedDrivers) {
       if (!driver.location) continue;
       const alertRes = await getAlertsAtLocation(driver.location.lat, driver.location.lng);
       if (!alertRes.success || !alertRes.alerts?.length) continue;
 
-      const severe = alertRes.alerts.filter((a) => {
-        const sev = String(a.severity || '').toLowerCase();
-        return sev === 'severe' || sev === 'extreme';
-      });
+      const severe = alertRes.alerts.filter((a) => isAlertRelevantForDriver(a, driver));
 
       for (const alert of severe) {
-        await sendAlert(driver.driver_id || driver._id || 'driver', alert);
+        const driverId = driver.driver_id || driver._id || 'driver';
+        const alreadySent = await wasAlertRecentlySent(driverId, alert.id);
+        if (alreadySent) continue;
+
+        await sendAlert(driverId, alert);
+        await createWeatherMemberNotification(driverId, alert);
+        await rememberAlertSent(driverId, alert.id);
         sentCount++;
+        notificationCount++;
       }
     }
 
-    return { success: true, sent: sentCount };
+    return { success: true, sent: sentCount, notifications: notificationCount };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -172,4 +216,80 @@ function calculateDistance(lat1, lng1, lat2, lng2) {
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function normalizePreferences(preferences = {}) {
+  const alertTypes = Array.isArray(preferences.alert_types) && preferences.alert_types.length
+    ? preferences.alert_types
+    : ['severe_weather', 'wind', 'winter', 'flood'];
+  const minSeverity = String(preferences.min_severity || 'moderate').toLowerCase();
+  return {
+    alert_types: alertTypes,
+    min_severity: ['minor', 'moderate', 'severe', 'extreme'].includes(minSeverity) ? minSeverity : 'moderate',
+    push_enabled: preferences.push_enabled !== false,
+    email_enabled: preferences.email_enabled !== false,
+    location: preferences.location || null
+  };
+}
+
+function severityRank(value) {
+  const sev = String(value || '').toLowerCase();
+  if (sev === 'extreme') return 4;
+  if (sev === 'severe') return 3;
+  if (sev === 'moderate') return 2;
+  if (sev === 'minor') return 1;
+  return 0;
+}
+
+function normalizeEventType(eventName) {
+  const event = String(eventName || '').toLowerCase();
+  if (event.includes('winter') || event.includes('ice') || event.includes('snow')) return 'winter';
+  if (event.includes('flood')) return 'flood';
+  if (event.includes('wind') || event.includes('tornado')) return 'wind';
+  return 'severe_weather';
+}
+
+function isAlertRelevantForDriver(alert, driver) {
+  const prefs = normalizePreferences(driver);
+  const alertType = normalizeEventType(alert.event);
+  if (!prefs.alert_types.includes(alertType) && !prefs.alert_types.includes('severe_weather')) {
+    return false;
+  }
+  const alertSeverity = severityRank(alert.severity);
+  return alertSeverity >= severityRank(prefs.min_severity);
+}
+
+async function createWeatherMemberNotification(driverId, alert) {
+  const notification = {
+    member_id: driverId,
+    type: 'weather_alert',
+    title: `Weather Alert: ${alert.event || 'Severe Weather'}`,
+    message: alert.headline || alert.description || 'Weather alert issued for your area.',
+    is_read: false,
+    action_url: 'https://www.lastmiledr.app/driver/road-utilities',
+    created_date: new Date()
+  };
+  const res = await dataAccess.insertRecord(COLLECTION_KEYS.memberNotifications, notification, { suppressAuth: true });
+  return Boolean(res.success);
+}
+
+async function wasAlertRecentlySent(driverId, alertId) {
+  if (!driverId || !alertId) return false;
+  const cacheKey = `weather_alert_sent:${driverId}:${alertId}`;
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.roadUtilityCache, {
+    filters: { cache_key: cacheKey },
+    limit: 1,
+    suppressAuth: true
+  });
+  return Boolean(result.success && result.items?.length);
+}
+
+async function rememberAlertSent(driverId, alertId) {
+  const cacheKey = `weather_alert_sent:${driverId}:${alertId}`;
+  await dataAccess.insertRecord(COLLECTION_KEYS.roadUtilityCache, {
+    cache_key: cacheKey,
+    payload: JSON.stringify({ driverId, alertId }),
+    expires_at: new Date(Date.now() + 6 * 60 * 60 * 1000),
+    created_at: new Date()
+  }, { suppressAuth: true });
 }

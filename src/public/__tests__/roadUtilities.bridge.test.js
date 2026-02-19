@@ -51,7 +51,7 @@ const ALL_ACTIONS = [
     'searchWeighStations', 'getStationStatus', 'reportStationStatus',
     'getDriverBypassServices', 'saveDriverBypassServices',
     'getReviews', 'submitReview', 'reportCondition', 'voteReview',
-    'getWeather',
+    'getWeather', 'subscribeAlerts',
     'getRoadConditions', 'getTruckRestrictions', 'reportRoadCondition', 'verifyConditionReport',
     'tabSwitch', 'tabChanged',
 ];
@@ -103,6 +103,7 @@ const mockRestStopService = {
 const mockWeatherService = {
     getAlertsAtLocation: jest.fn().mockResolvedValue({ success: true, alerts: [{ type: 'winter_storm', severity: 'moderate' }] }),
     getRouteWeather: jest.fn().mockResolvedValue({ success: true, alerts: [{ type: 'fog', severity: 'minor' }] }),
+    subscribeToAlerts: jest.fn().mockResolvedValue({ success: true }),
 };
 
 const mockRoadConditionService = {
@@ -486,6 +487,22 @@ async function routeMessage(component, msg, services = {}, wixUsers = mockWixUse
                 sendToHtml(component, 'weatherResults', {
                     alerts,
                     chainLaws: chainLawsResult.success ? chainLawsResult.requirements : []
+                });
+                break;
+            }
+
+            case 'subscribeAlerts': {
+                if (!wixUsers.currentUser.loggedIn) {
+                    sendToHtml(component, 'weatherSubscriptionSaved', {
+                        success: false,
+                        message: 'Must be logged in to save weather alert settings'
+                    });
+                    return;
+                }
+                const result = await weather.subscribeToAlerts(wixUsers.currentUser.id, data.preferences || {});
+                sendToHtml(component, 'weatherSubscriptionSaved', {
+                    success: result.success,
+                    message: result.success ? 'Weather alert preferences saved' : (result.error || 'Unable to save preferences')
                 });
                 break;
             }
@@ -1112,6 +1129,20 @@ describe('Road Utilities Bridge Tests', () => {
             await routeMessage(component, { type: 'getWeather', data: {} });
             expect(mockWeatherService.getAlertsAtLocation).toHaveBeenCalledWith(39.31, -120.33);
             expect(mockWeatherService.getRouteWeather).not.toHaveBeenCalled();
+        });
+
+        test('subscribeAlerts saves weather preferences for logged in user', async () => {
+            await routeMessage(component, {
+                type: 'subscribeAlerts',
+                data: { preferences: { min_severity: 'severe' } }
+            });
+            expect(mockWeatherService.subscribeToAlerts).toHaveBeenCalledWith('user-123', { min_severity: 'severe' });
+            expect(component.postMessage).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    type: 'weatherSubscriptionSaved',
+                    data: expect.objectContaining({ success: true })
+                })
+            );
         });
     });
 

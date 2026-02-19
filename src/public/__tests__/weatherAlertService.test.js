@@ -3,14 +3,24 @@
 import {
     getAlertsAtLocation,
     getRouteWeather,
-    getChainRequirements
+    getChainRequirements,
+    subscribeToAlerts,
+    processNewAlerts
 } from '../../backend/weatherAlertService';
 import { fetch } from 'wix-fetch';
-import * as emailService from '../../backend/emailService';
+import * as dataAccess from '../../backend/dataAccess';
 
 // Mock emailService
 jest.mock('../../backend/emailService', () => ({
     sendWeatherAlertEmail: jest.fn().mockResolvedValue({ success: true })
+}));
+jest.mock('../../backend/dataAccess', () => ({
+    queryRecords: jest.fn(),
+    insertRecord: jest.fn(),
+    updateRecord: jest.fn()
+}));
+jest.mock('../../backend/seeds/seedMockData', () => ({
+    seedDriverSubscriptions: jest.fn().mockResolvedValue({ seeded: true })
 }));
 
 // Mock wix-fetch
@@ -27,6 +37,7 @@ describe('Weather Alert Service Tests', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        dataAccess.insertRecord.mockResolvedValue({ success: true, record: { _id: 'rec1' } });
     });
 
     // 1. Test Single Location Alerts (NWS API)
@@ -116,6 +127,19 @@ describe('Weather Alert Service Tests', () => {
 
     // 4. Test Scheduled Job (processNewAlerts)
     test('processNewAlerts should find severe alerts and trigger emails', async () => {
+        dataAccess.queryRecords
+            .mockResolvedValueOnce({
+                success: true,
+                items: [{
+                    _id: 'sub1',
+                    driver_id: 'driver-1',
+                    location: { lat: 39.31, lng: -120.33 },
+                    alert_types: ['severe_weather'],
+                    min_severity: 'moderate'
+                }]
+            })
+            .mockResolvedValueOnce({ success: true, items: [] }); // no dedupe cache
+
         // Mock NWS to return a severe alert
         const mockSevereAlert = {
             properties: {
@@ -133,19 +157,49 @@ describe('Weather Alert Service Tests', () => {
             json: jest.fn().mockResolvedValue({ features: [mockSevereAlert] })
         });
 
-        const { processNewAlerts } = require('../../backend/weatherAlertService');
         const emailService = require('../../backend/emailService');
 
         const result = await processNewAlerts();
 
         expect(result.success).toBe(true);
         expect(result.sent).toBeGreaterThan(0);
+        expect(result.notifications).toBeGreaterThan(0);
         expect(emailService.sendWeatherAlertEmail).toHaveBeenCalledWith(
             expect.anything(),
             expect.objectContaining({
                 event: 'Tornado Warning',
                 severity: 'Severe'
             })
+        );
+        expect(dataAccess.insertRecord).toHaveBeenCalledWith(
+            'memberNotifications',
+            expect.objectContaining({ type: 'weather_alert' }),
+            expect.anything()
+        );
+    });
+
+    test('subscribeToAlerts should upsert driver preferences', async () => {
+        dataAccess.queryRecords.mockResolvedValue({ success: true, items: [] });
+        dataAccess.insertRecord.mockResolvedValue({
+            success: true,
+            record: { driver_id: 'driver-1', min_severity: 'severe' }
+        });
+
+        const result = await subscribeToAlerts('driver-1', {
+            min_severity: 'severe',
+            alert_types: ['winter'],
+            push_enabled: true
+        });
+
+        expect(result.success).toBe(true);
+        expect(dataAccess.insertRecord).toHaveBeenCalledWith(
+            'driverNotificationPreferences',
+            expect.objectContaining({
+                driver_id: 'driver-1',
+                min_severity: 'severe',
+                alert_types: ['winter']
+            }),
+            expect.anything()
         );
     });
 

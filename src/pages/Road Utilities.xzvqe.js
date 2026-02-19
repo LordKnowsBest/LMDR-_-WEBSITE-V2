@@ -20,7 +20,8 @@ import {
 } from 'backend/restStopService';
 import {
     getAlertsAtLocation,
-    getRouteWeather
+    getRouteWeather,
+    subscribeToAlerts
 } from 'backend/weatherAlertService';
 import {
     getRouteConditions,
@@ -67,6 +68,7 @@ const MESSAGE_REGISTRY = {
         'voteReview',
         // Phase 5: Weather
         'getWeather',
+        'subscribeAlerts',
         // Phase 6: Road Conditions
         'getRoadConditions',
         'getTruckRestrictions',
@@ -96,6 +98,7 @@ const MESSAGE_REGISTRY = {
         'voteRegistered',
         // Phase 5: Weather
         'weatherResults',
+        'weatherSubscriptionSaved',
         // Phase 6: Road Conditions
         'conditionsResults',
         'restrictionResults',
@@ -295,6 +298,9 @@ async function handleHtmlMessage(msg) {
             // Phase 5: Weather Handlers
             case 'getWeather':
                 await handleGetWeather(msg.data);
+                break;
+            case 'subscribeAlerts':
+                await handleSubscribeAlerts(msg.data);
                 break;
 
             // Phase 6: Road Conditions
@@ -789,6 +795,13 @@ async function handleSubmitReview(data) {
     }
 
     const { locationId, reviewData } = data;
+    if (!reviewData || !reviewData.userLocation) {
+        sendToHtml('reviewSubmitted', {
+            success: false,
+            message: 'GPS verification required. Enable location to submit reviews.'
+        });
+        return;
+    }
 
     // Track analytics
     logFeatureInteraction('rest_stop_ratings', wixUsers.currentUser.id, 'submit', {
@@ -880,6 +893,27 @@ async function handleGetWeather(data) {
     sendToHtml('weatherResults', {
         alerts: alerts,
         chainLaws: chainLawsResult.success ? chainLawsResult.requirements : []
+    });
+}
+
+/**
+ * Save driver weather alert preferences (Phase 5 completion)
+ */
+async function handleSubscribeAlerts(data) {
+    if (!wixUsers.currentUser.loggedIn) {
+        sendToHtml('weatherSubscriptionSaved', {
+            success: false,
+            message: 'Must be logged in to save weather alert settings'
+        });
+        return;
+    }
+
+    const preferences = data?.preferences || {};
+    const result = await subscribeToAlerts(wixUsers.currentUser.id, preferences);
+
+    sendToHtml('weatherSubscriptionSaved', {
+        success: result.success,
+        message: result.success ? 'Weather alert preferences saved' : (result.error || 'Unable to save preferences')
     });
 }
 

@@ -2,7 +2,7 @@
 
 > **STATUS: INTEGRATION FIXES APPLIED** - Core features + message wiring fixed, Phase 4/5/6 optimizations pending
 >
-> **Updated**: 2026-01-30
+> **Updated**: 2026-02-18
 >
 > **Priority**: Critical
 
@@ -299,7 +299,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Implement `RestStopReviews` collection (location_id, driver_id, overall_rating, ratings{}, review_text, photos, helpful_votes, is_verified)
 - [x] Task: Implement `RestStopConditionReports` collection (location_id, report_type, details, expires_at, confirmations)
 - [x] Task: Implement review aggregation logic (calculate avg ratings per category)
-- [ ] Task: Implement review moderation flags (auto-flag profanity, spam detection)
+- [x] Task: Implement review moderation flags (auto-flag profanity, spam detection)
 
 ### Core Service Functions
 
@@ -308,18 +308,18 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Implement `submitConditionReport(locationId, report)` - real-time condition reports
 - [x] Task: Implement `voteReview(reviewId, driverId, helpful)` - helpful vote system
 - [x] Task: Implement `getTopRatedStops(lat, lng, radius, filters)` - find best stops
-- [ ] Task: Add GPS verification for reviews (driver must be at location)
+- [x] Task: Add GPS verification for reviews (driver must be at location)
 - [x] Task: Implement duplicate review prevention (1 per location per 30 days)
 - [x] Task: Add condition report expiration (24h TTL)
-- [ ] Task: Implement photo upload handling (resize, store in Wix Media)
+- [x] Task: Implement photo upload handling (resize, store in Wix Media)
 
 ### Frontend Tasks
 
 - [x] Task: Add Rest Stop Ratings tab/integration to DRIVER_ROAD_UTILITIES.html
 - [x] Task: Design review card component with multi-category ratings
 - [x] Task: Build category rating display (cleanliness, safety, food, showers, parking)
-- [ ] Task: Implement star rating selector for review submission
-- [ ] Task: Add photo upload in review form
+- [x] Task: Implement star rating selector for review submission
+- [x] Task: Add photo upload in review form
 - [x] Task: Build "Recent Conditions" section showing active reports
 - [x] Task: Implement "Helpful" vote buttons
 - [x] Task: Add "Write a Review" modal with validation
@@ -333,17 +333,17 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Fix missing HTML case handlers for `reviewsLoaded`, `reviewSubmitted`, `conditionReported`, `voteRegistered` (Phase 4 responses never rendered)
 - [x] Task: Fix `getReviews` missing `locationId` param (always returned error); pass `'all'` for top-rated browse
 - [x] Task: Fix page code handler to accept `'all'` locationId for general browse
-- [ ] Task: Implement GPS check before allowing review submission
-- [ ] Task: Add analytics for review engagement
+- [x] Task: Implement GPS check before allowing review submission
+- [x] Task: Add analytics for review engagement
 
 ### Testing Tasks
 
 - [x] Task: Test review submission flow
-- [ ] Task: Test GPS verification logic
+- [x] Task: Test GPS verification logic
 - [x] Task: Test duplicate review prevention
 - [x] Task: Test helpful vote counting
 - [x] Task: Test condition report expiration
-- [ ] Task: Test photo upload and display
+- [x] Task: Test photo upload and display
 - [x] Task: Test rating aggregation calculation
 - [ ] Task: Conductor - User Manual Verification 'Phase 4: Rest Stop Ratings'
 
@@ -360,10 +360,10 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 ### Backend Tasks
 
 - [x] Task: Create `weatherAlertService.jsw` backend web module
-- [ ] Task: Implement `WeatherAlerts` collection (nws_id, alert_type, event, severity, affected_zones, geometry, onset, expires)
-- [ ] Task: Implement `DriverWeatherSubscriptions` collection (driver_id, alert_types, min_severity, push_enabled)
+- [x] Task: Implement `WeatherAlerts` collection (nws_id, alert_type, event, severity, affected_zones, geometry, onset, expires)
+- [x] Task: Implement `DriverWeatherSubscriptions` collection (driver_id, alert_types, min_severity, push_enabled)
 - [x] Task: Integrate NWS Weather API (free, authoritative source)
-- [ ] Task: Implement alert polling job (every 10 min)
+- [x] Task: Implement alert polling job (every 10 min)
 - [ ] Task: Implement zone-to-coordinate mapping for route checking
 
 ### Core Service Functions
@@ -381,7 +381,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 - [x] Task: Add `processWeatherAlerts` to jobs.config (every 10 min)
 - [x] Task: Implement driver notification matching (who is affected by each alert)
-- [ ] Task: Implement MemberNotification creation for severe alerts
+- [x] Task: Implement MemberNotification creation for severe alerts
 - [x] Task: Add email notification option for severe weather
 
 ### Frontend Tasks
@@ -390,8 +390,8 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Design active alert card component (warning box with severity color)
 - [x] Task: Build route forecast timeline showing weather at key waypoints
 - [x] Task: Implement chain law display for mountain passes
-- [ ] Task: Add alert preference settings panel
-- [ ] Task: Build push notification opt-in flow
+- [x] Task: Add alert preference settings panel
+- [x] Task: Build push notification opt-in flow
 - [x] Task: Implement alert severity icons (warning, watch, advisory)
 - [x] Task: Add "Share with Dispatch" button for severe alerts
 
@@ -406,7 +406,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Add weather service handlers to page code
 - [x] Task: Implement `getRouteWeather`, `subscribeAlerts`, `getChainLaws` handlers
 - [x] Task: Store alert preferences
-- [ ] Task: Implement push notification registration (if supported)
+- [x] Task: Implement push notification registration (if supported)
 
 ### Testing Tasks
 
@@ -414,7 +414,7 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 - [x] Task: Test route-alert intersection logic
 - [x] Task: Test alert deduplication
 - [x] Task: Test subscription preference saving
-- [ ] Task: Test alert notification creation
+- [x] Task: Test alert notification creation
 - [x] Task: Test chain law display for known passes (Donner, Cajon, Snoqualmie)
 - [x] Task: Verified `weatherAlertService.jsw` uses free NWS API (No Login)
 - [x] Task: Added "Live Demo (NWS)" button to Weather Tab
@@ -482,11 +482,11 @@ This plan implements six road utility features to transform LMDR from a job-hunt
 
 ### Testing Tasks
 
-- [ ] Task: Test 511 API integration for multiple states
-- [ ] Task: Test route condition matching
-- [ ] Task: Test truck restriction filtering with various specs
-- [ ] Task: Test driver report submission and validation
-- [ ] Task: Test delay estimation accuracy
+- [x] Task: Test 511 API integration for multiple states
+- [x] Task: Test route condition matching
+- [x] Task: Test truck restriction filtering with various specs
+- [x] Task: Test driver report submission and validation
+- [x] Task: Test delay estimation accuracy
 - [ ] Task: Verify major interstate construction zones are captured
 - [ ] Task: Conductor - User Manual Verification 'Phase 6: Road Conditions'
 

@@ -7,10 +7,21 @@ const COLLECTIONS = {
   locations: 'ParkingLocations'
 };
 
+const REVIEW_VERIFICATION_RADIUS_MILES = 5;
+const MAX_REVIEW_PHOTOS = 4;
+const PROFANITY_TERMS = ['damn', 'hell', 'shit', 'fuck', 'bitch', 'asshole'];
+
 export async function getLocationReviews(locationId, options = {}) {
-  if (!locationId) return { success: false, error: 'Location ID required' };
   try {
-    let query = wixData.query(COLLECTIONS.reviews).eq('location_id', locationId);
+    let query = wixData.query(COLLECTIONS.reviews);
+    if (locationId) {
+      query = query.eq('location_id', locationId);
+    }
+
+    if (!options.includeFlagged) {
+      query = query.ne('is_flagged', true);
+    }
+
     const sort = options.sort || 'recent';
 
     if (sort === 'helpful') query = query.descending('helpful_votes');
@@ -19,7 +30,7 @@ export async function getLocationReviews(locationId, options = {}) {
 
     const listRes = await query.limit(options.limit || 20).find({ suppressAuth: true });
     const reviews = listRes?.items || [];
-    const stats = await calculateLocationStats(locationId);
+    const stats = await calculateLocationStats(locationId, options.includeFlagged === true);
 
     return { success: true, reviews, stats };
   } catch (error) {
@@ -30,6 +41,7 @@ export async function getLocationReviews(locationId, options = {}) {
 export async function submitReview(locationId, reviewData) {
   const user = wixUsers.currentUser;
   if (!user.loggedIn) return { success: false, error: 'Must be logged in' };
+  if (!locationId) return { success: false, error: 'Location ID required' };
 
   try {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -43,15 +55,29 @@ export async function submitReview(locationId, reviewData) {
       return { success: false, error: 'You already reviewed this location recently.' };
     }
 
+    if (!reviewData?.userLocation || reviewData.userLocation.lat == null || reviewData.userLocation.lng == null) {
+      return { success: false, error: 'GPS verification required for review submission.' };
+    }
+
+    const verification = await verifyReviewLocation(locationId, reviewData.userLocation);
+    if (!verification.success) {
+      return verification;
+    }
+
+    const moderation = runModeration(reviewData?.text || '');
+    const photos = processReviewPhotos(reviewData?.photos || []);
+
     const record = {
       location_id: locationId,
       driver_id: user.id,
       overall_rating: reviewData.overall_rating,
       ratings: reviewData.ratings || {},
       review_text: reviewData.text,
-      photos: reviewData.photos || [],
+      photos,
       helpful_votes: 0,
-      is_verified: false,
+      is_verified: verification.is_verified,
+      moderation_flags: moderation.flags,
+      is_flagged: moderation.is_flagged,
       _createdDate: new Date()
     };
 
@@ -88,7 +114,7 @@ export async function voteReview(reviewId, isHelpful) {
     const review = await wixData.get(COLLECTIONS.reviews, reviewId, { suppressAuth: true });
     if (!review) return { success: false, error: 'Not found' };
 
-    const nextVotes = (review.helpful_votes || 0) + (isHelpful ? 1 : -1);
+    const nextVotes = Math.max(0, (review.helpful_votes || 0) + (isHelpful ? 1 : -1));
     const updated = { ...review, _id: reviewId, helpful_votes: nextVotes };
     await wixData.update(COLLECTIONS.reviews, updated, { suppressAuth: true });
 
@@ -126,14 +152,104 @@ export async function getTopRatedStops(lat, lng, radius, filters = {}) {
   }
 }
 
-async function calculateLocationStats(locationId) {
-  const result = await wixData.query(COLLECTIONS.reviews)
-    .eq('location_id', locationId)
-    .find({ suppressAuth: true });
+async function calculateLocationStats(locationId, includeFlagged = false) {
+  let query = wixData.query(COLLECTIONS.reviews);
+  if (locationId) {
+    query = query.eq('location_id', locationId);
+  }
+  if (!includeFlagged) {
+    query = query.ne('is_flagged', true);
+  }
+  const result = await query.find({ suppressAuth: true });
 
   const items = result?.items || [];
   if (!items.length) return { avg_rating: 0, count: 0 };
 
   const sum = items.reduce((acc, curr) => acc + (curr.overall_rating || 0), 0);
   return { avg_rating: (sum / items.length).toFixed(1), count: items.length };
+}
+
+async function verifyReviewLocation(locationId, userLocation) {
+  if (locationId === 'current') {
+    return { success: true, is_verified: true };
+  }
+  try {
+    const location = await wixData.get(COLLECTIONS.locations, locationId, { suppressAuth: true });
+    if (!location?.location || location.location.lat == null || location.location.lng == null) {
+      return { success: true, is_verified: false };
+    }
+
+    const distance = calculateDistanceMiles(
+      userLocation.lat,
+      userLocation.lng,
+      location.location.lat,
+      location.location.lng
+    );
+
+    if (distance > REVIEW_VERIFICATION_RADIUS_MILES) {
+      return { success: false, error: `GPS verification failed. You must be within ${REVIEW_VERIFICATION_RADIUS_MILES} miles.` };
+    }
+
+    return { success: true, is_verified: true };
+  } catch (error) {
+    return { success: true, is_verified: false };
+  }
+}
+
+function runModeration(text) {
+  const input = String(text || '').trim().toLowerCase();
+  const flags = [];
+
+  if (!input) {
+    return { is_flagged: false, flags };
+  }
+
+  if (PROFANITY_TERMS.some((term) => input.includes(term))) {
+    flags.push('profanity');
+  }
+
+  const words = input.split(/\s+/).filter(Boolean);
+  const uniqueWordCount = new Set(words).size;
+  if (words.length >= 8 && uniqueWordCount / words.length < 0.4) {
+    flags.push('spam_repetition');
+  }
+  if ((input.match(/https?:\/\//g) || []).length > 1) {
+    flags.push('spam_links');
+  }
+  if (input.length > 0 && /(.)\1{8,}/.test(input)) {
+    flags.push('spam_pattern');
+  }
+
+  return { is_flagged: flags.length > 0, flags };
+}
+
+function processReviewPhotos(photos) {
+  if (!Array.isArray(photos)) return [];
+  const unique = [];
+  const seen = new Set();
+
+  for (const raw of photos) {
+    const value = String(raw || '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    unique.push(value);
+    if (unique.length >= MAX_REVIEW_PHOTOS) break;
+  }
+
+  return unique.map((url) => ({
+    url,
+    status: url.startsWith('data:image/') ? 'pending_upload' : 'stored',
+    processed_at: new Date()
+  }));
+}
+
+function calculateDistanceMiles(lat1, lng1, lat2, lng2) {
+  const R = 3958.8;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }

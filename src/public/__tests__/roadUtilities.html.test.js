@@ -55,6 +55,7 @@ const INBOUND_MESSAGES = [
     'reviewSubmitted',
     'conditionReported',
     'voteRegistered',
+    'weatherSubscriptionSaved',
     'error',
 ];
 
@@ -65,6 +66,7 @@ const OUTBOUND_MESSAGES = [
     'getWeather',
     'getRoadConditions',
     'getTruckRestrictions',
+    'subscribeAlerts',
     'tabSwitch',
     'getReviews',
     'getDriverFuelCards',
