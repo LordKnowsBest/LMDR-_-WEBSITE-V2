@@ -57,13 +57,15 @@ export async function checkSurveyTriggers() {
   let surveysSent = 0;
   let errors = 0;
 
-  const triggers = [
-    { surveyType: SURVEY_TYPES.DAY_7,  minDays: 6, maxDays: 8  },
+  // Time-based triggers keyed to HIRED_ACTIVE events
+  const timeTriggers = [
+    { surveyType: SURVEY_TYPES.DAY_7,  minDays: 6,  maxDays: 8  },
     { surveyType: SURVEY_TYPES.DAY_30, minDays: 28, maxDays: 32 }
   ];
 
   try {
-    for (const { surveyType, minDays, maxDays } of triggers) {
+    // --- DAY_7 and DAY_30: scan HIRED_ACTIVE events ---
+    for (const { surveyType, minDays, maxDays } of timeTriggers) {
       const windowStart = new Date(now - maxDays * 86400000).toISOString();
       const windowEnd   = new Date(now - minDays * 86400000).toISOString();
 
@@ -80,21 +82,35 @@ export async function checkSurveyTriggers() {
         try {
           const { driver_id, carrier_id } = hireEvent;
           if (!driver_id) continue;
-
-          // Check if survey request already created
-          const existing = await queryRecords('driverSurveyRequests', {
-            filters: { driver_id, survey_type: surveyType },
-            limit: 1,
-            suppressAuth: true
-          });
-          if ((existing.items || []).length > 0) continue;
-
-          await sendSurvey(driver_id, carrier_id, surveyType);
-          surveysSent++;
+          const sent = await sendSurveyIfNotSent(driver_id, carrier_id, surveyType);
+          if (sent) surveysSent++;
         } catch (driverErr) {
           console.warn(`[surveyService] Trigger error for driver ${hireEvent.driver_id}:`, driverErr.message);
           errors++;
         }
+      }
+    }
+
+    // --- ORIENTATION: scan ORIENTATION_COMPLETE events from last 2 days (safety net) ---
+    const orientationWindow = new Date(now - 2 * 86400000).toISOString();
+    const orientationResult = await queryRecords('lifecycleEvents', {
+      filters: {
+        event_type: lifecycleService.EVENT_TYPES.ORIENTATION,
+        event_date: { gte: orientationWindow }
+      },
+      limit: 500,
+      suppressAuth: true
+    });
+
+    for (const event of (orientationResult.items || [])) {
+      try {
+        const { driver_id, carrier_id } = event;
+        if (!driver_id) continue;
+        const sent = await sendSurveyIfNotSent(driver_id, carrier_id, SURVEY_TYPES.ORIENTATION);
+        if (sent) surveysSent++;
+      } catch (eventErr) {
+        console.warn(`[surveyService] Orientation trigger error for driver ${event.driver_id}:`, eventErr.message);
+        errors++;
       }
     }
 
@@ -104,6 +120,27 @@ export async function checkSurveyTriggers() {
     console.error('[surveyService] checkSurveyTriggers error:', error);
     return { success: false, error: error.message };
   }
+}
+
+/**
+ * Send a survey only if one hasn't already been sent for this driver+type.
+ * Safe to call from any trigger point — deduplicates against driverSurveyRequests.
+ *
+ * @param {string} driverId
+ * @param {string} carrierId
+ * @param {string} surveyType - One of SURVEY_TYPES
+ * @returns {Promise<boolean>} true if a new survey was sent, false if already existed
+ */
+export async function sendSurveyIfNotSent(driverId, carrierId, surveyType) {
+  const existing = await queryRecords('driverSurveyRequests', {
+    filters: { driver_id: driverId, survey_type: surveyType },
+    limit: 1,
+    suppressAuth: true
+  });
+  if ((existing.items || []).length > 0) return false;
+
+  await sendSurvey(driverId, carrierId, surveyType);
+  return true;
 }
 
 /**
