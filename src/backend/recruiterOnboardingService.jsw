@@ -1,0 +1,300 @@
+import * as dataAccess from 'backend/dataAccess';
+
+// Collection keys for dataAccess routing
+const COLLECTIONS = {
+  documentRequests: 'documentRequests',
+  backgroundChecks: 'backgroundChecks',
+  drugTests: 'drugTests',
+  eSignRequests: 'eSignRequests',
+  orientationSlots: 'orientationSlots',
+  onboardingWorkflows: 'onboardingWorkflows',
+  driverProfiles: 'driverProfiles'
+};
+
+// ============================================================================
+// 1. requestDocuments
+// ============================================================================
+
+export async function requestDocuments(recruiterId, params = {}) {
+  try {
+    const { driverId, workflowId, documentTypes = [], deadline, message } = params;
+    if (!driverId || !workflowId || !documentTypes.length) {
+      return { error: 'driverId, workflowId, and documentTypes are required' };
+    }
+
+    const now = new Date().toISOString();
+    let created = 0;
+
+    for (const docType of documentTypes) {
+      await dataAccess.insertRecord(COLLECTIONS.documentRequests, {
+        workflow_id: workflowId,
+        driver_id: driverId,
+        recruiter_id: recruiterId,
+        document_type: docType,
+        status: 'requested',
+        deadline: deadline || null,
+        message: message || '',
+        requested_at: now
+      }, { suppressAuth: true });
+      created++;
+    }
+
+    return { success: true, requestCount: created };
+  } catch (error) {
+    console.error('requestDocuments error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 2. getDocumentCollectionStatus
+// ============================================================================
+
+export async function getDocumentCollectionStatus(workflowId) {
+  try {
+    if (!workflowId) return { error: 'workflowId is required' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.documentRequests, {
+      filters: { workflow_id: workflowId },
+      limit: 50,
+      suppressAuth: true
+    });
+
+    const documents = (result.items || []).map(doc => ({
+      type: doc.document_type,
+      status: doc.status,
+      requestedAt: doc.requested_at || doc._createdDate,
+      receivedAt: doc.received_at || null
+    }));
+
+    const now = new Date();
+    const pendingCount = documents.filter(d => d.status === 'requested').length;
+    const overdue = documents.filter(d => {
+      if (d.status !== 'requested') return false;
+      const dl = result.items.find(i => i.document_type === d.type)?.deadline;
+      return dl && new Date(dl) < now;
+    });
+    const completionRate = documents.length > 0
+      ? Math.round(((documents.length - pendingCount) / documents.length) * 100)
+      : 0;
+
+    return { documents, completionRate, pendingCount, overdue };
+  } catch (error) {
+    console.error('getDocumentCollectionStatus error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 3. initiateBGC
+// ============================================================================
+
+export async function initiateBGC(recruiterId, params = {}) {
+  try {
+    const { driverId, workflowId, checkType = 'standard', provider } = params;
+    if (!driverId || !workflowId) {
+      return { error: 'driverId and workflowId are required' };
+    }
+
+    const record = await dataAccess.insertRecord(COLLECTIONS.backgroundChecks, {
+      workflow_id: workflowId,
+      driver_id: driverId,
+      recruiter_id: recruiterId,
+      check_type: checkType,
+      provider: provider || 'default',
+      status: 'ordered',
+      ordered_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    const checkId = record?._id || record?.id || null;
+    return { success: true, checkId };
+  } catch (error) {
+    console.error('initiateBGC error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 4. getBGCStatus
+// ============================================================================
+
+export async function getBGCStatus(checkId) {
+  try {
+    if (!checkId) return { error: 'checkId is required' };
+
+    const check = await dataAccess.getRecord(COLLECTIONS.backgroundChecks, checkId, { suppressAuth: true });
+    if (!check) return { error: 'Background check not found' };
+
+    return { check };
+  } catch (error) {
+    console.error('getBGCStatus error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 5. initiateDrugTest
+// ============================================================================
+
+export async function initiateDrugTest(recruiterId, params = {}) {
+  try {
+    const { driverId, workflowId, testType = 'pre_employment', collectionSiteId } = params;
+    if (!driverId || !workflowId) {
+      return { error: 'driverId and workflowId are required' };
+    }
+
+    const record = await dataAccess.insertRecord(COLLECTIONS.drugTests, {
+      workflow_id: workflowId,
+      driver_id: driverId,
+      recruiter_id: recruiterId,
+      test_type: testType,
+      collection_site_id: collectionSiteId || null,
+      status: 'ordered',
+      ordered_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    const testId = record?._id || record?.id || null;
+    return { success: true, testId };
+  } catch (error) {
+    console.error('initiateDrugTest error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 6. getDrugTestStatus
+// ============================================================================
+
+export async function getDrugTestStatus(testId) {
+  try {
+    if (!testId) return { error: 'testId is required' };
+
+    const test = await dataAccess.getRecord(COLLECTIONS.drugTests, testId, { suppressAuth: true });
+    if (!test) return { error: 'Drug test not found' };
+
+    return { test };
+  } catch (error) {
+    console.error('getDrugTestStatus error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 7. sendESignRequest
+// ============================================================================
+
+export async function sendESignRequest(recruiterId, params = {}) {
+  try {
+    const { driverId, workflowId, documentName, documentUrl, signerEmail, deadline } = params;
+    if (!driverId || !workflowId || !documentName) {
+      return { error: 'driverId, workflowId, and documentName are required' };
+    }
+
+    const record = await dataAccess.insertRecord(COLLECTIONS.eSignRequests, {
+      workflow_id: workflowId,
+      driver_id: driverId,
+      recruiter_id: recruiterId,
+      document_name: documentName,
+      document_url: documentUrl || '',
+      signer_email: signerEmail || '',
+      deadline: deadline || null,
+      status: 'sent',
+      sent_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    const requestId = record?._id || record?.id || null;
+    return { success: true, requestId };
+  } catch (error) {
+    console.error('sendESignRequest error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 8. getESignStatus
+// ============================================================================
+
+export async function getESignStatus(requestId) {
+  try {
+    if (!requestId) return { error: 'requestId is required' };
+
+    const request = await dataAccess.getRecord(COLLECTIONS.eSignRequests, requestId, { suppressAuth: true });
+    if (!request) return { error: 'E-sign request not found' };
+
+    return { request };
+  } catch (error) {
+    console.error('getESignStatus error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 9. scheduleOrientation
+// ============================================================================
+
+export async function scheduleOrientation(recruiterId, params = {}) {
+  try {
+    const { driverId, workflowId, slotId, carrierId } = params;
+    if (!driverId || !workflowId || !slotId) {
+      return { error: 'driverId, workflowId, and slotId are required' };
+    }
+
+    // Get the slot to verify it exists and is available
+    const slot = await dataAccess.getRecord(COLLECTIONS.orientationSlots, slotId, { suppressAuth: true });
+    if (!slot) return { error: 'Orientation slot not found' };
+    if (slot.status === 'booked') return { error: 'Orientation slot is already booked' };
+
+    // Book the slot
+    await dataAccess.updateRecord(COLLECTIONS.orientationSlots, {
+      _id: slotId,
+      status: 'booked',
+      driver_id: driverId,
+      workflow_id: workflowId,
+      booked_by: recruiterId,
+      booked_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    return { success: true, scheduledAt: slot.slot_date || slot.date };
+  } catch (error) {
+    console.error('scheduleOrientation error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 10. getOrientationSlots
+// ============================================================================
+
+export async function getOrientationSlots(carrierId, filters = {}) {
+  try {
+    if (!carrierId) return { error: 'carrierId is required' };
+
+    const queryFilters = { carrier_id: carrierId };
+    if (filters.available_only) {
+      queryFilters.status = 'available';
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.orientationSlots, {
+      filters: queryFilters,
+      limit: 50,
+      suppressAuth: true
+    });
+
+    let slots = result.items || [];
+
+    // Apply date range filters in-memory
+    if (filters.dateFrom) {
+      const from = new Date(filters.dateFrom);
+      slots = slots.filter(s => new Date(s.slot_date || s.date) >= from);
+    }
+    if (filters.dateTo) {
+      const to = new Date(filters.dateTo);
+      slots = slots.filter(s => new Date(s.slot_date || s.date) <= to);
+    }
+
+    return { slots, totalCount: slots.length };
+  } catch (error) {
+    console.error('getOrientationSlots error:', error);
+    return { error: error.message };
+  }
+}

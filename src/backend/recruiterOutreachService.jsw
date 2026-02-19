@@ -1,0 +1,367 @@
+/**
+ * Recruiter Outreach Service
+ * Unified campaign management across all outreach channels (email, SMS, voice, social, autopilot).
+ * Reads from existing campaign collections to provide a unified view.
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+    emailCampaigns: 'emailCampaigns',
+    smsCampaigns: 'smsCampaigns',
+    voiceCampaigns: 'voiceCampaigns',
+    socialPosts: 'socialPosts',
+    autopilotCampaigns: 'autopilotCampaigns',
+    outreachTemplates: 'outreachTemplates',
+    driverProfiles: 'driverProfiles'
+};
+
+const CAMPAIGN_TYPE_MAP = {
+    email: 'emailCampaigns',
+    sms: 'smsCampaigns',
+    voice: 'voiceCampaigns',
+    social: 'socialPosts',
+    autopilot: 'autopilotCampaigns'
+};
+
+// ============================================================================
+// CAMPAIGN STATUS
+// ============================================================================
+
+/**
+ * Get campaign status by type
+ * @param {string} recruiterId - Recruiter ID
+ * @param {string} campaignId - Campaign record ID
+ * @param {string} campaignType - 'sms' | 'email' | 'voice' | 'social' | 'autopilot'
+ * @returns {Promise<Object>} { success, campaign }
+ */
+export async function getCampaignStatus(recruiterId, campaignId, campaignType) {
+    try {
+        const collectionKey = CAMPAIGN_TYPE_MAP[campaignType];
+        if (!collectionKey) {
+            return { error: 'Invalid campaign type. Must be one of: email, sms, voice, social, autopilot' };
+        }
+
+        const record = await dataAccess.getRecord(collectionKey, campaignId);
+        if (!record) {
+            return { error: 'Campaign not found' };
+        }
+
+        return {
+            result: {
+                id: record._id,
+                type: campaignType,
+                status: record.status || 'unknown',
+                name: record.name || record.campaign_name || record.title || '',
+                created_at: record._createdDate || record.created_at,
+                metrics: {
+                    sent: record.sent_count || record.total_sent || 0,
+                    delivered: record.delivered_count || record.total_delivered || 0,
+                    opened: record.open_count || record.total_opened || 0,
+                    clicked: record.click_count || record.total_clicked || 0,
+                    replied: record.reply_count || record.total_replied || 0
+                }
+            }
+        };
+    } catch (error) {
+        console.error('[RecruiterOutreach] getCampaignStatus error:', error);
+        return { error: error.message };
+    }
+}
+
+// ============================================================================
+// PAUSE / RESUME
+// ============================================================================
+
+/**
+ * Pause a campaign across any channel type
+ * @param {string} campaignId - Campaign record ID
+ * @param {string} campaignType - 'sms' | 'email' | 'voice' | 'social' | 'autopilot'
+ * @returns {Promise<Object>} { result } | { error }
+ */
+export async function pauseCampaign(campaignId, campaignType) {
+    try {
+        const collectionKey = CAMPAIGN_TYPE_MAP[campaignType];
+        if (!collectionKey) {
+            return { error: 'Invalid campaign type' };
+        }
+
+        if (campaignType === 'autopilot') {
+            const { pauseCampaign: pauseAutopilot } = await import('backend/autopilotService');
+            const result = await pauseAutopilot(campaignId);
+            return result.success ? { result: { success: true } } : { error: result.error };
+        }
+
+        await dataAccess.updateRecord(collectionKey, {
+            _id: campaignId,
+            status: 'paused',
+            paused_at: new Date().toISOString()
+        });
+
+        return { result: { success: true } };
+    } catch (error) {
+        console.error('[RecruiterOutreach] pauseCampaign error:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Resume a paused campaign across any channel type
+ * @param {string} campaignId - Campaign record ID
+ * @param {string} campaignType - 'sms' | 'email' | 'voice' | 'social' | 'autopilot'
+ * @returns {Promise<Object>} { result } | { error }
+ */
+export async function resumeCampaign(campaignId, campaignType) {
+    try {
+        const collectionKey = CAMPAIGN_TYPE_MAP[campaignType];
+        if (!collectionKey) {
+            return { error: 'Invalid campaign type' };
+        }
+
+        if (campaignType === 'autopilot') {
+            const { resumeCampaign: resumeAutopilot } = await import('backend/autopilotService');
+            const result = await resumeAutopilot(campaignId);
+            return result.success ? { result: { success: true } } : { error: result.error };
+        }
+
+        await dataAccess.updateRecord(collectionKey, {
+            _id: campaignId,
+            status: 'active',
+            resumed_at: new Date().toISOString()
+        });
+
+        return { result: { success: true } };
+    } catch (error) {
+        console.error('[RecruiterOutreach] resumeCampaign error:', error);
+        return { error: error.message };
+    }
+}
+
+// ============================================================================
+// CAMPAIGN HISTORY
+// ============================================================================
+
+/**
+ * Get unified campaign history across all channels
+ * @param {string} recruiterId - Recruiter ID
+ * @param {Object} filters - { campaignType, status, dateFrom, dateTo, page, page_size }
+ * @returns {Promise<Object>} { result: { campaigns, totalCount, page, pageSize } } | { error }
+ */
+export async function getCampaignHistory(recruiterId, filters = {}) {
+    try {
+        const page = Number(filters.page) || 1;
+        const pageSize = Math.min(Number(filters.page_size) || 20, 50);
+
+        const typesToQuery = filters.campaignType
+            ? [filters.campaignType]
+            : ['email', 'sms', 'voice', 'social'];
+
+        const allCampaigns = [];
+
+        for (const type of typesToQuery) {
+            const collectionKey = CAMPAIGN_TYPE_MAP[type];
+            if (!collectionKey) continue;
+
+            const queryFilters = { recruiter_id: recruiterId };
+            if (filters.status) queryFilters.status = filters.status;
+
+            try {
+                const records = await dataAccess.getAllRecords(collectionKey, { filters: queryFilters });
+
+                records.forEach(rec => {
+                    const createdAt = rec._createdDate || rec.created_at || '';
+                    if (filters.dateFrom && new Date(createdAt) < new Date(filters.dateFrom)) return;
+                    if (filters.dateTo && new Date(createdAt) > new Date(filters.dateTo)) return;
+
+                    allCampaigns.push({
+                        id: rec._id,
+                        type,
+                        name: rec.name || rec.campaign_name || rec.title || '',
+                        status: rec.status || 'unknown',
+                        created_at: createdAt,
+                        sent: rec.sent_count || rec.total_sent || 0,
+                        delivered: rec.delivered_count || rec.total_delivered || 0,
+                        opened: rec.open_count || rec.total_opened || 0
+                    });
+                });
+            } catch (queryErr) {
+                console.warn(`[RecruiterOutreach] Failed to query ${type} campaigns:`, queryErr.message);
+            }
+        }
+
+        // Sort by created_at desc
+        allCampaigns.sort((a, b) => {
+            const da = a.created_at ? new Date(a.created_at) : 0;
+            const db = b.created_at ? new Date(b.created_at) : 0;
+            return db - da;
+        });
+
+        const totalCount = allCampaigns.length;
+        const startIdx = (page - 1) * pageSize;
+        const paginated = allCampaigns.slice(startIdx, startIdx + pageSize);
+
+        return { result: { campaigns: paginated, totalCount, page, pageSize } };
+    } catch (error) {
+        console.error('[RecruiterOutreach] getCampaignHistory error:', error);
+        return { error: error.message };
+    }
+}
+
+// ============================================================================
+// MESSAGE TEMPLATES
+// ============================================================================
+
+/**
+ * Get message templates for a recruiter
+ * @param {string} recruiterId - Recruiter ID
+ * @param {Object} filters - { channel, category, search_query, page, page_size }
+ * @returns {Promise<Object>} { result: { templates, totalCount, page, pageSize } } | { error }
+ */
+export async function getMessageTemplates(recruiterId, filters = {}) {
+    try {
+        const page = Number(filters.page) || 1;
+        const pageSize = Math.min(Number(filters.page_size) || 20, 50);
+
+        const queryFilters = { recruiter_id: recruiterId };
+        if (filters.channel) queryFilters.channel = filters.channel;
+        if (filters.category) queryFilters.category = filters.category;
+
+        const records = await dataAccess.getAllRecords(COLLECTIONS.outreachTemplates, { filters: queryFilters });
+
+        let templates = records.map(rec => ({
+            id: rec._id,
+            name: rec.name || '',
+            channel: rec.channel || '',
+            category: rec.category || 'general',
+            subject: rec.subject || '',
+            body: rec.body || '',
+            tags: rec.tags || '',
+            usage_count: rec.usage_count || 0,
+            last_used_at: rec.last_used_at || null,
+            created_at: rec._createdDate || rec.created_at
+        }));
+
+        // Client-side search filter
+        if (filters.search_query) {
+            const q = filters.search_query.toLowerCase();
+            templates = templates.filter(t =>
+                t.name.toLowerCase().includes(q) ||
+                t.body.toLowerCase().includes(q) ||
+                t.subject.toLowerCase().includes(q)
+            );
+        }
+
+        const totalCount = templates.length;
+        const startIdx = (page - 1) * pageSize;
+        const paginated = templates.slice(startIdx, startIdx + pageSize);
+
+        return { result: { templates: paginated, totalCount, page, pageSize } };
+    } catch (error) {
+        console.error('[RecruiterOutreach] getMessageTemplates error:', error);
+        return { error: error.message };
+    }
+}
+
+/**
+ * Create a new message template
+ * @param {string} recruiterId - Recruiter ID
+ * @param {Object} params - { name, channel, subject, body, category, tags }
+ * @returns {Promise<Object>} { result: { templateId } } | { error }
+ */
+export async function createMessageTemplate(recruiterId, params = {}) {
+    try {
+        if (!params.name || !params.channel || !params.body) {
+            return { error: 'Missing required fields: name, channel, body' };
+        }
+
+        if (!['sms', 'email'].includes(params.channel)) {
+            return { error: 'Channel must be sms or email' };
+        }
+
+        if (params.channel === 'email' && !params.subject) {
+            return { error: 'Subject is required for email templates' };
+        }
+
+        const record = {
+            recruiter_id: recruiterId,
+            name: params.name,
+            channel: params.channel,
+            subject: params.subject || '',
+            body: params.body,
+            category: params.category || 'general',
+            tags: params.tags || '',
+            usage_count: 0,
+            last_used_at: null
+        };
+
+        const result = await dataAccess.insertRecord(COLLECTIONS.outreachTemplates, record);
+        return { result: { templateId: result.record._id } };
+    } catch (error) {
+        console.error('[RecruiterOutreach] createMessageTemplate error:', error);
+        return { error: error.message };
+    }
+}
+
+// ============================================================================
+// CAMPAIGN REACH PREVIEW
+// ============================================================================
+
+/**
+ * Estimate audience size for a campaign
+ * @param {string} recruiterId - Recruiter ID
+ * @param {Object} params - { carrierDot, channel, filters: { cdl_class, state, experience_min, ... } }
+ * @returns {Promise<Object>} { result: { estimatedReach, breakdown } } | { error }
+ */
+export async function previewCampaignReach(recruiterId, params = {}) {
+    try {
+        const { carrierDot, channel, filters: targetFilters = {} } = params;
+
+        const queryFilters = {};
+        if (targetFilters.cdl_class) queryFilters.cdl_class = targetFilters.cdl_class;
+        if (targetFilters.state) queryFilters.state = targetFilters.state;
+        if (targetFilters.status) queryFilters.status = targetFilters.status;
+
+        const drivers = await dataAccess.getAllRecords(COLLECTIONS.driverProfiles, { filters: queryFilters });
+
+        let filtered = drivers;
+
+        if (targetFilters.experience_min) {
+            const minExp = Number(targetFilters.experience_min);
+            filtered = filtered.filter(d => (Number(d.years_experience) || 0) >= minExp);
+        }
+
+        // Channel-specific filtering
+        if (channel === 'sms') {
+            filtered = filtered.filter(d => d.phone && d.sms_opt_in !== false);
+        } else if (channel === 'email') {
+            filtered = filtered.filter(d => d.email && d.email_opt_in !== false);
+        }
+
+        // Breakdown by state
+        const byState = {};
+        filtered.forEach(d => {
+            const st = d.state || 'Unknown';
+            byState[st] = (byState[st] || 0) + 1;
+        });
+
+        // Breakdown by CDL class
+        const byCdlClass = {};
+        filtered.forEach(d => {
+            const cls = d.cdl_class || 'Unknown';
+            byCdlClass[cls] = (byCdlClass[cls] || 0) + 1;
+        });
+
+        return {
+            result: {
+                estimatedReach: filtered.length,
+                breakdown: {
+                    byState,
+                    byCdlClass
+                }
+            }
+        };
+    } catch (error) {
+        console.error('[RecruiterOutreach] previewCampaignReach error:', error);
+        return { error: error.message };
+    }
+}

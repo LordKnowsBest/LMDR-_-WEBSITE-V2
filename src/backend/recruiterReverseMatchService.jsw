@@ -1,0 +1,370 @@
+import * as dataAccess from 'backend/dataAccess';
+
+// Collection keys (camelCase from configData.js)
+const COLLECTIONS = {
+    subscriptions: 'matchSubscriptions',
+    alerts: 'matchSubscriptionAlerts',
+    drivers: 'driverProfiles',
+    carrierSubs: 'carrierSubscriptions',
+    billing: 'billingHistory',
+    recruiters: 'recruiterProfiles'
+};
+
+// ===================================================
+// 1. reverseSearchDrivers
+// ===================================================
+export async function reverseSearchDrivers(recruiterId, params = {}) {
+    try {
+        const page = Number(params.page) || 1;
+        const pageSize = Math.min(Number(params.page_size) || 20, 50);
+
+        const queryFilters = { status: 'active' };
+        if (params.cdlClass) queryFilters.cdl_class = params.cdlClass;
+        if (params.state) queryFilters.state = params.state;
+        if (params.jobType) queryFilters.job_type = params.jobType;
+
+        const result = await dataAccess.queryRecords(COLLECTIONS.drivers, {
+            filters: queryFilters,
+            limit: pageSize,
+            skip: (page - 1) * pageSize
+        });
+
+        if (!result.success) {
+            return { error: result.error || 'Failed to search drivers' };
+        }
+
+        const minExp = params.minExperience ? Number(params.minExperience) : 0;
+        const reqEndorsements = params.endorsements
+            ? (Array.isArray(params.endorsements) ? params.endorsements : String(params.endorsements).split(',').map(s => s.trim()))
+            : [];
+
+        const scored = (result.items || []).map(driver => {
+            let matchScore = 0;
+            let maxScore = 0;
+
+            // Experience match
+            maxScore += 25;
+            const driverExp = Number(driver.years_experience) || 0;
+            if (driverExp >= minExp) matchScore += 25;
+            else if (minExp > 0) matchScore += Math.round((driverExp / minExp) * 25);
+
+            // Location match
+            maxScore += 20;
+            if (!params.state || driver.state === params.state) matchScore += 20;
+
+            // Endorsements match
+            if (reqEndorsements.length > 0) {
+                maxScore += 25;
+                const driverEndorsements = driver.endorsements
+                    ? String(driver.endorsements).split(',').map(s => s.trim().toUpperCase())
+                    : [];
+                const matched = reqEndorsements.filter(e => driverEndorsements.includes(e.toUpperCase()));
+                matchScore += Math.round((matched.length / reqEndorsements.length) * 25);
+            }
+
+            // Preferences match
+            maxScore += 15;
+            if (params.homeTime && driver.preferred_home_time === params.homeTime) matchScore += 15;
+            else if (!params.homeTime) matchScore += 15;
+
+            // Availability / willingness to relocate
+            maxScore += 15;
+            if (params.willRelocate !== undefined) {
+                const driverWill = String(driver.will_relocate).toLowerCase() === 'true' || driver.will_relocate === 'Yes';
+                if (String(params.willRelocate).toLowerCase() === 'true' && driverWill) matchScore += 15;
+                else if (String(params.willRelocate).toLowerCase() !== 'true') matchScore += 15;
+            } else {
+                matchScore += 15;
+            }
+
+            const finalScore = maxScore > 0 ? Math.round((matchScore / maxScore) * 100) : 0;
+
+            return {
+                ...driver,
+                match_score: finalScore
+            };
+        });
+
+        // Sort by match score descending
+        scored.sort((a, b) => b.match_score - a.match_score);
+
+        return { result: { drivers: scored, totalCount: result.totalCount || scored.length } };
+    } catch (err) {
+        console.error('reverseSearchDrivers error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 2. getReverseMatchScores
+// ===================================================
+export async function getReverseMatchScores(recruiterId, matchId) {
+    try {
+        if (!matchId) return { error: 'matchId is required' };
+
+        // matchId references a saved match record — look it up from alerts or a match collection
+        const alertResult = await dataAccess.queryRecords(COLLECTIONS.alerts, {
+            filters: { _id: String(matchId) },
+            limit: 1
+        });
+
+        if (!alertResult.success || !alertResult.items || alertResult.items.length === 0) {
+            return { error: 'Match record not found' };
+        }
+
+        const match = alertResult.items[0];
+
+        // Fetch driver details
+        const driverResult = await dataAccess.queryRecords(COLLECTIONS.drivers, {
+            filters: { _id: match.driver_id || match.driverId },
+            limit: 1
+        });
+
+        const driver = driverResult.success && driverResult.items?.length > 0 ? driverResult.items[0] : null;
+
+        return {
+            result: {
+                driver: driver || { id: match.driver_id },
+                carrier: { dot: match.carrier_dot },
+                overallScore: match.match_score || 0,
+                breakdown: {
+                    experience: match.experience_score ?? null,
+                    location: match.location_score ?? null,
+                    endorsements: match.endorsements_score ?? null,
+                    preferences: match.preferences_score ?? null,
+                    availability: match.availability_score ?? null
+                }
+            }
+        };
+    } catch (err) {
+        console.error('getReverseMatchScores error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 3. createMatchSubscription
+// ===================================================
+export async function createMatchSubscription(recruiterId, params = {}) {
+    try {
+        const { carrierDot, name, criteria, frequency } = params;
+        if (!carrierDot) return { error: 'carrierDot is required' };
+        if (!name) return { error: 'name is required' };
+
+        const validFrequencies = ['realtime', 'daily', 'weekly'];
+        const freq = validFrequencies.includes(frequency) ? frequency : 'daily';
+
+        const record = {
+            recruiter_id: String(recruiterId),
+            carrier_dot: String(carrierDot),
+            name: name,
+            criteria: JSON.stringify(criteria || {}),
+            frequency: freq,
+            status: 'active',
+            created_date: new Date().toISOString()
+        };
+
+        const insertResult = await dataAccess.insertRecord(COLLECTIONS.subscriptions, record, { suppressAuth: true });
+
+        if (!insertResult.success) {
+            return { error: insertResult.error || 'Failed to create subscription' };
+        }
+
+        return { result: { success: true, subscriptionId: insertResult._id || insertResult.item?._id } };
+    } catch (err) {
+        console.error('createMatchSubscription error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 4. getMatchSubscriptions
+// ===================================================
+export async function getMatchSubscriptions(recruiterId) {
+    try {
+        const result = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: {
+                recruiter_id: String(recruiterId),
+                status: 'active'
+            },
+            sort: [{ field: 'created_date', direction: 'desc' }]
+        });
+
+        if (!result.success) {
+            return { error: result.error || 'Failed to query subscriptions' };
+        }
+
+        const subscriptions = (result.items || []).map(item => ({
+            ...item,
+            criteria: safeParse(item.criteria)
+        }));
+
+        return { result: { subscriptions } };
+    } catch (err) {
+        console.error('getMatchSubscriptions error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 5. deleteMatchSubscription
+// ===================================================
+export async function deleteMatchSubscription(recruiterId, subscriptionId) {
+    try {
+        if (!subscriptionId) return { error: 'subscriptionId is required' };
+
+        // Verify ownership
+        const existing = await dataAccess.queryRecords(COLLECTIONS.subscriptions, {
+            filters: {
+                _id: String(subscriptionId),
+                recruiter_id: String(recruiterId)
+            },
+            limit: 1
+        });
+
+        if (!existing.success || !existing.items || existing.items.length === 0) {
+            return { error: 'Subscription not found or not owned by this recruiter' };
+        }
+
+        const updateResult = await dataAccess.updateRecord(COLLECTIONS.subscriptions, subscriptionId, {
+            status: 'inactive',
+            deactivated_date: new Date().toISOString()
+        }, { suppressAuth: true });
+
+        if (!updateResult.success) {
+            return { error: updateResult.error || 'Failed to delete subscription' };
+        }
+
+        return { result: { success: true } };
+    } catch (err) {
+        console.error('deleteMatchSubscription error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 6. getSubscriptionAlerts
+// ===================================================
+export async function getSubscriptionAlerts(recruiterId, filters = {}) {
+    try {
+        const page = Number(filters.page) || 1;
+        const pageSize = Math.min(Number(filters.page_size) || 20, 50);
+
+        const queryFilters = { recruiter_id: String(recruiterId) };
+        if (filters.subscriptionId) queryFilters.subscription_id = String(filters.subscriptionId);
+        if (filters.isRead !== undefined) queryFilters.is_read = String(filters.isRead) === 'true';
+
+        const result = await dataAccess.queryRecords(COLLECTIONS.alerts, {
+            filters: queryFilters,
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            sort: [{ field: '_createdDate', direction: 'desc' }]
+        });
+
+        if (!result.success) {
+            return { error: result.error || 'Failed to query alerts' };
+        }
+
+        const alerts = result.items || [];
+
+        // Count unread
+        const unreadResult = await dataAccess.queryRecords(COLLECTIONS.alerts, {
+            filters: { recruiter_id: String(recruiterId), is_read: false },
+            limit: 0
+        });
+        const unreadCount = unreadResult.totalCount || 0;
+
+        return { result: { alerts, totalCount: result.totalCount || alerts.length, unreadCount } };
+    } catch (err) {
+        console.error('getSubscriptionAlerts error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 7. getStripeBilling
+// ===================================================
+export async function getStripeBilling(recruiterId) {
+    try {
+        // Get carrier subscription
+        const subResult = await dataAccess.queryRecords(COLLECTIONS.carrierSubs, {
+            filters: { recruiter_id: String(recruiterId) },
+            sort: [{ field: '_createdDate', direction: 'desc' }],
+            limit: 1
+        });
+
+        const subscription = subResult.success && subResult.items?.length > 0
+            ? {
+                plan: subResult.items[0].plan || 'free',
+                status: subResult.items[0].status || 'active',
+                renewalDate: subResult.items[0].renewal_date || null
+            }
+            : { plan: 'free', status: 'none', renewalDate: null };
+
+        // Get recent billing history
+        const billingResult = await dataAccess.queryRecords(COLLECTIONS.billing, {
+            filters: { recruiter_id: String(recruiterId) },
+            sort: [{ field: 'charge_date', direction: 'desc' }],
+            limit: 10
+        });
+
+        const recentCharges = billingResult.success ? (billingResult.items || []) : [];
+        const totalSpend = recentCharges.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+
+        return { result: { subscription, recentCharges, totalSpend } };
+    } catch (err) {
+        console.error('getStripeBilling error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 8. upgradeSubscription
+// ===================================================
+export async function upgradeSubscription(recruiterId, params = {}) {
+    try {
+        const { newPlan, billingCycle } = params;
+        if (!newPlan) return { error: 'newPlan is required' };
+
+        const validCycles = ['monthly', 'annual'];
+        const cycle = validCycles.includes(billingCycle) ? billingCycle : 'monthly';
+
+        const record = {
+            recruiter_id: String(recruiterId),
+            plan: newPlan,
+            billing_cycle: cycle,
+            status: 'pending_upgrade',
+            amount: 0,
+            charge_date: new Date().toISOString(),
+            description: `Upgrade to ${newPlan} (${cycle})`
+        };
+
+        const insertResult = await dataAccess.insertRecord(COLLECTIONS.billing, record, { suppressAuth: true });
+
+        if (!insertResult.success) {
+            return { error: insertResult.error || 'Failed to initiate upgrade' };
+        }
+
+        return {
+            result: {
+                success: true,
+                checkoutUrl: null,
+                upgradeId: insertResult._id || insertResult.item?._id
+            }
+        };
+    } catch (err) {
+        console.error('upgradeSubscription error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// Helpers
+// ===================================================
+function safeParse(str) {
+    try {
+        return typeof str === 'string' ? JSON.parse(str) : str;
+    } catch {
+        return str;
+    }
+}

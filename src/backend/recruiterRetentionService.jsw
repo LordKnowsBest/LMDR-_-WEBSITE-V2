@@ -1,0 +1,283 @@
+import * as dataAccess from 'backend/dataAccess';
+
+// Collection keys (camelCase from configData.js)
+const COLLECTIONS = {
+    riskLogs: 'retentionRiskLogs',
+    watchlist: 'retentionWatchlist',
+    interventions: 'retentionInterventions',
+    drivers: 'driverProfiles',
+    interests: 'driverCarrierInterests'
+};
+
+// ===================================================
+// 1. getRetentionRisks
+// ===================================================
+export async function getRetentionRisks(recruiterId, filters = {}) {
+    try {
+        const page = Number(filters.page) || 1;
+        const pageSize = Math.min(Number(filters.page_size) || 20, 50);
+
+        const queryFilters = {};
+        if (filters.carrierDot) queryFilters.carrier_dot = String(filters.carrierDot);
+        if (filters.riskLevel) queryFilters.risk_level = filters.riskLevel;
+
+        const result = await dataAccess.queryRecords(COLLECTIONS.riskLogs, {
+            filters: queryFilters,
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            sort: [{ field: 'risk_score', direction: 'desc' }]
+        });
+
+        if (!result.success) {
+            return { error: result.error || 'Failed to query retention risks' };
+        }
+
+        const drivers = (result.items || []).map(item => ({
+            driverId: item.driver_id,
+            name: item.driver_name || 'Unknown',
+            riskScore: item.risk_score,
+            riskLevel: item.risk_level,
+            topFactors: item.top_factors || [],
+            lastContact: item.last_contact
+        }));
+
+        return { result: { drivers, totalCount: result.totalCount || drivers.length } };
+    } catch (err) {
+        console.error('getRetentionRisks error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 2. getRiskScoreDetail
+// ===================================================
+export async function getRiskScoreDetail(driverId) {
+    try {
+        const result = await dataAccess.queryRecords(COLLECTIONS.riskLogs, {
+            filters: { driver_id: String(driverId) },
+            sort: [{ field: '_createdDate', direction: 'desc' }],
+            limit: 1
+        });
+
+        if (!result.success || !result.items || result.items.length === 0) {
+            return { error: 'No risk data found for driver' };
+        }
+
+        const entry = result.items[0];
+        return {
+            result: {
+                driverId: entry.driver_id,
+                overallScore: entry.risk_score,
+                breakdown: {
+                    satisfaction: entry.satisfaction_score ?? null,
+                    tenure: entry.tenure_score ?? null,
+                    payCompetitiveness: entry.pay_competitiveness_score ?? null,
+                    homeTime: entry.home_time_score ?? null,
+                    recentActivity: entry.recent_activity_score ?? null
+                },
+                lastUpdated: entry._updatedDate || entry._createdDate,
+                trend: entry.trend || 'stable'
+            }
+        };
+    } catch (err) {
+        console.error('getRiskScoreDetail error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 3. addToWatchlist
+// ===================================================
+export async function addToWatchlist(recruiterId, params = {}) {
+    try {
+        const { driverId, carrierDot, reason, priority } = params;
+        if (!driverId) return { error: 'driverId is required' };
+
+        // Idempotent check — look for existing active entry
+        const existing = await dataAccess.queryRecords(COLLECTIONS.watchlist, {
+            filters: {
+                recruiter_id: String(recruiterId),
+                driver_id: String(driverId),
+                status: 'active'
+            },
+            limit: 1
+        });
+
+        if (existing.success && existing.items && existing.items.length > 0) {
+            return { result: { success: true, watchlistId: existing.items[0]._id, alreadyExisted: true } };
+        }
+
+        const record = {
+            recruiter_id: String(recruiterId),
+            driver_id: String(driverId),
+            carrier_dot: carrierDot ? String(carrierDot) : '',
+            reason: reason || '',
+            priority: priority || 'normal',
+            status: 'active',
+            added_date: new Date().toISOString()
+        };
+
+        const insertResult = await dataAccess.insertRecord(COLLECTIONS.watchlist, record, { suppressAuth: true });
+
+        if (!insertResult.success) {
+            return { error: insertResult.error || 'Failed to add to watchlist' };
+        }
+
+        return { result: { success: true, watchlistId: insertResult._id || insertResult.item?._id } };
+    } catch (err) {
+        console.error('addToWatchlist error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 4. removeFromWatchlist
+// ===================================================
+export async function removeFromWatchlist(recruiterId, driverId) {
+    try {
+        if (!driverId) return { error: 'driverId is required' };
+
+        const existing = await dataAccess.queryRecords(COLLECTIONS.watchlist, {
+            filters: {
+                recruiter_id: String(recruiterId),
+                driver_id: String(driverId),
+                status: 'active'
+            },
+            limit: 1
+        });
+
+        if (!existing.success || !existing.items || existing.items.length === 0) {
+            return { error: 'No active watchlist entry found for this driver' };
+        }
+
+        const entry = existing.items[0];
+        const updateResult = await dataAccess.updateRecord(COLLECTIONS.watchlist, entry._id, {
+            status: 'removed',
+            removed_date: new Date().toISOString()
+        }, { suppressAuth: true });
+
+        if (!updateResult.success) {
+            return { error: updateResult.error || 'Failed to remove from watchlist' };
+        }
+
+        return { result: { success: true } };
+    } catch (err) {
+        console.error('removeFromWatchlist error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 5. getWatchlist
+// ===================================================
+export async function getWatchlist(recruiterId, filters = {}) {
+    try {
+        const page = Number(filters.page) || 1;
+        const pageSize = Math.min(Number(filters.page_size) || 20, 50);
+
+        const queryFilters = {
+            recruiter_id: String(recruiterId),
+            status: 'active'
+        };
+        if (filters.carrierDot) queryFilters.carrier_dot = String(filters.carrierDot);
+        if (filters.priority) queryFilters.priority = filters.priority;
+
+        const result = await dataAccess.queryRecords(COLLECTIONS.watchlist, {
+            filters: queryFilters,
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            sort: [{ field: 'added_date', direction: 'desc' }]
+        });
+
+        if (!result.success) {
+            return { error: result.error || 'Failed to query watchlist' };
+        }
+
+        return { result: { entries: result.items || [], totalCount: result.totalCount || 0 } };
+    } catch (err) {
+        console.error('getWatchlist error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 6. createRetentionIntervention
+// ===================================================
+export async function createRetentionIntervention(recruiterId, params = {}) {
+    try {
+        const { driverId, carrierDot, interventionType, description, incentiveDetails } = params;
+        if (!driverId) return { error: 'driverId is required' };
+        if (!interventionType) return { error: 'interventionType is required' };
+
+        const validTypes = ['call', 'sms', 'email', 'incentive', 'meeting'];
+        if (!validTypes.includes(interventionType)) {
+            return { error: `interventionType must be one of: ${validTypes.join(', ')}` };
+        }
+
+        const record = {
+            recruiter_id: String(recruiterId),
+            driver_id: String(driverId),
+            carrier_dot: carrierDot ? String(carrierDot) : '',
+            intervention_type: interventionType,
+            description: description || '',
+            incentive_details: incentiveDetails || '',
+            status: 'completed',
+            outcome: 'pending',
+            created_date: new Date().toISOString()
+        };
+
+        const insertResult = await dataAccess.insertRecord(COLLECTIONS.interventions, record, { suppressAuth: true });
+
+        if (!insertResult.success) {
+            return { error: insertResult.error || 'Failed to create intervention' };
+        }
+
+        return { result: { success: true, interventionId: insertResult._id || insertResult.item?._id } };
+    } catch (err) {
+        console.error('createRetentionIntervention error:', err);
+        return { error: err.message };
+    }
+}
+
+// ===================================================
+// 7. getRetentionHistory
+// ===================================================
+export async function getRetentionHistory(recruiterId, filters = {}) {
+    try {
+        const page = Number(filters.page) || 1;
+        const pageSize = Math.min(Number(filters.page_size) || 20, 50);
+
+        const queryFilters = { recruiter_id: String(recruiterId) };
+        if (filters.carrierDot) queryFilters.carrier_dot = String(filters.carrierDot);
+        if (filters.driverId) queryFilters.driver_id = String(filters.driverId);
+        if (filters.interventionType) queryFilters.intervention_type = filters.interventionType;
+        if (filters.outcome) queryFilters.outcome = filters.outcome;
+
+        const result = await dataAccess.queryRecords(COLLECTIONS.interventions, {
+            filters: queryFilters,
+            limit: pageSize,
+            skip: (page - 1) * pageSize,
+            sort: [{ field: 'created_date', direction: 'desc' }]
+        });
+
+        if (!result.success) {
+            return { error: result.error || 'Failed to query retention history' };
+        }
+
+        const interventions = result.items || [];
+        const successCount = interventions.filter(i => i.outcome === 'retained').length;
+        const totalWithOutcome = interventions.filter(i => i.outcome && i.outcome !== 'pending').length;
+        const successRate = totalWithOutcome > 0 ? Math.round((successCount / totalWithOutcome) * 100) : null;
+
+        return {
+            result: {
+                interventions,
+                totalCount: result.totalCount || interventions.length,
+                successRate
+            }
+        };
+    } catch (err) {
+        console.error('getRetentionHistory error:', err);
+        return { error: err.message };
+    }
+}

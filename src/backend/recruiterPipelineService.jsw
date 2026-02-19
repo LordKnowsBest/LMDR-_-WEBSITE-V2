@@ -1,0 +1,329 @@
+import * as dataAccess from 'backend/dataAccess';
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+// Collection keys for dataAccess routing
+const COLLECTIONS = {
+  savedSearches: 'savedSearches',
+  savedSearchAlerts: 'savedSearchAlerts',
+  interventionTemplates: 'interventionTemplates',
+  interventionLog: 'interventionLog',
+  driverCarrierInterests: 'driverCarrierInterests',
+  driverProfiles: 'driverProfiles',
+  callOutcomes: 'callOutcomes',
+  voiceCallLogs: 'voiceCallLogs'
+};
+
+// ============================================================================
+// 1. saveDriverSearch
+// ============================================================================
+
+export async function saveDriverSearch(recruiterId, params = {}) {
+  try {
+    const { name, criteria = {}, alertFrequency = 'none' } = params;
+    if (!name) return { error: 'name is required' };
+
+    const record = await dataAccess.insertRecord(COLLECTIONS.savedSearches, {
+      recruiter_id: recruiterId,
+      name,
+      criteria: JSON.stringify(criteria),
+      alert_frequency: alertFrequency,
+      created_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    const searchId = record?._id || record?.id || null;
+    return { success: true, searchId };
+  } catch (error) {
+    console.error('saveDriverSearch error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 2. getSavedSearches
+// ============================================================================
+
+export async function getSavedSearches(recruiterId) {
+  try {
+    if (!recruiterId) return { error: 'recruiterId is required' };
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.savedSearches, {
+      filters: { recruiter_id: recruiterId },
+      limit: 50,
+      suppressAuth: true
+    });
+
+    const searches = (result.items || []).map(s => ({
+      ...s,
+      criteria: safeParse(s.criteria)
+    }));
+
+    return { searches };
+  } catch (error) {
+    console.error('getSavedSearches error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 3. runSavedSearch
+// ============================================================================
+
+export async function runSavedSearch(recruiterId, searchId) {
+  try {
+    if (!searchId) return { error: 'searchId is required' };
+
+    const search = await dataAccess.getRecord(COLLECTIONS.savedSearches, searchId, { suppressAuth: true });
+    if (!search) return { error: 'Saved search not found' };
+    if (search.recruiter_id !== recruiterId) return { error: 'Access denied' };
+
+    const criteria = safeParse(search.criteria);
+    const queryFilters = {};
+
+    if (criteria.cdl_class) queryFilters.cdl_class = criteria.cdl_class;
+    if (criteria.state) queryFilters.state = criteria.state;
+    if (criteria.job_type) queryFilters.job_type = criteria.job_type;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverProfiles, {
+      filters: queryFilters,
+      limit: 50,
+      suppressAuth: true
+    });
+
+    let results = result.items || [];
+
+    // Apply numeric filters in-memory
+    if (criteria.min_experience) {
+      const minExp = Number(criteria.min_experience);
+      results = results.filter(d => Number(d.years_experience || 0) >= minExp);
+    }
+    if (criteria.endorsements) {
+      const required = criteria.endorsements;
+      results = results.filter(d => {
+        const driverEndorsements = d.endorsements || '';
+        return required.every(e => driverEndorsements.includes(e));
+      });
+    }
+
+    return { results, totalCount: results.length, searchName: search.name };
+  } catch (error) {
+    console.error('runSavedSearch error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 4. getInterventionTemplates
+// ============================================================================
+
+export async function getInterventionTemplates(filters = {}) {
+  try {
+    const queryFilters = {};
+    if (filters.category) queryFilters.category = filters.category;
+    if (filters.stage) queryFilters.stage = filters.stage;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.interventionTemplates, {
+      filters: queryFilters,
+      limit: 50,
+      suppressAuth: true
+    });
+
+    return { templates: result.items || [] };
+  } catch (error) {
+    console.error('getInterventionTemplates error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 5. applyIntervention
+// ============================================================================
+
+export async function applyIntervention(recruiterId, params = {}) {
+  try {
+    const { candidateId, templateId, customMessage, channel = 'manual' } = params;
+    if (!candidateId) return { error: 'candidateId is required' };
+
+    let templateData = null;
+    if (templateId) {
+      templateData = await dataAccess.getRecord(COLLECTIONS.interventionTemplates, templateId, { suppressAuth: true });
+      if (!templateData) return { error: 'Intervention template not found' };
+    }
+
+    const record = await dataAccess.insertRecord(COLLECTIONS.interventionLog, {
+      recruiter_id: recruiterId,
+      candidate_id: candidateId,
+      template_id: templateId || null,
+      template_name: templateData?.name || 'Custom',
+      channel,
+      message: customMessage || templateData?.message || '',
+      status: 'applied',
+      applied_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    const interventionId = record?._id || record?.id || null;
+    return { success: true, interventionId };
+  } catch (error) {
+    console.error('applyIntervention error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 6. bulkUpdatePipeline
+// ============================================================================
+
+export async function bulkUpdatePipeline(recruiterId, params = {}) {
+  try {
+    const { candidateIds = [], newStatus, notes } = params;
+    if (!candidateIds.length || !newStatus) {
+      return { error: 'candidateIds and newStatus are required' };
+    }
+
+    let updated = 0;
+    let failed = 0;
+    const errors = [];
+
+    const chunks = chunkArray(candidateIds, 10);
+    for (const chunk of chunks) {
+      const results = await Promise.all(
+        chunk.map(async (candidateId) => {
+          try {
+            await dataAccess.updateRecord(COLLECTIONS.driverCarrierInterests, {
+              _id: candidateId,
+              status: newStatus,
+              notes: notes || '',
+              updated_by: recruiterId,
+              updated_at: new Date().toISOString()
+            }, { suppressAuth: true });
+            return { success: true };
+          } catch (err) {
+            return { success: false, id: candidateId, error: err.message };
+          }
+        })
+      );
+
+      for (const r of results) {
+        if (r.success) updated++;
+        else {
+          failed++;
+          errors.push({ id: r.id, error: r.error });
+        }
+      }
+
+      // Rate limit between chunks
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    return { updated, failed, errors };
+  } catch (error) {
+    console.error('bulkUpdatePipeline error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 7. getStaleCandidates
+// ============================================================================
+
+export async function getStaleCandidates(recruiterId, params = {}) {
+  try {
+    const { carrierDot, staleDays = 7, stage_filter, page, page_size } = params;
+    const pageNum = Number(page) || 1;
+    const pageSize = Math.min(Number(page_size) || 20, 50);
+
+    const queryFilters = {};
+    if (carrierDot) queryFilters.carrier_dot = String(carrierDot);
+    if (stage_filter) queryFilters.status = stage_filter;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.driverCarrierInterests, {
+      filters: queryFilters,
+      limit: 200,
+      suppressAuth: true
+    });
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - staleDays);
+
+    const stale = (result.items || []).filter(item => {
+      const lastUpdated = item.updated_at || item._updatedDate || item._createdDate;
+      return lastUpdated && new Date(lastUpdated) < cutoff;
+    });
+
+    const start = (pageNum - 1) * pageSize;
+    const candidates = stale.slice(start, start + pageSize);
+
+    return { candidates, totalCount: stale.length };
+  } catch (error) {
+    console.error('getStaleCandidates error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// 8. getCallOutcomesSummary
+// ============================================================================
+
+export async function getCallOutcomesSummary(recruiterId, params = {}) {
+  try {
+    const { carrierDot, dateRange, page, page_size } = params;
+    const pageNum = Number(page) || 1;
+    const pageSize = Math.min(Number(page_size) || 20, 50);
+
+    const queryFilters = {};
+    if (carrierDot) queryFilters.carrier_dot = String(carrierDot);
+    if (recruiterId) queryFilters.recruiter_id = recruiterId;
+
+    const result = await dataAccess.queryRecords(COLLECTIONS.callOutcomes, {
+      filters: queryFilters,
+      limit: 200,
+      suppressAuth: true
+    });
+
+    let outcomes = result.items || [];
+
+    // Apply date range filter in-memory
+    if (dateRange) {
+      const { from, to } = dateRange;
+      if (from) {
+        const fromDate = new Date(from);
+        outcomes = outcomes.filter(o => new Date(o.call_date || o._createdDate) >= fromDate);
+      }
+      if (to) {
+        const toDate = new Date(to);
+        outcomes = outcomes.filter(o => new Date(o.call_date || o._createdDate) <= toDate);
+      }
+    }
+
+    // Build summary
+    const summary = { connected: 0, voicemail: 0, no_answer: 0, busy: 0, total: outcomes.length };
+    for (const o of outcomes) {
+      const outcome = (o.outcome || o.disposition || '').toLowerCase();
+      if (outcome.includes('connect')) summary.connected++;
+      else if (outcome.includes('voicemail')) summary.voicemail++;
+      else if (outcome.includes('no_answer') || outcome.includes('no answer')) summary.no_answer++;
+      else if (outcome.includes('busy')) summary.busy++;
+    }
+
+    const start = (pageNum - 1) * pageSize;
+    const pagedOutcomes = outcomes.slice(start, start + pageSize);
+
+    return { summary, outcomes: pagedOutcomes };
+  } catch (error) {
+    console.error('getCallOutcomesSummary error:', error);
+    return { error: error.message };
+  }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+function safeParse(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
