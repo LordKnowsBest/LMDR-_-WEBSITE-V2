@@ -12,6 +12,8 @@ import { sendBatchStreakAtRiskNotifications } from 'backend/streakNotifications'
 import { batchRecalculateBadges } from 'backend/badgeService';
 import { generateLeaderboardSnapshot, generateAllLeaderboardSnapshots } from 'backend/leaderboardService';
 import { processExpiredChallenges, sendExpiringChallengeReminders, assignDailyChallenges } from 'backend/challengeService';
+import { logEvent, EVENT_TYPES } from 'backend/lifecycleService';
+import { queryRecords } from 'backend/dataAccess';
 
 // =============================================================================
 // DAILY STREAK PROCESSING (runs at midnight UTC)
@@ -437,4 +439,103 @@ export async function triggerChallengeReminders() {
  */
 export async function triggerDailyChallengeAssignment() {
   return await assignDailyChallengesJob();
+}
+
+// =============================================================================
+// RETENTION MILESTONE CHECKS (runs daily at 07:30 UTC)
+// =============================================================================
+
+/**
+ * Scan for drivers who hit their 30-day or 90-day post-hire milestone.
+ * For each qualifying driver, logs the lifecycle event which fires the
+ * retention_30_day (+300 XP) or retention_90_day (+500 XP) award via
+ * the logEvent hook in lifecycleService.
+ *
+ * Uses a ±3-day window around each milestone so a missed run catches up
+ * without re-processing old milestones (existing MILESTONE events block re-fire).
+ *
+ * Cron: 30 7 * * * (07:30 UTC daily)
+ */
+export async function checkRetentionMilestones() {
+  console.log('[GamificationJobs] Checking retention milestones (30-day / 90-day)...');
+
+  const now = Date.now();
+  let milestones30 = 0;
+  let milestones90 = 0;
+  let errors = 0;
+
+  try {
+    // Build date windows: hire events that land in [N-3, N+3] day range
+    const windows = [
+      { days: 30, eventType: EVENT_TYPES.MILESTONE_30 },
+      { days: 90, eventType: EVENT_TYPES.MILESTONE_90 }
+    ];
+
+    for (const { days, eventType } of windows) {
+      const windowStart = new Date(now - (days + 3) * 86400000).toISOString();
+      const windowEnd   = new Date(now - (days - 3) * 86400000).toISOString();
+
+      // Fetch HIRE events in the window
+      const hireResult = await queryRecords('lifecycleEvents', {
+        filters: {
+          event_type: EVENT_TYPES.HIRE,
+          event_date: { gte: windowStart, lte: windowEnd }
+        },
+        limit: 500,
+        suppressAuth: true
+      });
+
+      const hireEvents = hireResult.items || [];
+      if (hireEvents.length === 0) continue;
+
+      for (const hireEvent of hireEvents) {
+        try {
+          const { driver_id, carrier_id } = hireEvent;
+          if (!driver_id) continue;
+
+          // Check if milestone already logged for this driver+carrier
+          const existing = await queryRecords('lifecycleEvents', {
+            filters: { driver_id, carrier_id, event_type: eventType },
+            limit: 1,
+            suppressAuth: true
+          });
+
+          if ((existing.items || []).length > 0) continue; // Already awarded
+
+          // Log milestone — the logEvent hook awards XP automatically
+          await logEvent(driver_id, carrier_id, eventType, {
+            hireEventId: hireEvent._id,
+            tenureDays: days
+          });
+
+          if (days === 30) milestones30++;
+          else milestones90++;
+
+        } catch (driverErr) {
+          console.warn(`[GamificationJobs] Milestone error for driver ${hireEvent.driver_id}:`, driverErr.message);
+          errors++;
+        }
+      }
+    }
+
+    console.log(`[GamificationJobs] Retention milestone check complete:
+      - 30-day milestones fired: ${milestones30}
+      - 90-day milestones fired: ${milestones90}
+      - Errors: ${errors}
+    `);
+
+    return { success: true, milestones30, milestones90, errors, executedAt: new Date().toISOString() };
+
+  } catch (error) {
+    console.error('[GamificationJobs] checkRetentionMilestones error:', error);
+    return { success: false, error: error.message, executedAt: new Date().toISOString() };
+  }
+}
+
+/**
+ * Manually trigger retention milestone check (admin use)
+ * @returns {object} Processing results
+ */
+export async function triggerRetentionMilestones() {
+  return await checkRetentionMilestones();
 }
