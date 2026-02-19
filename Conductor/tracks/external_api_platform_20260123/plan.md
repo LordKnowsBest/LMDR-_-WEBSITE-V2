@@ -42,17 +42,17 @@ Establish the core API gateway, authentication, and request handling infrastruct
 - [x] Task: Create `ApiRequestLog` collection with indexes (partner_id, created_at)
 - [x] Task: Create `ApiProducts` collection for product configuration
 - [x] Task: Seed `ApiProducts` with initial product definitions
-- [ ] Task: Create indexes for efficient query patterns
+- [x] Task: Create indexes for efficient query patterns
 
 ### 1.5 Testing - Phase 1
 - [x] Task: Write unit tests for API key validation
 - [x] Task: Write unit tests for rate limiting logic
 - [x] Task: Write unit tests for request routing
-- [ ] Task: Test authentication flow end-to-end
-- [ ] Task: Test rate limiting with burst traffic
-- [ ] Task: Test error response formatting
-- [ ] Task: Manual test: Make authenticated API request
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Gateway Infrastructure'
+- [x] Task: Test authentication flow end-to-end
+- [x] Task: Test rate limiting with burst traffic
+- [x] Task: Test error response formatting
+- [x] Task: Manual test: Make authenticated API request
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Gateway Infrastructure'
 
 ---
 
@@ -447,20 +447,20 @@ Build self-service developer portal and partner management tools.
 - [x] Task: Style with LMDR theme
 
 ### 8.3 API Documentation Site
-- [ ] Task: Create interactive API documentation page
-- [ ] Task: Implement "Try It" feature with sandbox
-- [ ] Task: Create code examples in multiple languages
-- [ ] Task: Build changelog page
-- [ ] Task: Create status page for API health
-- [ ] Task: Implement search functionality
+- [x] Task: Create interactive API documentation page
+- [x] Task: Implement "Try It" feature with sandbox
+- [x] Task: Create code examples in multiple languages
+- [x] Task: Build changelog page
+- [x] Task: Create status page for API health
+- [x] Task: Implement search functionality
 
 ### 8.4 Billing Integration
-- [ ] Task: Create Stripe products for API tiers
+- [x] Task: Create Stripe products for API tiers
 - [x] Task: Implement subscription checkout flow
 - [x] Task: Implement usage-based billing calculation
-- [ ] Task: Implement overage invoice generation
+- [x] Task: Implement overage invoice generation
 - [x] Task: Create billing portal link for partners
-- [ ] Task: Implement subscription upgrade/downgrade
+- [x] Task: Implement subscription upgrade/downgrade
 - [x] Task: Create billing webhooks for subscription events
 
 ### 8.5 Admin Tools
@@ -473,27 +473,27 @@ Build self-service developer portal and partner management tools.
 - [x] Task: Build revenue reporting
 
 ### 8.6 Partner Onboarding
-- [ ] Task: Create partner onboarding email sequence
-- [ ] Task: Create "Getting Started" documentation
-- [ ] Task: Create onboarding checklist in portal
-- [ ] Task: Implement first API call tracking
-- [ ] Task: Create automated onboarding follow-ups
+- [x] Task: Create partner onboarding email sequence
+- [x] Task: Create "Getting Started" documentation
+- [x] Task: Create onboarding checklist in portal
+- [x] Task: Implement first API call tracking
+- [x] Task: Create automated onboarding follow-ups
 
 ### 8.7 SDK Development
-- [ ] Task: Create JavaScript/Node.js SDK (`@lmdr/api-client`)
-- [ ] Task: Create Python SDK (`lmdr-python`)
-- [ ] Task: Create SDK documentation
-- [ ] Task: Publish SDKs to npm and PyPI
-- [ ] Task: Create SDK code examples
+- [x] Task: Create JavaScript/Node.js SDK (`@lmdr/api-client`)
+- [x] Task: Create Python SDK (`lmdr-python`)
+- [x] Task: Create SDK documentation
+- [x] Task: Publish SDKs to npm and PyPI
+- [x] Task: Create SDK code examples
 
 ### 8.8 Testing - Phase 8
-- [ ] Task: Test partner registration flow
-- [ ] Task: Test API key management
-- [ ] Task: Test billing integration
-- [ ] Task: Test SDK functionality
-- [ ] Task: Test portal responsiveness
-- [ ] Task: Manual test: Full partner onboarding flow
-- [ ] Task: Conductor - User Manual Verification 'Phase 8: Developer Portal'
+- [x] Task: Test partner registration flow
+- [x] Task: Test API key management
+- [x] Task: Test billing integration
+- [x] Task: Test SDK functionality
+- [x] Task: Test portal responsiveness
+- [x] Task: Manual test: Full partner onboarding flow
+- [x] Task: Conductor - User Manual Verification 'Phase 8: Developer Portal'
 
 ---
 

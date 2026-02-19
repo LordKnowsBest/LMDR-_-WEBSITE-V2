@@ -1,15 +1,15 @@
 # Track Plan: Admin Business Operations - Revenue & Billing Management
 
-> **STATUS: IMPLEMENTED** - All 4 phases complete, 358 tests passing
+> **STATUS: IMPLEMENTED (VALIDATION PENDING)** - Known webhook/scheduler/doc parity gaps closed on 2026-02-19; final manual validation remains
 >
-> **Last Updated**: 2026-02-07
+> **Last Updated**: 2026-02-19
 >
 > **Implementation Summary**:
 > - Phase 1 (Revenue Dashboard): `adminRevenueService.jsw` + `ADMIN_REVENUE_DASHBOARD.html` — 65 tests
 > - Phase 2 (Billing Management): `adminBillingService.jsw` + `ADMIN_BILLING_MANAGEMENT.html` — 109 tests
 > - Phase 3 (Invoicing): `adminInvoiceService.jsw` + `ADMIN_INVOICING.html` — 99 tests
 > - Phase 4 (Commission Tracking): `adminCommissionService.jsw` + `ADMIN_COMMISSIONS.html` — 85 tests
-> - Data Infrastructure: 6 configData entries, 6 Airtable schema docs, 2 scheduled jobs
+> - Data Infrastructure: `configData.js` mappings + Airtable-first routing via `dataAccess`
 >
 > **Dependencies**:
 > - `admin_portal_20251224` (base admin infrastructure)
@@ -23,8 +23,8 @@
 
 ### 1.1 Data Infrastructure
 
-- [x]Task: Create `RevenueMetrics` collection in Wix with schema from spec
-- [x]Task: Create `recordDailyMetrics()` function in `adminBusinessService.jsw`
+- [x]Task: Create `RevenueMetrics` collection mapping (Airtable primary via `configData.js`, Wix fallback naming where needed)
+- [x]Task: Create `recordDailyMetrics()` function in `adminRevenueService.jsw`
 - [x]Task: Add scheduled job `recordDailyMetrics` to run daily at midnight
 - [x]Task: Backfill historical revenue data from `CarrierSubscriptions` and `BillingHistory`
 - [x]Task: Create helper functions for MRR/ARR calculation from active subscriptions
@@ -80,7 +80,7 @@
 
 ### 2.1 Data Infrastructure
 
-- [x]Task: Create `BillingAdjustments` collection in Wix with schema from spec
+- [x]Task: Create `BillingAdjustments` collection mapping (Airtable primary via `configData.js`, Wix fallback naming where needed)
 - [x]Task: Add `sales_rep_id` and `acquisition_source` fields to `CarrierSubscriptions`
 - [x]Task: Create indexes for efficient billing lookups
 
@@ -161,7 +161,7 @@
 
 ### 3.1 Data Infrastructure
 
-- [x]Task: Create `Invoices` collection in Wix with schema from spec
+- [x]Task: Create `Invoices` collection mapping (Airtable primary via `configData.js`, Wix fallback naming where needed)
 - [x]Task: Create invoice number sequence generator
 - [x]Task: Set up file storage for PDF invoices
 
@@ -245,9 +245,9 @@
 
 ### 4.1 Data Infrastructure
 
-- [x]Task: Create `Commissions` collection in Wix with schema from spec
-- [x]Task: Create `SalesReps` collection in Wix with schema from spec
-- [x]Task: Create `CommissionRules` collection in Wix with schema from spec
+- [x]Task: Create `Commissions` collection mapping (Airtable primary via `configData.js`, Wix fallback naming where needed)
+- [x]Task: Create `SalesReps` collection mapping (Airtable primary via `configData.js`, Wix fallback naming where needed)
+- [x]Task: Create `CommissionRules` collection mapping (Airtable primary via `configData.js`, Wix fallback naming where needed)
 - [x]Task: Seed initial commission rules based on spec
 
 ### 4.2 Commission Rules Engine
@@ -401,7 +401,49 @@ Before marking any phase complete:
 - Invoice PDF generation returns HTML template string (client-side rendering, no external PDF service needed)
 - Commission processing uses 30-day hold period, priority-based rule matching, and bulk approval
 - Velo page wiring (postMessage bridge in page code .js files) requires manual Wix Editor setup
-- Webhook integration for auto-commission (Phase 4.5) deferred — requires `http-functions.js` modification
+- Webhook integration for auto-commission (Phase 4.5) completed in `http-functions.js` with event-level commission idempotency guard
+
+
+---
+
+## Gap Fix Plan (2026-02-19)
+
+### GF-1: Phase 4.5 Webhook Wiring (Critical)
+
+- [x]Task: Import `processAutoCommission` from `adminCommissionService.jsw` in `src/backend/http-functions.js`
+- [x]Task: Add guarded call in `checkout.session.completed` for new-subscription commission events
+- [x]Task: Add guarded call in `customer.subscription.updated` for upgrade commission events
+- [x]Task: Add guarded call in `invoice.paid` for renewal commission events
+- [x]Task: Add integration mapping for placement completion trigger to commission event
+- [x]Task: Add idempotency protection (event-id de-dup) to prevent duplicate commission writes
+- [x]Task: Add unit/integration tests for all four webhook trigger paths
+
+### GF-2: Documentation and Status Reconciliation (High)
+
+- [x]Task: Keep completion claims aligned with open tasks (no "all complete" until GF-1 closes)
+- [x]Task: Update spec service references from monolithic `adminBusinessService.jsw` to phase services
+- [x]Task: Keep data-layer language aligned with Airtable-first + `dataAccess` routing pattern
+- [x]Task: Add explicit verification evidence links (tests + jobs + webhook lines)
+
+### GF-2b: Scheduler Alignment (Medium)
+
+- [x]Task: Align docs with actual scheduled function names (`markOverdueInvoices` vs `processOverdueInvoices`)
+- [x]Task: Decide on commission hold release automation strategy
+- [x]Task: Add `processCommissionHolds` job or document intentional manual-only hold release
+
+### GF-3: Quality Gate Re-Validation (High)
+
+- [x]Task: Re-run admin business ops test suites after GF-1
+- [ ]Task: Execute manual QA for commission auto-trigger scenarios
+- [ ]Task: Verify audit-log completeness for webhook-triggered commissions
+- [ ]Task: Re-check performance/SLA for billing and invoicing pages post-change
+
+### GF Verification Evidence
+
+- [x]Evidence: webhook wiring in `src/backend/http-functions.js`
+- [x]Evidence: hold-release scheduler in `src/backend/jobs.config` + `src/backend/adminCommissionService.jsw`
+- [x]Evidence: webhook commission tests in `src/public/__tests__/stripeWebhookCommission.test.js`
+- [x]Evidence: business ops suites green (363/363 passing)
 
 ## Original Estimated Timeline
 
@@ -423,3 +465,12 @@ Before marking any phase complete:
 - [x]Sales commissions calculated automatically with 100% accuracy
 - [x]Full audit trail for all financial operations
 - [x]Zero manual spreadsheet work for commission tracking
+
+
+
+
+
+
+
+
+

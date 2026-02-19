@@ -78,8 +78,8 @@ This track implements comprehensive business operations tools for LMDR administr
                                       |
                                       v
 +----------------+          +------------------------+          +----------------+
-|   Admin UI     |  <-----> |  adminBusinessService  |  <-----> |  Wix Data      |
-|  (HTML Pages)  |          |        .jsw            |          |  Collections   |
+|   Admin UI     |  <-----> | Phase Services (.jsw)  |  <-----> | dataAccess     |
+|  (HTML Pages)  |          |  Revenue/Billing/Inv/  |          | Airtable+Wix   |
 +----------------+          +------------------------+          +----------------+
        |                              |                                |
        |  postMessage                 |  API calls                     |
@@ -474,7 +474,7 @@ Signup Month    M0      M1      M2      M3      M6      M12
 
 ### 4.1 New Collections
 
-#### RevenueMetrics (Daily snapshots)
+#### RevenueMetrics (Daily snapshots, Airtable primary via dataAccess)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -492,7 +492,7 @@ Signup Month    M0      M1      M2      M3      M6      M12
 | `placement_revenue` | Number | One-time placement revenue |
 | `_createdDate` | DateTime | Record creation |
 
-#### BillingAdjustments
+#### BillingAdjustments (Airtable primary via dataAccess)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -509,7 +509,7 @@ Signup Month    M0      M1      M2      M3      M6      M12
 | `notes` | String | Internal notes |
 | `_createdDate` | DateTime | When created |
 
-#### Invoices
+#### Invoices (Airtable primary via dataAccess)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -541,7 +541,7 @@ Signup Month    M0      M1      M2      M3      M6      M12
 | `_createdDate` | DateTime | Record creation |
 | `_updatedDate` | DateTime | Last modified |
 
-#### Commissions
+#### Commissions (Airtable primary via dataAccess)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -562,7 +562,7 @@ Signup Month    M0      M1      M2      M3      M6      M12
 | `notes` | String | Admin notes |
 | `_createdDate` | DateTime | When commission recorded |
 
-#### SalesReps
+#### SalesReps (Airtable primary via dataAccess)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -580,7 +580,7 @@ Signup Month    M0      M1      M2      M3      M6      M12
 | `payment_details` | Object | Bank info or address |
 | `_createdDate` | DateTime | Record creation |
 
-#### CommissionRules
+#### CommissionRules (Airtable primary via dataAccess)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -610,7 +610,7 @@ Signup Month    M0      M1      M2      M3      M6      M12
 
 ## 5. API Design
 
-### 5.1 adminBusinessService.jsw
+### 5.1 Backend Service Modules
 
 ```javascript
 // ============================================================
@@ -928,17 +928,19 @@ Leverage existing `stripeService.jsw`:
 
 ### 7.2 Webhook Integration
 
-Add commission processing to existing webhook handlers:
+Commission processing is wired in existing webhook handlers:
 - `checkout.session.completed` -> `processAutoCommission('subscription.new', ...)`
 - `customer.subscription.updated` -> Check for upgrade, process if so
-- Placement completion -> `processAutoCommission('placement.complete', ...)`
+- `invoice.paid` (subscription cycle) -> `processAutoCommission('renewal', ...)`
+- Placement completion mapping -> `processAutoCommission('placement', ...)` when checkout metadata marks placement
+- Commission-level idempotency key guard prevents duplicate commission writes per Stripe event trigger
 
 ### 7.3 Scheduled Jobs
 
-Add to `jobs.config`:
-- `recordDailyMetrics` - Daily at midnight
-- `processOverdueInvoices` - Daily, mark invoices overdue
-- `processCommissionHolds` - Daily, release held commissions
+Current `jobs.config` implementation:
+- `recordDailyMetrics` - Daily at midnight (`adminRevenueService.jsw`)
+- `markOverdueInvoices` - Daily at 06:00 (`adminInvoiceService.jsw`)
+- `processCommissionHolds` - Daily at 06:15 (`adminCommissionService.jsw`)
 
 ---
 
@@ -990,3 +992,5 @@ All billing actions logged to `AdminAuditLog`:
 3. **Revenue Recognition**: Immediate or amortized over subscription period?
 4. **Multi-Currency**: Support international carriers in the future?
 5. **Tax Handling**: Integrate tax calculation service?
+
+

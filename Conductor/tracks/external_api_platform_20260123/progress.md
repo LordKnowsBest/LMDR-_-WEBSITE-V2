@@ -63,6 +63,92 @@
     - revenue report action trigger
     - revenue summary/tier panes
     - monthly revenue trend + top-partners visual blocks
+- API Documentation Site delivery (Phase 8.3):
+  - Added `src/public/admin/API_DOCS_PORTAL.html` with:
+    - interactive endpoint catalog rendering
+    - endpoint search filtering
+    - sandbox "Try It" action panel
+    - multi-language code example tabs (cURL/JavaScript/Python)
+    - inline status and changelog snapshots
+  - Added dedicated pages:
+    - `src/public/admin/API_CHANGELOG.html`
+    - `src/public/admin/API_STATUS.html`
+  - Added Wix page bridges:
+    - `src/pages/API_DOCS_PORTAL.external.js`
+    - `src/pages/API_CHANGELOG.external.js`
+    - `src/pages/API_STATUS.external.js`
+  - Added backend support in `apiPortalService.jsw`:
+    - `getApiDocumentationCatalog()`
+    - `runApiSandboxRequest(endpointKey, payload)`
+    - `getApiChangelog(limit)`
+    - `getApiHealthStatus(windowHours)`
+- Partner onboarding delivery (Phase 8.6 partial):
+  - Added getting-started guide:
+    - `docs/api/getting-started.external.v1.md`
+  - Added onboarding checklist panel in portal:
+    - `src/public/admin/API_PORTAL_DASHBOARD.html`
+  - Implemented first API call tracking in gateway:
+    - `src/backend/apiGateway.jsw` now persists `first_api_call_at`, endpoint, and method on `apiPartners` record
+- Billing completion pass (Phase 8.4):
+  - Added Stripe-tier product readiness endpoint:
+    - `ensureApiStripeProducts()` in `stripeService.jsw`
+  - Added overage invoice generation:
+    - `generateApiOverageInvoice(partnerId, periodKey, autoFinalize)` in `stripeService.jsw`
+    - Exposed via `createPartnerOverageInvoice(...)` in `apiPortalService.jsw`
+  - Added plan upgrade/downgrade mutation:
+    - `changeApiSubscriptionPlan(partnerId, newTier, planType, immediate)` in `stripeService.jsw`
+    - Exposed via `changePartnerApiSubscription(...)` in `apiPortalService.jsw`
+  - Added portal controls for overage invoicing, plan switching, and Stripe tier product checks.
+- Partner onboarding completion pass (Phase 8.6):
+  - Added onboarding email sequence definitions and retrieval:
+    - `getApiOnboardingEmailSequence()` in `apiPortalService.jsw`
+  - Added onboarding enrollment + follow-up processor:
+    - `initializePartnerOnboarding(partnerId)`
+    - `processPartnerOnboardingFollowUps(limit)`
+  - Added scheduled job:
+    - `src/backend/apiOnboardingJobs.jsw` -> `processApiPartnerOnboardingFollowUps`
+    - Registered in `src/backend/jobs.config` (`0 */6 * * *`)
+  - Added onboarding sequence docs:
+    - `docs/api/onboarding-email-sequence.external.v1.md`
+- SDK completion pass (Phase 8.7):
+  - Added JavaScript SDK scaffold:
+    - `sdk/js/lmdr-api-client/package.json`
+    - `sdk/js/lmdr-api-client/src/index.js`
+    - `sdk/js/lmdr-api-client/README.md`
+  - Added Python SDK scaffold:
+    - `sdk/python/lmdr_python/pyproject.toml`
+    - `sdk/python/lmdr_python/lmdr_python/client.py`
+    - `sdk/python/lmdr_python/lmdr_python/__init__.py`
+    - `sdk/python/lmdr_python/README.md`
+  - Added SDK documentation + publishing guidance:
+    - `docs/api/sdk/README.md`
+    - `docs/api/sdk/examples.javascript.md`
+    - `docs/api/sdk/examples.python.md`
+    - `docs/api/sdk/publishing.md`
+- Phase 8 testing completion pass (8.8):
+  - Added `src/public/__tests__/externalApiPlatformPhase8Flows.test.js` for:
+    - partner registration flow
+    - API key management flow
+    - billing integration flow
+    - SDK functionality
+    - portal responsiveness checks
+  - Extended `externalApiPlatformPhase8.test.js` coverage for new Phase 8 actions.
+  - Full external platform regression run:
+    - 12 suites passed, 43 tests passed
+- Manual verification + parity records:
+  - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase8_20260219.md`
+  - `Conductor/tracks/external_api_platform_20260123/code_doc_parity_20260219.md`
+- Phase 1 completion pass (gateway infrastructure closure):
+  - Added API index planning artifact:
+    - `docs/schemas/airtable/v2_API_Platform_Index_Plan.md`
+  - Expanded `apiGateway.external.test.js` with:
+    - auth flow end-to-end 401 contract test
+    - burst traffic throttle 429 contract test
+    - standardized error envelope formatting test
+  - Added verification artifact:
+    - `Conductor/tracks/external_api_platform_20260123/manual_verification_phase1_20260219.md`
+  - Phase 1 focused suite run:
+    - 3 suites passed, 12 tests passed
 - Extended validation test and reran external API platform suite:
   - `src/public/__tests__/externalApiPlatformPhase8.test.js` expanded for new actions/features
   - 11-suite external platform cluster rerun: 11 passed, 37 tests passed
@@ -70,10 +156,13 @@
 ## Not Yet Implemented
 - Category-specific integration guides (Safety/Intelligence/Operations/Matching deep dives still pending).
 - Full webhook delivery pipeline (signatures, retries, event dispatch).
-- Billing integration for API tiers and overage billing.
-- Frontend developer portal + admin partner management now support core partner operations and baseline revenue reporting; deeper analytics depth remains.
-- SDK publishing (Node/Python) and documentation site.
 - Expanded automated test coverage for auth/rate-limit internals and full endpoint matrix.
+
+## Phase 8 Status
+- Phase 8 is now fully implemented in-repo (backend + frontend + docs + tests + verification artifacts).
+
+## Phase 1 Status
+- Phase 1 is now fully implemented in-repo (gateway + auth + rate limiting + index plan + verification artifacts).
 
 ## Current Parity Position
 - Core backend API surface is in place and callable through `/v1/*`.
