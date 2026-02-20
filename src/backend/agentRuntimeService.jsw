@@ -55,6 +55,17 @@ function _recordSuccess() {
   _circuitOpenUntil = 0;
 }
 
+// ── Internal fetch helper ────────────────────────────────────────────────────
+
+async function _authHeaders() {
+  const key = await getSecret('LMDR_INTERNAL_KEY');
+  return {
+    'Content-Type':        'application/json',
+    'x-lmdr-internal-key': key,
+    'x-lmdr-timestamp':    String(Date.now()),
+  };
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -94,6 +105,83 @@ export function isRuntimeAvailable() {
  *   latencyMs:    number
  * }>}
  */
+/**
+ * Creates a streaming session on the runtime microservice.
+ *
+ * Calls POST /v1/stream/agent-turn (auth required), which starts async Claude
+ * streaming and returns { token, eventsPath } immediately.
+ *
+ * Returns { token, streamUrl, requestId } to the page code. The page code
+ * forwards streamUrl to the HTML iframe, which uses AgentStreamClient.js
+ * (CDN module) to open an EventSource directly from the browser.
+ *
+ * The browser needs NO auth headers — the token itself (unguessable 48-char
+ * hex, 90 s TTL) is the credential for the events endpoint.
+ *
+ * @param {object} params
+ * @param {string}   params.systemPrompt
+ * @param {Array}    params.messages
+ * @param {Array}   [params.tools]
+ * @param {string}  [params.modelId]
+ * @param {number}  [params.maxTokens]
+ * @param {string}  [params.traceId]
+ * @returns {Promise<{ token: string, streamUrl: string, requestId: string }>}
+ */
+export async function createStreamSession({
+  systemPrompt,
+  messages,
+  tools = [],
+  modelId,
+  maxTokens,
+  traceId,
+}) {
+  const callStart = Date.now();
+
+  let headers;
+  try {
+    headers = await _authHeaders();
+  } catch (err) {
+    throw new Error(`[agentRuntime] Secret load failed: ${err.message}`);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000); // session create is fast
+
+  let res;
+  try {
+    res = await fetch(`${RUNTIME_BASE}/v1/stream/agent-turn`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ systemPrompt, messages, tools, modelId, maxTokens, traceId }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    const reason = err.name === 'AbortError' ? 'Request timed out' : err.message;
+    throw new Error(`[agentRuntime] createStreamSession fetch failed: ${reason}`);
+  }
+
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    let errCode = `HTTP_${res.status}`;
+    try {
+      const body = await res.json();
+      errCode = body?.error?.code || errCode;
+    } catch { /* ignore */ }
+    throw new Error(`[agentRuntime] Stream session create: runtime responded ${res.status} (${errCode})`);
+  }
+
+  const data = await res.json();
+  console.log(`[agentRuntime] Stream session created in ${Date.now() - callStart}ms token=${data.token?.slice(0, 8)}…`);
+
+  return {
+    token:      data.token,
+    streamUrl:  `${RUNTIME_BASE}${data.eventsPath}`,
+    requestId:  data.requestId,
+  };
+}
+
 export async function callRuntimeStep({
   systemPrompt,
   messages,
@@ -104,10 +192,10 @@ export async function callRuntimeStep({
 }) {
   const callStart = Date.now();
 
-  // ── Load auth secret ──
-  let internalKey;
+  // ── Load auth headers ──
+  let headers;
   try {
-    internalKey = await getSecret('LMDR_INTERNAL_KEY');
+    headers = await _authHeaders();
   } catch (err) {
     _recordFailure();
     throw new Error(`[agentRuntime] Secret load failed: ${err.message}`);
@@ -121,11 +209,7 @@ export async function callRuntimeStep({
   try {
     res = await fetch(`${RUNTIME_BASE}/v1/agent/turn`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-lmdr-internal-key': internalKey,
-        'x-lmdr-timestamp': String(Date.now()),
-      },
+      headers,
       body: JSON.stringify({
         systemPrompt,
         messages,

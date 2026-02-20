@@ -13,6 +13,12 @@ const TOLERANCE_MS = 30_000;
 
 export function authMiddleware() {
   return async (c, next) => {
+    // Browser EventSource cannot send custom headers — the session token in
+    // the URL path is the credential for stream/events endpoints.
+    if (c.req.path.includes('/stream/events/')) {
+      return next();
+    }
+
     const key = c.req.header('x-lmdr-internal-key');
     const ts  = c.req.header('x-lmdr-timestamp');
 
