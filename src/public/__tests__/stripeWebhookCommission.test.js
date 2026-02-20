@@ -47,19 +47,29 @@ jest.mock('backend/smsCampaignService', () => ({
 jest.mock('backend/jobBoardService', () => ({ processJobBoardWebhook: jest.fn() }));
 jest.mock('backend/socialPostingService', () => ({ connectSocialAccount: jest.fn() }));
 
+const nodeCrypto = require('crypto');
+
 const { getSecret } = require('wix-secrets-backend');
 const dataAccess = require('backend/dataAccess');
 const stripeService = require('backend/stripeService');
 const { processAutoCommission } = require('backend/adminCommissionService');
 const { post_stripe_webhook } = require('backend/http-functions');
 
+const TEST_WEBHOOK_SECRET = 'whsec_test_1234567890abcdef';
+
 function buildRequest(event) {
+  const body = JSON.stringify(event);
+  const timestamp = Math.floor(Date.now() / 1000);
+  const sig = nodeCrypto
+    .createHmac('sha256', TEST_WEBHOOK_SECRET)
+    .update(`${timestamp}.${body}`)
+    .digest('hex');
   return {
     body: {
-      text: jest.fn().mockResolvedValue(JSON.stringify(event))
+      text: jest.fn().mockResolvedValue(body)
     },
     headers: {
-      'stripe-signature': 't=123,v1=testsig'
+      'stripe-signature': `t=${timestamp},v1=${sig}`
     }
   };
 }
@@ -67,7 +77,10 @@ function buildRequest(event) {
 describe('stripe webhook commission wiring', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    getSecret.mockResolvedValue(null);
+    // Return the test secret for STRIPE_WEBHOOK_SECRET; null for everything else
+    getSecret.mockImplementation(name =>
+      Promise.resolve(name === 'STRIPE_WEBHOOK_SECRET' ? TEST_WEBHOOK_SECRET : null)
+    );
     dataAccess.queryRecords.mockResolvedValue({ success: true, items: [] });
   });
 

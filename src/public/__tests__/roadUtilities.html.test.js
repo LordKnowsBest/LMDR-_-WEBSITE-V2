@@ -90,6 +90,16 @@ const DOM_ELEMENT_MAP = {
 
 const htmlSource = fs.readFileSync(HTML_FILE, 'utf8');
 
+// CDN-served JS modules that own the bridge and message-handling logic
+const BRIDGE_FILE = path.resolve(__dirname, '..', 'driver', 'js', 'road-utilities-bridge.js');
+const LOGIC_FILE  = path.resolve(__dirname, '..', 'driver', 'js', 'road-utilities-logic.js');
+const RENDER_FILE = path.resolve(__dirname, '..', 'driver', 'js', 'road-utilities-render.js');
+const bridgeSource = fs.readFileSync(BRIDGE_FILE, 'utf8');
+const logicSource  = fs.readFileSync(LOGIC_FILE,  'utf8');
+const renderSource = fs.readFileSync(RENDER_FILE, 'utf8');
+// Combined source for structural checks that span the full page stack
+const fullSource = htmlSource + '\n' + bridgeSource + '\n' + logicSource + '\n' + renderSource;
+
 // =============================================================================
 // MOCK DOM INFRASTRUCTURE
 // =============================================================================
@@ -408,38 +418,44 @@ describe('DRIVER_ROAD_UTILITIES.html DOM Tests', () => {
         });
 
         test('contains a message listener', () => {
+            // Message listener lives in the CDN-served logic module, not inline HTML
             const hasListener =
-                htmlSource.includes("addEventListener('message'") ||
-                htmlSource.includes('addEventListener("message"') ||
-                htmlSource.includes('window.onmessage');
+                fullSource.includes("addEventListener('message'") ||
+                fullSource.includes('addEventListener("message"') ||
+                fullSource.includes('window.onmessage');
             expect(hasListener).toBe(true);
         });
 
         test('contains parent postMessage calls', () => {
+            // postMessage calls live in the CDN-served bridge module
             const hasOutbound =
-                htmlSource.includes('window.parent.postMessage') ||
-                htmlSource.includes('parent.postMessage');
+                fullSource.includes('window.parent.postMessage') ||
+                fullSource.includes('parent.postMessage');
             expect(hasOutbound).toBe(true);
         });
 
         test('handles all expected inbound message types', () => {
+            // Inbound message types handled in the CDN-served logic module
             INBOUND_MESSAGES.forEach(msg => {
-                expect(htmlSource).toContain(msg);
+                expect(fullSource).toContain(msg);
             });
         });
 
         test('references expected outbound message types', () => {
+            // Outbound message types defined in the CDN-served bridge module
             OUTBOUND_MESSAGES.forEach(msg => {
-                expect(htmlSource).toContain(msg);
+                expect(fullSource).toContain(msg);
             });
         });
 
         test('uses type-based message protocol', () => {
+            // Protocol uses msg.type (from event.data); pattern lives in logic module
             const hasType =
-                htmlSource.includes('{ type, data }') ||
-                htmlSource.includes('{type, data}') ||
-                htmlSource.includes('data.type') ||
-                htmlSource.includes("event.data.type");
+                fullSource.includes('{ type, data }') ||
+                fullSource.includes('{type, data}') ||
+                fullSource.includes('data.type') ||
+                fullSource.includes('event.data.type') ||
+                fullSource.includes('msg.type');
             expect(hasType).toBe(true);
         });
 
@@ -829,11 +845,13 @@ describe('DRIVER_ROAD_UTILITIES.html DOM Tests', () => {
 
     describe('Sanitization', () => {
         test('source uses textContent for user-facing text', () => {
-            expect(htmlSource).toContain('.textContent');
+            // textContent usage lives in the CDN-served logic module
+            expect(fullSource).toContain('.textContent');
         });
 
         test('source contains toast function using textContent', () => {
-            expect(htmlSource).toContain('toast.textContent');
+            // Toast helper using textContent lives in the CDN-served logic module
+            expect(fullSource).toContain('toast.textContent');
         });
     });
 

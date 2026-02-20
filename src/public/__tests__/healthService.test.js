@@ -98,8 +98,8 @@ describe('Health Service Logic', () => {
     describe('getResourcesByCategory', () => {
         it('should return resources for a category', async () => {
             const mockResources = [
-                { _id: '1', title: 'Res 1', category: 'exercise', created_at: new Date() },
-                { _id: '2', title: 'Res 2', category: 'exercise', created_at: new Date() }
+                { _id: '1', title: 'Res 1', category: 'exercise', created_at: new Date('2026-02-20T10:00:00Z') },
+                { _id: '2', title: 'Res 2', category: 'exercise', created_at: new Date('2026-02-20T09:00:00Z') }
             ];
             wixData.__seedData('healthResources', mockResources);
 

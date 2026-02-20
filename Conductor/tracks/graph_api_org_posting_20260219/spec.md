@@ -215,6 +215,33 @@ const token = await SecretProvider.get(`meta_page_token_${pageId}`);
 
 **Proactive monitoring:** Run a nightly job that calls `GET /debug_token?input_token={page_token}&access_token={app-token}` to check `is_valid`, `expires_at`, and `scopes` for each stored token. Alert if `is_valid=false` or expiry < 7 days.
 
+### 5.1 Migration Step Verification (Code Parity, 2026-02-20)
+
+The migration guidance above remains accurate for the current implementation:
+
+1. `src/backend/socialSecretService.jsw` already uses a provider selector with `SOCIAL_RUNTIME` and a `GCPSecretProvider` stub.
+2. Secret key naming is stable and migration-safe (`meta_page_token_{page_id}`, `meta_ig_token_{ig_user_id}`, `meta_app_id`, `meta_app_secret`).
+3. Token validation uses Graph `/debug_token` in `src/backend/socialTokenService.jsw` and is consumed by `src/backend/socialTokenHealthJob.jsw`.
+4. No app secret or access token material is exposed to frontend/page code.
+
+### 5.2 Cloud Run Extraction Notes (Code Parity, 2026-02-20)
+
+`src/backend/socialPostingService.jsw` can be extracted to a Cloud Run service with these bounded changes:
+
+1. Replace `socialSecretService.jsw` runtime provider internals with GCP Secret Manager reads.
+2. Replace `socialQueueService.jsw` Airtable-backed persistence with Cloud SQL/Firestore adapters.
+3. Move `jobs.config` schedules (`processSocialQueue`, `runSocialTokenHealthCheck`) to Cloud Scheduler + HTTP-triggered handlers.
+4. Keep payload contracts and result shapes stable to avoid surface breakage for callers.
+
+### 5.3 Multi-Tenant Considerations (Code Parity, 2026-02-20)
+
+Current implementation is tenant-ready at the token boundary but not yet isolated by tenant-owned queue partitions:
+
+1. Token lookup is account-scoped (`pageId`, `igUserId`) and does not depend on hardcoded IDs.
+2. Secret names are account-suffixed, enabling per-brand token separation.
+3. Queue and audit records should retain explicit tenant/account keys for strict data partitioning when multi-brand concurrency increases.
+4. Migration to Cloud Run should include tenant-aware authz checks before dispatching queue records.
+
 ---
 
 ## 6. Posting Flows

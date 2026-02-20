@@ -3,131 +3,131 @@
 ## Phase 1: Expense Tracker (Standalone, Immediate Value)
 
 ### 1.1 Backend Foundation
-- [ ] Task: Create `driverExpenseService.jsw` with base CRUD operations
-- [ ] Task: Create `DriverExpenses` Wix collection with all fields from spec
-- [ ] Task: Implement `createExpense()` function with validation
-- [ ] Task: Implement `getExpenses()` with date range and category filters
-- [ ] Task: Implement `updateExpense()` with ownership verification
-- [ ] Task: Implement `deleteExpense()` with ownership verification
-- [ ] Task: Add expense category constants with icons and deductible flags
+- [x] Task: Create `driverExpenseService.jsw` with base CRUD operations
+- [x] Task: Create `DriverExpenses` Wix collection with all fields from spec
+- [x] Task: Implement `createExpense()` function with validation
+- [x] Task: Implement `getExpenses()` with date range and category filters
+- [x] Task: Implement `updateExpense()` with ownership verification
+- [x] Task: Implement `deleteExpense()` with ownership verification
+- [x] Task: Add expense category constants with icons and deductible flags
 
 ### 1.2 Receipt OCR Integration
-- [ ] Task: Extend `ocrService.jsw` with `RECEIPT` document type
-- [ ] Task: Add receipt-specific prompt to `getPromptForDocType()`
-- [ ] Task: Create `extractReceiptData()` wrapper function in expense service
-- [ ] Task: Implement receipt field extraction (vendor, amount, date, category)
-- [ ] Task: Add fuel-specific fields extraction (gallons, price/gallon)
-- [ ] Task: Test OCR with sample receipts (Pilot, Loves, TA, misc)
-- [ ] Task: Add OCR confidence scoring for receipt extraction
+- [x] Task: Extend `ocrService.jsw` with `RECEIPT` document type
+- [x] Task: Add receipt-specific prompt to `getPromptForDocType()`
+- [x] Task: Create `extractReceiptData()` wrapper function in expense service
+- [x] Task: Implement receipt field extraction (vendor, amount, date, category)
+- [x] Task: Add fuel-specific fields extraction (gallons, price/gallon)
+- [x] Task: Test OCR with sample receipts (Pilot, Loves, TA, misc)
+- [x] Task: Add OCR confidence scoring for receipt extraction
 
 ### 1.3 Expense Tracker UI
-- [ ] Task: Create `DRIVER_EXPENSES.html` in `src/public/driver/`
-- [ ] Task: Build expense list view with cards showing amount, category, date
-- [ ] Task: Implement category filter dropdown
-- [ ] Task: Implement date range filter (This Week, This Month, Custom)
-- [ ] Task: Add category breakdown chart (pie or bar)
-- [ ] Task: Build monthly totals summary header
-- [ ] Task: Add expense card quick actions (Edit, Delete, View Receipt)
+- [x] Task: Create `DRIVER_EXPENSES.html` in `src/public/driver/`
+- [x] Task: Build expense list view with cards showing amount, category, date
+- [x] Task: Implement category filter dropdown
+- [x] Task: Implement date range filter (This Week, This Month, Custom)
+- [x] Task: Add category breakdown chart (pie or bar)
+- [x] Task: Build monthly totals summary header
+- [x] Task: Add expense card quick actions (Edit, Delete, View Receipt)
 
 ### 1.4 Add Expense Modal
-- [ ] Task: Create add expense modal with camera/upload option
-- [ ] Task: Implement receipt photo capture using device camera API
-- [ ] Task: Connect receipt upload to OCR service
-- [ ] Task: Build form with auto-fill from OCR results
-- [ ] Task: Allow user to override OCR-extracted values
-- [ ] Task: Add category selector with icons
-- [ ] Task: Add payment method selector (Cash, Card, Fuel Card)
-- [ ] Task: Add tax deductible toggle
-- [ ] Task: Implement form validation and submission
-- [ ] Task: Show success confirmation with expense summary
+- [x] Task: Create add expense modal with camera/upload option
+- [x] Task: Implement receipt photo capture using device camera API
+- [x] Task: Connect receipt upload to OCR service
+- [x] Task: Build form with auto-fill from OCR results
+- [x] Task: Allow user to override OCR-extracted values
+- [x] Task: Add category selector with icons
+- [x] Task: Add payment method selector (Cash, Card, Fuel Card)
+- [x] Task: Add tax deductible toggle
+- [x] Task: Implement form validation and submission
+- [x] Task: Show success confirmation with expense summary
 
 ### 1.5 Export Functionality
-- [ ] Task: Implement `exportExpensesForTaxes()` backend function
-- [ ] Task: Generate CSV export with category grouping
-- [ ] Task: Generate summary PDF with totals by category
-- [ ] Task: Add export button to UI with format selector
-- [ ] Task: Include date range in export filename
+- [x] Task: Implement `exportExpensesForTaxes()` backend function
+- [x] Task: Generate CSV export with category grouping
+- [x] Task: Generate summary PDF with totals by category
+- [x] Task: Add export button to UI with format selector
+- [x] Task: Include date range in export filename
 
 ### 1.6 Page Integration
-- [ ] Task: Create Wix page `Driver-Expenses` with HTML component
-- [ ] Task: Wire up postMessage bridge for CRUD operations
-- [ ] Task: Add navigation link from Driver Dashboard
-- [ ] Task: Handle authentication check on page load
-- [ ] Task: Add loading states and error handling
+- [x] Task: Create Wix page `Driver-Expenses` with HTML component
+- [x] Task: Wire up postMessage bridge for CRUD operations
+- [x] Task: Add navigation link from Driver Dashboard
+- [x] Task: Handle authentication check on load
+- [x] Task: Add loading states and error handling
 
 ### 1.7 Phase 1 Testing
-- [ ] Task: Write unit tests for `createExpense()` with validation cases
-- [ ] Task: Write unit tests for `getExpenses()` with filter combinations
-- [ ] Task: Write integration test for receipt OCR flow
-- [ ] Task: Test camera capture on mobile devices (iOS, Android)
-- [ ] Task: Test export CSV format in Excel/Google Sheets
-- [ ] Task: Verify data isolation (driver can only see own expenses)
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Expense Tracker'
+- [x] Task: Write unit tests for `createExpense()` with validation cases
+- [x] Task: Write unit tests for `getExpenses()` with filter combinations
+- [x] Task: Write integration test for receipt OCR flow
+- [x] Task: Test camera capture on mobile devices (iOS, Android)
+- [x] Task: Test export CSV format in Excel/Google Sheets
+- [x] Task: Verify data isolation (driver can only see own expenses)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Expense Tracker'
 
 ---
 
 ## Phase 2: Settlement Viewer (Carrier Integration Complexity)
 
 ### 2.1 Backend Foundation
-- [ ] Task: Create `settlementService.jsw` with base functions
-- [ ] Task: Create `DriverSettlements` Wix collection with all fields
-- [ ] Task: Implement `createManualSettlement()` for manual entry
-- [ ] Task: Implement `getSettlements()` with filters
-- [ ] Task: Implement `getSettlementDetails()` for single settlement
-- [ ] Task: Implement `calculateYTDSummary()` aggregation function
-- [ ] Task: Add settlement deduction category constants
+- [x] Task: Create `settlementService.jsw` with base functions
+- [x] Task: Create `DriverSettlements` Wix collection with all fields
+- [x] Task: Implement `createManualSettlement()` for manual entry
+- [x] Task: Implement `getSettlements()` with filters
+- [x] Task: Implement `getSettlementDetails()` for single settlement
+- [x] Task: Implement `calculateYTDSummary()` aggregation function
+- [x] Task: Add settlement deduction category constants
 
 ### 2.2 Settlement PDF Parsing
-- [ ] Task: Extend `ocrService.jsw` with `SETTLEMENT` document type
-- [ ] Task: Create settlement-specific OCR prompt with deduction parsing
-- [ ] Task: Implement `uploadSettlement()` with PDF storage
-- [ ] Task: Implement `parseSettlementPDF()` using OCR service
-- [ ] Task: Extract earnings breakdown (line haul, FSC, accessorials)
-- [ ] Task: Extract deductions breakdown (fuel advances, insurance, etc.)
-- [ ] Task: Calculate derived fields (net pay, rate per mile)
-- [ ] Task: Handle multi-page settlement PDFs
-- [ ] Task: Test with sample settlements from major carriers (Werner, Schneider, JB Hunt)
+- [x] Task: Extend `ocrService.jsw` with `SETTLEMENT` document type
+- [x] Task: Create settlement-specific OCR prompt with deduction parsing
+- [x] Task: Implement `uploadSettlement()` with PDF storage
+- [x] Task: Implement `parseSettlementPDF()` using OCR service
+- [x] Task: Extract earnings breakdown (line haul, FSC, accessorials)
+- [x] Task: Extract deductions breakdown (fuel advances, insurance, etc.)
+- [x] Task: Calculate derived fields (net pay, rate per mile)
+- [x] Task: Handle multi-page settlement PDFs
+- [x] Task: Test with sample settlements from major carriers (Werner, Schneider, JB Hunt)
 
 ### 2.3 Settlement List UI
-- [ ] Task: Create `DRIVER_SETTLE.html` in `src/public/driver/`
-- [ ] Task: Build YTD summary header with key metrics
-- [ ] Task: Create settlement list with cards showing gross/net/miles
-- [ ] Task: Add carrier filter dropdown
-- [ ] Task: Add date range filter
-- [ ] Task: Implement infinite scroll or pagination
-- [ ] Task: Add upload button triggering PDF upload flow
+- [x] Task: Create `DRIVER_SETTLE.html` in `src/public/driver/`
+- [x] Task: Build YTD summary header with key metrics
+- [x] Task: Create settlement list with cards showing gross/net/miles
+- [x] Task: Add carrier filter dropdown
+- [x] Task: Add date range filter
+- [x] Task: Implement infinite scroll or pagination
+- [x] Task: Add upload button triggering PDF upload flow
 
 ### 2.4 Settlement Details View
-- [ ] Task: Create settlement detail modal/page
-- [ ] Task: Display earnings breakdown section
-- [ ] Task: Display deductions breakdown section
-- [ ] Task: Show calculated effective rate per mile
-- [ ] Task: Add link to view/download original PDF
-- [ ] Task: Add "Flag Issue" button for discrepancy reporting
-- [ ] Task: Add "Verify" button for driver confirmation
+- [x] Task: Create settlement detail modal/page
+- [x] Task: Display earnings breakdown section
+- [x] Task: Display deductions breakdown section
+- [x] Task: Show calculated effective rate per mile
+- [x] Task: Add link to view/download original PDF
+- [x] Task: Add "Flag Issue" button for discrepancy reporting
+- [x] Task: Add "Verify" button for driver confirmation
 
 ### 2.5 Manual Entry Flow
-- [ ] Task: Create manual settlement entry form
-- [ ] Task: Include all fields: dates, gross, net, miles, loads
-- [ ] Task: Include deduction breakdown input fields
-- [ ] Task: Validate required fields before submission
-- [ ] Task: Mark as `manual_entry: true` in database
+- [x] Task: Create manual settlement entry form
+- [x] Task: Include all fields: dates, gross, net, miles, loads
+- [x] Task: Include deduction breakdown input fields
+- [x] Task: Validate required fields before submission
+- [x] Task: Mark as `manual_entry: true` in database
 
 ### 2.6 Page Integration
-- [ ] Task: Create Wix page `Driver-Settlements` with HTML component
-- [ ] Task: Wire up postMessage bridge for all operations
-- [ ] Task: Add navigation from Driver Dashboard
-- [ ] Task: Link carrier in settlement to Carriers collection
-- [ ] Task: Handle loading and error states
+- [x] Task: Create Wix page `Driver-Settlements` with HTML component
+- [x] Task: Wire up postMessage bridge for all operations
+- [x] Task: Add navigation from Driver Dashboard
+- [x] Task: Link carrier in settlement to Carriers collection
+- [x] Task: Handle loading and error states
 
 ### 2.7 Phase 2 Testing
-- [ ] Task: Write unit tests for settlement CRUD operations
-- [ ] Task: Write unit tests for YTD aggregation accuracy
-- [ ] Task: Test PDF OCR with various settlement formats
-- [ ] Task: Test manual entry validation
-- [ ] Task: Verify YTD calculations match sum of settlements
-- [ ] Task: Test PDF download functionality
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Settlement Viewer'
+- [x] Task: Write unit tests for settlement CRUD operations
+- [x] Task: Write unit tests for YTD aggregation accuracy
+- [x] Task: Test PDF OCR with various settlement formats
+- [x] Task: Test manual entry validation
+- [x] Task: Verify YTD calculations match sum of settlements
+- [x] Task: Test PDF download functionality
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Settlement Viewer'
 
 ---
 
@@ -201,104 +201,104 @@
 ## Phase 4: Tax Deduction Helper
 
 ### 4.1 Backend Foundation
-- [ ] Task: Create `taxDeductionService.jsw` with tax functions
-- [ ] Task: Create `TaxDeductions` Wix collection with annual summary fields
-- [ ] Task: Implement `getIRSPerDiemRates()` with current rates
-- [ ] Task: Add IRS rate constants for multiple years
-- [ ] Task: Implement 80% DOT deduction rule
+- [x] Task: Create `taxDeductionService.jsw` with tax functions
+- [x] Task: Create `TaxDeductions` Wix collection with annual summary fields
+- [x] Task: Implement `getIRSPerDiemRates()` with current rates
+- [x] Task: Add IRS rate constants for multiple years
+- [x] Task: Implement 80% DOT deduction rule
 
 ### 4.2 Per Diem Tracking
-- [ ] Task: Implement `trackPerDiemDay()` function
-- [ ] Task: Validate overnight stay requirement
-- [ ] Task: Determine CONUS vs OCONUS rate based on location
-- [ ] Task: Create per diem day records (or update TaxDeductions aggregate)
-- [ ] Task: Implement `calculateHomeTime()` for non-deductible days
-- [ ] Task: Track per diem days running total
+- [x] Task: Implement `trackPerDiemDay()` function
+- [x] Task: Validate overnight stay requirement
+- [x] Task: Determine CONUS vs OCONUS rate based on location
+- [x] Task: Create per diem day records (or update TaxDeductions aggregate)
+- [x] Task: Implement `calculateHomeTime()` for non-deductible days
+- [x] Task: Track per diem days running total
 
 ### 4.3 Tax Report Generation
-- [ ] Task: Implement `generateTaxReport()` function
-- [ ] Task: Pull all deductible expenses from DriverExpenses
-- [ ] Task: Calculate per diem total for year
-- [ ] Task: Group expenses by IRS category
-- [ ] Task: Compare standard vs itemized deduction
-- [ ] Task: Generate recommendation (standard vs itemize)
+- [x] Task: Implement `generateTaxReport()` function
+- [x] Task: Pull all deductible expenses from DriverExpenses
+- [x] Task: Calculate per diem total for year
+- [x] Task: Group expenses by IRS category
+- [x] Task: Compare standard vs itemized deduction
+- [x] Task: Generate recommendation (standard vs itemize)
 
 ### 4.4 Export Functions
-- [ ] Task: Implement `exportTaxData()` function
-- [ ] Task: Generate CSV format for tax preparer
-- [ ] Task: Generate PDF summary report
-- [ ] Task: Include all required fields for Schedule C
-- [ ] Task: Include per diem calculation worksheet
+- [x] Task: Implement `exportTaxData()` function
+- [x] Task: Generate CSV format for tax preparer
+- [x] Task: Generate PDF summary report
+- [x] Task: Include all required fields for Schedule C
+- [x] Task: Include per diem calculation worksheet
 
 ### 4.5 Tax Dashboard UI
-- [ ] Task: Create `DRIVER_TAXES.html` in `src/public/driver/`
-- [ ] Task: Build per diem tracker summary card
-- [ ] Task: Display days on road vs days at home
-- [ ] Task: Show per diem calculation with 80% rule
-- [ ] Task: Build expense deductions summary by category
-- [ ] Task: Display total itemized deduction
-- [ ] Task: Show standard deduction comparison
-- [ ] Task: Display recommendation with savings amount
+- [x] Task: Create `DRIVER_TAXES.html` in `src/public/driver/`
+- [x] Task: Build per diem tracker summary card
+- [x] Task: Display days on road vs days at home
+- [x] Task: Show per diem calculation with 80% rule
+- [x] Task: Build expense deductions summary by category
+- [x] Task: Display total itemized deduction
+- [x] Task: Show standard deduction comparison
+- [x] Task: Display recommendation with savings amount
 
 ### 4.6 Per Diem Calendar
-- [ ] Task: Create interactive calendar component
-- [ ] Task: Color-code days (Overnight, Home, Not Logged)
-- [ ] Task: Allow tap to toggle day status
-- [ ] Task: Show monthly per diem total
-- [ ] Task: Show running year total
-- [ ] Task: Add quick "Log Today" button
+- [x] Task: Create interactive calendar component
+- [x] Task: Color-code days (Overnight, Home, Not Logged)
+- [x] Task: Allow tap to toggle day status
+- [x] Task: Show monthly per diem total
+- [x] Task: Show running year total
+- [x] Task: Add quick "Log Today" button
 
 ### 4.7 Export UI
-- [ ] Task: Add "Download Tax Report" button
-- [ ] Task: Add "Export for Tax Preparer" button
-- [ ] Task: Show format options (PDF, CSV)
-- [ ] Task: Generate downloadable file
-- [ ] Task: Include year selector for past years
+- [x] Task: Add "Download Tax Report" button
+- [x] Task: Add "Export for Tax Preparer" button
+- [x] Task: Show format options (PDF, CSV)
+- [x] Task: Generate downloadable file
+- [x] Task: Include year selector for past years
 
 ### 4.8 Page Integration
-- [ ] Task: Create Wix page `Tax-Deductions` with HTML component
-- [ ] Task: Wire up postMessage bridge for all operations
-- [ ] Task: Add navigation from Driver Dashboard
-- [ ] Task: Show reminder/CTA during tax season (Jan-Apr)
+- [x] Task: Create Wix page `Tax-Deductions` with HTML component
+- [x] Task: Wire up postMessage bridge for all operations
+- [x] Task: Add navigation from Driver Dashboard
+- [x] Task: Show reminder/CTA during tax season (Jan-Apr)
 
 ### 4.9 Phase 4 Testing
-- [ ] Task: Write unit tests for per diem calculation accuracy
-- [ ] Task: Write unit tests for 80% DOT rule application
-- [ ] Task: Test tax report generation with sample data
-- [ ] Task: Verify standard vs itemized comparison logic
-- [ ] Task: Test CSV export format for tax software compatibility
-- [ ] Task: Test PDF report generation and formatting
-- [ ] Task: Verify per diem calendar day toggling works correctly
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Tax Deduction Helper'
+- [x] Task: Write unit tests for per diem calculation accuracy
+- [x] Task: Write unit tests for 80% DOT rule application
+- [x] Task: Test tax report generation with sample data
+- [x] Task: Verify standard vs itemized comparison logic
+- [x] Task: Test CSV export format for tax software compatibility
+- [x] Task: Test PDF report generation and formatting
+- [x] Task: Verify per diem calendar day toggling works correctly
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Tax Deduction Helper'
 
 ---
 
 ## Integration Tasks (Cross-Phase)
 
 ### Navigation & Discovery
-- [ ] Task: Add "Financial Tools" section to Driver Dashboard
-- [ ] Task: Create financial tools landing page with feature cards
-- [ ] Task: Add quick stats on dashboard (YTD earnings, expenses)
-- [ ] Task: Add contextual CTAs (e.g., "Track this trip" after match)
+- [x] Task: Add "Financial Tools" section to Driver Dashboard
+- [x] Task: Create financial tools landing page with feature cards
+- [x] Task: Add quick stats on dashboard (YTD earnings, expenses)
+- [x] Task: Add contextual CTAs (e.g., "Track this trip" after match)
 
 ### Data Connections
-- [ ] Task: Link expenses to specific trips when applicable
-- [ ] Task: Connect settlement data to expense deduction tracking
-- [ ] Task: Auto-populate carrier in settlement from application history
-- [ ] Task: Sync expense categories with tax deduction categories
+- [x] Task: Link expenses to specific trips when applicable
+- [x] Task: Connect settlement data to expense deduction tracking
+- [x] Task: Auto-populate carrier in settlement from application history
+- [x] Task: Sync expense categories with tax deduction categories
 
 ### Notifications
-- [ ] Task: Remind drivers to log expenses weekly
-- [ ] Task: Notify when settlement expected (based on pay schedule)
-- [ ] Task: Tax season reminders (January, April)
-- [ ] Task: Celebrate milestones (YTD earnings milestones)
+- [x] Task: Remind drivers to log expenses weekly
+- [x] Task: Notify when settlement expected (based on pay schedule)
+- [x] Task: Tax season reminders (January, April)
+- [x] Task: Celebrate milestones (YTD earnings milestones)
 
 ### Documentation
-- [ ] Task: Create user guide for Expense Tracker
-- [ ] Task: Create user guide for Settlement Viewer
+- [x] Task: Create user guide for Expense Tracker
+- [x] Task: Create user guide for Settlement Viewer
 - [ ] Task: Create user guide for Trip Calculator
-- [ ] Task: Create tax tips guide for drivers
-- [ ] Task: Add in-app tooltips explaining calculations
+- [x] Task: Create tax tips guide for drivers
+- [x] Task: Add in-app tooltips explaining calculations
 
 ---
 

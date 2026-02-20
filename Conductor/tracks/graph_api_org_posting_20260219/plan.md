@@ -1,7 +1,7 @@
 ﻿# Graph API Organic Posting â€” Implementation Plan
 
 **Track:** `graph_api_org_posting_20260219`
-**Last Updated:** 2026-02-19
+**Last Updated:** 2026-02-20
 **Spec:** [spec.md](./spec.md)
 
 ---
@@ -180,6 +180,7 @@
 ### 2.4 â€” Post Queue Data Model
 
 - [ ] **2.4.1** Create Airtable table `v2_Social Post Queue` with fields per spec.md Section 10
+  - Schema documentation added: `docs/schemas/airtable/v2_Social_Post_Queue.md`; Airtable table provisioning still pending.
 - [x] **2.4.2** Create `src/backend/socialQueueService.jsw`:
   - `createQueueRecord(payload)` â€” creates record with `status=queued`
   - `updateQueueRecord(id, updates)` â€” updates status, post_id, error fields
@@ -265,7 +266,10 @@
 ### 4.3 â€” Audit Log
 
 - [ ] **4.3.1** Create Airtable table `v2_Social Audit Log` with fields: `event_type`, `platform`, `actor`, `queue_record_id`, `details`, `timestamp`
+  - Schema documentation added: `docs/schemas/airtable/v2_Social_Audit_Log.md`; Airtable table provisioning still pending.
 - [ ] **4.3.2** Log the following events: `post_dispatched`, `post_published`, `post_failed`, `post_retried`, `post_dead_lettered`, `token_refreshed`, `token_health_alert`, `kill_switch_triggered`
+  - Implemented: `post_dispatched`, `post_published`, `post_failed`, `post_retried`, `post_dead_lettered`, `token_health_alert`
+  - Remaining: `token_refreshed`, `kill_switch_triggered`
 
 ### 4.4 â€” Admin Alerting Hooks
 
@@ -298,12 +302,12 @@
   ```
 - [x] **5.1.2** Implement `WixSecretProvider` (wraps current `getSecret()` calls â€” no behavior change)
 - [x] **5.1.3** Stub `GCPSecretProvider` with a TODO pointing to `gcp_migration_20260218` track for implementation
-- [ ] **5.1.4** Document the migration steps in `spec.md` Section 5 (already written) â€” verify they remain accurate
+- [x] **5.1.4** Document the migration steps in `spec.md` Section 5 (already written) â€” verify they remain accurate
 
 ### 5.2 â€” Cloud Run Portability Notes
 
 - [x] **5.2.1** Ensure all post functions are pure HTTP calls with no Wix-specific dependencies (no `wix-fetch` â€” use standard `fetch`; no Wix session context)
-- [ ] **5.2.2** Document: `socialPostingService.jsw` can be extracted as a standalone Cloud Run microservice with only these changes:
+- [x] **5.2.2** Document: `socialPostingService.jsw` can be extracted as a standalone Cloud Run microservice with only these changes:
   - Replace `socialSecretService.jsw` with `GCPSecretProvider`
   - Replace `socialQueueService.jsw` Airtable calls with Cloud SQL/Firestore
   - Replace `jobs.config` job with Cloud Scheduler trigger
@@ -313,7 +317,7 @@
 
 - [x] **5.3.1** Verify all functions accept `pageId` and `igUserId` as explicit parameters (no hardcoded IDs)
 - [x] **5.3.2** Verify secret keys use `_{account_id}` suffix pattern â€” ready for multiple clients
-- [ ] **5.3.3** Document multi-tenant considerations in spec.md Section 5 (token scope separation confirmed âœ…)
+- [x] **5.3.3** Document multi-tenant considerations in spec.md Section 5 (token scope separation confirmed âœ…)
 
 **Acceptance Criteria:**
 - `socialSecretService.jsw` uses the provider pattern and routes to `WixSecretProvider` by default with zero behavior change
@@ -331,7 +335,7 @@ The track is **done** when:
 - [ ] Phase 2: All post types callable; queue model operational; `post.both()` working
 - [ ] Phase 3: IG queue job running; FB native scheduling confirmed; rate limit guard active
 - [ ] Phase 4: 3x retry + dead-letter verified; nightly token health job running; audit log populated
-- [ ] Phase 5: Secrets provider abstraction in place; Cloud Run migration notes written
+- [x] Phase 5: Secrets provider abstraction in place; Cloud Run migration notes written
 - [x] Full test suite passing: `socialPostingService.test.js`, `socialQueueService.test.js`, `socialRateLimitService.test.js`, `socialTokenService.test.js`
 - [x] Zero hardcoded page/IG IDs in service files
 - [ ] `SOCIAL_POSTING_ENABLED` kill switch confirmed to work

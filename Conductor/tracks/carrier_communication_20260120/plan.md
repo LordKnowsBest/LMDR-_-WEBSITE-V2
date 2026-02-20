@@ -12,7 +12,7 @@ Build the foundation for carrier-to-driver communication with rich announcements
 - [x] Task: Create `AnnouncementComments` collection for driver engagement
 - [x] Task: Create `CarrierNotificationSettings` collection for carrier preferences
 - [x] Task: Create `DriverNotificationPreferences` collection for driver opt-outs
-- [ ] Task: Add indexes for efficient querying (carrier_id, status, published_at)
+- [x] Task: Add indexes for efficient querying (carrier_id, status, published_at)
 
 ### 1.2 Announcements Service Backend
 - [x] Task: Create `carrierAnnouncementsService.jsw` for announcement management
@@ -30,77 +30,77 @@ Build the foundation for carrier-to-driver communication with rich announcements
 - [x] Task: Implement `getAnnouncementStats()` with read rate calculation
 - [x] Task: Implement `getReadReceipts()` with pagination
 - [x] Task: Implement `getUnreadDrivers()` for reminder targeting
-- [ ] Task: Add time-spent tracking for engagement metrics (optional)
+- [x] Task: Add time-spent tracking for engagement metrics (optional)
 
 ### 1.4 Driver Feed Backend
 - [x] Task: Implement `getAnnouncementsForDriver()` with filtering and pagination
 - [x] Task: Implement `addComment()` with basic moderation
-- [ ] Task: Add notification trigger for new announcements
+- [x] Task: Add notification trigger for new announcements
 - [x] Task: Implement announcement expiry logic
 
 ### 1.5 Carrier Admin UI - Announcements Dashboard
 - [x] Task: Create `CARRIER_ANNOUNCEMENTS.html` in `src/public/carrier/`
 - [x] Task: Build announcements list with tabs (Published, Scheduled, Drafts, Archived)
-- [ ] Task: Display read rate progress bars for each announcement
-- [ ] Task: Add filter controls (status, priority, date range)
+- [x] Task: Display read rate progress bars for each announcement
+- [x] Task: Add filter controls (status, priority, date range)
 - [x] Task: Create "New Announcement" button with modal trigger
-- [ ] Task: Implement archive and send reminder actions
+- [x] Task: Implement archive and send reminder actions
 
 ### 1.6 Carrier Admin UI - Create/Edit Announcement
-- [ ] Task: Build announcement creation modal/page
-- [ ] Task: Implement rich text editor with formatting toolbar (bold, italic, links, headers, lists)
-- [ ] Task: Add image upload and embedding in content
-- [ ] Task: Create priority selector (Normal, Important, Urgent)
-- [ ] Task: Build target audience selector with segment options
-- [ ] Task: Add segment builder UI (region, tenure, status filters)
-- [ ] Task: Implement recipient preview counter
-- [ ] Task: Add attachment upload with file type validation
-- [ ] Task: Create scheduling date/time picker
-- [ ] Task: Add preview mode before publishing
-- [ ] Task: Implement save as draft functionality
+- [x] Task: Build announcement creation modal/page
+- [x] Task: Implement rich text editor with formatting toolbar (bold, italic, links, headers, lists)
+- [x] Task: Add image upload and embedding in content
+- [x] Task: Create priority selector (Normal, Important, Urgent)
+- [x] Task: Build target audience selector with segment options
+- [x] Task: Add segment builder UI (region, tenure, status filters)
+- [x] Task: Implement recipient preview counter
+- [x] Task: Add attachment upload with file type validation
+- [x] Task: Create scheduling date/time picker
+- [x] Task: Add preview mode before publishing
+- [x] Task: Implement save as draft functionality
 
 ### 1.7 Carrier Admin UI - Announcement Detail
-- [ ] Task: Build announcement detail view with full content
-- [ ] Task: Display read receipt statistics with visual chart
-- [ ] Task: Show read/unread driver lists with pagination
-- [ ] Task: Add "Send Reminder" to unread drivers action
-- [ ] Task: Display driver comments section (if enabled)
-- [ ] Task: Add comment moderation controls (hide/unhide)
+- [x] Task: Build announcement detail view with full content
+- [x] Task: Display read receipt statistics with visual chart
+- [x] Task: Show read/unread driver lists with pagination
+- [x] Task: Add "Send Reminder" to unread drivers action
+- [x] Task: Display driver comments section (if enabled)
+- [x] Task: Add comment moderation controls (hide/unhide)
 
 ### 1.8 Driver UI - Announcements Feed
 - [x] Task: Create `DRIVER_ANNOUNCEMENTS.html` in `src/public/driver/`
 - [x] Task: Build announcement card component with priority badges
 - [x] Task: Implement NEW/UNREAD/READ status indicators
-- [ ] Task: Add "Read Full Announcement" expansion
-- [ ] Task: Display attachments with download links
+- [x] Task: Add "Read Full Announcement" expansion
+- [x] Task: Display attachments with download links
 - [x] Task: Implement auto-mark-read on view
-- [ ] Task: Add comments section (if enabled)
-- [ ] Task: Implement infinite scroll pagination
+- [x] Task: Add comments section (if enabled)
+- [x] Task: Implement infinite scroll pagination
 
 ### 1.9 Notification Integration
-- [ ] Task: Create email template `announcement_notification.html`
-- [ ] Task: Create email template `announcement_digest.html` for daily/weekly
-- [ ] Task: Implement push notification payload for announcements
-- [ ] Task: Add in-app notification badge to navigation
-- [ ] Task: Implement digest scheduling (daily/weekly based on settings)
+- [x] Task: Create email template `announcement_notification.html`
+- [x] Task: Create email template `announcement_digest.html` for daily/weekly
+- [x] Task: Implement push notification payload for announcements
+- [x] Task: Add in-app notification badge to navigation
+- [x] Task: Implement digest scheduling (daily/weekly based on settings)
 
 ### 1.10 Wix Page Integration
-- [ ] Task: Create "Announcements" page in Wix Editor for carrier admin
-- [ ] Task: Add HTML component and connect to CARRIER_ANNOUNCEMENTS.html
+- [x] Task: Create "Announcements" page in Wix Editor for carrier admin
+- [x] Task: Add HTML component and connect to CARRIER_ANNOUNCEMENTS.html
 - [x] Task: Set up postMessage bridge for backend calls
-- [ ] Task: Add announcements widget to driver dashboard
-- [ ] Task: Configure page permissions (carrier admin only)
+- [x] Task: Add announcements widget to driver dashboard
+- [x] Task: Configure page permissions (carrier admin only)
 
 ### 1.11 Testing - Announcements
-- [ ] Task: Write unit tests for `carrierAnnouncementsService.jsw` CRUD operations
-- [ ] Task: Test audience targeting with various segment combinations
-- [ ] Task: Test scheduling logic with future dates
-- [ ] Task: Test read receipt tracking and deduplication
-- [ ] Task: Test attachment upload with various file types
-- [ ] Task: Manual test: create, schedule, publish announcement flow
-- [ ] Task: Manual test: driver viewing and read tracking
-- [ ] Task: Manual test: send reminder to unread drivers
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Company Announcements'
+- [x] Task: Write unit tests for `carrierAnnouncementsService.jsw` CRUD operations
+- [x] Task: Test audience targeting with various segment combinations
+- [x] Task: Test scheduling logic with future dates
+- [x] Task: Test read receipt tracking and deduplication
+- [x] Task: Test attachment upload with various file types
+- [x] Task: Manual test: create, schedule, publish announcement flow
+- [x] Task: Manual test: driver viewing and read tracking
+- [x] Task: Manual test: send reminder to unread drivers
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Company Announcements'
 
 ---
 
@@ -111,8 +111,8 @@ Centralized document management with version control, acknowledgment tracking, a
 ### 2.1 Backend Collections
 - [x] Task: Create `PolicyDocuments` collection with schema from spec
 - [x] Task: Create `PolicyAcknowledgments` collection with audit fields
-- [ ] Task: Add indexes for compliance queries (carrier_id, status, requires_acknowledgment)
-- [ ] Task: Seed initial policy categories (Handbook, Safety, SOP, Compliance, HR)
+- [x] Task: Add indexes for compliance queries (carrier_id, status, requires_acknowledgment)
+- [x] Task: Seed initial policy categories (Handbook, Safety, SOP, Compliance, HR)
 
 ### 2.2 Policy Service Backend
 - [x] Task: Create `carrierPolicyService.jsw` for document management
@@ -121,19 +121,19 @@ Centralized document management with version control, acknowledgment tracking, a
 - [x] Task: Implement `publishPolicyVersion()` with change summary
 - [x] Task: Implement `archivePolicy()` with acknowledgment preservation
 - [x] Task: Implement `uploadPolicyFile()` for PDF handling
-- [ ] Task: Implement Markdown rendering for inline policies
+- [x] Task: Implement Markdown rendering for inline policies
 
 ### 2.3 Acknowledgment Configuration Backend
 - [x] Task: Implement `setAcknowledgmentRequired()` with deadline setting
 - [x] Task: Implement `setTargetAudience()` for selective requirements
 - [x] Task: Implement `sendReminders()` to pending drivers
-- [ ] Task: Add deadline reminder scheduling (7d, 3d, 1d before)
+- [x] Task: Add deadline reminder scheduling (7d, 3d, 1d before)
 
 ### 2.4 Compliance Tracking Backend
 - [x] Task: Implement `getComplianceStatus()` with completion percentage
 - [x] Task: Implement `getAcknowledgmentList()` with status filter
 - [x] Task: Implement `getDriverPolicyStatus()` for driver's view
-- [ ] Task: Implement `exportComplianceReport()` in CSV and PDF formats
+- [x] Task: Implement `exportComplianceReport()` in CSV and PDF formats
 
 ### 2.5 Driver Acknowledgment Backend
 - [x] Task: Implement `getPoliciesForDriver()` with required/optional sorting
@@ -144,73 +144,73 @@ Centralized document management with version control, acknowledgment tracking, a
 
 ### 2.6 Carrier Admin UI - Policy Repository Dashboard
 - [x] Task: Create `CARRIER_POLICIES.html` in `src/public/carrier/`
-- [ ] Task: Build policy list grouped by category
-- [ ] Task: Display version number and last published date
-- [ ] Task: Show compliance progress bars for required policies
+- [x] Task: Build policy list grouped by category
+- [x] Task: Display version number and last published date
+- [x] Task: Show compliance progress bars for required policies
 - [x] Task: Add filter by category and status
 - [x] Task: Create "New Policy" button
 
 ### 2.7 Carrier Admin UI - Create/Edit Policy
-- [ ] Task: Build policy creation modal/page
-- [ ] Task: Add title, category, and description fields
-- [ ] Task: Implement content type selector (Markdown editor, PDF upload, external link)
-- [ ] Task: Build Markdown editor with preview
-- [ ] Task: Add PDF upload with viewer preview
-- [ ] Task: Create acknowledgment settings section
-- [ ] Task: Add deadline date picker
-- [ ] Task: Implement target audience selector (all, new hires, specific segments)
-- [ ] Task: Add "Mandatory" toggle for skip prevention
+- [x] Task: Build policy creation modal/page
+- [x] Task: Add title, category, and description fields
+- [x] Task: Implement content type selector (Markdown editor, PDF upload, external link)
+- [x] Task: Build Markdown editor with preview
+- [x] Task: Add PDF upload with viewer preview
+- [x] Task: Create acknowledgment settings section
+- [x] Task: Add deadline date picker
+- [x] Task: Implement target audience selector (all, new hires, specific segments)
+- [x] Task: Add "Mandatory" toggle for skip prevention
 
 ### 2.8 Carrier Admin UI - Compliance Dashboard
-- [ ] Task: Build compliance detail view for specific policy
-- [ ] Task: Display overall completion percentage with progress bar
-- [ ] Task: Show completed vs pending driver counts
-- [ ] Task: Build pending acknowledgments list with days-until-deadline
-- [ ] Task: Build completed acknowledgments list with signature dates
-- [ ] Task: Add "Send Reminder" bulk action
-- [ ] Task: Implement "Export Report" functionality
+- [x] Task: Build compliance detail view for specific policy
+- [x] Task: Display overall completion percentage with progress bar
+- [x] Task: Show completed vs pending driver counts
+- [x] Task: Build pending acknowledgments list with days-until-deadline
+- [x] Task: Build completed acknowledgments list with signature dates
+- [x] Task: Add "Send Reminder" bulk action
+- [x] Task: Implement "Export Report" functionality
 
 ### 2.9 Driver UI - Policy View
 - [x] Task: Create `DRIVER_POLICIES.html` in `src/public/driver/`
 - [x] Task: Build "Action Required" section for pending acknowledgments
 - [x] Task: Display policy list with acknowledgment status badges
-- [ ] Task: Show deadline countdown for required policies
+- [x] Task: Show deadline countdown for required policies
 - [x] Task: Implement policy detail view with content rendering
 
 ### 2.10 Driver UI - Acknowledgment Flow
 - [x] Task: Build acknowledgment modal with full policy viewer
-- [ ] Task: Implement PDF viewer for uploaded documents
-- [ ] Task: Render Markdown content with proper styling
+- [x] Task: Implement PDF viewer for uploaded documents
+- [x] Task: Render Markdown content with proper styling
 - [x] Task: Add checkbox acknowledgment for simple policies
-- [ ] Task: Implement e-signature capture (canvas drawing)
-- [ ] Task: Add confirmation checkboxes before submission
+- [x] Task: Implement e-signature capture (canvas drawing)
+- [x] Task: Add confirmation checkboxes before submission
 - [x] Task: Display success confirmation with timestamp
 
 ### 2.11 Notification Integration
-- [ ] Task: Create email template `policy_reminder.html`
-- [ ] Task: Create email template `policy_deadline_warning.html` (1 day)
-- [ ] Task: Implement push notification for policy deadlines
-- [ ] Task: Add reminder scheduling job (7d, 3d, 1d before deadline)
+- [x] Task: Create email template `policy_reminder.html`
+- [x] Task: Create email template `policy_deadline_warning.html` (1 day)
+- [x] Task: Implement push notification for policy deadlines
+- [x] Task: Add reminder scheduling job (7d, 3d, 1d before deadline)
 
 ### 2.12 Wix Page Integration
-- [ ] Task: Create "Policy Repository" page in Wix Editor for carrier admin
-- [ ] Task: Add HTML component and connect to CARRIER_POLICIES.html
-- [ ] Task: Add policy widget to driver dashboard
+- [x] Task: Create "Policy Repository" page in Wix Editor for carrier admin
+- [x] Task: Add HTML component and connect to CARRIER_POLICIES.html
+- [x] Task: Add policy widget to driver dashboard
 - [x] Task: Set up postMessage bridge for backend calls
-- [ ] Task: Configure page permissions
+- [x] Task: Configure page permissions
 
 ### 2.13 Testing - Policy Repository
-- [ ] Task: Write unit tests for `carrierPolicyService.jsw` CRUD operations
-- [ ] Task: Test version history tracking
-- [ ] Task: Test acknowledgment with various signature types
-- [ ] Task: Test compliance percentage calculations
-- [ ] Task: Test deadline reminder scheduling
-- [ ] Task: Test PDF upload and rendering
-- [ ] Task: Manual test: policy creation with Markdown content
-- [ ] Task: Manual test: policy creation with PDF upload
-- [ ] Task: Manual test: driver acknowledgment flow with e-signature
-- [ ] Task: Manual test: compliance report export
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Policy Repository'
+- [x] Task: Write unit tests for `carrierPolicyService.jsw` CRUD operations
+- [x] Task: Test version history tracking
+- [x] Task: Test acknowledgment with various signature types
+- [x] Task: Test compliance percentage calculations
+- [x] Task: Test deadline reminder scheduling
+- [x] Task: Test PDF upload and rendering
+- [x] Task: Manual test: policy creation with Markdown content
+- [x] Task: Manual test: policy creation with PDF upload
+- [x] Task: Manual test: driver acknowledgment flow with e-signature
+- [x] Task: Manual test: compliance report export
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Policy Repository'
 
 ---
 
