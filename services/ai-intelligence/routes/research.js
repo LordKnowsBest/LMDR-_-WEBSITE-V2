@@ -111,7 +111,10 @@ researchRouter.post('/company', async (c) => {
     return c.json({ error: { code: 'validation_error', message: 'Invalid JSON body', requestId } }, 400);
   }
 
-  const { dotNumber, companyName, requestedSections = ALL_SECTIONS } = body;
+  // fmcsaData: optional pre-fetched FMCSA data from Velo (bypasses the live
+  // FMCSA API call which is blocked by Railway datacenter IPs).
+  // Shape: { safetyRating, operatingStatus, totalDrivers, powerUnits, legalName, ... }
+  const { dotNumber, companyName, requestedSections = ALL_SECTIONS, fmcsaData } = body;
 
   if (!dotNumber || !companyName) {
     return c.json({
@@ -127,11 +130,21 @@ researchRouter.post('/company', async (c) => {
     }, 400);
   }
 
-  console.log(`[research] Starting ${dotNumber} sections=[${sections}] requestId=${requestId}`);
+  console.log(`[research] Starting ${dotNumber} sections=[${sections}] preloadedFmcsa=${!!fmcsaData} requestId=${requestId}`);
 
   // ── Run all sections in parallel ──────────────────────────────────────────
+  // If fmcsaData was pre-fetched by Velo (Railway IPs are blocked by FMCSA),
+  // inject it directly instead of making a live API call.
   const outcomes = await Promise.all(
-    sections.map(section => runSection(section, dotNumber, companyName))
+    sections.map(section => {
+      if (section === 'fmcsa' && fmcsaData) {
+        return Promise.resolve({
+          section: 'fmcsa',
+          result: { status: 'ok', ...fmcsaData },
+        });
+      }
+      return runSection(section, dotNumber, companyName);
+    })
   );
 
   // Build sections map

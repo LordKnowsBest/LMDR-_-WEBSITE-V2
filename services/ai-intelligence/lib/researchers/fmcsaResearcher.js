@@ -37,7 +37,10 @@ export async function fmcsaResearch(dotNumber) {
   try {
     res = await fetch(
       `${FMCSA_BASE}/carriers/${encodeURIComponent(dotNumber)}?webKey=${webKey}`,
-      { signal: controller.signal }
+      {
+        headers: { 'Accept': 'application/json' },
+        signal:  controller.signal,
+      }
     );
   } catch (err) {
     clearTimeout(timer);
@@ -60,7 +63,8 @@ export async function fmcsaResearch(dotNumber) {
     return { status: 'error', note: 'FMCSA response was not valid JSON' };
   }
 
-  const carrier = data?.content?.[0]?.carrier;
+  // FMCSA returns content as object (not array)
+  const carrier = data?.content?.carrier;
   if (!carrier) {
     return { status: 'not_found', note: 'No carrier record found for DOT number' };
   }

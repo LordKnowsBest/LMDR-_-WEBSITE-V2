@@ -813,12 +813,30 @@ export async function runParallelResearch(dotNumber, companyName, sections = ALL
     throw new Error('runParallelResearch: dotNumber and companyName are required');
   }
 
-  let internalKey;
-  try {
-    internalKey = await getSecret('LMDR_INTERNAL_KEY');
-  } catch (err) {
-    throw new Error(`runParallelResearch: secret load failed: ${err.message}`);
-  }
+  // ── Fetch FMCSA from Velo (Railway datacenter IPs are blocked by FMCSA) ──
+  // Run in parallel with secret loading to minimise added latency.
+  const [internalKey, fmcsaRaw] = await Promise.all([
+    getSecret('LMDR_INTERNAL_KEY').catch(err => {
+      throw new Error(`runParallelResearch: secret load failed: ${err.message}`);
+    }),
+    sections.includes('fmcsa')
+      ? getCarrierSafetyData(dotNumber).catch(err => {
+          console.warn(`[runParallelResearch] FMCSA fetch failed for ${dotNumber}:`, err.message);
+          return null;
+        })
+      : Promise.resolve(null),
+  ]);
+
+  // Normalise Velo FMCSA shape → microservice section schema
+  const fmcsaData = fmcsaRaw ? {
+    safetyRating:    fmcsaRaw.safety_rating    || 'Not Rated',
+    operatingStatus: fmcsaRaw.operating_status || null,
+    totalDrivers:    fmcsaRaw.total_drivers    || null,
+    powerUnits:      fmcsaRaw.total_power_units || null,
+    legalName:       fmcsaRaw.legal_name       || null,
+    entityType:      fmcsaRaw.entity_type      || null,
+    fromCache:       fmcsaRaw.fromCache        || false,
+  } : null;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RESEARCH_TIMEOUT_MS);
@@ -836,6 +854,7 @@ export async function runParallelResearch(dotNumber, companyName, sections = ALL
         dotNumber,
         companyName,
         requestedSections: sections,
+        fmcsaData,          // null if fetch failed or fmcsa not in sections
       }),
       signal: controller.signal,
     });
