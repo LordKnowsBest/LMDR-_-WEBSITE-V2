@@ -1,0 +1,237 @@
+/**
+ * semanticBackfillJob.jsw
+ *
+ * Populates and refreshes Pinecone vector indexes for driver and carrier profiles.
+ *
+ * Strategy:
+ *   - Uses a daily date string (YYYY-MM-DD) as profileUpdatedAt.
+ *     The embed endpoint skips a record if its stored date matches — so each
+ *     record embeds at most once per day, and re-embeds daily to pick up
+ *     profile changes from the previous day.
+ *   - Processes in chunks of 10 with 300ms gaps → ~33 chunks/min (~330 records/min).
+ *     Conservative enough for Voyage AI free tier and Pinecone serverless.
+ *   - Gracefully handles individual record failures — logs them and continues.
+ *   - Returns a stats object so callers can log/alert on failures.
+ *
+ * Scheduled: nightly at 03:30 UTC (low-traffic window, after B2B batch at 03:00).
+ * Can also be called directly for manual/initial backfill.
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+import { embedDriver, embedCarrier } from 'backend/semanticSearchService';
+import { chunkArray } from 'backend/utils/arrayUtils';
+import { FEATURE_FLAGS } from 'backend/configData';
+
+const CHUNK_SIZE     = 10;
+const CHUNK_DELAY_MS = 300;
+const PAGE_SIZE      = 100;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function todayVersionString() {
+  return new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// ── Driver backfill ──────────────────────────────────────────────────────────
+
+/**
+ * Embed all discoverable driver profiles into lmdr-drivers Pinecone index.
+ * @returns {{ processed, skipped, failed, errors }}
+ */
+async function _backfillDrivers() {
+  const version = todayVersionString();
+  const stats   = { processed: 0, skipped: 0, failed: 0, errors: [] };
+
+  let offset = 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    let page;
+    try {
+      const result = await dataAccess.queryRecords('driverProfiles', {
+        filters: { is_discoverable: 'Yes' },
+        limit:  PAGE_SIZE,
+        offset,
+        suppressAuth: true,
+      });
+      page    = result.items || [];
+      hasMore = page.length === PAGE_SIZE;
+      offset += page.length;
+    } catch (err) {
+      console.error('[semanticBackfill] Driver page fetch failed at offset', offset, ':', err.message);
+      break;
+    }
+
+    if (page.length === 0) break;
+
+    const chunks = chunkArray(page, CHUNK_SIZE);
+    for (const chunk of chunks) {
+      await Promise.all(chunk.map(async (driver) => {
+        if (!driver._id) { stats.skipped++; return; }
+
+        try {
+          await embedDriver(
+            driver._id,
+            version,
+            {
+              cdl_class:        driver.cdl_class        || null,
+              endorsements:     driver.endorsements      || null,
+              home_state:       driver.home_state        || null,
+              experience_years: driver.years_experience  || 0,   // field name mapping
+              haul_types:       driver.haul_types        || null,
+              pay_min:          driver.pay_min_cpm       || driver.minimum_pay || null,
+              is_discoverable:  driver.is_discoverable   || 'Yes',
+              bio:              driver.bio               || null,
+            }
+          );
+          stats.processed++;
+        } catch (err) {
+          stats.failed++;
+          stats.errors.push({ id: driver._id, error: err.message });
+        }
+      }));
+
+      await sleep(CHUNK_DELAY_MS);
+    }
+
+    console.log(`[semanticBackfill] Drivers: offset=${offset} processed=${stats.processed} failed=${stats.failed}`);
+  }
+
+  return stats;
+}
+
+// ── Carrier backfill ─────────────────────────────────────────────────────────
+
+/**
+ * Embed all active carrier accounts into lmdr-carriers Pinecone index.
+ * @returns {{ processed, skipped, failed, errors }}
+ */
+async function _backfillCarriers() {
+  const version = todayVersionString();
+  const stats   = { processed: 0, skipped: 0, failed: 0, errors: [] };
+
+  let offset = 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    let page;
+    try {
+      const result = await dataAccess.queryRecords('carrierAccounts', {
+        filters: { status: 'active' },
+        limit:  PAGE_SIZE,
+        offset,
+        suppressAuth: true,
+      });
+      page    = result.items || [];
+      hasMore = page.length === PAGE_SIZE;
+      offset += page.length;
+    } catch (err) {
+      console.error('[semanticBackfill] Carrier page fetch failed at offset', offset, ':', err.message);
+      break;
+    }
+
+    if (page.length === 0) break;
+
+    const chunks = chunkArray(page, CHUNK_SIZE);
+    for (const chunk of chunks) {
+      await Promise.all(chunk.map(async (carrier) => {
+        if (!carrier._id) { stats.skipped++; return; }
+
+        try {
+          await embedCarrier(
+            carrier._id,
+            version,
+            {
+              dot_number:     carrier.dot_number                                         || null,
+              description:    carrier.description || carrier.company_description         || null,
+              haul_types:     carrier.haul_types  || carrier.freight_types               || null,
+              home_states:    carrier.home_states || carrier.operating_states             || null,
+              fleet_size:     carrier.fleet_size  || carrier.number_of_trucks            || 0,
+              pay_range_min:  carrier.pay_range_min || carrier.pay_cpm_min               || 0,
+              pay_range_max:  carrier.pay_range_max || carrier.pay_cpm_max               || 0,
+            }
+          );
+          stats.processed++;
+        } catch (err) {
+          stats.failed++;
+          stats.errors.push({ id: carrier._id, error: err.message });
+        }
+      }));
+
+      await sleep(CHUNK_DELAY_MS);
+    }
+
+    console.log(`[semanticBackfill] Carriers: offset=${offset} processed=${stats.processed} failed=${stats.failed}`);
+  }
+
+  return stats;
+}
+
+// ── Exported job functions ───────────────────────────────────────────────────
+
+/**
+ * Scheduled entry point — called nightly by jobs.config.
+ * Skips gracefully if semanticToolEnabled is off.
+ */
+export async function runNightlySemanticBackfill() {
+  if (!FEATURE_FLAGS.semanticToolEnabled) {
+    console.log('[semanticBackfill] Skipped — semanticToolEnabled is false');
+    return { skipped: true };
+  }
+
+  console.log('[semanticBackfill] Starting nightly backfill...');
+  const start = Date.now();
+
+  const [drivers, carriers] = await Promise.all([
+    _backfillDrivers(),
+    _backfillCarriers(),
+  ]);
+
+  const durationMs = Date.now() - start;
+  const summary = {
+    durationMs,
+    drivers,
+    carriers,
+    totalProcessed: drivers.processed + carriers.processed,
+    totalFailed:    drivers.failed    + carriers.failed,
+  };
+
+  console.log('[semanticBackfill] Complete:', JSON.stringify({
+    durationMs,
+    drivers:  `${drivers.processed} ok / ${drivers.failed} failed`,
+    carriers: `${carriers.processed} ok / ${carriers.failed} failed`,
+  }));
+
+  if (summary.totalFailed > 0) {
+    console.warn('[semanticBackfill] Failed records:', [
+      ...drivers.errors.slice(0, 5),
+      ...carriers.errors.slice(0, 5),
+    ]);
+  }
+
+  return summary;
+}
+
+/**
+ * Manual driver-only backfill — callable from admin dashboard or one-time migration.
+ */
+export async function runDriverBackfill() {
+  console.log('[semanticBackfill] Starting driver backfill...');
+  const stats = await _backfillDrivers();
+  console.log('[semanticBackfill] Driver backfill complete:', stats.processed, 'processed,', stats.failed, 'failed');
+  return stats;
+}
+
+/**
+ * Manual carrier-only backfill.
+ */
+export async function runCarrierBackfill() {
+  console.log('[semanticBackfill] Starting carrier backfill...');
+  const stats = await _backfillCarriers();
+  console.log('[semanticBackfill] Carrier backfill complete:', stats.processed, 'processed,', stats.failed, 'failed');
+  return stats;
+}

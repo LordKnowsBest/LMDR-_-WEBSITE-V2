@@ -474,7 +474,7 @@ export const FEATURE_FLAGS = {
   /** Phase 1: Route agent AI steps through external runtime microservice (ai.lastmiledr.app) */
   runtimeEnabled: true,
   /** Phase 2: Enable semantic search tool calls in agent context */
-  semanticToolEnabled: false,
+  semanticToolEnabled: true,
   /** Phase 2: Blend semantic score as a component in driver ranking (driverScoring.js) */
   semanticSearchBlendEnabled: false,
 };
