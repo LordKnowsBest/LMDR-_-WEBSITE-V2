@@ -1,7 +1,9 @@
 import { currentUser } from 'wix-users-backend';
 import { getSubscription, checkViewQuota, recordProfileView } from 'backend/subscriptionService';
-import { calculateDriverMatchScore, generateDriverMatchRationale, getCarrierFeedbackWeights, applyFeedbackAdjustments, DEFAULT_WEIGHTS } from 'backend/driverScoring';
+import { calculateDriverMatchScore, blendSemanticScore, generateDriverMatchRationale, getCarrierFeedbackWeights, applyFeedbackAdjustments, DEFAULT_WEIGHTS } from 'backend/driverScoring';
 import { getDriverMatchingWeights } from 'backend/admin_config_service';
+import { searchDriversSemantic } from 'backend/semanticSearchService';
+import { FEATURE_FLAGS } from 'backend/configData';
 import { startTrace, endTrace, log, logDatabase } from 'backend/observabilityService';
 import { withRetry } from 'backend/utils/retryUtils';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
@@ -919,6 +921,38 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
       }
     }
 
+    // Semantic blend: one batch search before the scoring loop (Phase 2)
+    // Builds a driverId → cosine similarity map; used at 15% weight if blend is enabled.
+    // On timeout or failure, semanticScoreMap stays empty and scoring is unaffected.
+    const semanticScoreMap = new Map();
+    if (FEATURE_FLAGS.semanticSearchBlendEnabled) {
+      try {
+        const haul  = Array.isArray(scoringPrefs.haul_types) ? scoringPrefs.haul_types.join(', ') : (scoringPrefs.haul_types || '');
+        const endt  = Array.isArray(scoringPrefs.required_endorsements) ? scoringPrefs.required_endorsements.join(', ') : '';
+        const pay   = scoringPrefs.pay_range_min ? `min $${scoringPrefs.pay_range_min}/mi` : '';
+        const semanticQuery = [
+          haul && `${haul} driver`,
+          endt && `${endt} endorsement`,
+          pay,
+          scoringPrefs.home_state && `based in ${scoringPrefs.home_state}`,
+        ].filter(Boolean).join(', ') || 'CDL driver';
+
+        const semanticResult = await searchDriversSemantic(
+          semanticQuery,
+          { is_discoverable: 'Yes' },
+          Math.min(drivers.length, 200)
+        );
+        if (semanticResult?.results) {
+          for (const r of semanticResult.results) {
+            semanticScoreMap.set(r.driverId, r.score);
+          }
+          console.log(`[driverMatching] Semantic pre-fetch: ${semanticScoreMap.size} scores loaded`);
+        }
+      } catch (err) {
+        console.warn('[driverMatching] Semantic pre-fetch failed (non-blocking):', err.message);
+      }
+    }
+
     // Process in parallel chunks to maximize throughput
     const CHUNK_SIZE = 50;
     for (let i = 0; i < drivers.length; i += CHUNK_SIZE) {
@@ -940,13 +974,19 @@ export async function findMatchingDrivers(carrierDot, filters = {}, options = {}
           const scoreResult = calculateDriverMatchScore(driver, finalWeights, explicitWeights, filters);
           const rationaleResult = generateDriverMatchRationale(scoreResult.scores || {}, driver, scoringPrefs);
 
+          // Semantic blend: apply if enabled and we have a score for this driver
+          let baseDriverScore = scoreResult.overallScore || 0;
+          if (FEATURE_FLAGS.semanticSearchBlendEnabled && semanticScoreMap.has(driver._id)) {
+            baseDriverScore = blendSemanticScore(baseDriverScore, semanticScoreMap.get(driver._id));
+          }
+
           // Check for mutual match via in-memory set (no API call)
           const isMutualMatch = mutualInterestSet.has(driver._id);
           const mutualMatchBoost = isMutualMatch ? MUTUAL_MATCH_SCORE_BOOST : 0;
 
           return {
             driver,
-            score: Math.min(100, (scoreResult.overallScore || 0) + mutualMatchBoost),
+            score: Math.min(100, baseDriverScore + mutualMatchBoost),
             rationale: rationaleResult.points || [],
             summary: rationaleResult.summary,
             isMutualMatch,

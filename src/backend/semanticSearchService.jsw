@@ -1,0 +1,147 @@
+/**
+ * semanticSearchService.jsw
+ *
+ * Velo-side wrapper for the semantic search endpoints on the external
+ * AI runtime microservice.
+ *
+ * Exposes:
+ *   searchDriversSemantic(query, filters, topK)   — batch driver search
+ *   searchCarriersSemantic(query, filters, topK)  — batch carrier search
+ *   embedDriver(driverId, profileUpdatedAt, profile) — upsert driver embedding
+ *   embedCarrier(carrierId, profileUpdatedAt, profile) — upsert carrier embedding
+ *
+ * Circuit breaker: 3 failures → open for 60s → callers receive { scores: null, circuitOpen: true }
+ * Feature flag: FEATURE_FLAGS.semanticToolEnabled must be true.
+ *
+ * Timeout budgets (matching spec §2):
+ *   Search: 400ms  — on timeout, caller uses deterministic score only
+ *   Embed:  2000ms — on timeout, log warning and skip (non-blocking)
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import { FEATURE_FLAGS } from 'backend/configData';
+
+const RUNTIME_BASE      = 'https://lmdr-ai-intelligence-production.up.railway.app';
+const SEARCH_TIMEOUT_MS = 400;
+const EMBED_TIMEOUT_MS  = 2_000;
+const CIRCUIT_THRESHOLD = 3;
+const CIRCUIT_OPEN_MS   = 60_000;
+
+let _failures       = 0;
+let _circuitUntil   = 0;
+
+// ── Circuit breaker ──────────────────────────────────────────────────────────
+
+function _isOpen()   { return Date.now() < _circuitUntil; }
+function _fail()     {
+  _failures++;
+  if (_failures >= CIRCUIT_THRESHOLD) {
+    _circuitUntil = Date.now() + CIRCUIT_OPEN_MS;
+    console.error('[semanticSearch] Circuit OPENED after', _failures, 'failures');
+  }
+}
+function _succeed()  { _failures = 0; _circuitUntil = 0; }
+
+// ── Internal fetch helper ────────────────────────────────────────────────────
+
+async function _call(path, body, timeoutMs) {
+  const key = await getSecret('LMDR_INTERNAL_KEY');
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(`${RUNTIME_BASE}/v1${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':        'application/json',
+        'x-lmdr-internal-key': key,
+        'x-lmdr-timestamp':    String(Date.now()),
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    _fail();
+    throw err;
+  }
+
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    _fail();
+    throw new Error(`Semantic API ${res.status} on ${path}`);
+  }
+
+  _succeed();
+  return res.json();
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * Search drivers semantically. Returns results array or null on circuit/timeout.
+ * @param {string} query   - Natural language description of ideal driver
+ * @param {object} filters - Pinecone metadata filters (e.g. { is_discoverable: 'Yes' })
+ * @param {number} topK    - Max results (default 50)
+ * @returns {{ results, queryLatencyMs, circuitOpen? } | { scores: null, circuitOpen: true }}
+ */
+export async function searchDriversSemantic(query, filters = {}, topK = 50) {
+  if (!FEATURE_FLAGS.semanticToolEnabled || _isOpen()) {
+    return { scores: null, circuitOpen: true };
+  }
+
+  try {
+    return await _call('/search/drivers', { query, filters, topK }, SEARCH_TIMEOUT_MS);
+  } catch (err) {
+    const reason = err.name === 'AbortError' ? 'timeout' : err.message;
+    console.warn('[semanticSearch] searchDrivers failed:', reason);
+    return { scores: null, circuitOpen: _isOpen() };
+  }
+}
+
+/**
+ * Search carriers semantically.
+ */
+export async function searchCarriersSemantic(query, filters = {}, topK = 20) {
+  if (!FEATURE_FLAGS.semanticToolEnabled || _isOpen()) {
+    return { scores: null, circuitOpen: true };
+  }
+
+  try {
+    return await _call('/search/carriers', { query, filters, topK }, SEARCH_TIMEOUT_MS);
+  } catch (err) {
+    const reason = err.name === 'AbortError' ? 'timeout' : err.message;
+    console.warn('[semanticSearch] searchCarriers failed:', reason);
+    return { scores: null, circuitOpen: _isOpen() };
+  }
+}
+
+/**
+ * Upsert a driver embedding. Fire-and-forget safe — caller should not await
+ * in the critical path. Logs on failure, never throws.
+ */
+export async function embedDriver(driverId, profileUpdatedAt, profile) {
+  if (!FEATURE_FLAGS.semanticToolEnabled) return;
+
+  try {
+    await _call('/embed/driver', { driverId, profileUpdatedAt, profile }, EMBED_TIMEOUT_MS);
+  } catch (err) {
+    console.warn('[semanticSearch] embedDriver failed (non-blocking):', err.message);
+  }
+}
+
+/**
+ * Upsert a carrier embedding. Fire-and-forget safe.
+ */
+export async function embedCarrier(carrierId, profileUpdatedAt, profile) {
+  if (!FEATURE_FLAGS.semanticToolEnabled) return;
+
+  try {
+    await _call('/embed/carrier', { carrierId, profileUpdatedAt, profile }, EMBED_TIMEOUT_MS);
+  } catch (err) {
+    console.warn('[semanticSearch] embedCarrier failed (non-blocking):', err.message);
+  }
+}

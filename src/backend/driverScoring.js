@@ -939,6 +939,36 @@ const applyFeedbackAdjustments = (baseWeights, feedbackWeights) => {
   return adjusted;
 };
 
+// =============================================================================
+// SEMANTIC BLEND (Phase 2 - AI Intelligence Layer)
+// =============================================================================
+
+/**
+ * Blend weight: semantic contributes 15%, deterministic baseline 85%.
+ * Safe degradation: if semanticCosineSimilarity is absent, returns deterministicScore unchanged.
+ */
+const SEMANTIC_BLEND_WEIGHT = 0.15;
+
+/**
+ * Blend a Pinecone cosine similarity score [0,1] into a deterministic
+ * driver match score [0,100].
+ *
+ * Only called when FEATURE_FLAGS.semanticSearchBlendEnabled is true AND
+ * the driver has a semantic score in the pre-fetched batch result.
+ *
+ * @param {number} deterministicScore       - Output of calculateDriverMatchScore [0,100]
+ * @param {number|null} semanticSimilarity  - Pinecone cosine score [0,1] or null
+ * @returns {number} Blended score [0,100]
+ */
+const blendSemanticScore = (deterministicScore, semanticSimilarity) => {
+  if (typeof semanticSimilarity !== 'number') return deterministicScore;
+  const semanticAs100 = semanticSimilarity * 100;
+  return Math.min(100, Math.round(
+    deterministicScore * (1 - SEMANTIC_BLEND_WEIGHT) +
+    semanticAs100 * SEMANTIC_BLEND_WEIGHT
+  ));
+};
+
 module.exports = {
   DEFAULT_WEIGHTS,
   FILTER_BOOST_MULTIPLIERS,
@@ -951,6 +981,7 @@ module.exports = {
   scoreSalaryFit,
   scoreEngagement,
   calculateDriverMatchScore,
+  blendSemanticScore,
   generateDriverMatchRationale,
   getCarrierFeedbackWeights,
   applyFeedbackAdjustments
