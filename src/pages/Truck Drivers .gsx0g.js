@@ -9,7 +9,7 @@ import wixLocation from 'wix-location';
 import { getTopJobOpportunities, getJobsByState, getRecentHires } from 'backend/publicStatsService';
 import { getDriverTestimonials } from 'backend/contentService';
 import { extractDocumentForAutoFill } from 'backend/ocrService';
-import { submitApplication } from 'backend/applicationService';
+import { submitApplication, saveDriverLead } from 'backend/applicationService';
 
 $w.onReady(async function () {
   await Promise.all([
@@ -276,48 +276,50 @@ async function handleExtractDocumentOCR(component, data) {
 
 async function handleSubmitQuickApply(component, data) {
   try {
+    // Build full payload — pass through ALL fields from the form
     const payload = {
-      carrierDOT: data.carrierDOT || null,
-      carrierName: data.carrierName || null,
+      fullName: data.fullName || '',
       phone: data.phone || '',
       email: data.email || '',
-      preferredContact: data.preferredContact || 'phone',
-      availability: data.availability || 'Immediately',
-      message: data.message || '',
+      homeZip: data.homeZip || '',
+      cdlClass: data.cdlClass || '',
+      yearsExperience: data.yearsExperience || '0',
+      endorsements: data.endorsements || [],
+      preferredRunType: data.preferredRunType || 'any',
       cdlNumber: data.cdlNumber || '',
       cdlExpiration: data.cdlExpiration || '',
       medCardExpiration: data.medCardExpiration || '',
-      documents: data.documents || {}
+      documents: data.documents || {},
+      carrierDOT: data.carrierDOT || null,
+      carrierName: data.carrierName || null
     };
 
-    // If no target carrier, this landing flow should not hard fail.
-    if (!payload.carrierDOT) {
-      safePost(component, 'submitResult', {
-        success: true,
-        type: 'profileUpdate',
-        message: 'Application details received. Continue in AI Matching.'
-      });
-      return;
+    let result;
+
+    if (payload.carrierDOT) {
+      // Targeted application to a specific carrier (requires auth)
+      result = await submitApplication(payload);
+    } else {
+      // Landing page lead capture — no auth required
+      result = await saveDriverLead(payload);
     }
 
-    const result = await submitApplication(payload);
     if (result.success) {
       safePost(component, 'submitResult', {
         success: true,
-        type: 'application',
-        carrierDOT: payload.carrierDOT,
-        carrierName: payload.carrierName,
-        applicationId: result.application?._id,
-        isNew: result.isNew,
-        message: 'Your application has been submitted successfully!'
+        type: result.type || 'lead',
+        leadId: result.leadId || null,
+        applicationId: result.application?._id || null,
+        message: result.message || 'Your application has been received!'
       });
     } else {
       safePost(component, 'submitResult', {
         success: false,
-        error: result.error || 'Failed to submit application'
+        error: result.error || 'Failed to save application'
       });
     }
   } catch (error) {
+    console.error('[TruckDrivers] Submit error:', error);
     safePost(component, 'submitResult', { success: false, error: error.message });
   }
 }

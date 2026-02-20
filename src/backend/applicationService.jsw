@@ -171,7 +171,7 @@ export async function submitApplication(applicationData) {
     if (applicationData.firstName && applicationData.lastName) {
       profileUpdates.display_name = `${applicationData.firstName} ${applicationData.lastName}`;
     }
-    
+
     // Normalize DOB
     if (applicationData.dob) {
       const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
@@ -214,7 +214,7 @@ export async function submitApplication(applicationData) {
 
     if (applicationData.accidentsLast3Years !== undefined) profileUpdates.accidents_last_3_years = parseInt(applicationData.accidentsLast3Years, 10) || 0;
     if (applicationData.violationsLast3Years !== undefined) profileUpdates.violations_last_3_years = parseInt(applicationData.violationsLast3Years, 10) || 0;
-    
+
     if (applicationData.companiesLast3Years !== undefined) profileUpdates.companies_last_3_years = parseInt(applicationData.companiesLast3Years, 10) || 0;
     if (applicationData.employer1Name) profileUpdates.employer_1_name = applicationData.employer1Name;
     if (applicationData.employer1Duration) profileUpdates.employer_1_duration = applicationData.employer1Duration;
@@ -240,7 +240,7 @@ export async function submitApplication(applicationData) {
 
     if (applicationData.documents) {
       const uploadFolder = `${userId}/${Date.now()}`;
-      
+
       const docsToUpload = [
         { key: 'cdlFront', field: 'cdl_front_image', urlField: 'cdl_front_url' },
         { key: 'cdlBack', field: 'cdl_back_image', urlField: 'cdl_back_url' },
@@ -255,7 +255,7 @@ export async function submitApplication(applicationData) {
           if (result.success) {
             profileUpdates[doc.field] = result.fileUrl;
             if (doc.urlField) profileUpdates[doc.urlField] = result.fileUrl;
-            
+
             // Update local variables for application record
             if (doc.key === 'cdlFront') cdlFrontImage = result.fileUrl;
             if (doc.key === 'cdlBack') cdlBackImage = result.fileUrl;
@@ -415,6 +415,124 @@ export async function submitApplication(applicationData) {
 }
 
 /**
+ * Save a driver lead from a public landing page (no auth required).
+ * Writes to the existing driverApplications collection (Airtable Applications table).
+ *
+ * @param {Object} leadData - Form data from the Truck Driver Page or similar landing pages
+ * @returns {Promise<{success: boolean, leadId?: string, message?: string, error?: string}>}
+ */
+export async function saveDriverLead(leadData) {
+  const traceId = `lead-${Date.now()}`;
+  try {
+    // Parse full name into first/last
+    const nameParts = (leadData.fullName || '').trim().split(/\s+/);
+    const firstName = nameParts[0] || '';
+    const lastName = nameParts.slice(1).join(' ') || '';
+
+    // Derive boolean flags for the scored-driver pipeline
+    const endorsements = Array.isArray(leadData.endorsements) ? leadData.endorsements : [];
+    const cdlClass = (leadData.cdlClass || '').toUpperCase();
+    const runType = (leadData.preferredRunType || 'any').toLowerCase();
+
+    const record = {
+      first_name: firstName,
+      last_name: lastName,
+      phone: leadData.phone || '',
+      email: leadData.email || '',
+      cdl_class: leadData.cdlClass || '',
+      has_valid_cdl: 'Yes',
+      years_experience: leadData.yearsExperience || '0',
+      endorsements: endorsements.join(', '),
+      route_pref_1: leadData.preferredRunType || 'any',
+      availability: 'Immediately',
+      submission_date: new Date(),
+      // Computed booleans
+      has_hazmat: endorsements.includes('H') || endorsements.includes('X') ? 'Yes' : 'No',
+      has_tanker: endorsements.includes('N') || endorsements.includes('X') ? 'Yes' : 'No',
+      has_cdl_a: cdlClass === 'A' ? 'Yes' : 'No',
+      has_cdl_b: cdlClass === 'B' ? 'Yes' : 'No',
+      has_cdl_c: cdlClass === 'C' ? 'Yes' : 'No',
+      is_otr_friendly: (runType === 'otr' || runType === 'any') ? 'Yes' : 'No',
+      is_regional_friendly: (runType === 'regional' || runType === 'any') ? 'Yes' : 'No',
+      is_local_friendly: (runType === 'local' || runType === 'any') ? 'Yes' : 'No',
+      years_exp_num: Number(leadData.yearsExperience) || 0
+    };
+
+    // CDL details from OCR auto-fill
+    if (leadData.cdlNumber) record.cdl_number = leadData.cdlNumber;
+    if (leadData.cdlExpiration) record.cdl_expiration = leadData.cdlExpiration;
+    if (leadData.medCardExpiration) record.med_card_expiration = leadData.medCardExpiration;
+    if (leadData.homeZip) record.home_zip = leadData.homeZip;
+
+    // Handle document uploads (no userId → use sanitised email as folder key)
+    if (leadData.documents) {
+      const safeEmail = (leadData.email || 'unknown').replace(/[^a-zA-Z0-9]/g, '_');
+      const uploadFolder = `leads/${safeEmail}/${Date.now()}`;
+
+      const docsToUpload = [
+        { key: 'cdlFront', field: 'cdl_front_url' },
+        { key: 'cdlBack', field: 'cdl_back_url' },
+        { key: 'medCard', field: 'med_card_url' }
+      ];
+
+      for (const doc of docsToUpload) {
+        const fileData = leadData.documents[doc.key];
+        if (fileData && (fileData.data || fileData.base64)) {
+          const base64 = fileData.data || fileData.base64;
+          const result = await uploadDocument(
+            base64,
+            fileData.name || `${doc.key}.jpg`,
+            fileData.type || 'image/jpeg',
+            uploadFolder
+          );
+          if (result.success) {
+            record[doc.field] = result.fileUrl;
+          }
+        }
+      }
+    }
+
+    // Insert into driverApplications (Airtable) — no auth needed
+    const insertResult = await dataAccess.insertRecord('driverApplications', record, { suppressAuth: true });
+
+    if (!insertResult.success) {
+      await log({
+        level: 'ERROR',
+        source: 'application-service',
+        message: 'Driver lead save failed',
+        traceId,
+        details: { error: insertResult.error, email: leadData.email }
+      });
+      return { success: false, error: insertResult.error || 'Failed to save application' };
+    }
+
+    await log({
+      level: 'INFO',
+      source: 'application-service',
+      message: `Driver lead saved: ${firstName} ${lastName} (${leadData.email})`,
+      traceId,
+      details: { leadId: insertResult.record?._id, email: leadData.email }
+    });
+
+    return {
+      success: true,
+      leadId: insertResult.record?._id,
+      type: 'lead',
+      message: 'Your application has been received! A recruiter will contact you shortly.'
+    };
+  } catch (error) {
+    await log({
+      level: 'ERROR',
+      source: 'application-service',
+      message: 'Driver lead save exception',
+      traceId,
+      details: { error: error.message, email: leadData?.email }
+    });
+    return { success: false, error: error.message };
+  }
+}
+
+/**
  * Get the current status of an application for a specific carrier
  */
 export async function getApplicationStatus(carrierDOT) {
@@ -507,7 +625,7 @@ export async function withdrawApplication(carrierDOT) {
       action: 'withdrawn',
       status_history: JSON.stringify(statusHistory)
     }, { suppressAuth: true });
-    
+
     return { success: true };
   } catch (error) {
     console.error('[applicationService] withdrawApplication error:', error.message);
@@ -543,7 +661,7 @@ export async function getDriverApplications(driverId) {
       } catch (e) {
         statusHistory = [];
       }
-      
+
       return {
         ...app,
         status_history: statusHistory,
@@ -567,19 +685,19 @@ export async function getDriverApplications(driverId) {
  * Verify driver authorization
  */
 async function verifyDriverAuthorization(driverId) {
-    const currentUser = wixUsersBackend.currentUser;
-    if (!currentUser.loggedIn) {
-        return { success: false, error: 'User not logged in.' };
-    }
+  const currentUser = wixUsersBackend.currentUser;
+  if (!currentUser.loggedIn) {
+    return { success: false, error: 'User not logged in.' };
+  }
 
-    if (currentUser.id === driverId) {
-        return { success: true };
-    }
-    
-    const profile = await getDriverProfile(currentUser.id);
-    if (profile && profile._id === driverId) {
-        return { success: true };
-    }
+  if (currentUser.id === driverId) {
+    return { success: true };
+  }
 
-    return { success: false, error: 'Unauthorized access.' };
+  const profile = await getDriverProfile(currentUser.id);
+  if (profile && profile._id === driverId) {
+    return { success: true };
+  }
+
+  return { success: false, error: 'Unauthorized access.' };
 }
