@@ -48,11 +48,143 @@ Error response shape (all errors):
 | 304 | `NOT_MODIFIED` | Embedding up to date; no upsert performed |
 | 429 | `RATE_LIMITED` | Caller exceeded rate limit; `Retry-After` header set |
 | 500 | `INTERNAL_ERROR` | Unhandled microservice error; `requestId` included for trace |
-| 503 | `DEPENDENCY_UNAVAILABLE` | Pinecone or OpenAI unreachable |
+| 502 | `PROVIDER_ERROR` | Claude API error; `requestId` for trace |
+| 503 | `DEPENDENCY_UNAVAILABLE` | Pinecone, OpenAI, or Claude unreachable |
+| 504 | `GATEWAY_TIMEOUT` | Provider step timed out (28s internal limit hit) |
 
 ---
 
-## §1 — Phase 1: Semantic Search Endpoints
+## §1 — Phase 1: Agent Runtime Endpoints
+
+### `POST /v1/agent/turn`
+
+Executes **one AI step** using the configured provider adapter (Claude by default).
+Returns either a text response or tool_use blocks for the caller to execute.
+The multi-step tool-use loop is managed by the calling layer (`agentRuntimeService.jsw`).
+
+**Timeout budget (caller):** 25 000 ms. Runtime hard-stops at 28 000 ms.
+
+**Request:**
+```json
+{
+  "systemPrompt": "You are a CDL driver assistant...",
+  "messages": [
+    { "role": "user", "content": "What carriers are hiring near Houston?" }
+  ],
+  "tools": [],
+  "modelId": "claude-sonnet-4-6",
+  "maxTokens": 2048,
+  "traceId": "runLedger-recAbc123"
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `systemPrompt` | string | no | Role system prompt; omit to use model default |
+| `messages` | array | yes | Non-empty Anthropic messages array |
+| `tools` | array | no | Anthropic tool definitions; empty array if no tools |
+| `modelId` | string | no | Default: `claude-sonnet-4-6` |
+| `maxTokens` | number | no | Default: `2048`; max: `8192` |
+| `traceId` | string | no | Wix run/trace ID correlated to Airtable `agentRuns` record |
+
+**Response — 200 OK (text):**
+```json
+{
+  "type": "text",
+  "text": "Based on your location, here are 8 carriers currently hiring near Houston...",
+  "stopReason": "end_turn",
+  "inputTokens": 412,
+  "outputTokens": 183,
+  "providerRunId": "msg_01XYZ...",
+  "traceId": "runLedger-recAbc123",
+  "requestId": "uuid",
+  "latencyMs": 1240
+}
+```
+
+**Response — 200 OK (tool_use):**
+```json
+{
+  "type": "tool_use",
+  "toolUseBlocks": [
+    {
+      "type": "tool_use",
+      "id": "toolu_01ABC",
+      "name": "search_drivers",
+      "input": { "zip": "77001", "maxDistance": 50 }
+    }
+  ],
+  "contentBlocks": [
+    { "type": "tool_use", "id": "toolu_01ABC", "name": "search_drivers", "input": { "zip": "77001", "maxDistance": 50 } }
+  ],
+  "stopReason": "tool_use",
+  "inputTokens": 398,
+  "outputTokens": 72,
+  "providerRunId": "msg_01DEF...",
+  "traceId": "runLedger-recAbc123",
+  "requestId": "uuid",
+  "latencyMs": 890
+}
+```
+
+| Field | Notes |
+|-------|-------|
+| `type` | `"text"` or `"tool_use"` |
+| `toolUseBlocks` | Only present when `type === "tool_use"`. Array of Anthropic `tool_use` content blocks. |
+| `contentBlocks` | Full assistant content block array — append as assistant message for next call |
+| `stopReason` | `end_turn`, `tool_use`, `max_tokens`, `stop_sequence` |
+| `providerRunId` | Anthropic `message.id`; correlate with Anthropic console |
+
+**Error codes for this endpoint:**
+
+| Code | HTTP | When |
+|------|------|------|
+| `validation_error` | 400 | `messages` missing or empty |
+| `auth_error` | 401 | Missing/invalid auth headers |
+| `timeout` | 504 | Provider step timed out (28s) |
+| `provider_error` | 502 | Claude API returned non-2xx |
+
+---
+
+### `GET /v1/health`
+
+Auth-exempt liveness + readiness probe. Check this before routing traffic.
+
+**Timeout budget (caller):** 1 000 ms
+
+**Response — 200 OK (healthy):**
+```json
+{
+  "status": "ok",
+  "checks": {
+    "claude_provider": "ok",
+    "pinecone": "ok",
+    "openai_embeddings": "ok"
+  },
+  "uptimeSeconds": 3600,
+  "requestId": "uuid"
+}
+```
+
+**Response — 503 (degraded):**
+```json
+{
+  "status": "degraded",
+  "checks": {
+    "claude_provider": "ok",
+    "pinecone": "error",
+    "openai_embeddings": "ok"
+  },
+  "requestId": "uuid"
+}
+```
+
+Phase 1 degraded = `claude_provider: "error"` → microservice is unusable; circuit should open.
+Phase 2+ degraded = `pinecone: "error"` → semantic features unavailable; agent runtime still functional.
+
+---
+
+## §2 — Phase 2: Semantic Search Endpoints
 
 ### `POST /v1/embed/driver`
 
@@ -222,38 +354,7 @@ Queries `lmdr-carriers` for carriers matching a driver's profile.
 
 ---
 
-### `GET /v1/health`
-
-**Timeout budget (caller):** 1000ms
-
-**Response — 200 OK (healthy):**
-```json
-{
-  "status": "ok",
-  "checks": {
-    "pinecone": "ok",
-    "openai_embeddings": "ok"
-  },
-  "uptimeSeconds": 3600,
-  "requestId": "uuid"
-}
-```
-
-**Response — 503 (degraded):**
-```json
-{
-  "status": "degraded",
-  "checks": {
-    "pinecone": "error",
-    "openai_embeddings": "ok"
-  },
-  "requestId": "uuid"
-}
-```
-
----
-
-## §2 — Phase 2: LangSmith Trace Ingest
+## §3 — Phase 3: LangSmith Trace Ingest
 
 ### `POST /v1/trace/agent-turn`
 
@@ -319,7 +420,7 @@ Receives an agent turn summary from Velo and forwards an enriched span to LangSm
 
 ---
 
-## §3 — Phase 3: Streaming (Branch B only)
+## §4 — Phase 4: Streaming (Branch B only)
 
 Only built if Velo native `ReadableStream` spike fails (Branch B).
 
@@ -363,7 +464,7 @@ data: {"type":"done","totalTokens":312,"latencyMs":1240}
 
 ---
 
-## §4 — Phase 4: B2B Parallel Research
+## §5 — Phase 5: B2B Parallel Research
 
 ### `POST /v1/research/company`
 
@@ -434,7 +535,27 @@ Runs 4 sub-agents in parallel against a company identifier and returns a unified
 
 ---
 
-## §5 — Velo Wrapper Contract (`semanticSearchService.jsw`)
+## §6 — Velo Wrapper Contracts
+
+### `agentRuntimeService.jsw` (Phase 1)
+
+Wraps `POST /v1/agent/turn`. Exposes `isRuntimeAvailable()` and `callRuntimeStep()`.
+`agentService.jsw` calls `isRuntimeAvailable()` before each AI step and falls back
+to `routeAIRequest` if the circuit is open or the flag is off.
+
+Key constants:
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `RUNTIME_TIMEOUT_MS` | 25 000 | AbortController timeout (runtime hard limit: 28 000) |
+| `CIRCUIT_THRESHOLD` | 3 | Consecutive failures before opening |
+| `CIRCUIT_OPEN_MS` | 60 000 | Cooldown before half-open probe |
+
+Feature flag: `FEATURE_FLAGS.runtimeEnabled` in `configData.js` — `false` by default.
+
+---
+
+### `semanticSearchService.jsw` (Phase 2)
 
 The Velo-side wrapper must implement:
 

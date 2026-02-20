@@ -1,0 +1,180 @@
+/**
+ * agentRuntimeService.jsw
+ *
+ * Velo-side wrapper for the external AI Runtime microservice.
+ *
+ * Exposes two functions consumed by agentService.jsw:
+ *   - isRuntimeAvailable()  — check flag + circuit state before routing
+ *   - callRuntimeStep(...)  — call POST /v1/agent/turn and normalize response
+ *
+ * Circuit breaker: after CIRCUIT_THRESHOLD consecutive failures the circuit
+ * opens for CIRCUIT_OPEN_MS. During this window isRuntimeAvailable() returns
+ * false and agentService.jsw falls back to routeAIRequest (legacy path).
+ *
+ * Feature flag: FEATURE_FLAGS.runtimeEnabled in configData.js must be true.
+ * Set to false to disable the runtime path entirely without code changes.
+ *
+ * Microservice base URL: https://ai.lastmiledr.app
+ * Caller timeout: 25 000 ms (microservice internal timeout is 28 000 ms)
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import { FEATURE_FLAGS } from 'backend/configData';
+
+const RUNTIME_BASE = 'https://ai.lastmiledr.app';
+const RUNTIME_TIMEOUT_MS = 25_000; // caller budget; runtime hard-stops at 28s
+const CIRCUIT_THRESHOLD = 3;       // consecutive failures to open circuit
+const CIRCUIT_OPEN_MS   = 60_000;  // 60s cooldown before half-open probe
+
+// In-memory circuit breaker state (per Velo instance)
+let _circuitFailures  = 0;
+let _circuitOpenUntil = 0;
+
+// ── Circuit breaker helpers ──────────────────────────────────────────────────
+
+function _circuitIsOpen() {
+  return Date.now() < _circuitOpenUntil;
+}
+
+function _recordFailure() {
+  _circuitFailures += 1;
+  if (_circuitFailures >= CIRCUIT_THRESHOLD) {
+    _circuitOpenUntil = Date.now() + CIRCUIT_OPEN_MS;
+    console.error(
+      `[agentRuntime] Circuit OPENED after ${_circuitFailures} consecutive failures.`,
+      `Will retry after ${new Date(_circuitOpenUntil).toISOString()}`
+    );
+  }
+}
+
+function _recordSuccess() {
+  if (_circuitFailures > 0) {
+    console.log('[agentRuntime] Circuit closed — runtime healthy again.');
+  }
+  _circuitFailures  = 0;
+  _circuitOpenUntil = 0;
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * Returns true when the runtime should be used for the next AI step.
+ * Returns false if:
+ *   - FEATURE_FLAGS.runtimeEnabled is false (kills runtime path without deploy)
+ *   - Circuit breaker is open (too many recent failures)
+ *
+ * @returns {boolean}
+ */
+export function isRuntimeAvailable() {
+  return FEATURE_FLAGS.runtimeEnabled === true && !_circuitIsOpen();
+}
+
+/**
+ * Calls POST /v1/agent/turn on the external runtime microservice and
+ * normalises the response into the shape agentService.jsw expects from
+ * routeAIRequest: { contentBlocks, stopReason, tokensUsed, content }
+ *
+ * On any failure this function throws — the caller (agentService.jsw) must
+ * catch and fall back to the legacy routeAIRequest path.
+ *
+ * @param {object} params
+ * @param {string}   params.systemPrompt  - Role system prompt string
+ * @param {Array}    params.messages      - Anthropic messages array
+ * @param {Array}   [params.tools]        - Anthropic tool definitions (optional)
+ * @param {string}  [params.modelId]      - Override model (default: claude-sonnet-4-6)
+ * @param {number}  [params.maxTokens]    - Max tokens for this step (default: 2048)
+ * @param {string}  [params.traceId]      - Wix run/trace ID for cross-system correlation
+ *
+ * @returns {Promise<{
+ *   contentBlocks: Array,
+ *   stopReason:   string,
+ *   tokensUsed:   number,
+ *   content:      string|null,
+ *   providerRunId: string|null,
+ *   latencyMs:    number
+ * }>}
+ */
+export async function callRuntimeStep({
+  systemPrompt,
+  messages,
+  tools = [],
+  modelId,
+  maxTokens,
+  traceId,
+}) {
+  const callStart = Date.now();
+
+  // ── Load auth secret ──
+  let internalKey;
+  try {
+    internalKey = await getSecret('LMDR_INTERNAL_KEY');
+  } catch (err) {
+    _recordFailure();
+    throw new Error(`[agentRuntime] Secret load failed: ${err.message}`);
+  }
+
+  // ── Abort controller for timeout ──
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RUNTIME_TIMEOUT_MS);
+
+  let res;
+  try {
+    res = await fetch(`${RUNTIME_BASE}/v1/agent/turn`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-lmdr-internal-key': internalKey,
+        'x-lmdr-timestamp': String(Date.now()),
+      },
+      body: JSON.stringify({
+        systemPrompt,
+        messages,
+        tools,
+        modelId,
+        maxTokens,
+        traceId: traceId || undefined,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    _recordFailure();
+    const reason = err.name === 'AbortError' ? 'Request timed out' : err.message;
+    throw new Error(`[agentRuntime] Fetch failed: ${reason}`);
+  }
+
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    let errCode = `HTTP_${res.status}`;
+    try {
+      const body = await res.json();
+      errCode = body?.error?.code || errCode;
+    } catch { /* ignore parse error */ }
+    _recordFailure();
+    throw new Error(`[agentRuntime] Runtime responded ${res.status} (${errCode})`);
+  }
+
+  const data = await res.json();
+  _recordSuccess();
+
+  // ── Normalise runtime response → agentService.jsw expected shape ──
+  //
+  // Runtime text response:   { type: 'text', text, stopReason, inputTokens, outputTokens, ... }
+  // Runtime tool_use:        { type: 'tool_use', toolUseBlocks, contentBlocks, stopReason, ... }
+  //
+  // agentService.jsw expects: { contentBlocks, stopReason, tokensUsed, content }
+
+  const contentBlocks = data.type === 'tool_use'
+    ? (data.contentBlocks || data.toolUseBlocks || [])
+    : [{ type: 'text', text: data.text || '' }];
+
+  return {
+    contentBlocks,
+    stopReason:    data.stopReason || 'end_turn',
+    tokensUsed:    (data.inputTokens || 0) + (data.outputTokens || 0),
+    content:       data.type === 'text' ? (data.text || '') : null,
+    providerRunId: data.providerRunId || null,
+    latencyMs:     Date.now() - callStart,
+  };
+}

@@ -8,6 +8,7 @@ import { routeAIRequest } from 'backend/aiRouterService';
 import { createConversation, addTurn, getRecentContext } from 'backend/agentConversationService';
 import * as dataAccess from 'backend/dataAccess';
 import { startRun, logStep, createGate, completeRun } from 'backend/agentRunLedgerService';
+import { isRuntimeAvailable, callRuntimeStep } from 'backend/agentRuntimeService';
 
 // ── Cost Control Configuration ──
 const COST_CONTROLS = {
@@ -2299,12 +2300,34 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
       }
       return { conversationId, runId, response: timeText, toolsUsed: true, role };
     }
-    const aiResponse = await routeAIRequest('agent_orchestration', {
-      system: ROLE_SYSTEM_PROMPTS[role],
-      messages: currentMessages,
-      tools,
-      maxTokens: 2048
-    });
+    // Route AI step: external runtime (Phase 1) or legacy routeAIRequest
+    let aiResponse;
+    if (isRuntimeAvailable()) {
+      try {
+        aiResponse = await callRuntimeStep({
+          systemPrompt: ROLE_SYSTEM_PROMPTS[role],
+          messages: currentMessages,
+          tools,
+          maxTokens: 2048,
+          traceId: runId || undefined,
+        });
+      } catch (runtimeErr) {
+        console.warn('[agentService] Runtime step failed, falling back to legacy:', runtimeErr.message);
+        aiResponse = await routeAIRequest('agent_orchestration', {
+          system: ROLE_SYSTEM_PROMPTS[role],
+          messages: currentMessages,
+          tools,
+          maxTokens: 2048,
+        });
+      }
+    } else {
+      aiResponse = await routeAIRequest('agent_orchestration', {
+        system: ROLE_SYSTEM_PROMPTS[role],
+        messages: currentMessages,
+        tools,
+        maxTokens: 2048,
+      });
+    }
 
     totalTokens += aiResponse.tokensUsed || 0;
 

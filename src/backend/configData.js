@@ -456,6 +456,30 @@ export const DATA_SOURCE = {
 };
 
 // =============================================================================
+// FEATURE FLAGS
+// =============================================================================
+
+/**
+ * Runtime feature flags.
+ * All values default to false/disabled — flip to true to enable without deploy.
+ *
+ * Phase 1 (Runtime Foundation):
+ *   runtimeEnabled            — route AI steps through external microservice
+ *
+ * Phase 2 (Semantic Search):
+ *   semanticToolEnabled       — enable semantic embed/search tool calls
+ *   semanticSearchBlendEnabled — blend semantic score into driver ranking
+ */
+export const FEATURE_FLAGS = {
+  /** Phase 1: Route agent AI steps through external runtime microservice (ai.lastmiledr.app) */
+  runtimeEnabled: false,
+  /** Phase 2: Enable semantic search tool calls in agent context */
+  semanticToolEnabled: false,
+  /** Phase 2: Blend semantic score as a component in driver ranking (driverScoring.js) */
+  semanticSearchBlendEnabled: false,
+};
+
+// =============================================================================
 // SOCIAL POSTING SETTINGS
 // =============================================================================
 
