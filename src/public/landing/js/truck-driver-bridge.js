@@ -17,7 +17,11 @@ var TruckDriverBridge = (function () {
   };
 
   function isAllowedOrigin(origin) {
-    if (!origin || origin === 'null') return false;
+    if (!origin) return false;
+    // Wix sandboxed iframes deliver messages with origin === 'null'.
+    // The source check (event.source !== window.parent) already guards against
+    // rogue senders, so null-origin messages from the verified parent are safe.
+    if (origin === 'null') return true;
     return ALLOWED_ORIGIN_PATTERNS.some(function (pattern) {
       return pattern.test(origin);
     });
