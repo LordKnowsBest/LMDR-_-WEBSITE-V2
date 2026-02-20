@@ -60,7 +60,7 @@ CRITICAL_PATHS = {
   },
   drivers: {
     route: '/drivers',
-    readyText: 'Truck Drivers',
+    readyText: 'Driver',
     selectorCSS: null,
     iframeMatch: null,
     timeoutMs: 20000,
