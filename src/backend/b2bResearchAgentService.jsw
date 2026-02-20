@@ -772,3 +772,86 @@ async function getCachedBrief(accountId) {
     return null;
   }
 }
+
+// ============================================================================
+// PHASE 4 — PARALLEL EXTERNAL RESEARCH VIA AI MICROSERVICE
+// ============================================================================
+
+const RESEARCH_RUNTIME_BASE  = 'https://lmdr-ai-intelligence-production.up.railway.app';
+const RESEARCH_TIMEOUT_MS    = 20_000;
+const ALL_RESEARCH_SECTIONS  = ['fmcsa', 'social', 'news', 'linkedin'];
+
+/**
+ * Run parallel external research on any carrier via the AI microservice.
+ *
+ * Unlike generateBrief() (which reads Airtable data), this calls the
+ * microservice which fans out to FMCSA + Claude-powered social/news/LinkedIn
+ * researchers in parallel. Results are returned in < 20s with partial: true
+ * if any section timed out.
+ *
+ * Useful for:
+ *   - Quick carrier background check before a B2B account is created
+ *   - Real-time enrichment panel on Account Detail page
+ *   - Prospecting workflow (any DOT#, not just ones already in Airtable)
+ *
+ * @param {string}   dotNumber     FMCSA DOT number
+ * @param {string}   companyName   Carrier legal/DBA name
+ * @param {string[]} [sections]    Subset of sections to request (default: all 4)
+ * @returns {Promise<{
+ *   dotNumber: string,
+ *   companyName: string,
+ *   partial: boolean,
+ *   generatedAt: string,
+ *   latencyMs: number,
+ *   sections: object,
+ *   synthesis: string|null,
+ *   requestId: string,
+ * }>}
+ */
+export async function runParallelResearch(dotNumber, companyName, sections = ALL_RESEARCH_SECTIONS) {
+  if (!dotNumber || !companyName) {
+    throw new Error('runParallelResearch: dotNumber and companyName are required');
+  }
+
+  let internalKey;
+  try {
+    internalKey = await getSecret('LMDR_INTERNAL_KEY');
+  } catch (err) {
+    throw new Error(`runParallelResearch: secret load failed: ${err.message}`);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RESEARCH_TIMEOUT_MS);
+
+  let res;
+  try {
+    res = await fetch(`${RESEARCH_RUNTIME_BASE}/v1/research/company`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':        'application/json',
+        'x-lmdr-internal-key': internalKey,
+        'x-lmdr-timestamp':    String(Date.now()),
+      },
+      body: JSON.stringify({
+        dotNumber,
+        companyName,
+        requestedSections: sections,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    const reason = err.name === 'AbortError' ? 'Request timed out (20s)' : err.message;
+    throw new Error(`runParallelResearch: fetch failed: ${reason}`);
+  }
+
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    let code = `HTTP_${res.status}`;
+    try { code = (await res.json())?.error?.code || code; } catch { /* ignore */ }
+    throw new Error(`runParallelResearch: microservice responded ${res.status} (${code})`);
+  }
+
+  return await res.json();
+}
