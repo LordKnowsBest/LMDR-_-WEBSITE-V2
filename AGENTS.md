@@ -35,3 +35,8 @@
 ## Security & Configuration Tips
 - Use full absolute URLs inside HTML components (Wix iframes) like `https://www.lastmiledr.app/path`.
 - Check element existence in Velo (`if ($w('#id').rendered) { ... }`).
+
+## Secrets & Security
+- **Never commit hardcoded secrets (API keys, tokens, passwords).** Always use `wix-secrets-backend` to retrieve sensitive values at runtime.
+- **Configuration as Code:** Configuration files or objects (e.g., `src/backend/config.jsw`) should only store the *name* of the secret key (e.g., `'STRIPE_SECRET_KEY'`), never the value itself.
+- **Audit Compliance:** Run occasional scans (e.g., `grep`) to ensure no secrets have accidentally been committed. See `SECRETS_AUDIT_REPORT_FINAL.md` for reference.
