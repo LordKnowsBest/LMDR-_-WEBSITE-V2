@@ -1,9 +1,9 @@
 # Spec — AI Intelligence Layer Microservice API Contracts
 
 **Track:** `ai_intelligence_layer_20260219`
-**Base URL:** `https://ai.lastmiledr.app` (Railway deployment)
+**Base URL:** `https://lmdr-ai-intelligence-production.up.railway.app` (Railway deployment)
 **API version:** `v1`
-**All endpoints:** `https://ai.lastmiledr.app/v1/<path>`
+**All endpoints:** `https://lmdr-ai-intelligence-production.up.railway.app/v1/<path>`
 
 ---
 
