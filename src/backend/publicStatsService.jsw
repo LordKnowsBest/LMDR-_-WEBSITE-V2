@@ -7,6 +7,50 @@ const COLLECTION_KEYS = {
   interests: 'driverCarrierInterests'
 };
 
+function isUnknownFieldError(err) {
+  const msg = String(err && err.message ? err.message : err);
+  return msg.includes('Unknown field name') ||
+    msg.includes('Unknown field names') ||
+    msg.includes('formula for filtering records is invalid');
+}
+
+async function queryCarriersSafe(options = {}) {
+  try {
+    return await dataAccess.queryRecords(COLLECTION_KEYS.carriers, options);
+  } catch (err) {
+    if (!isUnknownFieldError(err)) throw err;
+    console.warn('queryCarriersSafe fallback (schema mismatch):', err.message);
+    // Fallback to minimal query so public pages can still render.
+    return await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+      limit: options.limit || 50,
+      suppressAuth: true
+    });
+  }
+}
+
+function carrierValue(carrier, keys, fallback = null) {
+  for (const key of keys) {
+    if (carrier && carrier[key] !== undefined && carrier[key] !== null && carrier[key] !== '') {
+      return carrier[key];
+    }
+  }
+  return fallback;
+}
+
+function carrierPayMin(carrier) {
+  return toNumber(carrierValue(carrier, ['pay_per_mile_min', 'PAY_CPM_MIN', 'pay_cpm_min'], null));
+}
+
+function carrierPayMax(carrier) {
+  return toNumber(carrierValue(carrier, ['pay_per_mile_max', 'PAY_CPM_MAX', 'pay_cpm_max', 'pay_cpm', 'PAY_CPM'], null));
+}
+
+function toNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 /**
  * Get public platform stats for drivers and general audience
  */
@@ -47,8 +91,12 @@ export async function getCarrierPlatformStats() {
     ]);
 
     const hireTimes = (hiresRes.items || [])
-      .filter(h => h.applied_date && h._updatedDate)
-      .map(h => Math.ceil((new Date(h._updatedDate) - new Date(h.applied_date)) / (1000 * 60 * 60 * 24)));
+      .map((h) => {
+        const endDate = h.action_timestamp || h.hired_at || h.updated_at || h._updatedDate;
+        if (!h.applied_date || !endDate) return null;
+        return Math.ceil((new Date(endDate) - new Date(h.applied_date)) / (1000 * 60 * 60 * 24));
+      })
+      .filter((d) => Number.isFinite(d) && d >= 0);
 
     const avgDays = hireTimes.length > 0 ? Math.round(hireTimes.reduce((a, b) => a + b, 0) / hireTimes.length) : 14;
 
@@ -64,7 +112,7 @@ export async function getCarrierPlatformStats() {
  */
 export async function getFeaturedCarriers(limit = 8) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+    const result = await queryCarriersSafe({
       filters: { nbr_power_unit: { gte: 50 }, logo_url: { ne: '' } },
       sort: [{ field: 'quality_score', direction: 'desc' }],
       limit, suppressAuth: true
@@ -72,11 +120,11 @@ export async function getFeaturedCarriers(limit = 8) {
 
     return (result.items || []).map(carrier => ({
       _id: carrier._id,
-      name: carrier.legal_name,
-      logo: carrier.logo_url,
-      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
+      name: carrierValue(carrier, ['legal_name', 'LEGAL_NAME', 'company_name'], 'Carrier'),
+      logo: carrierValue(carrier, ['logo_url', 'LOGO_URL'], ''),
+      location: `${carrierValue(carrier, ['phy_city', 'PHY_CITY'], '') || ''}, ${carrierValue(carrier, ['phy_state', 'PHY_STATE'], '') || ''}`.replace(/^, |, $/g, ''),
       tagline: carrier.hiring_tagline || 'Now Hiring CDL Drivers',
-      fleetSize: carrier.nbr_power_unit,
+      fleetSize: toNumber(carrierValue(carrier, ['nbr_power_unit', 'NBR_POWER_UNIT'], 0)) || 0,
       payRange: carrier.pay_range || ''
     }));
   } catch (err) {
@@ -92,13 +140,13 @@ export async function getRecentHires(limit = 10) {
   try {
     const result = await dataAccess.queryRecords(COLLECTION_KEYS.interests, {
       filters: { status: 'hired' },
-      sort: [{ field: '_updatedDate', direction: 'desc' }],
+      sort: [{ field: 'action_timestamp', direction: 'desc' }],
       limit, suppressAuth: true
     });
 
     return (result.items || []).map(h => ({
       location: h.driver_state || 'USA',
-      daysAgo: getDaysAgo(h._updatedDate),
+      daysAgo: getDaysAgo(h.action_timestamp || h.hired_at || h.updated_at || h._updatedDate),
       operationType: h.operation_type || 'OTR'
     }));
   } catch (err) {
@@ -112,7 +160,7 @@ export async function getRecentHires(limit = 10) {
  */
 export async function getTopJobOpportunities(limit = 6) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+    const result = await queryCarriersSafe({
       filters: { pay_per_mile_max: { gte: 0.55 }, is_hiring: true },
       sort: [{ field: 'pay_per_mile_max', direction: 'desc' }],
       limit, suppressAuth: true
@@ -120,12 +168,12 @@ export async function getTopJobOpportunities(limit = 6) {
 
     return (result.items || []).map(carrier => ({
       _id: carrier._id,
-      carrierName: carrier.legal_name,
-      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
-      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
-      operationType: carrier.operation_type || 'OTR',
+      carrierName: carrierValue(carrier, ['legal_name', 'LEGAL_NAME', 'company_name'], 'Carrier'),
+      payRange: formatPayRange(carrierPayMin(carrier), carrierPayMax(carrier)),
+      location: `${carrierValue(carrier, ['phy_city', 'PHY_CITY'], '') || ''}, ${carrierValue(carrier, ['phy_state', 'PHY_STATE'], '') || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrierValue(carrier, ['operation_type', 'OPERATION_TYPE'], 'OTR'),
       benefits: carrier.benefits_summary || 'Full benefits package',
-      fleetSize: carrier.nbr_power_unit
+      fleetSize: toNumber(carrierValue(carrier, ['nbr_power_unit', 'NBR_POWER_UNIT'], 0)) || 0
     }));
   } catch (err) {
     console.error('getTopJobOpportunities error:', err);
@@ -138,7 +186,7 @@ export async function getTopJobOpportunities(limit = 6) {
  */
 export async function getJobsByState(state, limit = 4) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+    const result = await queryCarriersSafe({
       filters: { phy_state: state, is_hiring: true },
       sort: [{ field: 'quality_score', direction: 'desc' }],
       limit, suppressAuth: true
@@ -146,10 +194,10 @@ export async function getJobsByState(state, limit = 4) {
 
     return (result.items || []).map(carrier => ({
       _id: carrier._id,
-      carrierName: carrier.legal_name,
-      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
-      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
-      operationType: carrier.operation_type || 'OTR'
+      carrierName: carrierValue(carrier, ['legal_name', 'LEGAL_NAME', 'company_name'], 'Carrier'),
+      payRange: formatPayRange(carrierPayMin(carrier), carrierPayMax(carrier)),
+      location: `${carrierValue(carrier, ['phy_city', 'PHY_CITY'], '') || ''}, ${carrierValue(carrier, ['phy_state', 'PHY_STATE'], '') || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrierValue(carrier, ['operation_type', 'OPERATION_TYPE'], 'OTR')
     }));
   } catch (err) {
     console.error('getJobsByState error:', err);
@@ -162,7 +210,7 @@ export async function getJobsByState(state, limit = 4) {
  */
 export async function getPartnerLogos(limit = 12) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+    const result = await queryCarriersSafe({
       filters: { logo_url: { ne: '' }, nbr_power_unit: { gte: 100 } },
       sort: [{ field: 'nbr_power_unit', direction: 'desc' }],
       limit, suppressAuth: true
@@ -170,8 +218,8 @@ export async function getPartnerLogos(limit = 12) {
 
     return (result.items || []).map(c => ({
       _id: c._id,
-      name: c.legal_name,
-      logoUrl: c.logo_url
+      name: carrierValue(c, ['legal_name', 'LEGAL_NAME', 'company_name'], 'Carrier'),
+      logoUrl: carrierValue(c, ['logo_url', 'LOGO_URL'], '')
     }));
   } catch (err) {
     console.error('getPartnerLogos error:', err);
@@ -184,7 +232,7 @@ export async function getPartnerLogos(limit = 12) {
  */
 export async function getJobsByOperationType(operationType, limit = 6) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+    const result = await queryCarriersSafe({
       filters: { operation_type: operationType, is_hiring: true },
       sort: [{ field: 'pay_per_mile_max', direction: 'desc' }],
       limit, suppressAuth: true
@@ -192,15 +240,15 @@ export async function getJobsByOperationType(operationType, limit = 6) {
 
     return (result.items || []).map(carrier => ({
       _id: carrier._id,
-      carrierName: carrier.legal_name,
-      dotNumber: carrier.dot_number,
-      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
-      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
-      operationType: carrier.operation_type || operationType,
+      carrierName: carrierValue(carrier, ['legal_name', 'LEGAL_NAME', 'company_name'], 'Carrier'),
+      dotNumber: carrierValue(carrier, ['dot_number', 'DOT_NUMBER'], ''),
+      payRange: formatPayRange(carrierPayMin(carrier), carrierPayMax(carrier)),
+      location: `${carrierValue(carrier, ['phy_city', 'PHY_CITY'], '') || ''}, ${carrierValue(carrier, ['phy_state', 'PHY_STATE'], '') || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrierValue(carrier, ['operation_type', 'OPERATION_TYPE'], operationType),
       homeTime: carrier.home_time || 'Varies',
       benefits: carrier.benefits_summary || 'Full benefits package',
-      fleetSize: carrier.nbr_power_unit,
-      truckAge: carrier.avg_truck_age
+      fleetSize: toNumber(carrierValue(carrier, ['nbr_power_unit', 'NBR_POWER_UNIT'], 0)) || 0,
+      truckAge: toNumber(carrierValue(carrier, ['avg_truck_age', 'AVG_TRUCK_AGE'], null))
     }));
   } catch (err) {
     console.error('getJobsByOperationType error:', err);
@@ -213,7 +261,7 @@ export async function getJobsByOperationType(operationType, limit = 6) {
  */
 export async function getJobsByEndorsement(endorsement, limit = 6) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+    const result = await queryCarriersSafe({
       filters: { required_endorsements: { contains: endorsement }, is_hiring: true },
       sort: [{ field: 'pay_per_mile_max', direction: 'desc' }],
       limit, suppressAuth: true
@@ -221,14 +269,14 @@ export async function getJobsByEndorsement(endorsement, limit = 6) {
 
     return (result.items || []).map(carrier => ({
       _id: carrier._id,
-      carrierName: carrier.legal_name,
-      dotNumber: carrier.dot_number,
-      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
-      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
-      operationType: carrier.operation_type || 'OTR',
+      carrierName: carrierValue(carrier, ['legal_name', 'LEGAL_NAME', 'company_name'], 'Carrier'),
+      dotNumber: carrierValue(carrier, ['dot_number', 'DOT_NUMBER'], ''),
+      payRange: formatPayRange(carrierPayMin(carrier), carrierPayMax(carrier)),
+      location: `${carrierValue(carrier, ['phy_city', 'PHY_CITY'], '') || ''}, ${carrierValue(carrier, ['phy_state', 'PHY_STATE'], '') || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrierValue(carrier, ['operation_type', 'OPERATION_TYPE'], 'OTR'),
       endorsements: carrier.required_endorsements || [endorsement],
       benefits: carrier.benefits_summary || 'Full benefits package',
-      fleetSize: carrier.nbr_power_unit
+      fleetSize: toNumber(carrierValue(carrier, ['nbr_power_unit', 'NBR_POWER_UNIT'], 0)) || 0
     }));
   } catch (err) {
     console.error('getJobsByEndorsement error:', err);
@@ -244,16 +292,16 @@ export async function getLocationPageData(state, city = null) {
     const filters = { phy_state: state, is_hiring: true };
     if (city) filters.phy_city = city;
 
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, { filters, limit: 100, suppressAuth: true });
+    const result = await queryCarriersSafe({ filters, limit: 100, suppressAuth: true });
     const carriers = result.items || [];
 
     if (carriers.length === 0) return { state, city, jobCount: 0, avgPay: null, topCarriers: [], operationTypes: {} };
 
-    const payRates = carriers.map(c => c.pay_per_mile_max || c.pay_per_mile_min).filter(Boolean);
+    const payRates = carriers.map(c => carrierPayMax(c) || carrierPayMin(c)).filter(Boolean);
     const avgPay = payRates.length > 0 ? (payRates.reduce((a, b) => a + b, 0) / payRates.length).toFixed(2) : null;
 
     const operationTypes = carriers.reduce((acc, c) => {
-      const type = c.operation_type || 'Other';
+      const type = carrierValue(c, ['operation_type', 'OPERATION_TYPE'], 'Other');
       acc[type] = (acc[type] || 0) + 1;
       return acc;
     }, {});
@@ -262,12 +310,20 @@ export async function getLocationPageData(state, city = null) {
       .sort((a, b) => (b.quality_score || 0) - (a.quality_score || 0))
       .slice(0, 5)
       .map(c => ({
-        _id: c._id, name: c.legal_name, dotNumber: c.dot_number,
-        payRange: formatPayRange(c.pay_per_mile_min, c.pay_per_mile_max),
-        operationType: c.operation_type || 'OTR', fleetSize: c.nbr_power_unit
+        _id: c._id, name: carrierValue(c, ['legal_name', 'LEGAL_NAME', 'company_name'], 'Carrier'), dotNumber: carrierValue(c, ['dot_number', 'DOT_NUMBER'], ''),
+        payRange: formatPayRange(carrierPayMin(c), carrierPayMax(c)),
+        operationType: carrierValue(c, ['operation_type', 'OPERATION_TYPE'], 'OTR'), fleetSize: toNumber(carrierValue(c, ['nbr_power_unit', 'NBR_POWER_UNIT'], 0)) || 0
       }));
 
-    return { state, city, jobCount: carriers.length, avgPay: avgPay ? `$${avgPay}/mi` : 'Competitive', topCarriers, operationTypes, totalFleetSize: carriers.reduce((sum, c) => sum + (c.nbr_power_unit || 0), 0) };
+    return {
+      state,
+      city,
+      jobCount: carriers.length,
+      avgPay: avgPay ? `$${avgPay}/mi` : 'Competitive',
+      topCarriers,
+      operationTypes,
+      totalFleetSize: carriers.reduce((sum, c) => sum + (toNumber(carrierValue(c, ['nbr_power_unit', 'NBR_POWER_UNIT'], 0)) || 0), 0)
+    };
   } catch (err) {
     console.error('getLocationPageData error:', err);
     return { state, city, jobCount: 0, avgPay: null, topCarriers: [], operationTypes: {} };
@@ -279,7 +335,7 @@ export async function getLocationPageData(state, city = null) {
  */
 export async function getPremiumOpportunities(limit = 5) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+    const result = await queryCarriersSafe({
       filters: { is_hiring: true, pay_per_mile_max: { gte: 0.65 } },
       sort: [{ field: 'pay_per_mile_max', direction: 'desc' }],
       limit, suppressAuth: true
@@ -287,12 +343,12 @@ export async function getPremiumOpportunities(limit = 5) {
 
     return (result.items || []).map(carrier => ({
       _id: carrier._id,
-      carrierName: carrier.legal_name,
-      dotNumber: carrier.dot_number,
-      payRange: formatPayRange(carrier.pay_per_mile_min, carrier.pay_per_mile_max),
+      carrierName: carrierValue(carrier, ['legal_name', 'LEGAL_NAME', 'company_name'], 'Carrier'),
+      dotNumber: carrierValue(carrier, ['dot_number', 'DOT_NUMBER'], ''),
+      payRange: formatPayRange(carrierPayMin(carrier), carrierPayMax(carrier)),
       signOnBonus: carrier.sign_on_bonus || null,
-      location: `${carrier.phy_city || ''}, ${carrier.phy_state || ''}`.replace(/^, |, $/g, ''),
-      operationType: carrier.operation_type || 'OTR',
+      location: `${carrierValue(carrier, ['phy_city', 'PHY_CITY'], '') || ''}, ${carrierValue(carrier, ['phy_state', 'PHY_STATE'], '') || ''}`.replace(/^, |, $/g, ''),
+      operationType: carrierValue(carrier, ['operation_type', 'OPERATION_TYPE'], 'OTR'),
       benefits: carrier.benefits_summary || 'Full benefits package',
       urgencyLevel: carrier.urgency_level || 'normal',
       openPositions: carrier.open_positions || 1
@@ -311,8 +367,12 @@ function getDaysAgo(date) {
 }
 
 function formatPayRange(min, max) {
-  if (max && min) return `$${min.toFixed(2)}-${max.toFixed(2)}/mi`;
-  if (max) return `Up to $${max.toFixed(2)}/mi`;
-  if (min) return `From $${min.toFixed(2)}/mi`;
+  if (min !== null && min !== undefined) min = Number(min);
+  if (max !== null && max !== undefined) max = Number(max);
+  const minOk = Number.isFinite(min);
+  const maxOk = Number.isFinite(max);
+  if (maxOk && minOk) return `$${min.toFixed(2)}-${max.toFixed(2)}/mi`;
+  if (maxOk) return `Up to $${max.toFixed(2)}/mi`;
+  if (minOk) return `From $${min.toFixed(2)}/mi`;
   return 'Competitive pay';
 }

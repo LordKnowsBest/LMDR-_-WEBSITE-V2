@@ -8,6 +8,8 @@
 import wixLocation from 'wix-location';
 import { getTopJobOpportunities, getJobsByState, getRecentHires } from 'backend/publicStatsService';
 import { getDriverTestimonials } from 'backend/contentService';
+import { extractDocumentForAutoFill } from 'backend/ocrService';
+import { submitApplication } from 'backend/applicationService';
 
 $w.onReady(async function () {
   await Promise.all([
@@ -183,13 +185,139 @@ function setupHtmlMessageHandlers() {
   try {
     const htmlJobs = $w('#jobsFeedHtml');
     if (htmlJobs.rendered && htmlJobs.onMessage) {
-      htmlJobs.onMessage((event) => {
-        if (event.data.type === 'navigateToMatching') {
-          const carrierId = event.data.data?.preselectedCarrier;
-          if (carrierId) wixLocation.to(`/ai-matching?carrier=${carrierId}`);
-          else wixLocation.to('/ai-matching');
+      htmlJobs.onMessage(async (event) => {
+        const msg = event.data || {};
+        const action = msg.action || msg.type;
+
+        switch (action) {
+          case 'navigateToMatching': {
+            const carrierId = msg.data?.preselectedCarrier;
+            if (carrierId) wixLocation.to(`/ai-matching?carrier=${carrierId}`);
+            else wixLocation.to('/ai-matching');
+            break;
+          }
+          case 'carrierMatchingReady':
+          case 'quickApplyReady':
+          case 'quickApplyFormReady':
+          case 'pageReady': {
+            safePost(htmlJobs, 'pageReady', {
+              userStatus: { loggedIn: false, isPremium: false, tier: 'guest' },
+              driverProfile: null
+            });
+            break;
+          }
+          case 'extractDocumentOCR': {
+            await handleExtractDocumentOCR(htmlJobs, msg.data || {});
+            break;
+          }
+          case 'submitQuickApply': {
+            await handleSubmitQuickApply(htmlJobs, msg.data || {});
+            break;
+          }
+          default:
+            break;
         }
       });
     }
   } catch (e) { }
+}
+
+function safePost(component, type, data) {
+  try {
+    component.postMessage({ type, data, timestamp: Date.now() });
+  } catch (err) {
+    console.error('Failed posting to HTML component:', err);
+  }
+}
+
+async function handleExtractDocumentOCR(component, data) {
+  const base64Data = data.base64Data;
+  const docType = data.docType;
+  const inputId = data.inputId;
+  if (!base64Data || !docType) {
+    safePost(component, 'ocrResult', {
+      success: false,
+      docType,
+      inputId,
+      error: 'Missing required data for OCR'
+    });
+    return;
+  }
+
+  try {
+    const result = await extractDocumentForAutoFill(base64Data, docType);
+    if (result.success) {
+      safePost(component, 'ocrResult', {
+        success: true,
+        docType,
+        inputId,
+        confidence: result.confidence,
+        consensusMethod: result.consensusMethod,
+        extracted: result.extracted || {}
+      });
+    } else {
+      safePost(component, 'ocrResult', {
+        success: false,
+        docType,
+        inputId,
+        error: result.error || 'OCR extraction failed',
+        userMessage: result.userMessage
+      });
+    }
+  } catch (error) {
+    safePost(component, 'ocrResult', {
+      success: false,
+      docType,
+      inputId,
+      error: error.message
+    });
+  }
+}
+
+async function handleSubmitQuickApply(component, data) {
+  try {
+    const payload = {
+      carrierDOT: data.carrierDOT || null,
+      carrierName: data.carrierName || null,
+      phone: data.phone || '',
+      email: data.email || '',
+      preferredContact: data.preferredContact || 'phone',
+      availability: data.availability || 'Immediately',
+      message: data.message || '',
+      cdlNumber: data.cdlNumber || '',
+      cdlExpiration: data.cdlExpiration || '',
+      medCardExpiration: data.medCardExpiration || '',
+      documents: data.documents || {}
+    };
+
+    // If no target carrier, this landing flow should not hard fail.
+    if (!payload.carrierDOT) {
+      safePost(component, 'submitResult', {
+        success: true,
+        type: 'profileUpdate',
+        message: 'Application details received. Continue in AI Matching.'
+      });
+      return;
+    }
+
+    const result = await submitApplication(payload);
+    if (result.success) {
+      safePost(component, 'submitResult', {
+        success: true,
+        type: 'application',
+        carrierDOT: payload.carrierDOT,
+        carrierName: payload.carrierName,
+        applicationId: result.application?._id,
+        isNew: result.isNew,
+        message: 'Your application has been submitted successfully!'
+      });
+    } else {
+      safePost(component, 'submitResult', {
+        success: false,
+        error: result.error || 'Failed to submit application'
+      });
+    }
+  } catch (error) {
+    safePost(component, 'submitResult', { success: false, error: error.message });
+  }
 }
