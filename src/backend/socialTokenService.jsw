@@ -1,0 +1,129 @@
+import * as secretService from 'backend/socialSecretService';
+
+const GRAPH_BASE = 'https://graph.facebook.com/v25.0';
+
+function toQueryString(params = {}) {
+  return new URLSearchParams(
+    Object.entries(params).reduce((acc, [key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        acc[key] = String(value);
+      }
+      return acc;
+    }, {})
+  ).toString();
+}
+
+function maskToken(token = '') {
+  if (!token) return '';
+  if (token.length <= 10) return '***';
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
+function parseScopes(tokenData = {}) {
+  if (Array.isArray(tokenData.scopes)) return tokenData.scopes;
+  if (Array.isArray(tokenData.granular_scopes)) return tokenData.granular_scopes.map(s => s.scope).filter(Boolean);
+  return [];
+}
+
+export async function validateToken(token) {
+  try {
+    if (!token) return { success: false, is_valid: false, error: 'Token is required' };
+
+    const appId = await secretService.getMetaAppId();
+    const appSecret = await secretService.getMetaAppSecret();
+    const appAccessToken = `${appId}|${appSecret}`;
+    const query = toQueryString({ input_token: token, access_token: appAccessToken });
+    const response = await fetch(`${GRAPH_BASE}/debug_token?${query}`);
+    const payload = await response.json();
+    const tokenData = payload && payload.data ? payload.data : {};
+
+    if (!response.ok || payload.error) {
+      console.error('[socialTokenService] validateToken failed:', payload.error || response.statusText, maskToken(token));
+      return {
+        success: false,
+        is_valid: false,
+        error: payload.error ? payload.error.message : `HTTP ${response.status}`
+      };
+    }
+
+    if (!tokenData.is_valid) {
+      console.error('[socialTokenService] invalid token:', maskToken(token));
+    }
+
+    return {
+      success: true,
+      is_valid: Boolean(tokenData.is_valid),
+      expires_at: Number(tokenData.expires_at || 0),
+      scopes: parseScopes(tokenData),
+      app_id: tokenData.app_id || '',
+      type: tokenData.type || ''
+    };
+  } catch (error) {
+    console.error('[socialTokenService] validateToken error:', error.message, maskToken(token));
+    return { success: false, is_valid: false, error: error.message };
+  }
+}
+
+export async function exchangeForLongLived(shortLivedToken) {
+  try {
+    if (!shortLivedToken) {
+      return { success: false, error: 'shortLivedToken is required' };
+    }
+    const appId = await secretService.getMetaAppId();
+    const appSecret = await secretService.getMetaAppSecret();
+    const query = toQueryString({
+      grant_type: 'fb_exchange_token',
+      client_id: appId,
+      client_secret: appSecret,
+      fb_exchange_token: shortLivedToken
+    });
+    const response = await fetch(`${GRAPH_BASE}/oauth/access_token?${query}`);
+    const payload = await response.json();
+    if (!response.ok || payload.error) {
+      return { success: false, error: payload.error ? payload.error.message : `HTTP ${response.status}` };
+    }
+    return {
+      success: true,
+      access_token: payload.access_token || '',
+      token_type: payload.token_type || 'bearer',
+      expires_in: Number(payload.expires_in || 0)
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+export async function getPageTokens(longLivedUserToken) {
+  try {
+    if (!longLivedUserToken) return { success: false, error: 'longLivedUserToken is required', pages: [] };
+
+    const meResponse = await fetch(`${GRAPH_BASE}/me?${toQueryString({
+      access_token: longLivedUserToken,
+      fields: 'id'
+    })}`);
+    const mePayload = await meResponse.json();
+    if (!meResponse.ok || mePayload.error || !mePayload.id) {
+      return { success: false, error: mePayload.error ? mePayload.error.message : 'Failed to resolve user id', pages: [] };
+    }
+
+    const response = await fetch(`${GRAPH_BASE}/${mePayload.id}/accounts?${toQueryString({
+      access_token: longLivedUserToken,
+      fields: 'id,name,access_token,instagram_business_account{id,username}'
+    })}`);
+    const payload = await response.json();
+    if (!response.ok || payload.error) {
+      return { success: false, error: payload.error ? payload.error.message : `HTTP ${response.status}`, pages: [] };
+    }
+
+    const pages = (payload.data || []).map(page => ({
+      page_id: page.id || '',
+      page_name: page.name || '',
+      page_access_token: page.access_token || '',
+      ig_user_id: page.instagram_business_account ? (page.instagram_business_account.id || '') : '',
+      ig_username: page.instagram_business_account ? (page.instagram_business_account.username || '') : ''
+    }));
+    return { success: true, pages };
+  } catch (error) {
+    return { success: false, error: error.message, pages: [] };
+  }
+}

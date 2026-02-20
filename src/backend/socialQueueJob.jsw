@@ -1,0 +1,186 @@
+import * as queueService from 'backend/socialQueueService';
+import * as rateLimitService from 'backend/socialRateLimitService';
+import { post } from 'backend/socialPostingService';
+import { sendSocialAlert } from 'backend/emailService';
+import { log } from 'backend/observabilityService';
+
+const RETRYABLE_ERRORS = new Set([
+  'NETWORK_TIMEOUT',
+  'CONTAINER_EXPIRED',
+  'RATE_LIMITED_FB'
+]);
+
+const NON_RETRYABLE_ERRORS = new Set([
+  'TOKEN_EXPIRED',
+  'PERMISSION_MISSING',
+  'MEDIA_PROCESSING_FAILED',
+  'MEDIA_NOT_PUBLIC',
+  'DUPLICATE_POST',
+  'POSTING_DISABLED'
+]);
+
+const BACKOFF_MINUTES = [5, 15, 45];
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function addMinutesIso(minutes) {
+  return new Date(Date.now() + Number(minutes || 0) * 60 * 1000).toISOString();
+}
+
+function parseSnapshot(snapshot) {
+  try {
+    if (!snapshot) return {};
+    return typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
+  } catch (error) {
+    return {};
+  }
+}
+
+async function applyRetry(queueRecord, result) {
+  const retries = Number(queueRecord.retry_count || 0);
+  if (retries >= 3) {
+    await queueService.updateQueueRecord(queueRecord._id || queueRecord.id, {
+      status: 'dead_letter',
+      error_type: result.error_type || 'UNKNOWN',
+      error_message: result.error_message || result.error || 'Exceeded retries'
+    });
+    await queueService.appendAuditLog('post_dead_lettered', {
+      platform: queueRecord.platform || '',
+      queue_record_id: queueRecord._id || queueRecord.id || '',
+      details: { error: result.error || result.error_message || '' }
+    });
+    await sendSocialAlert('POST_DEAD_LETTERED', {
+      queueRecordId: queueRecord._id || queueRecord.id || '',
+      errorType: result.error_type || 'UNKNOWN',
+      errorMessage: result.error || result.error_message || ''
+    });
+    return { action: 'dead_letter' };
+  }
+
+  const delay = BACKOFF_MINUTES[Math.min(retries, BACKOFF_MINUTES.length - 1)];
+  await queueService.updateQueueRecord(queueRecord._id || queueRecord.id, {
+    status: 'queued',
+    retry_count: retries + 1,
+    scheduled_for: addMinutesIso(delay),
+    error_type: result.error_type || '',
+    error_message: result.error_message || result.error || ''
+  });
+  await queueService.appendAuditLog('post_retried', {
+    platform: queueRecord.platform || '',
+    queue_record_id: queueRecord._id || queueRecord.id || '',
+    details: { retry_count: retries + 1, retry_at: addMinutesIso(delay) }
+  });
+  return { action: 'retried', retry_count: retries + 1 };
+}
+
+async function finalizeFailure(queueRecord, result) {
+  await queueService.updateQueueRecord(queueRecord._id || queueRecord.id, {
+    status: 'failed',
+    error_type: result.error_type || 'UNKNOWN',
+    error_message: result.error_message || result.error || 'Post failed'
+  });
+  await queueService.appendAuditLog('post_failed', {
+    platform: queueRecord.platform || '',
+    queue_record_id: queueRecord._id || queueRecord.id || '',
+    details: { error: result.error || result.error_message || '' }
+  });
+  await sendSocialAlert(result.error_type || 'TOKEN_EXPIRED', {
+    queueRecordId: queueRecord._id || queueRecord.id || '',
+    errorType: result.error_type || 'UNKNOWN',
+    errorMessage: result.error || result.error_message || ''
+  });
+}
+
+async function processQueueRecord(record) {
+  const queueId = record._id || record.id;
+  const payload = parseSnapshot(record.payload_snapshot);
+  const platform = payload.platform || record.platform || '';
+
+  await queueService.updateQueueRecord(queueId, { status: 'processing' });
+  await queueService.appendAuditLog('post_dispatched', {
+    platform,
+    queue_record_id: queueId,
+    details: { dedupe_key: record.dedupe_key || '' }
+  });
+
+  let result;
+  if (platform === 'instagram') {
+    result = await post.instagram(payload);
+  } else if (platform === 'facebook') {
+    result = await post.facebook(payload);
+  } else {
+    result = { success: false, error_type: 'UNKNOWN_PLATFORM', error: `Unsupported platform: ${platform}` };
+  }
+
+  if (result.success) {
+    await queueService.updateQueueRecord(queueId, {
+      status: 'published',
+      fb_post_id: result.post_id || record.fb_post_id || '',
+      ig_media_id: result.media_id || record.ig_media_id || '',
+      ig_container_id: result.container_id || record.ig_container_id || '',
+      published_at: nowIso(),
+      error_type: '',
+      error_message: ''
+    });
+    await queueService.appendAuditLog('post_published', {
+      platform,
+      queue_record_id: queueId,
+      details: {
+        post_id: result.post_id || '',
+        media_id: result.media_id || '',
+        container_id: result.container_id || ''
+      }
+    });
+    return { success: true, status: 'published' };
+  }
+
+  if (RETRYABLE_ERRORS.has(result.error_type)) {
+    return applyRetry(record, result);
+  }
+
+  if (NON_RETRYABLE_ERRORS.has(result.error_type) || !result.error_type) {
+    await finalizeFailure(record, result);
+    return { success: false, status: 'failed' };
+  }
+
+  await finalizeFailure(record, result);
+  return { success: false, status: 'failed' };
+}
+
+export async function processSocialQueue() {
+  const due = await queueService.getDueQueuedRecords(5);
+  if (!due.success) {
+    return { success: false, error: due.error || 'Failed to query social queue', processed: 0 };
+  }
+
+  let processed = 0;
+  for (const record of due.items || []) {
+    const payload = parseSnapshot(record.payload_snapshot);
+    if ((payload.platform || record.platform) === 'instagram') {
+      const igId = payload.igUserId || payload.ig_user_id || '';
+      if (igId) {
+        const quota = await rateLimitService.checkIGQuota(igId);
+        if (quota.success && quota.quota_used >= 40) {
+          await sendSocialAlert('IG_QUOTA_NEAR_LIMIT', {
+            igUserId: igId,
+            quotaUsed: quota.quota_used,
+            quotaTotal: quota.quota_total
+          });
+        }
+        await log({
+          level: 'INFO',
+          source: 'social-queue-job',
+          message: 'Instagram quota check',
+          details: quota
+        });
+      }
+    }
+
+    await processQueueRecord(record);
+    processed++;
+  }
+
+  return { success: true, processed };
+}

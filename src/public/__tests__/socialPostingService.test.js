@@ -13,7 +13,28 @@ const mockDataAccess = {
 
 jest.mock('backend/dataAccess', () => mockDataAccess);
 jest.mock('wix-secrets-backend', () => ({ getSecret: jest.fn().mockResolvedValue('test-secret') }));
-jest.mock('backend/configData', () => ({ DATA_SOURCE: {}, AIRTABLE_TABLE_NAMES: {} }), { virtual: true });
+jest.mock('backend/configData', () => ({
+    DATA_SOURCE: {},
+    AIRTABLE_TABLE_NAMES: {},
+    SOCIAL_POSTING_SETTINGS: { SOCIAL_POSTING_ENABLED: true, SOCIAL_RUNTIME: 'wix' }
+}), { virtual: true });
+jest.mock('backend/observabilityService', () => ({ log: jest.fn().mockResolvedValue({}) }));
+jest.mock('backend/emailService', () => ({ sendSocialAlert: jest.fn().mockResolvedValue({ success: true }) }));
+jest.mock('backend/socialSecretService', () => ({
+    getFBPageToken: jest.fn().mockResolvedValue('fb-page-token'),
+    getIGUserToken: jest.fn().mockResolvedValue('ig-user-token')
+}));
+jest.mock('backend/socialRateLimitService', () => ({
+    checkIGQuota: jest.fn().mockResolvedValue({ success: true, can_post: true, quota_used: 0, quota_total: 50, quota_duration: 86400 }),
+    checkFBUsage: jest.fn().mockReturnValue({ success: true, alert: false, severity: 'normal' })
+}));
+jest.mock('backend/socialQueueService', () => ({
+    getByDedupeKey: jest.fn().mockResolvedValue({ success: true, record: null }),
+    createQueueRecord: jest.fn().mockResolvedValue({ success: true, record: { _id: 'queue-1' } }),
+    updateQueueRecord: jest.fn().mockResolvedValue({ success: true }),
+    appendAuditLog: jest.fn().mockResolvedValue({ success: true }),
+    isPublishedRecord: jest.fn().mockReturnValue(false)
+}));
 
 global.fetch = jest.fn().mockResolvedValue({
     ok: true,
@@ -437,6 +458,63 @@ describe('socialPostingService', () => {
             expect(typeof result.characterCount).toBe('number');
             expect(typeof result.limit).toBe('number');
             expect(result.limit).toBe(3000);
+        });
+    });
+
+    describe('Graph API organic posting', () => {
+        it('postToFacebook should return post_id on success', async () => {
+            global.fetch.mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                headers: { get: () => '{"call_count":10,"total_time":9,"total_cputime":8}' },
+                json: async () => ({ id: 'page_post_123' })
+            });
+            const { postToFacebook } = require('backend/socialPostingService');
+            const result = await postToFacebook({ pageId: 'page_1', message: 'hello world', post_type: 'text' });
+            expect(result.success).toBe(true);
+            expect(result.post_id).toBe('page_post_123');
+        });
+
+        it('postToFacebook should classify token-expired error', async () => {
+            global.fetch.mockResolvedValueOnce({
+                ok: false,
+                status: 400,
+                headers: { get: () => '' },
+                json: async () => ({ error: { code: 190, message: 'Token expired' } })
+            });
+            const { postToFacebook } = require('backend/socialPostingService');
+            const result = await postToFacebook({ pageId: 'page_1', message: 'hello world', post_type: 'text' });
+            expect(result.success).toBe(false);
+            expect(result.error_type).toBe('TOKEN_EXPIRED');
+        });
+
+        it('postToInstagram should complete container + publish flow', async () => {
+            const { checkIGQuota } = require('backend/socialRateLimitService');
+            checkIGQuota.mockResolvedValueOnce({ success: true, can_post: true, quota_used: 2, quota_total: 50, quota_duration: 86400 });
+            global.fetch
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ id: 'ig_container_1' })
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ id: 'ig_media_1' })
+                });
+            const { postToInstagram } = require('backend/socialPostingService');
+            const result = await postToInstagram({ igUserId: 'ig_1', image_url: 'https://img.example.com/a.jpg', caption: 'caption', post_type: 'image' });
+            expect(result.success).toBe(true);
+            expect(result.media_id).toBe('ig_media_1');
+        });
+
+        it('postToInstagram should block at quota limit', async () => {
+            const { checkIGQuota } = require('backend/socialRateLimitService');
+            checkIGQuota.mockResolvedValueOnce({ success: true, can_post: false, quota_used: 50, quota_total: 50, quota_duration: 86400 });
+            const { postToInstagram } = require('backend/socialPostingService');
+            const result = await postToInstagram({ igUserId: 'ig_1', image_url: 'https://img.example.com/a.jpg', caption: 'caption', post_type: 'image' });
+            expect(result.success).toBe(false);
+            expect(result.error_type).toBe('RATE_LIMITED_IG');
         });
     });
 

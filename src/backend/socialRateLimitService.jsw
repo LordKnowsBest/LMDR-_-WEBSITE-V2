@@ -1,0 +1,100 @@
+import * as secretService from 'backend/socialSecretService';
+
+const GRAPH_BASE = 'https://graph.facebook.com/v25.0';
+const CACHE_TTL_MS = 60 * 1000;
+
+const cache = new Map();
+
+function cacheKey(scope, id) {
+  return `${scope}:${id}`;
+}
+
+function getCached(key) {
+  const found = cache.get(key);
+  if (!found) return null;
+  if (Date.now() > found.expiresAt) {
+    cache.delete(key);
+    return null;
+  }
+  return found.value;
+}
+
+function setCached(key, value) {
+  cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+function parsePercentUsage(headerValue = '') {
+  try {
+    if (!headerValue) return null;
+    const parsed = typeof headerValue === 'string' ? JSON.parse(headerValue) : headerValue;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      call_count: Number(parsed.call_count || 0),
+      total_time: Number(parsed.total_time || 0),
+      total_cputime: Number(parsed.total_cputime || 0)
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+export async function checkIGQuota(igUserId) {
+  try {
+    if (!igUserId) return { success: false, can_post: false, error: 'igUserId is required' };
+    const key = cacheKey('ig_quota', igUserId);
+    const cached = getCached(key);
+    if (cached) return { success: true, ...cached, cached: true };
+
+    const token = await secretService.getIGUserToken(igUserId);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const since = nowSeconds - 86400;
+    const url = `${GRAPH_BASE}/${igUserId}/content_publishing_limit?fields=quota_usage,config&since=${since}&access_token=${encodeURIComponent(token)}`;
+    const response = await fetch(url);
+    const payload = await response.json();
+    if (!response.ok || payload.error) {
+      return {
+        success: false,
+        can_post: false,
+        error: payload.error ? payload.error.message : `HTTP ${response.status}`
+      };
+    }
+
+    const quotaUsed = Number(payload.quota_usage || 0);
+    const quotaTotal = Number(payload.config && payload.config.quota_total ? payload.config.quota_total : 50);
+    const quotaDuration = Number(payload.config && payload.config.quota_duration ? payload.config.quota_duration : 86400);
+    const value = {
+      can_post: quotaUsed < quotaTotal,
+      quota_used: quotaUsed,
+      quota_total: quotaTotal,
+      quota_duration: quotaDuration
+    };
+    setCached(key, value);
+    return { success: true, ...value, cached: false };
+  } catch (error) {
+    return { success: false, can_post: false, error: error.message };
+  }
+}
+
+export function checkFBUsage(pageId, appUsageHeader) {
+  const usage = parsePercentUsage(appUsageHeader);
+  if (!usage) {
+    return {
+      success: false,
+      page_id: pageId || '',
+      alert: false,
+      error: 'Missing or invalid X-App-Usage header'
+    };
+  }
+  const maxPct = Math.max(usage.call_count, usage.total_time, usage.total_cputime);
+  return {
+    success: true,
+    page_id: pageId || '',
+    usage,
+    alert: maxPct > 75,
+    severity: maxPct > 90 ? 'critical' : (maxPct > 75 ? 'warning' : 'normal')
+  };
+}
+
+export function __resetSocialRateLimitCacheForTests() {
+  cache.clear();
+}

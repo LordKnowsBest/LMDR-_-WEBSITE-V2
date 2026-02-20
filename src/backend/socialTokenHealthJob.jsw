@@ -1,0 +1,103 @@
+import * as dataAccess from 'backend/dataAccess';
+import * as secretService from 'backend/socialSecretService';
+import * as tokenService from 'backend/socialTokenService';
+import { sendSocialAlert } from 'backend/emailService';
+import * as queueService from 'backend/socialQueueService';
+
+const COLLECTIONS = {
+  queue: 'socialPostQueue'
+};
+
+function sevenDaysFromNowSec() {
+  return Math.floor((Date.now() + 7 * 24 * 60 * 60 * 1000) / 1000);
+}
+
+function collectIdsFromQueue(items = [], fieldCandidates = []) {
+  const out = new Set();
+  for (const item of items) {
+    for (const key of fieldCandidates) {
+      const value = item[key];
+      if (value) out.add(String(value));
+    }
+    if (item.payload_snapshot) {
+      try {
+        const payload = typeof item.payload_snapshot === 'string' ?
+          JSON.parse(item.payload_snapshot) : item.payload_snapshot;
+        for (const key of fieldCandidates) {
+          const value = payload[key];
+          if (value) out.add(String(value));
+        }
+      } catch (error) {
+        // ignore malformed payload snapshots
+      }
+    }
+  }
+  return Array.from(out);
+}
+
+export async function runSocialTokenHealthCheck() {
+  const sample = await dataAccess.queryRecords(COLLECTIONS.queue, {
+    filters: {},
+    sort: [{ field: 'updated_at', direction: 'desc' }],
+    limit: 250,
+    suppressAuth: true
+  });
+  if (!sample.success) {
+    return { success: false, error: sample.error || 'Failed to query social queue', scanned: 0, alerts: 0 };
+  }
+
+  const igUserIds = collectIdsFromQueue(sample.items || [], ['igUserId', 'ig_user_id']);
+  const pageIds = collectIdsFromQueue(sample.items || [], ['pageId', 'page_id']);
+  const alertThresholdSec = sevenDaysFromNowSec();
+
+  let scanned = 0;
+  let alerts = 0;
+
+  for (const pageId of pageIds) {
+    try {
+      const token = await secretService.getFBPageToken(pageId);
+      const status = await tokenService.validateToken(token);
+      scanned++;
+      if (!status.success || !status.is_valid || (status.expires_at > 0 && status.expires_at < alertThresholdSec)) {
+        alerts++;
+        await queueService.appendAuditLog('token_health_alert', {
+          platform: 'facebook',
+          actor: 'system',
+          details: { pageId, status }
+        });
+        await sendSocialAlert('TOKEN_HEALTH_ALERT', {
+          platform: 'facebook',
+          accountId: pageId,
+          status
+        });
+      }
+    } catch (error) {
+      alerts++;
+    }
+  }
+
+  for (const igUserId of igUserIds) {
+    try {
+      const token = await secretService.getIGUserToken(igUserId);
+      const status = await tokenService.validateToken(token);
+      scanned++;
+      if (!status.success || !status.is_valid || (status.expires_at > 0 && status.expires_at < alertThresholdSec)) {
+        alerts++;
+        await queueService.appendAuditLog('token_health_alert', {
+          platform: 'instagram',
+          actor: 'system',
+          details: { igUserId, status }
+        });
+        await sendSocialAlert('TOKEN_HEALTH_ALERT', {
+          platform: 'instagram',
+          accountId: igUserId,
+          status
+        });
+      }
+    } catch (error) {
+      alerts++;
+    }
+  }
+
+  return { success: true, scanned, alerts };
+}

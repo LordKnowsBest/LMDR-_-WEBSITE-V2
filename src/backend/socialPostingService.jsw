@@ -9,6 +9,12 @@
 
 import { getSecret } from 'wix-secrets-backend';
 import * as dataAccess from 'backend/dataAccess';
+import * as configData from 'backend/configData';
+import * as socialSecretService from 'backend/socialSecretService';
+import * as socialRateLimitService from 'backend/socialRateLimitService';
+import * as socialQueueService from 'backend/socialQueueService';
+import { log } from 'backend/observabilityService';
+import { sendSocialAlert } from 'backend/emailService';
 
 // =============================================================================
 // CONSTANTS
@@ -779,3 +785,565 @@ function _safeJsonParse(str, fallback) {
         return fallback;
     }
 }
+
+// =============================================================================
+// GRAPH API ORGANIC POSTING (FACEBOOK PAGE + INSTAGRAM)
+// =============================================================================
+
+const META_GRAPH_BASE = 'https://graph.facebook.com/v25.0';
+const RETRY_POLL_MAX = 10;
+const RETRY_POLL_MS = 5000;
+
+function nowMs() {
+    return Date.now();
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getSocialPostingEnabledFlag() {
+    const fromConfig = Boolean(configData && configData.SOCIAL_POSTING_SETTINGS && configData.SOCIAL_POSTING_SETTINGS.SOCIAL_POSTING_ENABLED);
+    if (typeof process !== 'undefined' && process.env && typeof process.env.SOCIAL_POSTING_ENABLED !== 'undefined') {
+        return String(process.env.SOCIAL_POSTING_ENABLED).toLowerCase() === 'true';
+    }
+    return fromConfig;
+}
+
+function toBody(params = {}) {
+    return new URLSearchParams(
+        Object.entries(params).reduce((acc, [key, value]) => {
+            if (value !== undefined && value !== null && value !== '') {
+                acc[key] = String(value);
+            }
+            return acc;
+        }, {})
+    ).toString();
+}
+
+function isValidUrl(url = '') {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch (error) {
+        return false;
+    }
+}
+
+function toUnixSeconds(isoValue) {
+    const ms = new Date(isoValue).getTime();
+    if (!Number.isFinite(ms)) return 0;
+    return Math.floor(ms / 1000);
+}
+
+function normalizeErrorType(error = {}) {
+    const code = Number(error.code || 0);
+    const subcode = Number(error.error_subcode || 0);
+    const message = String(error.message || '').toLowerCase();
+    if (code === 190) return 'TOKEN_EXPIRED';
+    if (code === 200 || code === 203) return 'PERMISSION_MISSING';
+    if (code === 341) return 'RATE_LIMITED_FB';
+    if (message.includes('image') && message.includes('public')) return 'MEDIA_NOT_PUBLIC';
+    if (message.includes('link') && message.includes('not') && message.includes('visible')) return 'LINK_INVISIBLE';
+    return 'GRAPH_API_ERROR';
+}
+
+async function logPostingAttempt(fields = {}) {
+    await log({
+        level: fields.success ? 'INFO' : 'ERROR',
+        source: 'social-graph-posting',
+        message: fields.success ? 'Social post published' : 'Social post failed',
+        duration: fields.duration_ms || 0,
+        details: fields
+    });
+}
+
+async function createQueueBeforeDispatch(payload = {}) {
+    const dedupe = payload.dedupe_key || generateDedupeKey(payload);
+    const existing = await socialQueueService.getByDedupeKey(dedupe);
+    if (!existing.success) {
+        return { success: false, error_type: 'QUEUE_ERROR', error_message: existing.error || 'Failed dedupe lookup' };
+    }
+    if (existing.record && socialQueueService.isPublishedRecord(existing.record)) {
+        return {
+            success: false,
+            duplicate: true,
+            error_type: 'DUPLICATE_POST',
+            error_message: 'Duplicate post detected',
+            queue_record: existing.record
+        };
+    }
+
+    const queueCreate = await socialQueueService.createQueueRecord({
+        dedupe_key: dedupe,
+        platform: payload.platform || '',
+        post_type: payload.post_type || 'text',
+        scheduled_for: payload.scheduled_for || null,
+        payload_snapshot: payload,
+        status: 'queued'
+    });
+    if (!queueCreate.success) {
+        return { success: false, error_type: 'QUEUE_ERROR', error_message: queueCreate.error || 'Failed to create queue record' };
+    }
+    const queueRecord = queueCreate.record || {};
+    await socialQueueService.appendAuditLog('post_dispatched', {
+        platform: payload.platform || '',
+        queue_record_id: queueRecord._id || queueRecord.id || '',
+        details: { dedupe_key: dedupe, post_type: payload.post_type || 'text' }
+    });
+    return { success: true, queue_record: queueRecord, dedupe_key: dedupe };
+}
+
+async function finalizeQueue(queueRecord, updates = {}, eventType = '') {
+    const queueId = queueRecord && (queueRecord._id || queueRecord.id) ? (queueRecord._id || queueRecord.id) : '';
+    if (!queueId) return;
+    await socialQueueService.updateQueueRecord(queueId, updates);
+    if (eventType) {
+        await socialQueueService.appendAuditLog(eventType, {
+            platform: updates.platform || queueRecord.platform || '',
+            queue_record_id: queueId,
+            details: updates
+        });
+    }
+}
+
+async function graphFetch(url, token, body, method = 'POST') {
+    const response = await fetch(url, {
+        method,
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: body || ''
+    });
+    let payload = {};
+    try {
+        payload = await response.json();
+    } catch (error) {
+        payload = {};
+    }
+    return { response, payload };
+}
+
+async function postFacebookByType(pageId, token, payload = {}) {
+    const postType = payload.post_type || 'text';
+    if (postType === 'photo') {
+        if (!isValidUrl(payload.url || payload.image_url || '')) {
+            return { success: false, error_type: 'MEDIA_NOT_PUBLIC', error_message: 'Invalid or non-public photo URL' };
+        }
+        const body = toBody({
+            url: payload.url || payload.image_url,
+            caption: payload.caption || payload.message || ''
+        });
+        const { response, payload: graph } = await graphFetch(`${META_GRAPH_BASE}/${pageId}/photos`, token, body);
+        if (!response.ok || graph.error) {
+            return { success: false, error_type: normalizeErrorType(graph.error || {}), error_message: graph.error ? graph.error.message : `HTTP ${response.status}` };
+        }
+        return { success: true, post_id: graph.id || '', usage_header: response.headers.get('x-app-usage') || '' };
+    }
+
+    if (postType === 'video') {
+        if (!isValidUrl(payload.file_url || payload.video_url || '')) {
+            return { success: false, error_type: 'MEDIA_NOT_PUBLIC', error_message: 'Invalid video URL' };
+        }
+        const body = toBody({
+            file_url: payload.file_url || payload.video_url,
+            description: payload.description || payload.message || ''
+        });
+        const { response, payload: graph } = await graphFetch(`${META_GRAPH_BASE}/${pageId}/videos`, token, body);
+        if (!response.ok || graph.error) {
+            return { success: false, error_type: normalizeErrorType(graph.error || {}), error_message: graph.error ? graph.error.message : `HTTP ${response.status}` };
+        }
+        return { success: true, post_id: graph.id || '', usage_header: response.headers.get('x-app-usage') || '' };
+    }
+
+    if (postType === 'link' && payload.link && !isValidUrl(payload.link)) {
+        return { success: false, error_type: 'LINK_INVISIBLE', error_message: 'Invalid link URL' };
+    }
+
+    const requestBody = {
+        message: payload.message || '',
+        link: payload.link || ''
+    };
+    if (payload.scheduled_publish_time) {
+        const whenUnix = typeof payload.scheduled_publish_time === 'number' ?
+            payload.scheduled_publish_time : toUnixSeconds(payload.scheduled_publish_time);
+        const minUnix = Math.floor((Date.now() + 10 * 60 * 1000) / 1000);
+        const maxUnix = Math.floor((Date.now() + 75 * 24 * 60 * 60 * 1000) / 1000);
+        if (whenUnix < minUnix || whenUnix > maxUnix) {
+            return { success: false, error_type: 'GRAPH_API_ERROR', error_message: 'scheduled_publish_time must be 10 minutes to 75 days in the future' };
+        }
+        requestBody.published = false;
+        requestBody.scheduled_publish_time = whenUnix;
+    }
+    if (!requestBody.message && !requestBody.link) {
+        return { success: false, error_type: 'GRAPH_API_ERROR', error_message: 'message or link is required' };
+    }
+    const { response, payload: graph } = await graphFetch(`${META_GRAPH_BASE}/${pageId}/feed`, token, toBody(requestBody));
+    if (!response.ok || graph.error) {
+        return { success: false, error_type: normalizeErrorType(graph.error || {}), error_message: graph.error ? graph.error.message : `HTTP ${response.status}` };
+    }
+    return { success: true, post_id: graph.id || '', usage_header: response.headers.get('x-app-usage') || '' };
+}
+
+async function pollContainerStatus(containerId, token) {
+    for (let i = 0; i < RETRY_POLL_MAX; i++) {
+        const response = await fetch(`${META_GRAPH_BASE}/${containerId}?fields=status_code,media_product_type&access_token=${encodeURIComponent(token)}`);
+        const payload = await response.json();
+        const statusCode = payload.status_code || '';
+        if (statusCode === 'FINISHED' || statusCode === 'PUBLISHED') {
+            return { success: true, status_code: statusCode, media_product_type: payload.media_product_type || '' };
+        }
+        if (statusCode === 'ERROR') {
+            return { success: false, error_type: 'MEDIA_PROCESSING_FAILED', error_message: 'Container processing failed' };
+        }
+        if (statusCode === 'EXPIRED') {
+            return { success: false, error_type: 'CONTAINER_EXPIRED', error_message: 'Container expired before publish' };
+        }
+        await sleep(RETRY_POLL_MS);
+    }
+    return { success: false, error_type: 'MEDIA_PROCESSING_FAILED', error_message: 'Timed out waiting for media processing' };
+}
+
+export function generateDedupeKey(payload = {}) {
+    const normalized = {
+        platform: payload.platform || '',
+        post_type: payload.post_type || 'text',
+        text: payload.caption || payload.message || '',
+        media: payload.image_url || payload.link || payload.video_url || payload.file_url || '',
+        account_id: payload.pageId || payload.igUserId || payload.account_id || ''
+    };
+    const raw = JSON.stringify(normalized);
+    let hash = 0;
+    for (let i = 0; i < raw.length; i++) {
+        hash = ((hash << 5) - hash) + raw.charCodeAt(i);
+        hash |= 0;
+    }
+    return `ddk_${Math.abs(hash)}_${raw.length}`;
+}
+
+export async function postToFacebook(payload = {}) {
+    const started = nowMs();
+    if (!getSocialPostingEnabledFlag()) {
+        return { success: false, error_type: 'POSTING_DISABLED', error_message: 'Social posting is disabled' };
+    }
+
+    const pageId = payload.pageId || payload.page_id || '';
+    if (!pageId) return { success: false, error_type: 'GRAPH_API_ERROR', error_message: 'pageId is required' };
+
+    const queuePrep = await createQueueBeforeDispatch({ ...payload, platform: 'facebook' });
+    if (!queuePrep.success) {
+        return {
+            success: false,
+            error_type: queuePrep.error_type || 'QUEUE_ERROR',
+            error_message: queuePrep.error_message || 'Queue error'
+        };
+    }
+    if (queuePrep.duplicate) {
+        return { success: false, error_type: 'DUPLICATE_POST', error_message: queuePrep.error_message || 'Duplicate post' };
+    }
+    const queueRecord = queuePrep.queue_record;
+
+    try {
+        const token = await socialSecretService.getFBPageToken(pageId);
+        const result = await postFacebookByType(pageId, token, payload);
+        if (!result.success) {
+            await finalizeQueue(queueRecord, {
+                status: 'failed',
+                platform: 'facebook',
+                error_type: result.error_type,
+                error_message: result.error_message
+            }, 'post_failed');
+            await sendSocialAlert(result.error_type === 'TOKEN_EXPIRED' ? 'TOKEN_EXPIRED' : 'POST_DEAD_LETTERED', {
+                pageId,
+                errorType: result.error_type,
+                message: result.error_message
+            });
+            await logPostingAttempt({
+                platform: 'facebook',
+                success: false,
+                error_type: result.error_type,
+                duration_ms: nowMs() - started
+            });
+            return result;
+        }
+
+        const fbUsage = socialRateLimitService.checkFBUsage(pageId, result.usage_header);
+        await finalizeQueue(queueRecord, {
+            status: 'published',
+            platform: 'facebook',
+            fb_post_id: result.post_id,
+            published_at: new Date().toISOString()
+        }, 'post_published');
+        await logPostingAttempt({
+            platform: 'facebook',
+            success: true,
+            post_id: result.post_id,
+            duration_ms: nowMs() - started,
+            fb_usage: fbUsage
+        });
+        return { success: true, post_id: result.post_id, fb_usage: fbUsage };
+    } catch (error) {
+        await finalizeQueue(queueRecord, {
+            status: 'failed',
+            platform: 'facebook',
+            error_type: 'NETWORK_TIMEOUT',
+            error_message: error.message
+        }, 'post_failed');
+        await logPostingAttempt({
+            platform: 'facebook',
+            success: false,
+            error_type: 'NETWORK_TIMEOUT',
+            duration_ms: nowMs() - started
+        });
+        return { success: false, error_type: 'NETWORK_TIMEOUT', error_message: error.message };
+    }
+}
+
+async function createIGMediaContainer(igUserId, token, payload = {}) {
+    const postType = payload.post_type || 'image';
+    if (postType === 'carousel') {
+        const children = Array.isArray(payload.children) ? payload.children : [];
+        if (!children.length) {
+            return { success: false, error_type: 'GRAPH_API_ERROR', error_message: 'children required for carousel' };
+        }
+
+        const childIds = [];
+        for (const item of children) {
+            const childBody = toBody({
+                image_url: item.image_url || '',
+                video_url: item.video_url || '',
+                media_type: item.video_url ? 'VIDEO' : '',
+                is_carousel_item: true,
+                access_token: token
+            });
+            const childResponse = await fetch(`${META_GRAPH_BASE}/${igUserId}/media`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: childBody
+            });
+            const childPayload = await childResponse.json();
+            if (!childResponse.ok || childPayload.error) {
+                return { success: false, error_type: normalizeErrorType(childPayload.error || {}), error_message: childPayload.error ? childPayload.error.message : `HTTP ${childResponse.status}` };
+            }
+            childIds.push(childPayload.id);
+        }
+
+        const carouselBody = toBody({
+            media_type: 'CAROUSEL',
+            children: childIds.join(','),
+            caption: payload.caption || '',
+            access_token: token
+        });
+        const response = await fetch(`${META_GRAPH_BASE}/${igUserId}/media`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: carouselBody
+        });
+        const container = await response.json();
+        if (!response.ok || container.error) {
+            return { success: false, error_type: normalizeErrorType(container.error || {}), error_message: container.error ? container.error.message : `HTTP ${response.status}` };
+        }
+        return { success: true, container_id: container.id };
+    }
+
+    const body = {
+        caption: payload.caption || ''
+    };
+    if (postType === 'video') {
+        body.video_url = payload.video_url || payload.file_url || '';
+        body.media_type = 'VIDEO';
+    } else if (postType === 'reels') {
+        body.video_url = payload.video_url || payload.file_url || '';
+        body.media_type = 'REELS';
+    } else {
+        body.image_url = payload.image_url || payload.url || '';
+    }
+    if ((body.image_url && !isValidUrl(body.image_url)) || (body.video_url && !isValidUrl(body.video_url))) {
+        return { success: false, error_type: 'MEDIA_NOT_PUBLIC', error_message: 'Media URL must be public and valid' };
+    }
+
+    const response = await fetch(`${META_GRAPH_BASE}/${igUserId}/media`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: toBody({ ...body, access_token: token })
+    });
+    const container = await response.json();
+    if (!response.ok || container.error) {
+        return { success: false, error_type: normalizeErrorType(container.error || {}), error_message: container.error ? container.error.message : `HTTP ${response.status}` };
+    }
+    return { success: true, container_id: container.id, post_type: postType };
+}
+
+export async function postToInstagram(payload = {}) {
+    const started = nowMs();
+    if (!getSocialPostingEnabledFlag()) {
+        return { success: false, error_type: 'POSTING_DISABLED', error_message: 'Social posting is disabled' };
+    }
+
+    const igUserId = payload.igUserId || payload.ig_user_id || '';
+    if (!igUserId) return { success: false, error_type: 'GRAPH_API_ERROR', error_message: 'igUserId is required' };
+
+    const queuePrep = await createQueueBeforeDispatch({ ...payload, platform: 'instagram' });
+    if (!queuePrep.success) {
+        return {
+            success: false,
+            error_type: queuePrep.error_type || 'QUEUE_ERROR',
+            error_message: queuePrep.error_message || 'Queue error'
+        };
+    }
+    if (queuePrep.duplicate) {
+        return { success: false, error_type: 'DUPLICATE_POST', error_message: queuePrep.error_message || 'Duplicate post' };
+    }
+    const queueRecord = queuePrep.queue_record;
+
+    try {
+        const token = await socialSecretService.getIGUserToken(igUserId);
+        const quota = await socialRateLimitService.checkIGQuota(igUserId);
+        if (!quota.success || !quota.can_post || Number(quota.quota_used || 0) >= 50) {
+            await finalizeQueue(queueRecord, {
+                status: 'failed',
+                platform: 'instagram',
+                error_type: 'RATE_LIMITED_IG',
+                error_message: quota.error || 'Instagram quota exhausted'
+            }, 'post_failed');
+            return { success: false, error_type: 'RATE_LIMITED_IG', error_message: quota.error || 'IG posting quota exceeded', quota };
+        }
+        if (Number(quota.quota_used || 0) >= 40) {
+            await sendSocialAlert('IG_QUOTA_NEAR_LIMIT', {
+                igUserId,
+                quotaUsed: quota.quota_used,
+                quotaTotal: quota.quota_total
+            });
+        }
+
+        const container = await createIGMediaContainer(igUserId, token, payload);
+        if (!container.success) {
+            await finalizeQueue(queueRecord, {
+                status: 'failed',
+                platform: 'instagram',
+                error_type: container.error_type,
+                error_message: container.error_message
+            }, 'post_failed');
+            return { success: false, error_type: container.error_type, error_message: container.error_message };
+        }
+
+        const postType = payload.post_type || 'image';
+        if (postType === 'video' || postType === 'reels') {
+            const poll = await pollContainerStatus(container.container_id, token);
+            if (!poll.success) {
+                await finalizeQueue(queueRecord, {
+                    status: 'failed',
+                    platform: 'instagram',
+                    ig_container_id: container.container_id,
+                    error_type: poll.error_type,
+                    error_message: poll.error_message
+                }, 'post_failed');
+                return { success: false, error_type: poll.error_type, error_message: poll.error_message };
+            }
+        }
+
+        const publishResponse = await fetch(`${META_GRAPH_BASE}/${igUserId}/media_publish`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: toBody({
+                creation_id: container.container_id,
+                access_token: token
+            })
+        });
+        const publishPayload = await publishResponse.json();
+        if (!publishResponse.ok || publishPayload.error) {
+            const errorType = normalizeErrorType(publishPayload.error || {});
+            await finalizeQueue(queueRecord, {
+                status: 'failed',
+                platform: 'instagram',
+                ig_container_id: container.container_id,
+                error_type: errorType,
+                error_message: publishPayload.error ? publishPayload.error.message : `HTTP ${publishResponse.status}`
+            }, 'post_failed');
+            await sendSocialAlert(errorType === 'TOKEN_EXPIRED' ? 'TOKEN_EXPIRED' : 'POST_DEAD_LETTERED', {
+                igUserId,
+                errorType,
+                message: publishPayload.error ? publishPayload.error.message : `HTTP ${publishResponse.status}`
+            });
+            return {
+                success: false,
+                error_type: errorType,
+                error_message: publishPayload.error ? publishPayload.error.message : `HTTP ${publishResponse.status}`
+            };
+        }
+
+        await finalizeQueue(queueRecord, {
+            status: 'published',
+            platform: 'instagram',
+            ig_container_id: container.container_id,
+            ig_media_id: publishPayload.id || '',
+            published_at: new Date().toISOString()
+        }, 'post_published');
+
+        await logPostingAttempt({
+            platform: 'instagram',
+            success: true,
+            media_id: publishPayload.id || '',
+            container_id: container.container_id,
+            duration_ms: nowMs() - started,
+            quota
+        });
+        return { success: true, media_id: publishPayload.id || '', container_id: container.container_id, quota };
+    } catch (error) {
+        await finalizeQueue(queueRecord, {
+            status: 'failed',
+            platform: 'instagram',
+            error_type: 'NETWORK_TIMEOUT',
+            error_message: error.message
+        }, 'post_failed');
+        return { success: false, error_type: 'NETWORK_TIMEOUT', error_message: error.message };
+    }
+}
+
+export async function postToBoth(payload = {}) {
+    const facebookPayload = {
+        ...payload,
+        platform: 'facebook',
+        post_type: payload.fb_post_type || payload.post_type || 'text',
+        pageId: payload.pageId || payload.page_id || ''
+    };
+    const instagramPayload = {
+        ...payload,
+        platform: 'instagram',
+        post_type: payload.ig_post_type || payload.post_type || 'image',
+        igUserId: payload.igUserId || payload.ig_user_id || ''
+    };
+
+    const [facebookResult, instagramResult] = await Promise.allSettled([
+        postToFacebook(facebookPayload),
+        postToInstagram(instagramPayload)
+    ]);
+
+    const fb = facebookResult.status === 'fulfilled' ? facebookResult.value : {
+        success: false,
+        error_type: 'NETWORK_TIMEOUT',
+        error_message: facebookResult.reason ? String(facebookResult.reason.message || facebookResult.reason) : 'Unknown Facebook failure'
+    };
+    const ig = instagramResult.status === 'fulfilled' ? instagramResult.value : {
+        success: false,
+        error_type: 'NETWORK_TIMEOUT',
+        error_message: instagramResult.reason ? String(instagramResult.reason.message || instagramResult.reason) : 'Unknown Instagram failure'
+    };
+
+    const overall_status = fb.success && ig.success ? 'published' :
+        ((fb.success || ig.success) ? 'partial' : 'failed');
+
+    return {
+        success: overall_status !== 'failed',
+        overall_status,
+        facebook: fb,
+        instagram: ig
+    };
+}
+
+export const post = {
+    facebook: postToFacebook,
+    instagram: postToInstagram,
+    both: postToBoth
+};

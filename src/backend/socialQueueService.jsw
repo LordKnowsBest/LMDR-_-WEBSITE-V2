@@ -1,0 +1,122 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  queue: 'socialPostQueue',
+  audit: 'socialAuditLog'
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeStatus(status = '') {
+  return String(status || '').toLowerCase();
+}
+
+export async function createQueueRecord(payload = {}) {
+  const record = {
+    dedupe_key: payload.dedupe_key || '',
+    platform: Array.isArray(payload.platform) ? payload.platform.join(',') : (payload.platform || ''),
+    post_type: payload.post_type || 'text',
+    status: payload.status || 'queued',
+    fb_post_id: payload.fb_post_id || '',
+    ig_media_id: payload.ig_media_id || '',
+    ig_container_id: payload.ig_container_id || '',
+    error_type: payload.error_type || '',
+    error_message: payload.error_message || '',
+    retry_count: Number(payload.retry_count || 0),
+    scheduled_for: payload.scheduled_for || null,
+    published_at: payload.published_at || null,
+    payload_snapshot: JSON.stringify(payload.payload_snapshot || payload || {}),
+    created_at: nowIso(),
+    updated_at: nowIso()
+  };
+  const insert = await dataAccess.insertRecord(COLLECTIONS.queue, record, { suppressAuth: true });
+  if (!insert.success) {
+    return { success: false, error: insert.error || 'Failed to create queue record' };
+  }
+  return { success: true, record: insert.record || record };
+}
+
+export async function updateQueueRecord(id, updates = {}) {
+  if (!id) return { success: false, error: 'id is required' };
+  const existing = await dataAccess.findByField(COLLECTIONS.queue, '_id', id, { suppressAuth: true }) ||
+    await dataAccess.findByField(COLLECTIONS.queue, 'id', id, { suppressAuth: true });
+  if (!existing) return { success: false, error: `Queue record not found: ${id}` };
+
+  const next = {
+    ...existing,
+    ...updates,
+    _id: existing._id || id,
+    updated_at: nowIso()
+  };
+  return dataAccess.updateRecord(COLLECTIONS.queue, next, { suppressAuth: true });
+}
+
+export async function getByDedupeKey(dedupeKey) {
+  if (!dedupeKey) return { success: true, record: null };
+  const result = await dataAccess.queryRecords(COLLECTIONS.queue, {
+    filters: { dedupe_key: dedupeKey },
+    sort: [{ field: 'created_at', direction: 'desc' }],
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!result.success) return { success: false, error: result.error || 'Failed to query dedupe key', record: null };
+  return { success: true, record: (result.items || [])[0] || null };
+}
+
+export async function getFailedRecords(limit = 50) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.queue, {
+    filters: { status: 'failed' },
+    sort: [{ field: 'updated_at', direction: 'desc' }],
+    limit: Number(limit) || 50,
+    suppressAuth: true
+  });
+  if (!result.success) return { success: false, error: result.error || 'Failed to query failed records', items: [] };
+  const items = (result.items || []).filter(item => Number(item.retry_count || 0) < 3);
+  return { success: true, items };
+}
+
+export async function getDeadLetterQueue(limit = 100) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.queue, {
+    filters: { status: 'dead_letter' },
+    sort: [{ field: 'updated_at', direction: 'desc' }],
+    limit: Number(limit) || 100,
+    suppressAuth: true
+  });
+  if (!result.success) return { success: false, error: result.error || 'Failed to query dead-letter queue', items: [] };
+  return { success: true, items: result.items || [] };
+}
+
+export async function getDueQueuedRecords(limit = 5) {
+  const result = await dataAccess.queryRecords(COLLECTIONS.queue, {
+    filters: { status: 'queued' },
+    sort: [{ field: 'scheduled_for', direction: 'asc' }],
+    limit: Number(limit) || 5,
+    suppressAuth: true
+  });
+  if (!result.success) return { success: false, error: result.error || 'Failed to query queue', items: [] };
+  const nowMs = Date.now();
+  const due = (result.items || []).filter(item => {
+    if (!item.scheduled_for) return true;
+    const when = new Date(item.scheduled_for).getTime();
+    return Number.isFinite(when) && when <= nowMs;
+  });
+  return { success: true, items: due };
+}
+
+export async function appendAuditLog(eventType, payload = {}) {
+  const record = {
+    event_type: eventType || '',
+    platform: payload.platform || '',
+    actor: payload.actor || 'system',
+    queue_record_id: payload.queue_record_id || '',
+    details: JSON.stringify(payload.details || payload || {}),
+    timestamp: nowIso()
+  };
+  return dataAccess.insertRecord(COLLECTIONS.audit, record, { suppressAuth: true });
+}
+
+export function isPublishedRecord(record = {}) {
+  return normalizeStatus(record.status) === 'published';
+}

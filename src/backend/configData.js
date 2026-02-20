@@ -384,6 +384,8 @@ export const DATA_SOURCE = {
   // Phase 4: Social Posting
   socialPosts: 'airtable',
   socialAccounts: 'airtable',
+  socialPostQueue: 'airtable',
+  socialAuditLog: 'airtable',
 
   // -------------------------------------------------------------------------
   // Agent Evaluations
@@ -451,6 +453,15 @@ export const DATA_SOURCE = {
   settlementDisputes: 'airtable',
   taxReferenceData: 'airtable',
   exitSurveys: 'airtable'
+};
+
+// =============================================================================
+// SOCIAL POSTING SETTINGS
+// =============================================================================
+
+export const SOCIAL_POSTING_SETTINGS = {
+  SOCIAL_POSTING_ENABLED: false,
+  SOCIAL_RUNTIME: 'wix'
 };
 
 // =============================================================================
@@ -1157,6 +1168,8 @@ export const AIRTABLE_TABLE_NAMES = {
   jobApplications: 'v2_Job Applications',
   socialPosts: 'v2_Social Posts',
   socialAccounts: 'v2_Social Accounts',
+  socialPostQueue: 'v2_Social Post Queue',
+  socialAuditLog: 'v2_Social Audit Log',
 
   // Pipeline Execution Agent
   pipelineEvents: 'v2_Pipeline Events',
