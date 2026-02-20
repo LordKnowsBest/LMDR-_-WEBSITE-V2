@@ -2,6 +2,7 @@
    TRUCK DRIVER PAGE — Logic Module
    Depends on: TruckDriverConfig, TruckDriverBridge, TruckDriverRender
    ========================================= */
+/* global TruckDriverConfig, TruckDriverBridge, TruckDriverRender */
 var TruckDriverLogic = (function () {
   'use strict';
 
@@ -11,6 +12,7 @@ var TruckDriverLogic = (function () {
 
   var currentStep = 0;
   var uploadedFiles = {};
+  var submitWarningId = null;
 
   function init() {
     bindNavigation();
@@ -96,14 +98,27 @@ var TruckDriverLogic = (function () {
           showFieldError('File too large (max 5MB). Please compress or use a smaller image.');
           return;
         }
-        uploadedFiles[doc.id] = file;
-        Render.markUploadComplete(doc.id, file.name);
+        if (!isAllowedFileType(file.type)) {
+          showFieldError('Unsupported file type. Please upload JPG, PNG, or PDF.');
+          return;
+        }
         readFileAsBase64(file, function (base64) {
+          uploadedFiles[doc.id] = {
+            name: file.name,
+            type: file.type,
+            size: file.size,
+            data: base64
+          };
+          Render.markUploadComplete(doc.id, file.name);
           var ocrType = Config.OCR_DOC_TYPES[doc.id];
           if (ocrType) Bridge.requestOCR(base64, ocrType, doc.id);
         });
       });
     });
+  }
+
+  function isAllowedFileType(fileType) {
+    return fileType === 'image/jpeg' || fileType === 'image/png' || fileType === 'application/pdf';
   }
 
   function readFileAsBase64(file, cb) {
@@ -117,21 +132,20 @@ var TruckDriverLogic = (function () {
     var form = document.getElementById('driverForm');
     form.addEventListener('submit', function (e) {
       e.preventDefault();
+      if (!validateRequiredDocuments()) {
+        showFieldError('Please upload CDL Front, CDL Back, and DOT Medical Card before submitting.');
+        return;
+      }
       var formData = collectFormData();
       Render.showLoading();
       Bridge.submitApplication(formData);
+      startSubmitFallbackTimers(formData);
+    });
+  }
 
-      // Fallback: redirect to AI Matching after 6s if no response
-      setTimeout(function () {
-        if (document.getElementById('loadingSection').classList.contains('active')) {
-          var params = new URLSearchParams({
-            zip: formData.homeZip || '',
-            name: formData.fullName || '',
-            src: 'truck-driver-page'
-          });
-          window.top.location.href = 'https://www.lastmiledr.app/ai-matching?' + params.toString();
-        }
-      }, 6000);
+  function validateRequiredDocuments() {
+    return Config.REQUIRED_DOCS.every(function (doc) {
+      return uploadedFiles[doc.id] && uploadedFiles[doc.id].data;
     });
   }
 
@@ -147,7 +161,13 @@ var TruckDriverLogic = (function () {
     var docs = {};
     Config.REQUIRED_DOCS.forEach(function (doc) {
       if (uploadedFiles[doc.id]) {
-        docs[doc.id] = { name: uploadedFiles[doc.id].name, type: uploadedFiles[doc.id].type };
+        docs[doc.id] = {
+          name: uploadedFiles[doc.id].name,
+          type: uploadedFiles[doc.id].type,
+          size: uploadedFiles[doc.id].size,
+          base64: uploadedFiles[doc.id].data,
+          data: uploadedFiles[doc.id].data
+        };
       }
     });
 
@@ -176,6 +196,7 @@ var TruckDriverLogic = (function () {
   function setupBridgeListeners() {
     Bridge.listen({
       onSubmitResult: function (data) {
+        clearSubmitFallbackTimers();
         if (data && data.success) {
           Render.showSuccess(data);
         } else {
@@ -203,13 +224,73 @@ var TruckDriverLogic = (function () {
           Render.flashOCRField('medCardExpiration');
         }
       },
-      onMatchResults: function (data) { Render.showResults(data); },
+      onMatchResults: function (data) {
+        clearSubmitFallbackTimers();
+        Render.showResults(data);
+      },
       onMatchError: function (data) {
+        clearSubmitFallbackTimers();
         Render.hideLoading();
         showFieldError('Match error: ' + (data.error || 'Unknown error'));
         document.getElementById('formSection').style.display = 'block';
       }
     });
+  }
+
+  function startSubmitFallbackTimers(formData) {
+    clearSubmitFallbackTimers();
+    submitWarningId = setTimeout(function () {
+      if (!document.getElementById('loadingSection').classList.contains('active')) return;
+      showSubmitTimeoutPrompt(formData);
+    }, 12000);
+  }
+
+  function clearSubmitFallbackTimers() {
+    if (submitWarningId) {
+      clearTimeout(submitWarningId);
+      submitWarningId = null;
+    }
+    hideSubmitTimeoutPrompt();
+  }
+
+  function showSubmitTimeoutPrompt(formData) {
+    hideSubmitTimeoutPrompt();
+    var prompt = document.createElement('div');
+    prompt.className = 'submit-timeout-prompt';
+    prompt.style.cssText =
+      'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);' +
+      'z-index:10001;background:#0f172a;color:#fff;padding:12px 14px;border-radius:10px;' +
+      'box-shadow:0 10px 28px rgba(0,0,0,0.3);font-size:12px;max-width:92vw;';
+    prompt.innerHTML =
+      '<div style="margin-bottom:8px;font-weight:700;">Still processing your application.</div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+      '<button type="button" id="timeoutWaitBtn" style="background:#334155;color:#fff;border:none;padding:7px 10px;border-radius:6px;font-weight:700;cursor:pointer;">Keep waiting</button>' +
+      '<button type="button" id="timeoutGoBtn" style="background:#fbbf24;color:#111827;border:none;padding:7px 10px;border-radius:6px;font-weight:700;cursor:pointer;">Go to AI Matching</button>' +
+      '</div>';
+    document.body.appendChild(prompt);
+
+    var waitBtn = document.getElementById('timeoutWaitBtn');
+    var goBtn = document.getElementById('timeoutGoBtn');
+    if (waitBtn) {
+      waitBtn.addEventListener('click', function () {
+        hideSubmitTimeoutPrompt();
+      });
+    }
+    if (goBtn) {
+      goBtn.addEventListener('click', function () {
+        var params = new URLSearchParams({
+          zip: formData.homeZip || '',
+          name: formData.fullName || '',
+          src: 'truck-driver-page'
+        });
+        window.top.location.href = 'https://www.lastmiledr.app/ai-matching?' + params.toString();
+      });
+    }
+  }
+
+  function hideSubmitTimeoutPrompt() {
+    var existing = document.querySelector('.submit-timeout-prompt');
+    if (existing) existing.remove();
   }
 
   function setVal(id, value) {
@@ -244,6 +325,7 @@ var TruckDriverLogic = (function () {
 
   /* --- Reset --- */
   function resetForm() {
+    clearSubmitFallbackTimers();
     document.getElementById('resultsSection').classList.remove('active');
     document.getElementById('formSection').style.display = 'block';
     document.getElementById('driverForm').reset();

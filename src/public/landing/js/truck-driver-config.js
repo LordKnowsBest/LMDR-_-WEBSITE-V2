@@ -53,8 +53,20 @@ var TruckDriverConfig = (function () {
   var MESSAGE_TYPES = {
     SUBMIT: 'submitQuickApply',
     OCR: 'extractDocumentOCR',
-    PAGE_READY: 'pageReady'
+    PAGE_READY: 'pageReady',
+    CARRIER_READY: 'carrierMatchingReady',
+    QUICK_APPLY_READY: 'quickApplyReady',
+    QUICK_APPLY_FORM_READY: 'quickApplyFormReady'
   };
+
+  var PROTOCOL_VERSION = 'truck-driver-v2';
+
+  var ALLOWED_PARENT_ORIGIN_PATTERNS = [
+    /^https:\/\/www\.lastmiledr\.app$/i,
+    /^https:\/\/[^/]+\.wixsite\.com$/i,
+    /^https:\/\/[^/]+\.wixstudio\.com$/i,
+    /^https:\/\/[^/]+\.wix\.com$/i
+  ];
 
   var OCR_DOC_TYPES = {
     cdlFront: 'CDL_FRONT',
@@ -71,6 +83,8 @@ var TruckDriverConfig = (function () {
     REQUIRED_DOCS: REQUIRED_DOCS,
     MAX_FILE_SIZE: MAX_FILE_SIZE,
     MESSAGE_TYPES: MESSAGE_TYPES,
-    OCR_DOC_TYPES: OCR_DOC_TYPES
+    OCR_DOC_TYPES: OCR_DOC_TYPES,
+    PROTOCOL_VERSION: PROTOCOL_VERSION,
+    ALLOWED_PARENT_ORIGIN_PATTERNS: ALLOWED_PARENT_ORIGIN_PATTERNS
   };
 })();

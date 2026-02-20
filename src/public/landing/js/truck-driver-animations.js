@@ -2,6 +2,7 @@
    TRUCK DRIVER PAGE — Animations Module
    Depends on: GSAP + ScrollTrigger (loaded in HTML head)
    ========================================= */
+/* global gsap, ScrollTrigger */
 var TruckDriverAnimations = (function () {
   'use strict';
 
@@ -9,7 +10,7 @@ var TruckDriverAnimations = (function () {
     if (typeof gsap === 'undefined' || typeof ScrollTrigger === 'undefined') return;
     gsap.registerPlugin(ScrollTrigger);
 
-    gsap.from('.gsap-stat-item', {
+    gsap.from('.stat-item', {
       scrollTrigger: '.stats-grid',
       y: 30, opacity: 0, duration: 0.8, stagger: 0.1, ease: 'power2.out'
     });

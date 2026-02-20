@@ -2,6 +2,7 @@
    TRUCK DRIVER PAGE — Render Module
    Depends on: TruckDriverConfig
    ========================================= */
+/* global TruckDriverConfig */
 var TruckDriverRender = (function () {
   'use strict';
 

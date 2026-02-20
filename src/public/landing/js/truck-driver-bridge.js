@@ -2,22 +2,47 @@
    TRUCK DRIVER PAGE — Bridge Module
    Depends on: TruckDriverConfig
    ========================================= */
+/* global TruckDriverConfig */
 var TruckDriverBridge = (function () {
   'use strict';
 
   var MT = TruckDriverConfig.MESSAGE_TYPES;
+  var PROTOCOL_VERSION = TruckDriverConfig.PROTOCOL_VERSION;
+  var ALLOWED_ORIGIN_PATTERNS = TruckDriverConfig.ALLOWED_PARENT_ORIGIN_PATTERNS || [];
+  var ALLOWED_INBOUND_TYPES = {
+    submitResult: true,
+    ocrResult: true,
+    matchResults: true,
+    matchError: true
+  };
+
+  function isAllowedOrigin(origin) {
+    if (!origin || origin === 'null') return false;
+    return ALLOWED_ORIGIN_PATTERNS.some(function (pattern) {
+      return pattern.test(origin);
+    });
+  }
 
   function sendToWix(action, data) {
     console.log('[TDP] Sending:', action);
     if (window.parent) {
-      window.parent.postMessage({ type: 'quickApply', action: action, data: data }, '*');
+      window.parent.postMessage({
+        type: 'quickApply',
+        action: action,
+        data: data,
+        protocolVersion: PROTOCOL_VERSION
+      }, '*');
     }
   }
 
   function sendPageReady() {
+    // Compatibility across current parent page handlers.
+    sendToWix(MT.CARRIER_READY, {});
+    sendToWix(MT.QUICK_APPLY_READY, {});
+    sendToWix(MT.QUICK_APPLY_FORM_READY, {});
     sendToWix(MT.PAGE_READY, {});
     if (window.parent) {
-      window.parent.postMessage({ type: 'pageReady' }, '*');
+      window.parent.postMessage({ type: 'pageReady', protocolVersion: PROTOCOL_VERSION }, '*');
     }
   }
 
@@ -31,8 +56,15 @@ var TruckDriverBridge = (function () {
 
   function listen(handlers) {
     window.addEventListener('message', function (event) {
+      if (event.source !== window.parent) return;
+      if (!isAllowedOrigin(event.origin)) {
+        console.warn('[TDP] Ignoring message from disallowed origin:', event.origin);
+        return;
+      }
+
       var msg = event.data;
       if (!msg || !msg.type) return;
+      if (!ALLOWED_INBOUND_TYPES[msg.type]) return;
       console.log('[TDP] Received:', msg.type);
 
       if (msg.type === 'submitResult' && handlers.onSubmitResult) {
