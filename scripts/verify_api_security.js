@@ -1,108 +1,125 @@
 // scripts/verify_api_security.js
+// This script reproduces the logic found in src/backend/apiAuthService.jsw and src/backend/apiGateway.jsw
+// to confirm security vulnerabilities.
 
-// ---------------------------------------------------------
-// MOCKED LOGIC FROM src/backend/apiAuthService.jsw
-// ---------------------------------------------------------
+const assert = require('assert');
 
-/**
- * Vulnerable IP Whitelist Logic
- * Finding: Fails OPEN if ipAddress is null/undefined or if whitelist is empty.
- */
+// --- Vulnerability 1: IP Whitelist Fail-Open ---
+console.log('--- verifying IP Whitelist Logic ---');
+
 function isIpAllowed(partner, ipAddress) {
-  // VULNERABILITY: Returns true if ipAddress is missing
-  if (!ipAddress) return true;
-
+  if (!ipAddress) return true; // CRITICAL: Allows if IP is unknown
   const whitelist = Array.isArray(partner.ip_whitelist) ? partner.ip_whitelist : [];
-
-  // VULNERABILITY: Returns true (allowed) if whitelist is empty
-  // Ideally, if whitelist is enabled/present, it should default to deny unless matched?
-  // Or if intended as "no whitelist = public", then it's fine.
-  // But usually for secure APIs, empty whitelist means nobody allowed or whitelist disabled.
-  if (!whitelist.length) return true;
-
+  if (!whitelist.length) return true; // Allows if whitelist is empty (optional feature)
   return whitelist.includes(ipAddress);
 }
 
+const partnerWithWhitelist = {
+  partner_id: 'p1',
+  ip_whitelist: ['1.2.3.4']
+};
 
-// ---------------------------------------------------------
-// MOCKED LOGIC FROM src/backend/apiGateway.jsw
-// ---------------------------------------------------------
+const partnerNoWhitelist = {
+  partner_id: 'p2',
+  ip_whitelist: []
+};
 
-/**
- * Vulnerable Rate Limit Bypass Logic
- * Finding: Explicit header bypass without auth check on the header itself.
- */
+try {
+  // Test Case 1: IP in whitelist -> Allowed
+  assert.strictEqual(isIpAllowed(partnerWithWhitelist, '1.2.3.4'), true, 'Should allow whitelisted IP');
+  console.log('PASS: Whitelisted IP is allowed');
+
+  // Test Case 2: IP not in whitelist -> Denied
+  assert.strictEqual(isIpAllowed(partnerWithWhitelist, '5.6.7.8'), false, 'Should deny non-whitelisted IP');
+  console.log('PASS: Non-whitelisted IP is denied');
+
+  // Test Case 3: IP is null (e.g. spoofed/missing header) -> Allowed (FAIL OPEN)
+  const resultNullIP = isIpAllowed(partnerWithWhitelist, null);
+  if (resultNullIP === true) {
+    console.log('FAIL: IP Whitelist fails open when IP is null/undefined! (VULNERABILITY CONFIRMED)');
+  } else {
+    console.log('PASS: IP Whitelist blocks null IP');
+  }
+
+  // Test Case 4: Whitelist is empty -> Allowed (Default Allow)
+  assert.strictEqual(isIpAllowed(partnerNoWhitelist, '1.1.1.1'), true);
+  console.log('INFO: Empty whitelist allows all IPs (Expected behavior for optional feature)');
+
+} catch (e) {
+  console.error('Error during IP verification:', e.message);
+}
+
+// --- Vulnerability 2: Rate Limit Bypass Header ---
+console.log('\n--- verifying Rate Limit Bypass Logic ---');
+
+function getHeader(request, name) {
+  const headers = request?.headers || {};
+  const lower = String(name || '').toLowerCase();
+  return headers[name] || headers[lower] || null;
+}
+
 function shouldBypassRateLimit(request) {
   const headerValue = String(getHeader(request, 'x-lmdr-bypass-rate-limit') || '').toLowerCase();
   return headerValue === 'true';
 }
 
-function getHeader(request, name) {
-  const headers = request?.headers || {};
-  const lower = String(name || '').toLowerCase();
-  // Mocking standard header access
-  return headers[name] || headers[lower] || null;
+async function checkAndTrackUsage({ bypassRateLimit }) {
+  if (bypassRateLimit) {
+    return { allowed: true, logic: 'bypassed' };
+  }
+  return { allowed: false, logic: 'enforced' };
 }
 
+(async () => {
+  try {
+    const requestWithBypass = {
+      headers: {
+        'x-lmdr-bypass-rate-limit': 'true'
+      }
+    };
 
-// ---------------------------------------------------------
-// VERIFICATION TESTS
-// ---------------------------------------------------------
+    const bypassFlag = shouldBypassRateLimit(requestWithBypass);
+    if (bypassFlag === true) {
+      console.log('FAIL: Rate limit bypass flag is TRUE purely based on header presence! (VULNERABILITY CONFIRMED)');
+    }
 
-console.log('--- STARTING API SECURITY VERIFICATION ---\n');
+    const usageResult = await checkAndTrackUsage({ bypassRateLimit: bypassFlag });
+    if (usageResult.allowed && usageResult.logic === 'bypassed') {
+      console.log('FAIL: Rate limiting logic explicitly bypassed! (VULNERABILITY CONFIRMED)');
+    }
 
-// TEST 1: IP Whitelist Bypass
-console.log('[TEST 1] IP Whitelist Logic Check (src/backend/apiAuthService.jsw)');
-
-const partnerWithWhitelist = {
-  ip_whitelist: ['1.2.3.4', '5.6.7.8']
-};
-
-const partnerNoWhitelist = {
-  ip_whitelist: []
-};
-
-// Case A: Valid IP
-const resultA = isIpAllowed(partnerWithWhitelist, '1.2.3.4');
-console.log(`  Case A (Valid IP): ${resultA ? 'ALLOWED' : 'DENIED'} (Expected: ALLOWED)`);
-
-// Case B: Invalid IP
-const resultB = isIpAllowed(partnerWithWhitelist, '9.9.9.9');
-console.log(`  Case B (Invalid IP): ${resultB ? 'ALLOWED' : 'DENIED'} (Expected: DENIED)`);
-
-// Case C: Missing IP (Null) - The Vulnerability
-const resultC = isIpAllowed(partnerWithWhitelist, null);
-console.log(`  Case C (Missing IP): ${resultC ? 'ALLOWED (FAIL - BYPASS)' : 'DENIED (PASS)'}`);
-if (resultC) console.error('    !! CRITICAL: IP Check fails open when IP is missing !!');
-
-// Case D: Empty Whitelist
-const resultD = isIpAllowed(partnerNoWhitelist, '9.9.9.9');
-console.log(`  Case D (Empty Whitelist): ${resultD ? 'ALLOWED (WARN - OPEN)' : 'DENIED (PASS)'}`);
-
-
-console.log('\n[TEST 2] Rate Limit Bypass Header Check (src/backend/apiGateway.jsw)');
-
-const requestNormal = {
-  headers: {
-    'user-agent': 'test-bot'
+  } catch (e) {
+    console.error('Error during Rate Limit verification:', e.message);
   }
-};
+})();
 
-const requestBypass = {
-  headers: {
-    'x-lmdr-bypass-rate-limit': 'true',
-    'user-agent': 'test-bot'
+// --- Vulnerability 3: Information Leakage ---
+console.log('\n--- verifying Auth Error Information Leakage ---');
+
+async function validateApiKey(key, ip) {
+  // Simulate finding key
+  const validKey = 'valid-key';
+  const partner = { ip_whitelist: ['1.2.3.4'] };
+
+  if (key !== validKey) {
+    return { success: false, message: 'Invalid API key' };
   }
-};
 
-// Case A: Normal Request
-const bypassA = shouldBypassRateLimit(requestNormal);
-console.log(`  Case A (Normal Request): Bypass is ${bypassA ? 'ACTIVE' : 'INACTIVE'} (Expected: INACTIVE)`);
+  if (!isIpAllowed(partner, ip)) {
+    return { success: false, message: 'IP address not allowed' };
+  }
 
-// Case B: Bypass Header Present
-const bypassB = shouldBypassRateLimit(requestBypass);
-console.log(`  Case B (Bypass Header): Bypass is ${bypassB ? 'ACTIVE (FAIL - UNPROTECTED)' : 'INACTIVE (PASS)'}`);
-if (bypassB) console.error('    !! CRITICAL: Rate limit bypass header is active and unprotected !!');
+  return { success: true };
+}
 
+(async () => {
+  const resInvalidKey = await validateApiKey('wrong-key', '1.2.3.4');
+  const resValidKeyWrongIP = await validateApiKey('valid-key', '5.6.7.8');
 
-console.log('\n--- VERIFICATION COMPLETE ---');
+  console.log(`Response for invalid key: "${resInvalidKey.message}"`);
+  console.log(`Response for valid key (wrong IP): "${resValidKeyWrongIP.message}"`);
+
+  if (resInvalidKey.message !== resValidKeyWrongIP.message) {
+    console.log('WARN: Error messages differ, leaking existence of valid key! (VULNERABILITY CONFIRMED)');
+  }
+})();
