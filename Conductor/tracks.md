@@ -496,3 +496,15 @@ This file tracks all major tracks for the project. Each track has its own detail
 - *3 dev swarm agents (scout, security-audit, style-audit)*
 - *4 Airtable tables (Autopilot Campaigns/Steps, Remediation Plans, Incident Log)*
 - *Tests: autopilotService.test.js + selfHealingService.test.js*
+
+## [ ] Track: AI Intelligence Layer — Semantic Search, Agent Streaming & B2B Multi-Agent
+*Link: [./tracks/ai_intelligence_layer_20260219/](./tracks/ai_intelligence_layer_20260219/)*
+*Depends on: full_agentic_buildout_20260218, reverse_matching_20251225, b2b_business_development_suite_20260128*
+*Priority: High*
+*Status: Planned*
+*Phases:*
+- *Phase 1 (YES): Semantic search microservice — LlamaIndex + Pinecone, driver/carrier vector embeddings, semantic scoring blended into driverScoring.js*
+- *Phase 2 (YES): LangSmith agent tracing — structured traces of every agent turn, tool latency, error rates, token cost per conversation*
+- *Phase 3 (LOW): Streaming agent responses — chunked postMessage token delivery instead of buffered full response*
+- *Phase 4 (MAYBE): B2B parallel research agents — CrewAI supervisor + parallel FMCSA/social/news/LinkedIn sub-agents (build only if B2B usage > 50 lookups/month)*
+*Architecture: All framework code in external microservice (Railway/Render) — Velo cannot run LangChain/LlamaIndex natively*
