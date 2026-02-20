@@ -345,6 +345,27 @@ export async function createCategory(categoryData) {
     }
 }
 
+export async function reorderCategories(orderedIds = []) {
+    await requireAdmin();
+    try {
+        let order = 1;
+        for (const categoryId of orderedIds) {
+            const existing = await dataAccess.getRecord(COLLECTION_KEYS.categories, categoryId, { suppressAuth: true });
+            if (!existing) continue;
+            await dataAccess.updateRecord(COLLECTION_KEYS.categories, {
+                ...existing,
+                _id: categoryId,
+                display_order: order,
+                updated_at: new Date()
+            }, { suppressAuth: true });
+            order += 1;
+        }
+        return { success: true, reordered: order - 1 };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
 // ============================================
 // ANALYTICS & FEEDBACK
 // ============================================
@@ -424,4 +445,92 @@ export async function getKBOverviewMetrics() {
         console.error('[knowledgeBaseService] getKBOverviewMetrics error:', error.message);
         return { success: false, error: error.message };
     }
+}
+
+export async function getPopularArticles(limit = 10) {
+    const context = await getContext();
+    const filters = {};
+    if (!context.isAdmin) {
+        filters.status = ARTICLE_STATUS.PUBLISHED;
+    }
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.articles, {
+        filters,
+        sort: [{ field: 'view_count', direction: 'desc' }],
+        limit,
+        suppressAuth: true
+    });
+    return { success: result.success, items: result.items || [] };
+}
+
+export async function getRelatedArticles(articleId, limit = 5) {
+    const target = await dataAccess.getRecord(COLLECTION_KEYS.articles, articleId, { suppressAuth: true });
+    if (!target) return { success: false, error: 'Article not found', items: [] };
+    const search = await dataAccess.queryRecords(COLLECTION_KEYS.articles, {
+        filters: { category_id: target.category_id, status: ARTICLE_STATUS.PUBLISHED },
+        sort: [{ field: 'updated_at', direction: 'desc' }],
+        limit: 50,
+        suppressAuth: true
+    });
+    const targetTags = new Set(target.tags || []);
+    const related = (search.items || [])
+        .filter((item) => item._id !== articleId)
+        .map((item) => ({
+            ...item,
+            _score: (item.tags || []).reduce((score, tag) => score + (targetTags.has(tag) ? 1 : 0), 0)
+        }))
+        .sort((a, b) => b._score - a._score || new Date(b.updated_at) - new Date(a.updated_at))
+        .slice(0, limit)
+        .map(({ _score, ...item }) => item);
+    return { success: true, items: related };
+}
+
+export async function getArticleAnalytics(articleId) {
+    await requireAdmin();
+    const article = await dataAccess.getRecord(COLLECTION_KEYS.articles, articleId, { suppressAuth: true });
+    if (!article) return { success: false, error: 'Article not found' };
+    const views = Number(article.view_count || 0);
+    const yes = Number(article.helpful_votes || 0);
+    const no = Number(article.not_helpful_votes || 0);
+    const totalVotes = yes + no;
+    return {
+        success: true,
+        analytics: {
+            articleId,
+            views,
+            helpfulYes: yes,
+            helpfulNo: no,
+            helpfulnessPct: totalVotes ? Number(((yes / totalVotes) * 100).toFixed(2)) : 0,
+            lastUpdated: article.updated_at || null
+        }
+    };
+}
+
+export async function getArticleVersions(articleId) {
+    await requireAdmin();
+    const versions = await dataAccess.queryRecords(COLLECTION_KEYS.versions, {
+        filters: { article_id: articleId },
+        sort: [{ field: 'version_number', direction: 'desc' }],
+        suppressAuth: true
+    });
+    return { success: versions.success, items: versions.items || [] };
+}
+
+export async function revertToVersion(articleId, versionNumber) {
+    const context = await requireAdmin();
+    const target = await dataAccess.queryRecords(COLLECTION_KEYS.versions, {
+        filters: { article_id: articleId, version_number: Number(versionNumber) },
+        limit: 1,
+        suppressAuth: true
+    });
+    const version = target.items?.[0];
+    if (!version) return { success: false, error: 'Version not found' };
+
+    const result = await updateArticle(articleId, {
+        title: version.title,
+        content: version.content
+    }, `Reverted to version ${versionNumber}`);
+    if (result.success) {
+        await auditAction('revertArticleVersion', articleId, { versionNumber }, context);
+    }
+    return result;
 }

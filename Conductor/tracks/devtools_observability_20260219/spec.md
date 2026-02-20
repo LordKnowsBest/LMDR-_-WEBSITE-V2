@@ -3,7 +3,7 @@
 **Track:** `devtools_observability_20260219`
 **Version:** 2.0 (rewritten — real chrome-devtools-mcp tools)
 **Date:** 2026-02-19
-**Status:** Planning
+**Status:** First Run Complete (quality_gate: FAIL — 4 P0 errors)
 
 > **Source of truth:** All tool names, parameters, and behaviors are sourced directly from
 > [ChromeDevTools/chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)
@@ -162,65 +162,101 @@ The `--user-data-dir` flag creates a **persistent profile** — Wix cookies surv
 
 For each path, the following is defined: URL, ready condition, required selectors, timeouts, and frame context.
 
+> **v3.0 Update (2026-02-20):** Critical paths updated from 5 speculative to 8 verified
+> public URLs on `lastmiledr.app`. Old paths `/driver-dashboard` (auth-gated),
+> `/carrier-welcome` (auth-gated), `/apply` (404), and `/quick-apply` (404) removed.
+
 ### 3.1 `home` — LMDR Homepage
 
 | Property | Value |
 |----------|-------|
-| **URL** | `https://www.lmdr.io` |
-| **Navigate tool** | `navigate_page` with `url: "https://www.lmdr.io"` |
-| **Ready condition** | `wait_for` text: "Find Your Next CDL Job" (or key hero copy) |
-| **Selector assertion** | `evaluate_script` → `document.querySelector('.hero-cta-button, [data-hook="cta"]')` |
-| **Snapshot** | `take_snapshot` — check CTA button present in a11y tree |
-| **Screenshot** | `take_screenshot` with `fullPage: true`, `filePath: "artifacts/devtools/<run_id>/visual_confirmation/home.png"` |
-| **Timeout** | 15,000 ms |
-| **Frame context** | Main frame only (no Wix HTML Component iframes on homepage hero) |
+| **URL** | `https://www.lastmiledr.app/` |
+| **Ready condition** | `wait_for` text: "Last Mile" |
+| **Snapshot** | `take_snapshot` — verified: hero, FAQ, footer, embedded iframes |
+| **Screenshot** | `home.png` |
+| **Timeout** | 20,000 ms |
+| **Frame context** | Main frame + footer iframe |
+| **First run** | RENDERED_WITH_ERRORS — 3 ModuleLoadError from publicStatsService.jsw |
 
-### 3.2 `ai_matcher` — AI Matching Interface
-
-| Property | Value |
-|----------|-------|
-| **URL** | Wix page containing `AI_MATCHING.html` (e.g., `/ai-matching`) |
-| **Navigate tool** | `navigate_page` with `url: "{siteUrl}/ai-matching"` |
-| **Ready condition** | `wait_for` text: "Find Your Match" or "AI Matching" (key heading inside iframe) |
-| **Selector assertion** | `evaluate_script` → iframe frame detection → `#ai-matching-container` visibility |
-| **Snapshot** | `take_snapshot` — inspect if iframe content appears in a11y tree |
-| **Screenshot** | `take_screenshot` with `fullPage: true`, save to `ai_matcher.png` |
-| **Timeout** | 20,000 ms (221KB HTML file + Tailwind CDN) |
-| **Frame context** | **Wix iframe** — see §5 for frame selection protocol |
-
-### 3.3 `driver_entry` — Driver Dashboard
+### 3.2 `about` — About LMDR
 
 | Property | Value |
 |----------|-------|
-| **URL** | Wix Driver Dashboard page |
-| **Ready condition** | `wait_for` text: "My Applications" or "Driver Dashboard" |
-| **Selector assertion** | `evaluate_script` → `#dashboard-container` or `.driver-dashboard` visible in iframe |
-| **Screenshot** | `driver_entry.png` |
+| **URL** | `https://www.lastmiledr.app/about` |
+| **Ready condition** | `wait_for` text: "About" |
+| **Screenshot** | `about.png` |
 | **Timeout** | 15,000 ms |
-| **Frame context** | Wix iframe (`DRIVER_DASHBOARD.html`) |
+| **Frame context** | Main frame |
+| **First run** | Not yet verified |
 
-### 3.4 `carrier_entry` — Carrier Welcome / Onboarding
+### 3.3 `privacy` — Privacy Policy
 
 | Property | Value |
 |----------|-------|
-| **URL** | Wix Carrier Welcome page |
-| **Ready condition** | `wait_for` text: "Welcome" or "Get Started" |
-| **Selector assertion** | `evaluate_script` → `.status-steps` or `#onboarding-container` visible in iframe |
-| **Screenshot** | `carrier_entry.png` |
+| **URL** | `https://www.lastmiledr.app/privacy-policy` |
+| **Ready condition** | `wait_for` text: "Privacy" |
+| **Screenshot** | `privacy.png` |
 | **Timeout** | 15,000 ms |
-| **Frame context** | Wix iframe (`Carrier_Welcome.html`) |
+| **Frame context** | Main frame |
+| **First run** | Not yet verified |
 
-### 3.5 `app_flow` — CDL Quick Apply Form
+### 3.4 `drivers` — Truck Drivers Hub (Public)
 
 | Property | Value |
 |----------|-------|
-| **URL** | Quick Apply page |
-| **Ready condition** | `wait_for` text: "Upload Your CDL" or "Quick Apply" |
-| **Selector assertion** | `evaluate_script` → `#cdl-upload-btn` or `.upload-section` visible |
-| **Screenshot** | `app_flow.png` |
+| **URL** | `https://www.lastmiledr.app/drivers` |
+| **Ready condition** | `wait_for` text: "Truck Drivers" |
+| **Screenshot** | `drivers.png` |
+| **Timeout** | 20,000 ms |
+| **Frame context** | Main frame (public driver hub — no auth required) |
+| **First run** | Not yet verified |
+
+### 3.5 `upload_docs` — Upload CDL Documents
+
+| Property | Value |
+|----------|-------|
+| **URL** | `https://www.lastmiledr.app/upload-cdl-documents` |
+| **Ready condition** | `wait_for` text: "Upload" |
+| **Selector assertion** | `#cdl-upload-btn, .upload-section` |
+| **Screenshot** | `upload_docs.png` |
+| **Timeout** | 20,000 ms |
+| **Non-destructive** | NEVER submit. Verify element existence only. |
+| **Frame context** | May contain iframe |
+| **First run** | Not yet verified |
+
+### 3.6 `pricing` — Carrier Pricing
+
+| Property | Value |
+|----------|-------|
+| **URL** | `https://www.lastmiledr.app/pricing` |
+| **Ready condition** | `wait_for` text: "Pricing" |
+| **Screenshot** | `pricing.png` |
 | **Timeout** | 15,000 ms |
-| **Non-destructive** | ✅ NEVER submit. Verify element existence only. |
-| **Frame context** | Wix iframe |
+| **Frame context** | Main frame |
+| **First run** | Not yet verified |
+
+### 3.7 `insights` — Blog / Industry Insights
+
+| Property | Value |
+|----------|-------|
+| **URL** | `https://www.lastmiledr.app/insights` |
+| **Ready condition** | `wait_for` text: "Insights" |
+| **Screenshot** | `insights.png` |
+| **Timeout** | 15,000 ms |
+| **Frame context** | Main frame (blog/content listing) |
+| **First run** | Not yet verified |
+
+### 3.8 `ai_matcher` — AI Matching Interface
+
+| Property | Value |
+|----------|-------|
+| **URL** | `https://www.lastmiledr.app/ai-matching` |
+| **Ready condition** | `wait_for` text: "Find Your Carrier" |
+| **Snapshot** | `take_snapshot` — verified: form fields, AI chat overlay, voice agent, accordion |
+| **Screenshot** | `ai_matcher.png` |
+| **Timeout** | 20,000 ms |
+| **Frame context** | **Wix iframe** (AI_MATCHING.html) — see §5 for frame selection protocol |
+| **First run** | CLEAN — 0 errors, PostMessage bridge verified (ping/pong/pageReady handshake) |
 
 ---
 
@@ -244,7 +280,7 @@ After the dwell, optionally check for network quiet by comparing `list_network_r
 
 ### The Core Problem
 
-LMDR's UIs are **Wix HTML Components** — `<iframe>` elements hosted at `static.parastorage.com` (a different origin from `www.lmdr.io`). This means:
+LMDR's UIs are **Wix HTML Components** — `<iframe>` elements hosted at `static.parastorage.com` (a different origin from `www.lastmiledr.app`). This means:
 
 - `evaluate_script` running in the **main page** cannot reach inside the iframe DOM via standard selectors
 - Console errors thrown inside the iframe are captured at the **page level** by `list_console_messages` (Chrome DevTools protocol sees all frames)
@@ -278,7 +314,7 @@ LMDR's UIs are **Wix HTML Components** — `<iframe>` elements hosted at `static
 
 ```
 Call: list_pages
-→ Find page whose URL matches preview.wixsite.com/lmdr or www.lmdr.io
+→ Find page whose URL matches lastmiledr.app
 → Call: select_page with that pageId
 → Proceed with verification on the correct tab
 ```
@@ -306,7 +342,7 @@ where `run_id` is an ISO-8601 timestamp string: `2026-02-19T18-20-00Z`
 {
   "run_id": "2026-02-19T18-20-00Z",
   "page": "ai_matcher",
-  "url": "https://www.lmdr.io/ai-matching",
+  "url": "https://www.lastmiledr.app/ai-matching",
   "captured_at": "2026-02-19T18:21:30Z",
   "tool_used": "list_console_messages + get_console_message",
   "summary": {
@@ -356,7 +392,7 @@ where `run_id` is an ISO-8601 timestamp string: `2026-02-19T18-20-00Z`
 {
   "run_id": "2026-02-19T18-20-00Z",
   "page": "ai_matcher",
-  "url": "https://www.lmdr.io/ai-matching",
+  "url": "https://www.lastmiledr.app/ai-matching",
   "captured_at": "2026-02-19T18:21:30Z",
   "tool_used": "list_network_requests + get_network_request",
   "summary": {
@@ -370,7 +406,7 @@ where `run_id` is an ISO-8601 timestamp string: `2026-02-19T18-20-00Z`
     {
       "reqid": 7,
       "method": "POST",
-      "url": "https://www.lmdr.io/_functions/getCarrierMatches",
+      "url": "https://www.lastmiledr.app/_functions/getCarrierMatches",
       "status": 500,
       "resource_type": "xhr",
       "failure_reason": "HTTP 500 — Velo Web Method server error",
@@ -399,10 +435,13 @@ where `run_id` is an ISO-8601 timestamp string: `2026-02-19T18-20-00Z`
 | Filename | Page | Pass Condition |
 |----------|------|---------------|
 | `home.png` | Homepage | File > 10KB; hero section visible (non-blank) |
+| `about.png` | About LMDR | File > 10KB; about content visible |
+| `privacy.png` | Privacy Policy | File > 10KB; policy text visible |
+| `drivers.png` | Truck Drivers Hub | File > 10KB; driver hub content visible |
+| `upload_docs.png` | Upload CDL Documents | File > 10KB; upload section visible |
+| `pricing.png` | Carrier Pricing | File > 10KB; pricing plans visible |
+| `insights.png` | Blog / Insights | File > 10KB; blog content visible |
 | `ai_matcher.png` | AI Matching | File > 10KB; iframe content rendered (not blank white box) |
-| `driver_entry.png` | Driver Dashboard | File > 10KB; dashboard content visible |
-| `carrier_entry.png` | Carrier Welcome | File > 10KB; onboarding content visible |
-| `app_flow.png` | Quick Apply | File > 10KB; upload section visible |
 
 **PII blurring before screenshot:** Use `evaluate_script` to inject CSS blur on PII selectors immediately before calling `take_screenshot`:
 
@@ -447,7 +486,7 @@ where `run_id` is an ISO-8601 timestamp string: `2026-02-19T18-20-00Z`
     "screenshots_captured": true,
     "zero_velo_worker_fatal_errors": true
   },
-  "pages_evaluated": ["home", "ai_matcher", "driver_entry", "carrier_entry", "app_flow"],
+  "pages_evaluated": ["home", "about", "privacy", "drivers", "upload_docs", "pricing", "insights", "ai_matcher"],
   "pages_failed_ready": [],
   "p0_error_count": 1,
   "p1_error_count": 0,
@@ -468,9 +507,9 @@ where `run_id` is an ISO-8601 timestamp string: `2026-02-19T18-20-00Z`
 |-------|------|
 | `zero_p0_errors` | `list_console_messages` returns zero ERROR entries with uncaught exception text |
 | `all_critical_selectors_visible` | `evaluate_script` confirms each required selector exists AND has `offsetWidth > 0` |
-| `all_pages_reached_ready_state` | All 5 `wait_for` calls completed without timeout |
+| `all_pages_reached_ready_state` | All 8 `wait_for` calls completed without timeout |
 | `zero_network_500_errors` | `list_network_requests` returns zero requests with `status >= 500` from LMDR endpoints |
-| `screenshots_captured` | All 5 PNG files exist and are > 10KB |
+| `screenshots_captured` | All 8 PNG files exist and are > 10KB |
 | `zero_velo_worker_fatal_errors` | No `list_console_messages` entries match Velo error patterns |
 
 ---

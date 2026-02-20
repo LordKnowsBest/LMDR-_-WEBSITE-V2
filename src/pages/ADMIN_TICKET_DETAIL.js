@@ -5,7 +5,8 @@ import {
     assignTicket,
     changeTicketStatus,
     addTicketComment,
-    escalateTicket
+    escalateTicket,
+    mergeTickets
 } from 'backend/supportTicketService.jsw';
 import { getAdminList } from 'backend/admin_audit_service.jsw';
 
@@ -86,6 +87,16 @@ async function routeMessage(component, message) {
             case 'escalateTicket':
                 await escalateTicket(message.ticketId, message.reason);
                 safeSend(component, { action: 'actionSuccess', message: 'Ticket escalated' });
+                break;
+            case 'updateTicket':
+                const updatedTicket = await updateTicket(message.ticketId, message.updates || {});
+                if (!updatedTicket.success) throw new Error(updatedTicket.error || 'Failed to update ticket');
+                safeSend(component, { action: 'ticketUpdated', payload: updatedTicket.record });
+                break;
+            case 'mergeTickets':
+                const mergeResult = await mergeTickets(message.primaryId, message.secondaryId);
+                if (!mergeResult.success) throw new Error(mergeResult.error || 'Failed to merge tickets');
+                safeSend(component, { action: 'ticketsMerged', payload: mergeResult });
                 break;
         }
     } catch (error) {

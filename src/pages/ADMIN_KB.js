@@ -5,7 +5,14 @@ import {
     updateArticle,
     publishArticle,
     archiveArticle,
-    getCategories
+    getCategories,
+    searchArticles,
+    reorderCategories,
+    getPopularArticles,
+    getRelatedArticles,
+    getArticleAnalytics,
+    getArticleVersions,
+    revertToVersion
 } from 'backend/knowledgeBaseService.jsw';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -84,6 +91,27 @@ async function routeMessage(component, message) {
             case 'getCategories':
                 await handleGetCategories(component);
                 break;
+            case 'searchArticles':
+                await handleSearchArticles(component, message.query || '', message.filters || {});
+                break;
+            case 'reorderCategories':
+                await handleReorderCategories(component, message.orderedIds || []);
+                break;
+            case 'getPopularArticles':
+                await handleGetPopularArticles(component, message.limit || 10);
+                break;
+            case 'getRelatedArticles':
+                await handleGetRelatedArticles(component, message.articleId, message.limit || 5);
+                break;
+            case 'getArticleAnalytics':
+                await handleGetArticleAnalytics(component, message.articleId);
+                break;
+            case 'getArticleVersions':
+                await handleGetArticleVersions(component, message.articleId);
+                break;
+            case 'revertToVersion':
+                await handleRevertToVersion(component, message.articleId, message.versionNumber);
+                break;
 
             default:
                 console.warn('ADMIN_KB: Unknown action:', action);
@@ -146,6 +174,49 @@ async function handleArchiveArticle(component, articleId) {
 async function handleGetCategories(component) {
     const result = await getCategories();
     safeSend(component, { action: 'categoriesLoaded', payload: result.items });
+}
+
+async function handleSearchArticles(component, query, filters) {
+    const result = await searchArticles(query, filters);
+    safeSend(component, { action: 'articlesSearched', payload: result.items || [] });
+}
+
+async function handleReorderCategories(component, orderedIds) {
+    const result = await reorderCategories(orderedIds);
+    if (result.success) {
+        safeSend(component, { action: 'categoriesReordered', payload: result });
+    } else {
+        safeSend(component, { action: 'actionError', message: result.error });
+    }
+}
+
+async function handleGetPopularArticles(component, limit) {
+    const result = await getPopularArticles(limit);
+    safeSend(component, { action: 'popularArticlesLoaded', payload: result.items || [] });
+}
+
+async function handleGetRelatedArticles(component, articleId, limit) {
+    const result = await getRelatedArticles(articleId, limit);
+    safeSend(component, { action: 'relatedArticlesLoaded', payload: result.items || [] });
+}
+
+async function handleGetArticleAnalytics(component, articleId) {
+    const result = await getArticleAnalytics(articleId);
+    safeSend(component, { action: 'articleAnalyticsLoaded', payload: result });
+}
+
+async function handleGetArticleVersions(component, articleId) {
+    const result = await getArticleVersions(articleId);
+    safeSend(component, { action: 'articleVersionsLoaded', payload: result.items || [] });
+}
+
+async function handleRevertToVersion(component, articleId, versionNumber) {
+    const result = await revertToVersion(articleId, versionNumber);
+    if (result.success) {
+        safeSend(component, { action: 'articleReverted', payload: result.record || result });
+    } else {
+        safeSend(component, { action: 'actionError', message: result.error });
+    }
 }
 
 // ============================================

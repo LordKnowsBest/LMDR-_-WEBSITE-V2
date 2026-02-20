@@ -55,13 +55,13 @@
  * The base URL for the verification run. Adjust per environment.
  *
  * Options:
- *   Live:    "https://www.lmdr.io"
+ *   Live:    "https://www.lastmiledr.app"
  *   Preview: "https://editor.wix.com/..." (get from `npm run dev` output)
  *
  * NOTE: Never target editor.wix.com for Evidence Pack runs.
  * Always use the published live site or the Wix Preview URL.
  */
-const SITE_BASE_URL = 'https://www.lmdr.io';
+const SITE_BASE_URL = 'https://www.lastmiledr.app';
 
 /**
  * RUN_ID
@@ -79,67 +79,94 @@ const ARTIFACT_ROOT = `${__dirname}/../../../artifacts/devtools/${RUN_ID}`;
 
 /**
  * CRITICAL_PATHS
- * The 5 pages that must be verified in every Evidence Pack run.
+ * The 8 pages that must be verified in every Evidence Pack run.
+ * Updated v3.0 post-first-run (2026-02-20): replaced 5 speculative paths
+ * with 8 verified public paths on lastmiledr.app.
  *
  * Fields:
  *   route           — URL path appended to SITE_BASE_URL
  *   readyText       — Text used with chrome-devtools-mcp `wait_for` tool
  *   selectorCSS     — CSS selector(s) used with `evaluate_script` for DOM assertion
  *                     Comma-separated = OR (first matching selector wins)
+ *                     null = use take_snapshot a11y tree instead
  *   iframeMatch     — substring to identify the Wix HTML Component iframe by src
  *                     null = main frame only (no iframe)
  *   timeoutMs       — timeout for `navigate_page` and `wait_for` (milliseconds)
  *   screenshotFile  — filename for take_screenshot filePath
  *   nonDestructive  — if true, NEVER call `click` on any submit/CTA button
- *
- * NOTE: Wix page slugs must be verified against the Wix Editor.
- * Go to: Wix Editor → Pages → right-click page → "Edit SEO & URL" to find slug.
  */
 const CRITICAL_PATHS = {
     home: {
         route: '/',
-        readyText: 'Last Mile',  // key text visible in LMDR homepage hero
+        readyText: 'Last Mile',
         selectorCSS: '.hero-cta-button, [data-hook="cta-button"], .hero-section',
-        iframeMatch: null, // homepage hero is in main Wix frame
-        timeoutMs: 15000,
+        iframeMatch: null,
+        timeoutMs: 20000,
         screenshotFile: 'home.png',
         nonDestructive: false,
     },
+    about: {
+        route: '/about',
+        readyText: 'About',
+        selectorCSS: null,
+        iframeMatch: null,
+        timeoutMs: 15000,
+        screenshotFile: 'about.png',
+        nonDestructive: false,
+    },
+    privacy: {
+        route: '/privacy-policy',
+        readyText: 'Privacy',
+        selectorCSS: null,
+        iframeMatch: null,
+        timeoutMs: 15000,
+        screenshotFile: 'privacy.png',
+        nonDestructive: false,
+    },
+    drivers: {
+        route: '/drivers',
+        readyText: 'Truck Drivers',
+        selectorCSS: null,
+        iframeMatch: null,
+        timeoutMs: 20000,
+        screenshotFile: 'drivers.png',
+        nonDestructive: false,
+    },
+    upload_docs: {
+        route: '/upload-cdl-documents',
+        readyText: 'Upload',
+        selectorCSS: '#cdl-upload-btn, .upload-section',
+        iframeMatch: null,
+        timeoutMs: 20000,
+        screenshotFile: 'upload_docs.png',
+        nonDestructive: true,
+    },
+    pricing: {
+        route: '/pricing',
+        readyText: 'Pricing',
+        selectorCSS: null,
+        iframeMatch: null,
+        timeoutMs: 15000,
+        screenshotFile: 'pricing.png',
+        nonDestructive: false,
+    },
+    insights: {
+        route: '/insights',
+        readyText: 'Insights',
+        selectorCSS: null,
+        iframeMatch: null,
+        timeoutMs: 15000,
+        screenshotFile: 'insights.png',
+        nonDestructive: false,
+    },
     ai_matcher: {
-        route: '/ai-matching', // VERIFY: check actual slug in Wix Editor
-        readyText: 'AI Matching', // key heading inside AI_MATCHING.html iframe
+        route: '/ai-matching',
+        readyText: 'Find Your Carrier', // verified from first run a11y snapshot
         selectorCSS: '#ai-matching-container, .match-card, .matching-interface',
-        iframeMatch: 'AI_MATCHING', // filters iframe.src.includes('AI_MATCHING')
-        timeoutMs: 20000, // 221KB HTML file + Tailwind CDN cold start
+        iframeMatch: 'AI_MATCHING',
+        timeoutMs: 20000,
         screenshotFile: 'ai_matcher.png',
         nonDestructive: false,
-    },
-    driver_entry: {
-        route: '/driver-dashboard', // VERIFY slug
-        readyText: 'My Applications', // or "Driver Dashboard"
-        selectorCSS: '#dashboard-container, .driver-dashboard, .application-card',
-        iframeMatch: 'DRIVER_DASHBOARD',
-        timeoutMs: 15000,
-        screenshotFile: 'driver_entry.png',
-        nonDestructive: false,
-    },
-    carrier_entry: {
-        route: '/carrier-welcome', // VERIFY slug
-        readyText: 'Welcome',
-        selectorCSS: '#onboarding-container, .carrier-welcome, .status-steps',
-        iframeMatch: 'Carrier_Welcome',
-        timeoutMs: 15000,
-        screenshotFile: 'carrier_entry.png',
-        nonDestructive: false,
-    },
-    app_flow: {
-        route: '/quick-apply', // VERIFY slug
-        readyText: 'Upload Your CDL', // or "Quick Apply"
-        selectorCSS: '#cdl-upload-btn, .upload-section',
-        iframeMatch: 'Quick Apply', // or relevant iframe src substring
-        timeoutMs: 15000,
-        screenshotFile: 'app_flow.png',
-        nonDestructive: true, // NEVER call click() on any submit button here
     },
 };
 
@@ -195,7 +222,7 @@ const PLAYBOOK_STEPS = [
         step: '0.1-list-pages',
         tool: 'list_pages',
         params: {},
-        note: 'Returns all open browser tabs. Find the tab with URL containing "lmdr.io" or "wixsite.com/lmdr". If none found: ABORT with session-not-found error. If any tab URL contains "users.wix.com": ABORT with session-expired error. Never select a tab with "editor.wix.com" in the URL.',
+        note: 'Returns all open browser tabs. Find the tab with URL containing "lastmiledr.app". If none found: ABORT with session-not-found error. If any tab URL contains "users.wix.com": ABORT with session-expired error. Never select a tab with "editor.wix.com" in the URL.',
     },
     {
         step: '0.2-select-page',

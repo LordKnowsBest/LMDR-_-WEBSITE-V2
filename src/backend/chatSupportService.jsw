@@ -1,7 +1,6 @@
 import { currentMember } from 'wix-members-backend';
 import * as dataAccess from 'backend/dataAccess';
-import { log } from 'backend/observabilityService';
-import { createTicket, addTicketComment } from 'backend/supportTicketService.jsw';
+import { createTicket } from 'backend/supportTicketService.jsw';
 
 // ============================================
 // CONFIGURATION & CONSTANTS
@@ -251,8 +250,7 @@ export async function convertChatToTicket(sessionId) {
 
         const transcript = (messages.items || []).map(m => 
             `[${new Date(m.created_at).toLocaleTimeString()}] ${m.sender_email} (${m.sender_type}): ${m.content}`
-        ).join('
-');
+        ).join('\n');
 
         // Create the ticket
         const ticketResult = await createTicket({
@@ -262,7 +260,10 @@ export async function convertChatToTicket(sessionId) {
 Full Transcript:
 ${transcript}`,
             category: session.topic,
-            metadata: { chat_session_id: sessionId }
+            metadata: { chat_session_id: sessionId },
+            user_id: session.user_id,
+            user_email: session.user_email,
+            user_role: session.user_role
         });
 
         if (ticketResult.success) {
@@ -363,4 +364,78 @@ export async function createCannedResponse(responseData) {
     } catch (error) {
         return { success: false, error: error.message };
     }
+}
+
+export async function updateCannedResponse(responseId, updates) {
+    await requireAdmin();
+    try {
+        const existing = await dataAccess.getRecord(COLLECTION_KEYS.responses, responseId, { suppressAuth: true });
+        if (!existing) return { success: false, error: 'Canned response not found' };
+        return await dataAccess.updateRecord(COLLECTION_KEYS.responses, {
+            ...existing,
+            ...updates,
+            _id: responseId,
+            updated_at: new Date()
+        }, { suppressAuth: true });
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+export async function getChatHistory(sessionId) {
+    await requireAdmin();
+    const session = await dataAccess.getRecord(COLLECTION_KEYS.sessions, sessionId, { suppressAuth: true });
+    if (!session) return { success: false, error: 'Session not found', session: null, messages: [] };
+    const messages = await dataAccess.queryRecords(COLLECTION_KEYS.messages, {
+        filters: { session_id: sessionId },
+        sort: [{ field: 'created_at', direction: 'asc' }],
+        suppressAuth: true
+    });
+    return { success: true, session, messages: messages.items || [] };
+}
+
+export async function getChatMetrics(dateRange = { start: null, end: null }) {
+    await requireAdmin();
+    const filters = {};
+    if (dateRange.start) filters.created_at = { gte: dateRange.start };
+    if (dateRange.end) filters.created_at = { ...(filters.created_at || {}), lte: dateRange.end };
+    const sessions = await dataAccess.getAllRecords(COLLECTION_KEYS.sessions, { filters, suppressAuth: true });
+
+    const ended = sessions.filter((s) => s.ended_at && s.created_at);
+    const avgDuration = ended.length ? Math.round(
+        ended.reduce((sum, s) => sum + (new Date(s.ended_at) - new Date(s.created_at)), 0) / ended.length
+    ) : 0;
+    const convertedCount = sessions.filter((s) => Boolean(s.ticket_id)).length;
+
+    return {
+        success: true,
+        metrics: {
+            totalSessions: sessions.length,
+            queued: sessions.filter((s) => s.status === SESSION_STATUS.QUEUED).length,
+            active: sessions.filter((s) => s.status === SESSION_STATUS.ACTIVE).length,
+            ended: sessions.filter((s) => s.status === SESSION_STATUS.ENDED).length,
+            converted: sessions.filter((s) => s.status === SESSION_STATUS.CONVERTED).length,
+            avgDurationMs: avgDuration,
+            resolutionRate: sessions.length ? Number((((sessions.length - convertedCount) / sessions.length) * 100).toFixed(2)) : 0
+        }
+    };
+}
+
+export async function getAgentChatStats(agentId, dateRange = { start: null, end: null }) {
+    await requireAdmin();
+    const filters = { assigned_to: agentId };
+    if (dateRange.start) filters.created_at = { gte: dateRange.start };
+    if (dateRange.end) filters.created_at = { ...(filters.created_at || {}), lte: dateRange.end };
+    const sessions = await dataAccess.getAllRecords(COLLECTION_KEYS.sessions, { filters, suppressAuth: true });
+    const rated = sessions.filter((s) => Number.isFinite(Number(s.rating)));
+    const avgRating = rated.length ? Number((rated.reduce((sum, s) => sum + Number(s.rating), 0) / rated.length).toFixed(2)) : 0;
+
+    return {
+        success: true,
+        agentId,
+        totalChats: sessions.length,
+        activeChats: sessions.filter((s) => s.status === SESSION_STATUS.ACTIVE).length,
+        completedChats: sessions.filter((s) => s.status === SESSION_STATUS.ENDED || s.status === SESSION_STATUS.CONVERTED).length,
+        avgRating
+    };
 }

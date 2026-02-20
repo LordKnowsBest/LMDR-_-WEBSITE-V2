@@ -31,10 +31,10 @@ Before reading the issues, understand what `chrome-devtools-mcp` CAN and CANNOT 
 
 ```
 Error (if tried via contentDocument): SecurityError: Blocked a frame with origin
-"https://www.lmdr.io" from accessing a cross-origin frame.
+"https://www.lastmiledr.app" from accessing a cross-origin frame.
 ```
 
-**Root Cause:** Wix HTML Components are served from `static.parastorage.com` — a different origin from `www.lmdr.io`. `evaluate_script` runs JavaScript in the main page's execution context and cannot penetrate cross-origin iframe boundaries via `document.querySelector`.
+**Root Cause:** Wix HTML Components are served from `static.parastorage.com` — a different origin from `www.lastmiledr.app`. `evaluate_script` runs JavaScript in the main page's execution context and cannot penetrate cross-origin iframe boundaries via `document.querySelector`.
 
 **chrome-devtools-mcp workarounds (in priority order):**
 
@@ -81,7 +81,7 @@ Error (if tried via contentDocument): SecurityError: Blocked a frame with origin
 
 ### KW-003: `list_pages` Returns Wix Editor Tab — Wrong Tab Selected
 
-**Symptom:** `list_pages` returns multiple tabs: `editor.wix.com` (Wix Editor), `www.lmdr.io` (live site), and `manage.wix.com` (Wix dashboard). The agent accidentally calls `select_page` on the editor tab. `evaluate_script` then runs in the editor's React app context and returns garbage results.
+**Symptom:** `list_pages` returns multiple tabs: `editor.wix.com` (Wix Editor), `www.lastmiledr.app` (live site), and `manage.wix.com` (Wix dashboard). The agent accidentally calls `select_page` on the editor tab. `evaluate_script` then runs in the editor's React app context and returns garbage results.
 
 **Symptom 2:** `list_console_messages` captures Wix Editor's own internal console errors (React devtools warnings, Next.js hydration errors) as if they were LMDR site errors. False P0 storm.
 
@@ -90,10 +90,10 @@ Error (if tried via contentDocument): SecurityError: Blocked a frame with origin
 **`chrome-devtools-mcp` response:**
 
 1. Always call `list_pages` first
-2. Filter the page list: only accept tabs where URL contains `lmdr.io` or `wixsite.com/lmdr`
+2. Filter the page list: only accept tabs where URL contains `lastmiledr.app`
 3. **Explicitly reject**: any URL containing `editor.wix.com`, `manage.wix.com`, or `users.wix.com`
 4. Call `select_page` only on the validated LMDR tab
-5. If no valid LMDR tab: ABORT with clear message: *"No lmdr.io tab found. Open www.lmdr.io in Chrome first."*
+5. If no valid LMDR tab: ABORT with clear message: *"No lastmiledr.app tab found. Open www.lastmiledr.app in Chrome first."*
 
 **Status:** Tab guard implemented in `verify_runtime.js` PLAYBOOK_STEPS step 0.1.
 
@@ -207,7 +207,7 @@ list_pages
 **`chrome-devtools-mcp` response:**
 
 Filter the returned list to only report on requests that match LMDR endpoints:
-- Include: `www.lmdr.io`, `*.lmdr.io`, `_functions/` (Velo web methods), `airtable.com`
+- Include: `www.lastmiledr.app`, `*.lastmiledr.app`, `_functions/` (Velo web methods), `airtable.com`
 - Exclude: `wix.com`, `parastorage.com`, `wixstatic.com`, `wixmedia.com`, `frog.wix.com`, `bo.wix.com`
 
 Apply `resourceTypes: ["xhr", "fetch"]` filter in the tool call to reduce volume.

@@ -19,7 +19,9 @@ const COLLECTION_KEYS = {
 
 const TICKET_STATUS = {
     OPEN: 'open',
-    PENDING: 'pending',
+    IN_PROGRESS: 'in_progress',
+    WAITING: 'waiting',
+    PENDING: 'waiting',
     RESOLVED: 'resolved',
     CLOSED: 'closed'
 };
@@ -106,6 +108,22 @@ function calculateSLADeadlines(priority) {
     };
 }
 
+function normalizeTicketStatus(status) {
+    if (status === 'pending') return TICKET_STATUS.WAITING;
+    return status;
+}
+
+function isValidStatusTransition(currentStatus, nextStatus) {
+    const allowed = {
+        [TICKET_STATUS.OPEN]: [TICKET_STATUS.IN_PROGRESS, TICKET_STATUS.WAITING, TICKET_STATUS.RESOLVED, TICKET_STATUS.CLOSED],
+        [TICKET_STATUS.IN_PROGRESS]: [TICKET_STATUS.WAITING, TICKET_STATUS.RESOLVED, TICKET_STATUS.CLOSED],
+        [TICKET_STATUS.WAITING]: [TICKET_STATUS.IN_PROGRESS, TICKET_STATUS.RESOLVED, TICKET_STATUS.CLOSED],
+        [TICKET_STATUS.RESOLVED]: [TICKET_STATUS.CLOSED, TICKET_STATUS.IN_PROGRESS, TICKET_STATUS.WAITING],
+        [TICKET_STATUS.CLOSED]: [TICKET_STATUS.IN_PROGRESS]
+    };
+    return (allowed[currentStatus] || []).includes(nextStatus);
+}
+
 // ============================================
 // PUBLIC TICKET METHODS
 // ============================================
@@ -118,6 +136,17 @@ export async function createTicket(ticketData) {
     if (!context.isAuthenticated) throw new Error('Authentication required to create a ticket');
 
     try {
+        const requester = {
+            userId: context.userId,
+            email: context.email,
+            role: context.role
+        };
+        if (context.isAdmin && ticketData && ticketData.user_id) {
+            requester.userId = ticketData.user_id;
+            requester.email = ticketData.user_email || requester.email;
+            requester.role = ticketData.user_role || 'user';
+        }
+
         const priority = ticketData.priority || TICKET_PRIORITY.MEDIUM;
         const slaDeadlines = calculateSLADeadlines(priority);
         
@@ -131,9 +160,9 @@ export async function createTicket(ticketData) {
             status: TICKET_STATUS.OPEN,
             priority: priority,
             category: ticketData.category || 'general',
-            user_id: context.userId,
-            user_email: context.email,
-            user_role: context.role,
+            user_id: requester.userId,
+            user_email: requester.email,
+            user_role: requester.role,
             assigned_to: null,
             created_at: new Date(),
             updated_at: new Date(),
@@ -151,7 +180,7 @@ export async function createTicket(ticketData) {
                 level: 'INFO',
                 source: 'support-ticket-service',
                 message: `New ticket created: ${ticketNumber}`,
-                details: { ticketId: result.record._id, userId: context.userId }
+                details: { ticketId: result.record._id, userId: requester.userId }
             }).catch(() => {});
         }
 
@@ -312,28 +341,39 @@ export async function changeTicketStatus(ticketId, status, reason = '') {
     try {
         const ticket = await dataAccess.getRecord(COLLECTION_KEYS.tickets, ticketId, { suppressAuth: true });
         if (!ticket) throw new Error('Ticket not found');
+        const currentStatus = normalizeTicketStatus(ticket.status || TICKET_STATUS.OPEN);
+        const nextStatus = normalizeTicketStatus(status);
+        if (!isValidStatusTransition(currentStatus, nextStatus)) {
+            throw new Error(`Invalid status transition: ${currentStatus} -> ${nextStatus}`);
+        }
 
         const updates = {
             _id: ticketId,
-            status: status,
+            status: nextStatus,
             updated_at: new Date()
         };
 
         // If resolving/closing, record completion time
-        if ([TICKET_STATUS.RESOLVED, TICKET_STATUS.CLOSED].includes(status)) {
+        if ([TICKET_STATUS.RESOLVED, TICKET_STATUS.CLOSED].includes(nextStatus)) {
             updates.resolved_at = new Date();
+        }
+        if (nextStatus === TICKET_STATUS.CLOSED) {
+            updates.closed_at = new Date();
+        }
+        if (nextStatus === TICKET_STATUS.IN_PROGRESS && !ticket.first_response_at) {
+            updates.first_response_at = new Date();
         }
 
         const result = await dataAccess.updateRecord(COLLECTION_KEYS.tickets, updates, { suppressAuth: true });
 
         if (result.success) {
-            await auditAction('changeStatus', ticketId, { status, reason }, context);
+            await auditAction('changeStatus', ticketId, { from: currentStatus, to: nextStatus, reason }, context);
             
             // Notify user of status change
             sendMessageNotification(ticket.user_id, {
                 recipientName: 'User',
                 senderName: 'LMDR Support',
-                messagePreview: `Your ticket ${ticket.ticket_number} has been updated to ${status}.`,
+                messagePreview: `Your ticket ${ticket.ticket_number} has been updated to ${nextStatus}.`,
                 isDriver: ticket.user_role === 'driver'
             }).catch(e => console.warn('Notification failed:', e.message));
         }
@@ -455,7 +495,8 @@ export async function getTicketMetrics(dateRange = { start: null, end: null }) {
         const metrics = {
             total: allTickets.length,
             open: allTickets.filter(t => t.status === TICKET_STATUS.OPEN).length,
-            pending: allTickets.filter(t => t.status === TICKET_STATUS.PENDING).length,
+            inProgress: allTickets.filter(t => normalizeTicketStatus(t.status) === TICKET_STATUS.IN_PROGRESS).length,
+            waiting: allTickets.filter(t => normalizeTicketStatus(t.status) === TICKET_STATUS.WAITING).length,
             resolved: allTickets.filter(t => t.status === TICKET_STATUS.RESOLVED).length,
             closed: allTickets.filter(t => t.status === TICKET_STATUS.CLOSED).length,
             urgent: allTickets.filter(t => t.priority === TICKET_PRIORITY.URGENT).length,
@@ -479,4 +520,105 @@ export async function getTicketMetrics(dateRange = { start: null, end: null }) {
         console.error('[supportTicketService] getTicketMetrics error:', error.message);
         return { success: false, error: error.message };
     }
+}
+
+export async function submitTicket(ticketData) {
+    return createTicket(ticketData);
+}
+
+export async function getMyTickets(userId) {
+    const context = await getContext();
+    if (!context.isAuthenticated) throw new Error('Authentication required');
+    if (!context.isAdmin && userId !== context.userId) {
+        throw new Error('Unauthorized');
+    }
+
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.tickets, {
+        filters: { user_id: userId },
+        sort: [{ field: 'created_at', direction: 'desc' }],
+        limit: 100,
+        suppressAuth: true
+    });
+    return { success: result.success, items: result.items || [], totalCount: result.totalCount || (result.items || []).length };
+}
+
+export async function mergeTickets(primaryId, secondaryId) {
+    const context = await requireAdmin();
+    const [primary, secondary] = await Promise.all([
+        dataAccess.getRecord(COLLECTION_KEYS.tickets, primaryId, { suppressAuth: true }),
+        dataAccess.getRecord(COLLECTION_KEYS.tickets, secondaryId, { suppressAuth: true })
+    ]);
+    if (!primary || !secondary) {
+        return { success: false, error: 'Primary or secondary ticket not found' };
+    }
+    if (primaryId === secondaryId) {
+        return { success: false, error: 'Cannot merge the same ticket' };
+    }
+
+    const mergedMeta = {
+        ...(primary.metadata || {}),
+        merged_ticket_ids: [...new Set([...(primary.metadata?.merged_ticket_ids || []), secondaryId])]
+    };
+
+    const updatePrimary = await dataAccess.updateRecord(COLLECTION_KEYS.tickets, {
+        ...primary,
+        metadata: mergedMeta,
+        updated_at: new Date()
+    }, { suppressAuth: true });
+    if (!updatePrimary.success) return updatePrimary;
+
+    const closeSecondary = await dataAccess.updateRecord(COLLECTION_KEYS.tickets, {
+        ...secondary,
+        status: TICKET_STATUS.CLOSED,
+        closed_at: new Date(),
+        resolved_at: secondary.resolved_at || new Date(),
+        metadata: { ...(secondary.metadata || {}), merged_into_ticket_id: primaryId },
+        updated_at: new Date()
+    }, { suppressAuth: true });
+    if (!closeSecondary.success) return closeSecondary;
+
+    await auditAction('mergeTickets', primaryId, { secondaryId }, context);
+    return { success: true, primaryId, secondaryId };
+}
+
+export async function getSLACompliance(dateRange = { start: null, end: null }) {
+    await requireAdmin();
+    const filters = {};
+    if (dateRange.start) filters.created_at = { gte: dateRange.start };
+    if (dateRange.end) filters.created_at = { ...(filters.created_at || {}), lte: dateRange.end };
+    const tickets = await dataAccess.getAllRecords(COLLECTION_KEYS.tickets, { filters, suppressAuth: true });
+
+    const byPriority = {};
+    for (const priority of Object.values(TICKET_PRIORITY)) {
+        const scoped = tickets.filter((t) => t.priority === priority && t.resolved_at && t.resolution_due);
+        const met = scoped.filter((t) => new Date(t.resolved_at) <= new Date(t.resolution_due)).length;
+        byPriority[priority] = {
+            total: scoped.length,
+            met,
+            compliancePct: scoped.length ? Number(((met / scoped.length) * 100).toFixed(2)) : 0
+        };
+    }
+
+    return { success: true, byPriority };
+}
+
+export async function getAgentPerformance(agentId, dateRange = { start: null, end: null }) {
+    await requireAdmin();
+    const filters = { assigned_to: agentId };
+    if (dateRange.start) filters.created_at = { gte: dateRange.start };
+    if (dateRange.end) filters.created_at = { ...(filters.created_at || {}), lte: dateRange.end };
+    const tickets = await dataAccess.getAllRecords(COLLECTION_KEYS.tickets, { filters, suppressAuth: true });
+
+    const resolved = tickets.filter((t) => t.resolved_at && t.created_at);
+    const avgResolutionMs = resolved.length ? Math.round(
+        resolved.reduce((sum, t) => sum + (new Date(t.resolved_at) - new Date(t.created_at)), 0) / resolved.length
+    ) : 0;
+
+    return {
+        success: true,
+        agentId,
+        ticketsHandled: tickets.length,
+        resolvedCount: resolved.length,
+        avgResolutionTimeMs: avgResolutionMs
+    };
 }

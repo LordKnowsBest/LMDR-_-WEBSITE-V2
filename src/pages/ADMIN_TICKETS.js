@@ -7,7 +7,10 @@ import {
     assignTicket,
     changeTicketStatus,
     addTicketComment,
-    escalateTicket
+    escalateTicket,
+    getTicketMetrics,
+    getSLACompliance,
+    getAgentPerformance
 } from 'backend/supportTicketService.jsw';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -93,6 +96,24 @@ async function routeMessage(component, message) {
             case 'changeTicketStatus':
                 await handleChangeTicketStatus(component, message.ticketId, message.status, message.reason);
                 break;
+            case 'updateTicket':
+                await handleUpdateTicket(component, message.ticketId, message.updates || {});
+                break;
+            case 'addTicketComment':
+                await handleAddTicketComment(component, message.ticketId, message.content, Boolean(message.isInternal));
+                break;
+            case 'escalateTicket':
+                await handleEscalateTicket(component, message.ticketId, message.reason || '');
+                break;
+            case 'getTicketMetrics':
+                await handleGetTicketMetrics(component, message.dateRange || {});
+                break;
+            case 'getSLACompliance':
+                await handleGetSLACompliance(component, message.dateRange || {});
+                break;
+            case 'getAgentPerformance':
+                await handleGetAgentPerformance(component, message.agentId, message.dateRange || {});
+                break;
 
             default:
                 console.warn('ADMIN_TICKETS: Unknown action:', action);
@@ -140,6 +161,48 @@ async function handleChangeTicketStatus(component, ticketId, status, reason) {
     } else {
         safeSend(component, { action: 'actionError', message: result.error });
     }
+}
+
+async function handleUpdateTicket(component, ticketId, updates) {
+    const result = await updateTicket(ticketId, updates);
+    if (result.success) {
+        safeSend(component, { action: 'ticketUpdated', payload: result.record });
+    } else {
+        safeSend(component, { action: 'actionError', message: result.error });
+    }
+}
+
+async function handleAddTicketComment(component, ticketId, content, isInternal) {
+    const result = await addTicketComment(ticketId, content, isInternal);
+    if (result.success) {
+        safeSend(component, { action: 'ticketCommentAdded', payload: result.record });
+    } else {
+        safeSend(component, { action: 'actionError', message: result.error });
+    }
+}
+
+async function handleEscalateTicket(component, ticketId, reason) {
+    const result = await escalateTicket(ticketId, reason);
+    if (result.success) {
+        safeSend(component, { action: 'ticketEscalated', payload: result.record || { ticketId } });
+    } else {
+        safeSend(component, { action: 'actionError', message: result.error });
+    }
+}
+
+async function handleGetTicketMetrics(component, dateRange) {
+    const result = await getTicketMetrics(dateRange);
+    safeSend(component, { action: 'ticketMetricsLoaded', payload: result });
+}
+
+async function handleGetSLACompliance(component, dateRange) {
+    const result = await getSLACompliance(dateRange);
+    safeSend(component, { action: 'slaComplianceLoaded', payload: result });
+}
+
+async function handleGetAgentPerformance(component, agentId, dateRange) {
+    const result = await getAgentPerformance(agentId, dateRange);
+    safeSend(component, { action: 'agentPerformanceLoaded', payload: result });
 }
 
 // ============================================

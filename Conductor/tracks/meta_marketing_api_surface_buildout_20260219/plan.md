@@ -153,4 +153,4 @@
 - [ ] Task: Keep `progress.md` updated per completed task block
 - [ ] Task: Keep `metadata.json` completion fields and dates current
 - [ ] Task: Maintain source references and version assumptions in `spec.md`
-- [ ] Task: Sync action names with `full_agentic_buildout_20260218` router conventions
+- [x] Task: Sync action names with `full_agentic_buildout_20260218` router conventions

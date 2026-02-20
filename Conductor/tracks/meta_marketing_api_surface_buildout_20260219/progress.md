@@ -141,3 +141,4 @@
 | 2026-02-19 | Added Phase 6.3 E2E lifecycle validation suite in `metaProductionReadiness.e2e.test.js` (create -> launch -> monitor -> optimize -> audit) |
 | 2026-02-19 | Added high-volume insights load harness in `metaInsightsLoad.test.js` with request-budget-aware throughput assertions |
 | 2026-02-19 | Added policy/role security assertions in `metaSecurityReview.test.js` and published `security_review_meta_marketing_api_20260219.md` |
+| 2026-02-19 | Added `metaRouterConventionParity.test.js` to verify Meta router/action snake_case naming and `ACTION_REGISTRY` ↔ `ROUTER_DEFINITIONS` enum alignment with full-agentic router conventions |

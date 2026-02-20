@@ -4,7 +4,9 @@ import {
     createArticle,
     updateArticle,
     publishArticle,
-    getCategories
+    getCategories,
+    getArticleVersions,
+    revertToVersion
 } from 'backend/knowledgeBaseService.jsw';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -63,6 +65,15 @@ async function routeMessage(component, message) {
             case 'publishArticle':
                 await publishArticle(message.articleId);
                 safeSend(component, { action: 'actionSuccess', message: 'Article published' });
+                break;
+            case 'getArticleVersions':
+                const versions = await getArticleVersions(message.articleId);
+                safeSend(component, { action: 'articleVersionsLoaded', payload: versions.items || [] });
+                break;
+            case 'revertToVersion':
+                const revertResult = await revertToVersion(message.articleId, message.versionNumber);
+                if (!revertResult.success) throw new Error(revertResult.error || 'Failed to revert version');
+                safeSend(component, { action: 'articleReverted', payload: revertResult.record || revertResult });
                 break;
         }
     } catch (error) {

@@ -3,7 +3,9 @@ import {
     getNPSScore,
     getNPSTrend,
     getSurveyConfig,
-    updateSurveyConfig
+    updateSurveyConfig,
+    getSegmentBreakdown,
+    getRecentFeedback
 } from 'backend/npsService.jsw';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
@@ -70,6 +72,12 @@ async function routeMessage(component, message) {
             case 'updateSurveyConfig':
                 await handleUpdateSurveyConfig(component, message.configId, message.updates);
                 break;
+            case 'getSegmentBreakdown':
+                await handleGetSegmentBreakdown(component, message.dateRange || {});
+                break;
+            case 'getRecentFeedback':
+                await handleGetRecentFeedback(component, message.limit || 20, message.category || null);
+                break;
 
             default:
                 console.warn('ADMIN_NPS: Unknown action:', action);
@@ -114,6 +122,16 @@ async function handleUpdateSurveyConfig(component, configId, updates) {
     } else {
         safeSend(component, { action: 'actionError', message: result.error });
     }
+}
+
+async function handleGetSegmentBreakdown(component, dateRange) {
+    const result = await getSegmentBreakdown(dateRange);
+    safeSend(component, { action: 'segmentBreakdownLoaded', payload: result });
+}
+
+async function handleGetRecentFeedback(component, limit, category) {
+    const result = await getRecentFeedback(limit, category);
+    safeSend(component, { action: 'recentFeedbackLoaded', payload: result.items || [] });
 }
 
 // ============================================

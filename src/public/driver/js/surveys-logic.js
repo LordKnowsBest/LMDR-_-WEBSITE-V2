@@ -73,8 +73,8 @@
     // Auto-start if only one survey
     if (surveys.length === 1) {
       var s = surveys[0];
-      var carrier = s.carrier_name || s.carrierName || 'Your Carrier';
-      L.startSurvey(s.id || s._id, s.survey_type, carrier);
+      var singleCarrier = s.carrier_name || s.carrierName || 'Your Carrier';
+      L.startSurvey(s.id || s._id, s.survey_type, singleCarrier);
       return;
     }
 
