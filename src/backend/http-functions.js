@@ -99,9 +99,8 @@ async function verifyStripeSignature(payload, signature) {
 
     const webhookSecret = await getSecret('STRIPE_WEBHOOK_SECRET');
     if (!webhookSecret) {
-      console.warn('[Webhook] No webhook secret configured, skipping verification');
-      // In development, allow unsigned requests
-      return { success: true, warning: 'No secret configured' };
+      console.error('[Webhook] Missing STRIPE_WEBHOOK_SECRET — rejecting request');
+      return { success: false, error: 'Server configuration error' };
     }
 
     // Parse signature header
