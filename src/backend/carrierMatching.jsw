@@ -1,6 +1,9 @@
 import { updateDriverPreferences, logCarrierInterest } from 'backend/driverProfiles';
 import { log, logDatabase, startTrace, endTrace } from 'backend/observabilityService';
 import * as dataAccess from 'backend/dataAccess';
+import { searchCarriersSemantic } from 'backend/semanticSearchService';
+import { blendSemanticScore } from 'backend/driverScoring';
+import { FEATURE_FLAGS } from 'backend/configData';
 
 // ============================================================================
 // SHARED SCORING MODULE
@@ -159,11 +162,50 @@ async function _findMatchingCarriersPipeline(driverPrefs, isPremiumUser, maxResu
       };
     }
 
+    // Semantic blend: pre-fetch carrier scores from Pinecone before scoring loop.
+    // On timeout or failure, semanticScoreMap stays empty and scoring is unaffected.
+    const semanticScoreMap = new Map();
+    if (FEATURE_FLAGS.semanticSearchBlendEnabled) {
+      try {
+        const cdl  = driverPrefs.cdl_class || driverPrefs.cdlClass || '';
+        const ops  = Array.isArray(driverPrefs.operation_types)
+          ? driverPrefs.operation_types.join(', ')
+          : (driverPrefs.operationType || driverPrefs.operation_type || '');
+        const state = driverPrefs.home_state || driverPrefs.homeState || '';
+        const pay   = (driverPrefs.pay_range_min || driverPrefs.minPay)
+          ? `min $${driverPrefs.pay_range_min || driverPrefs.minPay}/mi` : '';
+        const semanticQuery = [
+          cdl   && `CDL-${cdl} driver looking for`,
+          ops   && `${ops} freight`,
+          state && `in or near ${state}`,
+          pay,
+        ].filter(Boolean).join(' ') || 'CDL truck driver job';
+
+        const semanticResult = await searchCarriersSemantic(
+          semanticQuery,
+          {},
+          Math.min(carrierItems.length, 200)
+        );
+        if (semanticResult?.results) {
+          for (const r of semanticResult.results) {
+            semanticScoreMap.set(r.carrierId, r.score);
+          }
+          console.log(`[carrierMatching] Semantic pre-fetch: ${semanticScoreMap.size} scores loaded`);
+        }
+      } catch (err) {
+        console.warn('[carrierMatching] Semantic pre-fetch failed (non-blocking):', err.message);
+      }
+    }
+
     // STEP 2: Score all carriers (synchronous, ~10ms)
     const customWeights = driverPrefs.customWeights || fetchedWeights;
-    const scoredCarriers = carrierItems.map(rawCarrier =>
-      calculateMatchScore(driverPrefs, rawCarrier, customWeights)
-    );
+    const scoredCarriers = carrierItems.map(rawCarrier => {
+      const scored = calculateMatchScore(driverPrefs, rawCarrier, customWeights);
+      if (FEATURE_FLAGS.semanticSearchBlendEnabled && semanticScoreMap.has(rawCarrier._id)) {
+        scored.overallScore = blendSemanticScore(scored.overallScore, semanticScoreMap.get(rawCarrier._id));
+      }
+      return scored;
+    });
 
     // STEP 3: Group divisions of the same carrier
     const groupedCarriers = {};
