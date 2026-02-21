@@ -326,6 +326,13 @@ function handlePageReady(data) {
 
   if (data.driverProfile) {
     prefillForm(data.driverProfile);
+  } else if (data.prefillZip) {
+    // Landing page redirect — no profile yet, just pre-fill the zip
+    const zipEl = document.getElementById('homeZip');
+    if (zipEl) {
+      zipEl.value = data.prefillZip;
+      zipEl.dispatchEvent(new Event('input'));
+    }
   }
 
   // Phase 1: Fetch mutual interests for the driver

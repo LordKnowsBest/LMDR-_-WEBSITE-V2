@@ -318,6 +318,7 @@ async function handleHtmlMessage(msg) {
       sendToHtml('pageReady', {
         userStatus: cachedUserStatus,
         memberId: wixUsers?.currentUser?.id || null,
+        prefillZip: wixLocation.query?.zip || null,
         driverProfile: cachedDriverProfile ? {
           id: cachedDriverProfile._id,
           displayName: cachedDriverProfile.display_name,
