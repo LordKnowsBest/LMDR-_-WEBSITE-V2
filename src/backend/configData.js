@@ -476,7 +476,7 @@ export const FEATURE_FLAGS = {
   /** Phase 2: Enable semantic search tool calls in agent context */
   semanticToolEnabled: true,
   /** Phase 2: Blend semantic score as a component in driver ranking (driverScoring.js) */
-  semanticSearchBlendEnabled: false,
+  semanticSearchBlendEnabled: true,
 };
 
 // =============================================================================
