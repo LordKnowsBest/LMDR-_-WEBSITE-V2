@@ -34,6 +34,7 @@ import {
 } from 'backend/smsCampaignService';
 import { processJobBoardWebhook } from 'backend/jobBoardService';
 import { connectSocialAccount } from 'backend/socialPostingService';
+import { runNightlySemanticBackfill } from 'backend/semanticBackfillJob';
 
 // ============================================================================
 // STRIPE WEBHOOK ENDPOINT
@@ -966,6 +967,35 @@ export async function get_oauth_linkedin_callback(request) {
     return ok({ success: false, error: result.error });
   } catch (error) {
     console.error('[OAuth] LinkedIn callback error:', error);
+    return serverError({ error: error.message });
+  }
+}
+
+// ============================================================================
+// ADMIN — SEMANTIC BACKFILL TRIGGER
+// POST https://www.lastmiledr.app/_functions/admin_semantic_backfill
+// Header: x-lmdr-internal-key: <secret>
+// One-shot endpoint to manually kick off the Pinecone embedding backfill.
+// Returns 202 immediately; job runs async in the background.
+// ============================================================================
+
+export async function post_admin_semantic_backfill(request) {
+  try {
+    const internalKey = await getSecret('LMDR_INTERNAL_KEY');
+    if (request.headers['x-lmdr-internal-key'] !== internalKey) {
+      return { status: 401, body: JSON.stringify({ error: 'Unauthorized' }) };
+    }
+
+    // Fire and forget — backfill can take several minutes
+    runNightlySemanticBackfill().then(summary => {
+      console.log('[admin_semantic_backfill] Complete:', JSON.stringify(summary));
+    }).catch(err => {
+      console.error('[admin_semantic_backfill] Failed:', err.message);
+    });
+
+    return ok({ started: true, message: 'Semantic backfill started. Check Wix logs for progress.' });
+  } catch (error) {
+    console.error('[admin_semantic_backfill] Error:', error);
     return serverError({ error: error.message });
   }
 }
