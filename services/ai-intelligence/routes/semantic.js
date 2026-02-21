@@ -19,6 +19,11 @@ const SEARCH_TIMEOUT_MS = 3_000;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** Remove undefined/null fields — Pinecone rejects null metadata values. */
+function stripNulls(obj) {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v != null));
+}
+
 function withTimeout(promise, ms) {
   return Promise.race([
     promise,
@@ -53,14 +58,14 @@ semanticRouter.post('/embed/driver', async (c) => {
     const text   = buildDriverText(profile);
     const vector = await withTimeout(embed(text), EMBED_TIMEOUT_MS);
 
-    const metadata = {
+    const metadata = stripNulls({
       profileUpdatedAt,
-      cdl_class:        profile.cdl_class        || null,
-      home_state:       profile.home_state        || null,
+      cdl_class:        profile.cdl_class        || undefined,
+      home_state:       profile.home_state        || undefined,
       experience_years: profile.experience_years  || 0,
       is_discoverable:  profile.is_discoverable   || 'No',
       last_active:      new Date().toISOString(),
-    };
+    });
 
     await upsertVector('drivers', driverId, vector, metadata);
 
@@ -103,12 +108,12 @@ semanticRouter.post('/embed/carrier', async (c) => {
     const text   = buildCarrierText(profile);
     const vector = await withTimeout(embed(text), EMBED_TIMEOUT_MS);
 
-    const metadata = {
+    const metadata = stripNulls({
       profileUpdatedAt,
-      dot_number:    profile.dot_number    || null,
+      dot_number:    profile.dot_number    || undefined,
       fleet_size:    profile.fleet_size    || 0,
       pay_range_min: profile.pay_range_min || 0,
-    };
+    });
 
     await upsertVector('carriers', carrierId, vector, metadata);
 
