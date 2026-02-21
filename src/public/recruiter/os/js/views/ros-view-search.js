@@ -3,7 +3,7 @@
 // Full feature parity with RECRUITER_DRIVER_SEARCH.html
 // ============================================================================
 
-(function() {
+(function () {
   'use strict';
 
   const VIEW_ID = 'search';
@@ -41,14 +41,18 @@
   const FILTER_GROUPS = {
     cdlClass: { label: 'CDL Class', type: 'multi', options: ['A', 'B'] },
     endorsements: { label: 'Endorsements', type: 'multi', options: ['HazMat', 'Tanker', 'Doubles/Triples', 'Passenger', 'School Bus'] },
-    experience: { label: 'Experience', type: 'radio', options: [
-      { value: '', label: 'Any' }, { value: '1', label: '1+ yr' },
-      { value: '3', label: '3+ yr' }, { value: '5', label: '5+ yr' }
-    ]},
-    availability: { label: 'Availability', type: 'radio', options: [
-      { value: '', label: 'Any' }, { value: 'immediate', label: 'Immediate' },
-      { value: '2_weeks', label: '2 Weeks' }
-    ]},
+    experience: {
+      label: 'Experience', type: 'radio', options: [
+        { value: '', label: 'Any' }, { value: '1', label: '1+ yr' },
+        { value: '3', label: '3+ yr' }, { value: '5', label: '5+ yr' }
+      ]
+    },
+    availability: {
+      label: 'Availability', type: 'radio', options: [
+        { value: '', label: 'Any' }, { value: 'immediate', label: 'Immediate' },
+        { value: '2_weeks', label: '2 Weeks' }
+      ]
+    },
     equipment: { label: 'Equipment', type: 'multi', options: ['Dry Van', 'Reefer', 'Flatbed', 'Tanker', 'Step Deck'] }
   };
 
@@ -136,7 +140,7 @@
           <option value="experience">Experience</option>
           <option value="location">Location</option>
         </select>
-        <button onclick="ROS.views._search.doSearch()" class="px-5 py-3 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-sm font-bold flex items-center gap-2 shadow-lg shadow-blue-500/20 hover:shadow-blue-500/40 transition-shadow whitespace-nowrap">
+        <button onclick="ROS.views._search.doSearch()" class="px-5 py-3 rounded-xl neu text-lmdr-blue text-sm font-bold flex items-center gap-2 hover:neu-raised transition-shadow whitespace-nowrap">
           <span class="material-symbols-outlined text-[18px]">search</span>Search
         </button>
         <button onclick="ROS.views._search.toggleWeights()" class="px-3 py-3 rounded-xl neu-x text-tan hover:text-lmdr-blue transition-colors" title="Match Weight Preferences">
@@ -205,7 +209,7 @@
 
       if (group.type === 'multi') {
         group.options.forEach(opt => {
-          const filterKey = groupKey === 'cdlClass' ? `cdl_${opt}` : `${groupKey}_${opt.replace(/[/\\s]/g,'_')}`;
+          const filterKey = groupKey === 'cdlClass' ? `cdl_${opt}` : `${groupKey}_${opt.replace(/[/\\s]/g, '_')}`;
           html += `<button class="filter-orb px-3 py-1.5 text-[10px] font-bold rounded-full neu-x text-tan transition-all"
                     data-filter-group="${groupKey}" data-filter-value="${opt}" id="orb-${filterKey}"
                     onclick="ROS.views._search.toggleOrb(this,'${groupKey}','${escapeHtml(opt)}')">${escapeHtml(opt)}</button>`;
@@ -469,7 +473,7 @@
           <div class="text-2xl font-black ${scoreColor}">${matchScore}%</div>
           <div class="text-[9px] font-bold text-tan uppercase tracking-wider">Match</div>
         </div>
-        <button class="px-3 py-2 rounded-lg ${isViewed ? 'bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white' : 'neu-x text-tan'} text-[11px] font-bold shadow-md hover:shadow-lg transition-all shrink-0"
+        <button class="px-3 py-2 rounded-lg ${isViewed ? 'neu-in text-lmdr-blue' : 'neu-x text-tan hover:neu-s'} text-[11px] font-bold transition-all shrink-0"
                 onclick="event.stopPropagation();ROS.views._search.saveDriver('${driverId}', ${matchScore})"
                 title="${isViewed ? 'Add to Pipeline' : 'View profile first to save'}">+ Pipeline</button>
       </div>`;
@@ -506,7 +510,7 @@
         html += `<span class="px-1.5 py-1.5 text-[11px] text-tan">...</span>`;
       } else {
         const isActive = p === currentPage;
-        html += `<button onclick="ROS.views._search.goToPage(${p})" class="w-8 h-8 rounded-lg ${isActive ? 'bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white shadow-md' : 'neu-x text-tan hover:text-lmdr-blue'} text-[11px] font-bold transition-all">${p + 1}</button>`;
+        html += `<button onclick="ROS.views._search.goToPage(${p})" class="w-8 h-8 rounded-lg ${isActive ? 'neu-in text-lmdr-blue' : 'neu-x text-tan hover:neu-s hover:text-lmdr-blue'} text-[11px] font-bold transition-all">${p + 1}</button>`;
       }
     });
 
@@ -519,7 +523,7 @@
   }
 
   function getPageNumbers(current, total) {
-    if (total <= 7) return Array.from({length: total}, (_, i) => i);
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i);
     const pages = [];
     pages.push(0);
     if (current > 2) pages.push('...');
@@ -655,7 +659,7 @@
 
         <!-- Action Buttons -->
         <div class="flex gap-2 flex-wrap">
-          <button onclick="ROS.views._search.saveDriverFromModal()" class="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[12px] font-bold flex items-center justify-center gap-2 shadow-lg hover:shadow-xl transition-shadow">
+          <button onclick="ROS.views._search.saveDriverFromModal()" class="flex-1 px-4 py-2.5 rounded-xl neu text-lmdr-blue text-[12px] font-bold flex items-center justify-center gap-2 hover:neu-s transition-all">
             <span class="material-symbols-outlined text-[16px]">person_add</span>Save to Pipeline
           </button>
           <button onclick="ROS.views._search.openMessageModal('email')" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan hover:text-lmdr-blue transition-colors flex items-center gap-2">
@@ -684,7 +688,7 @@
         <h3 class="text-[16px] font-bold text-lmdr-dark mb-2">Profile View Quota Exceeded</h3>
         <p class="text-[12px] text-tan mb-4">You've used all your profile views for this period. Upgrade your plan for more views.</p>
         <div class="flex gap-2 justify-center">
-          <button onclick="ROS.views._search.upgrade()" class="px-5 py-2.5 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[12px] font-bold shadow-lg">Upgrade Plan</button>
+          <button onclick="ROS.views._search.upgrade()" class="px-5 py-2.5 rounded-xl neu text-lmdr-blue text-[12px] font-bold hover:neu-s transition-all">Upgrade Plan</button>
           <button onclick="ROS.views._search.closeModal('profile-modal')" class="px-5 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan">Close</button>
         </div>
       </div>`;
@@ -723,7 +727,7 @@
           </button>
         </div>
         <div class="flex gap-2">
-          <button onclick="ROS.views._search.sendMessage()" class="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[12px] font-bold shadow-lg hover:shadow-xl transition-shadow">
+          <button onclick="ROS.views._search.sendMessage()" class="flex-1 px-4 py-2.5 rounded-xl neu text-lmdr-blue text-[12px] font-bold hover:neu-s transition-all">
             ${isText ? 'Send Text' : 'Send Email'}
           </button>
           <button onclick="ROS.views._search.closeModal('message-modal')" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan">Cancel</button>
@@ -795,7 +799,7 @@
           </div>
         </div>
         <div class="flex gap-2 mt-5">
-          <button onclick="ROS.views._search.submitSaveSearch()" class="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-br from-lmdr-blue to-lmdr-deep text-white text-[12px] font-bold shadow-lg">Save Search</button>
+          <button onclick="ROS.views._search.submitSaveSearch()" class="flex-1 px-4 py-2.5 rounded-xl neu text-lmdr-blue text-[12px] font-bold hover:neu-s transition-all">Save Search</button>
           <button onclick="ROS.views._search.closeModal('save-search-modal')" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan">Cancel</button>
         </div>
       </div>`;
@@ -876,11 +880,11 @@
   // ── Weight Preferences (floating orb with donut chart) ──
   const WEIGHT_META = {
     qualifications: { name: 'Qualifications', icon: 'verified', color: 'text-lmdr-blue', hex: '#2563eb' },
-    experience:     { name: 'Experience',     icon: 'work_history', color: 'text-violet-500', hex: '#8b5cf6' },
-    location:       { name: 'Location',       icon: 'location_on', color: 'text-emerald-500', hex: '#10b981' },
-    availability:   { name: 'Availability',   icon: 'event_available', color: 'text-amber-500', hex: '#f59e0b' },
-    salary_fit:     { name: 'Salary Fit',     icon: 'payments', color: 'text-teal-500', hex: '#14b8a6' },
-    engagement:     { name: 'Engagement',     icon: 'trending_up', color: 'text-rose-400', hex: '#fb7185' }
+    experience: { name: 'Experience', icon: 'work_history', color: 'text-violet-500', hex: '#8b5cf6' },
+    location: { name: 'Location', icon: 'location_on', color: 'text-emerald-500', hex: '#10b981' },
+    availability: { name: 'Availability', icon: 'event_available', color: 'text-amber-500', hex: '#f59e0b' },
+    salary_fit: { name: 'Salary Fit', icon: 'payments', color: 'text-teal-500', hex: '#14b8a6' },
+    engagement: { name: 'Engagement', icon: 'trending_up', color: 'text-rose-400', hex: '#fb7185' }
   };
 
   function renderDonutChart() {
@@ -1032,7 +1036,7 @@
 
   // ── Public API ──
   ROS.views._search = {
-    doSearch: function() {
+    doSearch: function () {
       if (!hasCarrier) {
         renderNoCarrierState();
         return;
@@ -1049,7 +1053,7 @@
       ROS.bridge.sendToVelo('searchDrivers', searchData);
     },
 
-    doSort: function() {
+    doSort: function () {
       const sel = document.getElementById('search-sort');
       sortField = sel ? sel.value : 'matchScore';
       if (allDrivers.length) {
@@ -1058,12 +1062,12 @@
       }
     },
 
-    toggleOrb: function(btn, group, value) {
+    toggleOrb: function (btn, group, value) {
       btn.classList.toggle('filter-orb-active');
       btn.classList.toggle('neu-x');
     },
 
-    selectRadioOrb: function(btn, group, value) {
+    selectRadioOrb: function (btn, group, value) {
       // Deselect all in group
       document.querySelectorAll(`[data-filter-group="${group}"]`).forEach(o => {
         o.classList.remove('filter-orb-active');
@@ -1073,7 +1077,7 @@
       btn.classList.remove('neu-x');
     },
 
-    clearFilters: function() {
+    clearFilters: function () {
       document.querySelectorAll('.filter-orb-active').forEach(o => {
         o.classList.remove('filter-orb-active');
         o.classList.add('neu-x');
@@ -1094,18 +1098,18 @@
       renderActiveFilters();
     },
 
-    removeFilter: function(key) {
+    removeFilter: function (key) {
       delete filters[key];
       renderActiveFilters();
     },
 
-    viewProfile: function(id, score) {
+    viewProfile: function (id, score) {
       selectedDriver = id;
       // Show loading state in results
       ROS.bridge.sendToVelo('viewDriverProfile', { driverId: id, matchScore: score });
     },
 
-    saveDriver: function(id, score) {
+    saveDriver: function (id, score) {
       if (!viewedDriverIds.has(id)) {
         showToast('View the driver\'s profile first before saving', 'error');
         return;
@@ -1113,7 +1117,7 @@
       ROS.bridge.sendToVelo('saveDriver', { driverId: id, matchScore: score || 0 });
     },
 
-    saveDriverFromModal: function() {
+    saveDriverFromModal: function () {
       if (selectedDriver) {
         viewedDriverIds.add(selectedDriver);
         const score = selectedDriverData ? (selectedDriverData.matchScore || selectedDriverData.match_score || 0) : 0;
@@ -1121,11 +1125,11 @@
       }
     },
 
-    openMessageModal: function(mode) {
+    openMessageModal: function (mode) {
       openMessageModal(mode);
     },
 
-    generateAIDraft: function() {
+    generateAIDraft: function () {
       if (!selectedDriverData) {
         showToast('No driver selected', 'error');
         return;
@@ -1145,7 +1149,7 @@
       });
     },
 
-    sendMessage: function() {
+    sendMessage: function () {
       const textarea = document.getElementById('msg-textarea');
       const message = textarea ? textarea.value.trim() : '';
       if (!message) {
@@ -1159,11 +1163,11 @@
       ROS.bridge.sendToVelo('contactDriver', { driverId: selectedDriver, message });
     },
 
-    closeModal: function(id) {
+    closeModal: function (id) {
       closeModal(id);
     },
 
-    goToPage: function(n) {
+    goToPage: function (n) {
       const totalPages = Math.ceil(totalCount / PAGE_SIZE);
       if (n < 0 || n >= totalPages) return;
       currentPage = n;
@@ -1173,11 +1177,11 @@
       if (results) results.scrollIntoView({ behavior: 'smooth', block: 'start' });
     },
 
-    openSaveModal: function() {
+    openSaveModal: function () {
       openSaveSearchModal();
     },
 
-    submitSaveSearch: function() {
+    submitSaveSearch: function () {
       const nameEl = document.getElementById('save-search-name');
       const freqEl = document.getElementById('save-search-freq');
       const channelEl = document.querySelector('input[name="save-alert-ch"]:checked');
@@ -1194,19 +1198,19 @@
       });
     },
 
-    loadSaved: function() {
+    loadSaved: function () {
       ROS.bridge.sendToVelo('loadSavedSearches', {});
     },
 
-    runSaved: function(id) {
+    runSaved: function (id) {
       ROS.bridge.sendToVelo('runSavedSearch', { searchId: id });
     },
 
-    deleteSaved: function(id) {
+    deleteSaved: function (id) {
       ROS.bridge.sendToVelo('deleteSavedSearch', { searchId: id });
     },
 
-    toggleWeights: function() {
+    toggleWeights: function () {
       const existing = document.getElementById('weights-orb');
       if (existing) { existing.remove(); return; }
       const orb = document.createElement('div');
@@ -1217,7 +1221,7 @@
       document.body.appendChild(orb);
     },
 
-    updateWeight: function(key, val) {
+    updateWeight: function (key, val) {
       const raw = parseInt(val) || 0;
       const otherTotal = Object.entries(weights).filter(([k]) => k !== key).reduce((s, [, v]) => s + v, 0);
       const clamped = Math.min(Math.max(raw, 0), 100 - otherTotal);
@@ -1229,12 +1233,12 @@
       updateWeightsTotal();
     },
 
-    resetWeights: function() {
+    resetWeights: function () {
       weights = { qualifications: 25, experience: 20, location: 20, availability: 15, salary_fit: 10, engagement: 10 };
       refreshWeightsOrb();
     },
 
-    saveWeights: function() {
+    saveWeights: function () {
       const btn = document.getElementById('save-weights-btn');
       if (btn) { btn.textContent = 'Saving\u2026'; btn.disabled = true; }
       ROS.bridge.sendToVelo('saveWeightPreferences', {
@@ -1247,7 +1251,7 @@
       });
     },
 
-    upgrade: function() {
+    upgrade: function () {
       ROS.bridge.sendToVelo('navigateTo', { page: '/pricing' });
     }
   };
