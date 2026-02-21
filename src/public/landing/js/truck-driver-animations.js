@@ -25,14 +25,8 @@ var TruckDriverAnimations = (function () {
       });
     });
 
-    // Step cards: fade+slide in without ScrollTrigger.
-    // ScrollTrigger doesn't fire in Wix iframes (scroll is on parent frame),
-    // and gsap.from() would pin cards at y:30 forever, clipping them below
-    // the iframe boundary. Use fromTo so no initial y-offset is applied.
-    gsap.fromTo('.step-card',
-      { opacity: 0, y: 20 },
-      { opacity: 1, y: 0, duration: 0.6, stagger: 0.12, ease: 'power2.out', delay: 0.2 }
-    );
+    // Step cards: no animation — cards must always be visible regardless of
+    // GSAP load state. ScrollTrigger doesn't fire reliably in Wix iframes.
 
     gsap.from('.benefit-card', {
       scrollTrigger: { trigger: '.benefit-card', start: 'top 85%' },
