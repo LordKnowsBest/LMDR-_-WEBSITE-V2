@@ -287,6 +287,12 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: In Progress*
 *Completion: 25% (Phase 1 Complete — Runtime Foundation)*
 
+## [ ] Track: Async Polling for Semantic Search via External Microservice
+*Link: [./tracks/semantic_search_polling_20260222/](./tracks/semantic_search_polling_20260222/)*
+*Priority: High*
+*Status: Planned*
+*Completion: 0%*
+
 ## [ ] Track: CDN Shell Refactor
 *Link: [./tracks/cdn_shell_refactor_20260219/](./tracks/cdn_shell_refactor_20260219/)*
 *Priority: Medium*
