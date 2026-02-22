@@ -92,7 +92,7 @@ var OnboardingBridge = (function () {
     var data = { page: page };
     if (extra) {
       for (var key in extra) {
-        if (extra.hasOwnProperty(key)) data[key] = extra[key];
+        if (Object.prototype.hasOwnProperty.call(extra, key)) data[key] = extra[key];
       }
     }
     sendToWix('navigateTo', data);

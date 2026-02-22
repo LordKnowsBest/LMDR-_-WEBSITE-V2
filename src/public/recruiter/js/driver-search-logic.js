@@ -121,8 +121,8 @@ var DriverSearchLogic = (function () {
 
     content.innerHTML =
       '<div class="text-center py-12">' +
-        '<div class="w-10 h-10 border-4 border-lmdr-blue border-t-transparent rounded-full animate-spin mx-auto"></div>' +
-        '<p class="text-slate-500 mt-3">Loading profile...</p>' +
+      '<div class="w-10 h-10 border-4 border-lmdr-blue border-t-transparent rounded-full animate-spin mx-auto"></div>' +
+      '<p class="text-slate-500 mt-3">Loading profile...</p>' +
       '</div>';
 
     Bridge.sendAndWait('viewDriverProfile', { driverId: driverId, matchScore: matchScore }).then(function (result) {
@@ -134,12 +134,12 @@ var DriverSearchLogic = (function () {
       } else if (result.quotaExceeded) {
         content.innerHTML =
           '<div class="text-center py-12">' +
-            '<div class="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">' +
-              '<i class="fa-solid fa-lock text-2xl text-amber-600"></i>' +
-            '</div>' +
-            '<h3 class="text-lg font-bold text-amber-800 mb-2">Quota Exceeded</h3>' +
-            '<p class="text-amber-700 mb-4">Upgrade to view more profiles this month.</p>' +
-            '<button class="bg-lmdr-blue text-white font-bold px-6 py-2.5 rounded-xl hover:bg-blue-700">Upgrade to Pro</button>' +
+          '<div class="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">' +
+          '<i class="fa-solid fa-lock text-2xl text-amber-600"></i>' +
+          '</div>' +
+          '<h3 class="text-lg font-bold text-amber-800 mb-2">Quota Exceeded</h3>' +
+          '<p class="text-amber-700 mb-4">Upgrade to view more profiles this month.</p>' +
+          '<button class="bg-lmdr-blue text-white font-bold px-6 py-2.5 rounded-xl hover:bg-blue-700">Upgrade to Pro</button>' +
           '</div>';
       } else {
         content.innerHTML = '<p class="text-red-600 text-center py-12">Failed to load profile</p>';
@@ -591,7 +591,7 @@ var DriverSearchLogic = (function () {
         if (data && data.preferences) {
           Bridge.log('Loaded weight preferences:', data.preferences);
           Object.keys(data.preferences).forEach(function (key) {
-            if (weights.hasOwnProperty(key)) weights[key] = data.preferences[key];
+            if (Object.prototype.hasOwnProperty.call(weights, key)) weights[key] = data.preferences[key];
           });
           Render.updateWeightSliders(weights);
         }

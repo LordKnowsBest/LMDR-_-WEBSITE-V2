@@ -61,8 +61,8 @@ var ComplianceCalendarLogic = (function () {
     }
 
     for (var day = 1; day <= daysInMonth; day++) {
-      var cell = document.createElement('div');
-      cell.className = 'calendar-cell hover:bg-blue-50 transition-colors';
+      var dayCell = document.createElement('div');
+      dayCell.className = 'calendar-cell hover:bg-blue-50 transition-colors';
       var dateNum = document.createElement('div');
       dateNum.className = 'text-xs font-bold text-slate-500 mb-1';
       dateNum.textContent = day;
@@ -70,7 +70,7 @@ var ComplianceCalendarLogic = (function () {
       if (day === today.getDate() && month === today.getMonth() && year === today.getFullYear()) {
         dateNum.className = 'text-xs font-bold text-white bg-lmdr-blue rounded-full w-5 h-5 flex items-center justify-center mb-1';
       }
-      cell.appendChild(dateNum);
+      dayCell.appendChild(dateNum);
 
       var dayEvents = events.filter(function (e) {
         if (!e.due_date) return false;
@@ -89,10 +89,10 @@ var ComplianceCalendarLogic = (function () {
         pill.textContent = evt.title;
         pill.title = evt.title + ' (' + evt.status + ')';
         pill.onclick = function (e) { e.stopPropagation(); viewEvent(evt._id); };
-        cell.appendChild(pill);
+        dayCell.appendChild(pill);
       });
 
-      calendarGrid.appendChild(cell);
+      calendarGrid.appendChild(dayCell);
     }
   }
 

@@ -98,7 +98,7 @@ var OnboardingLogic = (function () {
     }
     if (workflow) {
       for (var key in updates) {
-        if (updates.hasOwnProperty(key)) {
+        if (Object.prototype.hasOwnProperty.call(updates, key)) {
           workflow[key] = updates[key];
         }
       }

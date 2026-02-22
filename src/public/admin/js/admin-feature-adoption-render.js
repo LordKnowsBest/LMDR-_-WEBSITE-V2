@@ -102,20 +102,20 @@ var FeatureAdoptionRender = (function () {
 
       return '<div class="card p-4 cursor-pointer hover:bg-slate-800/50 transition-colors" onclick="FeatureAdoptionLogic.showFeatureDetail(\'' + f.featureId + '\')">' +
         '<div class="flex items-start justify-between mb-2">' +
-          '<div class="text-sm font-medium text-white truncate pr-2">' + (f.displayName || f.featureId) + '</div>' +
-          statusBadge +
+        '<div class="text-sm font-medium text-white truncate pr-2">' + (f.displayName || f.featureId) + '</div>' +
+        statusBadge +
         '</div>' +
         '<div class="flex items-center gap-2 mb-2">' +
-          '<span class="text-2xl font-bold text-' + color + '-400">' + f.healthScore + '</span>' +
-          '<span class="material-symbols-outlined text-sm ' + trendColor + '">' + trendIcon + '</span>' +
-          '<span class="text-xs ' + trendColor + '">' + (f.trend || '0%') + '</span>' +
+        '<span class="text-2xl font-bold text-' + color + '-400">' + f.healthScore + '</span>' +
+        '<span class="material-symbols-outlined text-sm ' + trendColor + '">' + trendIcon + '</span>' +
+        '<span class="text-xs ' + trendColor + '">' + (f.trend || '0%') + '</span>' +
         '</div>' +
         '<div class="health-bar"><div class="health-bar-fill bg-' + color + '-400" style="width:' + f.healthScore + '%"></div></div>' +
         '<div class="flex justify-between mt-2 text-xs text-slate-500">' +
-          '<span>' + (f.last30DaysUsers || 0) + ' users</span>' +
-          '<span>' + (f.category || 'uncategorized') + '</span>' +
+        '<span>' + (f.last30DaysUsers || 0) + ' users</span>' +
+        '<span>' + (f.category || 'uncategorized') + '</span>' +
         '</div>' +
-      '</div>';
+        '</div>';
     }).join('');
   }
 
@@ -138,7 +138,7 @@ var FeatureAdoptionRender = (function () {
         '<td class="p-3 text-slate-300">' + (f.last30DaysUsers || 0) + '</td>' +
         '<td class="p-3 ' + trendColor + '">' + (f.trend || '0%') + '</td>' +
         '<td class="p-3"><button onclick="event.stopPropagation(); FeatureAdoptionLogic.changeFeatureStatus(\'' + f.featureId + '\')" class="text-xs text-slate-400 hover:text-white"><span class="material-symbols-outlined text-sm">edit</span></button></td>' +
-      '</tr>';
+        '</tr>';
     }).join('');
   }
 
@@ -149,7 +149,7 @@ var FeatureAdoptionRender = (function () {
         '<span class="material-symbols-outlined text-4xl text-emerald-400 mb-2">check_circle</span>' +
         '<p class="text-slate-300">No at-risk features detected</p>' +
         '<p class="text-xs text-slate-500 mt-1">All features are performing within acceptable thresholds</p>' +
-      '</div>';
+        '</div>';
       return;
     }
 
@@ -157,14 +157,14 @@ var FeatureAdoptionRender = (function () {
       var riskFactors = f.riskFactors || [];
       return '<div class="card p-4 border-l-4 border-red-400 cursor-pointer hover:bg-slate-800/50" onclick="FeatureAdoptionLogic.showFeatureDetail(\'' + f.featureId + '\')">' +
         '<div class="flex items-start justify-between">' +
-          '<div><div class="font-medium text-white">' + (f.displayName || f.featureId) + '</div>' +
-          '<div class="text-xs text-slate-500 mt-1">' + (f.recommendation || 'Needs investigation') + '</div></div>' +
-          '<span class="text-2xl font-bold text-red-400">' + (f.healthScore || 0) + '</span>' +
+        '<div><div class="font-medium text-white">' + (f.displayName || f.featureId) + '</div>' +
+        '<div class="text-xs text-slate-500 mt-1">' + (f.recommendation || 'Needs investigation') + '</div></div>' +
+        '<span class="text-2xl font-bold text-red-400">' + (f.healthScore || 0) + '</span>' +
         '</div>' +
         (riskFactors.length ? '<div class="flex flex-wrap gap-1 mt-2">' +
           riskFactors.map(function (r) { return '<span class="text-xs bg-red-900/30 text-red-300 px-2 py-0.5 rounded">' + r + '</span>'; }).join('') +
-        '</div>' : '') +
-      '</div>';
+          '</div>' : '') +
+        '</div>';
     }).join('');
   }
 
@@ -186,18 +186,18 @@ var FeatureAdoptionRender = (function () {
 
     var html =
       '<div class="mb-4">' +
-        '<div class="text-sm text-white font-medium">' + (data.displayName || data.funnelId) + '</div>' +
-        '<div class="text-xs text-slate-500">' + (data.timeRange?.start || '') + ' to ' + (data.timeRange?.end || '') + '</div>' +
+      '<div class="text-sm text-white font-medium">' + (data.displayName || data.funnelId) + '</div>' +
+      '<div class="text-xs text-slate-500">' + (data.timeRange?.start || '') + ' to ' + (data.timeRange?.end || '') + '</div>' +
       '</div>' +
       '<div class="grid grid-cols-2 gap-3 mb-4">' +
-        '<div class="bg-slate-800/50 rounded-lg p-3 text-center">' +
-          '<div class="text-xs text-slate-400">Total Entered</div>' +
-          '<div class="text-xl font-bold text-white">' + (data.totalEntered || 0) + '</div>' +
-        '</div>' +
-        '<div class="bg-slate-800/50 rounded-lg p-3 text-center">' +
-          '<div class="text-xs text-slate-400">Overall Conversion</div>' +
-          '<div class="text-xl font-bold text-emerald-400">' + (data.overallConversionRate || 0) + '%</div>' +
-        '</div>' +
+      '<div class="bg-slate-800/50 rounded-lg p-3 text-center">' +
+      '<div class="text-xs text-slate-400">Total Entered</div>' +
+      '<div class="text-xl font-bold text-white">' + (data.totalEntered || 0) + '</div>' +
+      '</div>' +
+      '<div class="bg-slate-800/50 rounded-lg p-3 text-center">' +
+      '<div class="text-xs text-slate-400">Overall Conversion</div>' +
+      '<div class="text-xl font-bold text-emerald-400">' + (data.overallConversionRate || 0) + '%</div>' +
+      '</div>' +
       '</div>' +
       '<div class="flex items-center gap-2 overflow-x-auto pb-4">';
 
@@ -206,12 +206,12 @@ var FeatureAdoptionRender = (function () {
       var color = step.conversionRate >= 80 ? 'bg-emerald-500' : step.conversionRate >= 50 ? 'bg-amber-500' : 'bg-red-500';
       html +=
         '<div class="funnel-step flex-shrink-0 text-center min-w-[120px]">' +
-          '<div class="text-xs text-slate-400 mb-1 truncate">' + (step.displayName || step.featureId) + '</div>' +
-          '<div class="mx-auto w-16 bg-slate-800 rounded-md overflow-hidden" style="height:100px">' +
-            '<div class="' + color + ' w-full rounded-md transition-all" style="height:' + barHeight + '%; margin-top:' + (100 - barHeight) + '%"></div>' +
-          '</div>' +
-          '<div class="text-sm font-bold text-white mt-1">' + step.completed + '</div>' +
-          '<div class="text-xs text-slate-500">' + step.conversionRate + '%</div>' +
+        '<div class="text-xs text-slate-400 mb-1 truncate">' + (step.displayName || step.featureId) + '</div>' +
+        '<div class="mx-auto w-16 bg-slate-800 rounded-md overflow-hidden" style="height:100px">' +
+        '<div class="' + color + ' w-full rounded-md transition-all" style="height:' + barHeight + '%; margin-top:' + (100 - barHeight) + '%"></div>' +
+        '</div>' +
+        '<div class="text-sm font-bold text-white mt-1">' + step.completed + '</div>' +
+        '<div class="text-xs text-slate-500">' + step.conversionRate + '%</div>' +
         '</div>';
     });
 
@@ -220,10 +220,10 @@ var FeatureAdoptionRender = (function () {
     if (dropoff) {
       html +=
         '<div class="mt-4 p-3 bg-red-900/20 border border-red-800/30 rounded-lg">' +
-          '<div class="flex items-center gap-2 text-sm text-red-300">' +
-            '<span class="material-symbols-outlined text-sm">warning</span>' +
-            'Biggest drop-off at step ' + dropoff.step + ': ' + dropoff.lostUsers + ' users lost' +
-          '</div>' +
+        '<div class="flex items-center gap-2 text-sm text-red-300">' +
+        '<span class="material-symbols-outlined text-sm">warning</span>' +
+        'Biggest drop-off at step ' + dropoff.step + ': ' + dropoff.lostUsers + ' users lost' +
+        '</div>' +
         '</div>';
     }
 
@@ -263,7 +263,7 @@ var FeatureAdoptionRender = (function () {
     };
     var html = '';
     for (var key in labels) {
-      if (!labels.hasOwnProperty(key)) continue;
+      if (!Object.prototype.hasOwnProperty.call(labels, key)) continue;
       var label = labels[key];
       var val = bd[key] || 0;
       var barColor = val >= 70 ? 'bg-emerald-400' : val >= 40 ? 'bg-amber-400' : 'bg-red-400';
@@ -271,7 +271,7 @@ var FeatureAdoptionRender = (function () {
         '<span class="w-20 text-slate-400">' + label + '</span>' +
         '<div class="flex-1 health-bar"><div class="health-bar-fill ' + barColor + '" style="width:' + val + '%"></div></div>' +
         '<span class="w-8 text-right text-slate-300">' + val + '</span>' +
-      '</div>';
+        '</div>';
     }
     document.getElementById('detailBreakdown').innerHTML = html;
     document.getElementById('detailRecommendation').textContent = data.recommendation || '--';

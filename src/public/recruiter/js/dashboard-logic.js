@@ -849,7 +849,7 @@ var DashboardLogic = (function () {
       getWeightPreferencesResult: function (data) {
         if (data && data.preferences) {
           Object.keys(data.preferences).forEach(function (key) {
-            if (sidebarWeights.hasOwnProperty(key)) {
+            if (Object.prototype.hasOwnProperty.call(sidebarWeights, key)) {
               sidebarWeights[key] = data.preferences[key];
             }
           });
