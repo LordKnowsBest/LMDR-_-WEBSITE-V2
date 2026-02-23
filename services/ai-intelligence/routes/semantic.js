@@ -108,12 +108,20 @@ semanticRouter.post('/embed/carrier', async (c) => {
     const text   = buildCarrierText(profile);
     const vector = await withTimeout(embed(text), EMBED_TIMEOUT_MS);
 
-    const metadata = stripNulls({
+    const metadata = {
       profileUpdatedAt,
-      dot_number:    profile.dot_number    || undefined,
-      fleet_size:    profile.fleet_size    || 0,
-      pay_range_min: profile.pay_range_min || 0,
-    });
+      dot_number:     profile.dot_number     || 0,
+      legal_name:     profile.legal_name     || 'unknown',
+      operation_type: profile.operation_type || 'unknown',
+      state:          profile.state          || 'unknown',
+      fleet_size:     profile.fleet_size     || 0,
+      driver_count:   profile.driver_count   || 0,
+      pay_cpm:        profile.pay_cpm        || profile.pay_range_min || 0,
+      turnover_pct:   profile.turnover_pct   ?? 0,
+      accident_rate:  profile.accident_rate  ?? 0,
+      priority_score: profile.priority_score || 0,
+      last_active:    new Date().toISOString(),
+    };
 
     await upsertVector('carriers', carrierId, vector, metadata);
 
