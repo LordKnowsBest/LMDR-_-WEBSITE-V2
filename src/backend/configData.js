@@ -457,6 +457,9 @@ export const DATA_SOURCE = {
 
   // ── Retention Outcomes ──
   retentionOutcomes: 'airtable',
+
+  // ── Market Signals ──
+  marketSignals: 'airtable',
 };
 
 // =============================================================================
@@ -886,6 +889,9 @@ export const WIX_COLLECTION_NAMES = {
 
   // ── Retention Outcomes ──
   retentionOutcomes: 'RetentionOutcomes',
+
+  // ── Market Signals ──
+  marketSignals: 'MarketSignals',
 };
 
 // =============================================================================
@@ -1263,6 +1269,9 @@ export const AIRTABLE_TABLE_NAMES = {
 
   // ── Retention Outcomes ──
   retentionOutcomes: 'v2_Retention Outcomes',
+
+  // ── Market Signals ──
+  marketSignals: 'v2_Market Signals',
 };
 
 // =============================================================================

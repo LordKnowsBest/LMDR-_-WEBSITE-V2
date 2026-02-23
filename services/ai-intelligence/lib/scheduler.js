@@ -26,8 +26,14 @@ const SCHEDULES = [
   {
     name:    'eia-fuel',
     path:    '/v1/jobs/eia-fuel',
-    // Every Monday (dayOfWeek === 1), hour 3
+    // Every Monday (dayOfWeek === 1), hour 3  (EIA publishes Mon morning)
     matches: (d) => d.getUTCDay() === 1 && d.getUTCHours() === 3,
+  },
+  {
+    name:    'market-signals',
+    path:    '/v1/jobs/market-signals',
+    // Every Monday, hour 4 — runs AFTER eia-fuel so diesel data is fresh
+    matches: (d) => d.getUTCDay() === 1 && d.getUTCHours() === 4,
   },
   {
     name:    'freight-signals',
@@ -101,6 +107,7 @@ export function startScheduler(port) {
   console.log('[scheduler] Schedules:');
   console.log('  fmcsa-sync        → Mon 02:00 UTC (weekly)');
   console.log('  eia-fuel          → Mon 03:00 UTC (weekly)');
+  console.log('  market-signals    → Mon 04:00 UTC (weekly, after eia-fuel)');
   console.log('  freight-signals   → 1st 04:00 UTC (monthly)');
   console.log('  fmcsa-roster-sync → 1st 05:00 UTC (monthly)');
 

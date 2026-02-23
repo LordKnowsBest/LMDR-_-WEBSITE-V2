@@ -1035,6 +1035,34 @@ const applyFeedbackAdjustments = (baseWeights, feedbackWeights) => {
 };
 
 // =============================================================================
+// MARKET SIGNAL ADJUSTMENT (Phase 3 - Market Intelligence Layer)
+// =============================================================================
+
+/**
+ * Apply the market pay_adjustment_factor to a raw salary fit score.
+ *
+ * In a HOT market (diesel up, freight PPI up), a carrier's pay offer is worth
+ * less than face value — drivers can command more. The factor < 1.0 deflates
+ * the salary fit score to reflect real purchasing power erosion.
+ *
+ * In a SOFT market (factor > 1.0), the same pay offer is relatively more
+ * competitive — score is boosted slightly.
+ *
+ * The factor range is 0.85–1.15, so the maximum score impact is ±15 points.
+ *
+ * @param {number} salaryFitScore     - Raw 0-100 score from scoreSalaryFit()
+ * @param {number} payAdjustFactor    - From marketSignalsService.getPayAdjustmentFactor()
+ * @returns {number} Adjusted score [0,100]
+ */
+const applyMarketAdjustment = (salaryFitScore, payAdjustFactor = 1.0) => {
+  if (typeof payAdjustFactor !== 'number' || payAdjustFactor <= 0) return salaryFitScore;
+  // Invert: high factor (HOT market) means pay is worth less → reduce score
+  // Low factor (SOFT market) means pay is worth more → boost score
+  const adjusted = salaryFitScore * (2 - payAdjustFactor);
+  return Math.min(100, Math.max(0, Math.round(adjusted)));
+};
+
+// =============================================================================
 // SEMANTIC BLEND (Phase 2 - AI Intelligence Layer)
 // =============================================================================
 
@@ -1085,5 +1113,6 @@ module.exports = {
   blendSemanticScore,
   generateDriverMatchRationale,
   getCarrierFeedbackWeights,
-  applyFeedbackAdjustments
+  applyFeedbackAdjustments,
+  applyMarketAdjustment
 };

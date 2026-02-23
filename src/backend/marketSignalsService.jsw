@@ -1,0 +1,129 @@
+/**
+ * marketSignalsService.jsw
+ *
+ * Reads the latest computed market signal from v2_Market Signals and exposes
+ * helpers for downstream services (driverScoring, carrierCoachingService).
+ *
+ * Key consumer: driverScoring.js uses getPayAdjustmentFactor() to adjust the
+ * compensation component of match scores based on current diesel prices and
+ * freight market conditions.
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTION_KEY = 'marketSignals';
+
+// Cache: refresh at most once per hour in the same Wix backend instance
+let _cache = null;
+let _cacheAt = 0;
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Fetch and return the most recent market signal record.
+ * Returns a default neutral signal if no data exists yet.
+ * @returns {Promise<Object>} Market signal fields
+ */
+export async function getLatestMarketSignal() {
+    const now = Date.now();
+    if (_cache && (now - _cacheAt) < CACHE_TTL_MS) {
+        return _cache;
+    }
+
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEY, {
+            limit: 1,
+            suppressAuth: true
+        });
+
+        const record = result.items && result.items[0];
+
+        if (!record) {
+            const neutral = _neutralSignal();
+            _cache = neutral;
+            _cacheAt = now;
+            return neutral;
+        }
+
+        const signal = {
+            signal_date:           record.signal_date           || null,
+            diesel_price_current:  Number(record.diesel_price_current)  || null,
+            diesel_price_4wk_avg:  Number(record.diesel_price_4wk_avg)  || null,
+            diesel_price_12wk_avg: Number(record.diesel_price_12wk_avg) || null,
+            diesel_trend_pct:      record.diesel_trend_pct  !== undefined ? Number(record.diesel_trend_pct)  : null,
+            freight_ppi_current:   Number(record.freight_ppi_current)   || null,
+            freight_ppi_trend_pct: record.freight_ppi_trend_pct !== undefined ? Number(record.freight_ppi_trend_pct) : null,
+            overall_ppi_current:   Number(record.overall_ppi_current)   || null,
+            market_condition:      record.market_condition   || 'NEUTRAL',
+            driver_leverage:       record.driver_leverage    || 'MEDIUM',
+            pay_adjustment_factor: record.pay_adjustment_factor !== undefined
+                ? Number(record.pay_adjustment_factor) : 1.0,
+            market_summary:        record.market_summary     || '',
+            computed_at:           record.computed_at         || null,
+        };
+
+        _cache = signal;
+        _cacheAt = now;
+        return signal;
+
+    } catch (error) {
+        console.error('getLatestMarketSignal error:', error.message);
+        return _neutralSignal();
+    }
+}
+
+/**
+ * Returns just the pay adjustment factor (1.0 = neutral, <1.0 = soft market, >1.0 = hot).
+ * Safe default: 1.0 (neutral) on any error so scoring is never blocked.
+ * @returns {Promise<number>}
+ */
+export async function getPayAdjustmentFactor() {
+    try {
+        const signal = await getLatestMarketSignal();
+        return signal.pay_adjustment_factor ?? 1.0;
+    } catch {
+        return 1.0;
+    }
+}
+
+/**
+ * Returns a brief market context string suitable for embedding in coaching
+ * insights or carrier profiles.
+ * @returns {Promise<Object>} { condition, leverage, summary, dieselPrice, factor }
+ */
+export async function getMarketContext() {
+    try {
+        const signal = await getLatestMarketSignal();
+        return {
+            success:      true,
+            condition:    signal.market_condition,
+            leverage:     signal.driver_leverage,
+            summary:      signal.market_summary,
+            dieselPrice:  signal.diesel_price_current,
+            dieselTrend:  signal.diesel_trend_pct,
+            freightTrend: signal.freight_ppi_trend_pct,
+            factor:       signal.pay_adjustment_factor,
+            signal_date:  signal.signal_date,
+        };
+    } catch (error) {
+        return { success: false, error: error.message, condition: 'NEUTRAL', factor: 1.0 };
+    }
+}
+
+/** Neutral fallback signal — used when no data has been computed yet. */
+function _neutralSignal() {
+    return {
+        signal_date:           null,
+        diesel_price_current:  null,
+        diesel_price_4wk_avg:  null,
+        diesel_price_12wk_avg: null,
+        diesel_trend_pct:      null,
+        freight_ppi_current:   null,
+        freight_ppi_trend_pct: null,
+        overall_ppi_current:   null,
+        market_condition:      'NEUTRAL',
+        driver_leverage:       'MEDIUM',
+        pay_adjustment_factor: 1.0,
+        market_summary:        'Market data not yet available.',
+        computed_at:           null,
+    };
+}
