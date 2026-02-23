@@ -47,6 +47,13 @@ const SCHEDULES = [
     // 1st of every month, hour 5
     matches: (d) => d.getUTCDate() === 1 && d.getUTCHours() === 5,
   },
+  {
+    name:    'fmcsa-mass-embed',
+    path:    '/v1/jobs/fmcsa-mass-embed',
+    // Every day at 01:00 UTC — scans 2000 DOTs per run (~3 min, 10 DOTs/sec)
+    // Resumes from Pinecone progress sentinel automatically.
+    matches: (d) => d.getUTCHours() === 1,
+  },
 ];
 
 // In-memory last-run tracker: { 'job-name': 'YYYY-MM-DD' }
@@ -105,6 +112,7 @@ export function startScheduler(port) {
 
   console.log('[scheduler] Started — checking every hour');
   console.log('[scheduler] Schedules:');
+  console.log('  fmcsa-mass-embed  → Daily 01:00 UTC (2000 DOTs/run, Pinecone-direct)');
   console.log('  fmcsa-sync        → Mon 02:00 UTC (weekly)');
   console.log('  eia-fuel          → Mon 03:00 UTC (weekly)');
   console.log('  market-signals    → Mon 04:00 UTC (weekly, after eia-fuel)');
