@@ -9,6 +9,14 @@
  */
 
 /**
+ * Unified weight constants for multi-dimensional scoring
+ */
+const WEIGHT_TECHNICAL = 0.40;      // Qualifications + Experience
+const WEIGHT_CULTURAL = 0.30;       // Engagement + Availability
+const WEIGHT_LOCATION = 0.20;       // Geographic fit via Haversine
+const WEIGHT_COMPENSATION = 0.10;   // Pay alignment via overlap scoring
+
+/**
  * Default weights for driver scoring (must sum to 100)
  */
 const DEFAULT_WEIGHTS = {
@@ -585,6 +593,93 @@ const scoreEngagement = (driver) => {
 };
 
 /**
+ * Score compensation alignment based on pay range overlap.
+ * Calculates overlap between driver expectations and carrier offer.
+ *
+ * @param {number} driverPayMin - Driver minimum pay expectation (per mile)
+ * @param {number} driverPayMax - Driver maximum pay expectation (per mile)
+ * @param {number} carrierPayMin - Carrier minimum pay offer (per mile)
+ * @param {number} carrierPayMax - Carrier maximum pay offer (per mile)
+ * @returns {number} Score from 0-100 based on compensation fit
+ */
+const compensationOverlapScore = (driverPayMin, driverPayMax, carrierPayMin, carrierPayMax) => {
+  // If any value is null/missing, return neutral score
+  if (driverPayMin == null || driverPayMax == null || carrierPayMin == null || carrierPayMax == null) {
+    return 70;
+  }
+
+  // Calculate overlap between two ranges
+  const overlapStart = Math.max(driverPayMin, carrierPayMin);
+  const overlapEnd = Math.min(driverPayMax, carrierPayMax);
+  const overlap = Math.max(0, overlapEnd - overlapStart);
+
+  // Driver's expected range width
+  const driverRange = driverPayMax - driverPayMin;
+
+  if (driverRange <= 0) {
+    return 70; // Single point expectation - if in carrier range, score 100
+  }
+
+  // Score as percentage of driver's range that overlaps with carrier's offer
+  const score = (overlap / driverRange) * 100;
+
+  return Math.min(100, Math.max(0, Math.round(score)));
+};
+
+/**
+ * Score driver location fit using Haversine distance formula.
+ * Calculates great-circle distance and applies tier-based scoring.
+ *
+ * @param {number} driverLat - Driver latitude
+ * @param {number} driverLng - Driver longitude
+ * @param {number} carrierLat - Carrier latitude (terminal/hub)
+ * @param {number} carrierLng - Carrier longitude (terminal/hub)
+ * @param {boolean} routeTypeMatch - True if driver route preference matches carrier type
+ * @returns {number} Score from 0-100 with optional route match boost
+ */
+const haversineDistanceScore = (driverLat, driverLng, carrierLat, carrierLng, routeTypeMatch = false) => {
+  // If coordinates missing, return neutral score
+  if (driverLat == null || driverLng == null || carrierLat == null || carrierLng == null) {
+    return 50;
+  }
+
+  // Earth radius in miles
+  const EARTH_RADIUS_MILES = 3956;
+
+  // Convert degrees to radians
+  const lat1Rad = (driverLat * Math.PI) / 180;
+  const lat2Rad = (carrierLat * Math.PI) / 180;
+  const deltaLat = ((carrierLat - driverLat) * Math.PI) / 180;
+  const deltaLng = ((carrierLng - driverLng) * Math.PI) / 180;
+
+  // Haversine formula
+  const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+            Math.cos(lat1Rad) * Math.cos(lat2Rad) *
+            Math.sin(deltaLng / 2) * Math.sin(deltaLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = EARTH_RADIUS_MILES * c;
+
+  // Tier-based scoring
+  let score;
+  if (distance <= 50) {
+    score = 1.0;
+  } else if (distance <= 150) {
+    score = 0.8;
+  } else if (distance <= 300) {
+    score = 0.6;
+  } else {
+    score = 0.3;
+  }
+
+  // Apply route type match boost (if driver route pref matches carrier type)
+  if (routeTypeMatch) {
+    score = Math.min(1.0, score * 1.1);
+  }
+
+  return Math.round(score * 100);
+};
+
+/**
  * Calculate overall weighted driver match score
  *
  * Now supports dynamic weighting based on:
@@ -970,6 +1065,10 @@ const blendSemanticScore = (deterministicScore, semanticSimilarity) => {
 };
 
 module.exports = {
+  WEIGHT_TECHNICAL,
+  WEIGHT_CULTURAL,
+  WEIGHT_LOCATION,
+  WEIGHT_COMPENSATION,
   DEFAULT_WEIGHTS,
   FILTER_BOOST_MULTIPLIERS,
   normalizeWeights,
@@ -980,6 +1079,8 @@ module.exports = {
   scoreAvailability,
   scoreSalaryFit,
   scoreEngagement,
+  compensationOverlapScore,
+  haversineDistanceScore,
   calculateDriverMatchScore,
   blendSemanticScore,
   generateDriverMatchRationale,

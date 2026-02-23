@@ -453,7 +453,10 @@ export const DATA_SOURCE = {
   driverSurveyRequests: 'airtable',
   settlementDisputes: 'airtable',
   taxReferenceData: 'airtable',
-  exitSurveys: 'airtable'
+  exitSurveys: 'airtable',
+
+  // ── Retention Outcomes ──
+  retentionOutcomes: 'airtable',
 };
 
 // =============================================================================
@@ -879,7 +882,10 @@ export const WIX_COLLECTION_NAMES = {
   driverSurveyRequests: 'DriverSurveyRequests',
   settlementDisputes: 'SettlementDisputes',
   taxReferenceData: 'TaxReferenceData',
-  exitSurveys: 'ExitSurveys'
+  exitSurveys: 'ExitSurveys',
+
+  // ── Retention Outcomes ──
+  retentionOutcomes: 'RetentionOutcomes',
 };
 
 // =============================================================================
@@ -1253,7 +1259,10 @@ export const AIRTABLE_TABLE_NAMES = {
   driverSurveyRequests: 'v2_Driver Survey Requests',
   settlementDisputes: 'v2_Settlement Disputes',
   taxReferenceData: 'v2_Tax Reference Data',
-  exitSurveys: 'v2_Exit Surveys'
+  exitSurveys: 'v2_Exit Surveys',
+
+  // ── Retention Outcomes ──
+  retentionOutcomes: 'v2_Retention Outcomes',
 };
 
 // =============================================================================
