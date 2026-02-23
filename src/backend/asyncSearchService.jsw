@@ -35,7 +35,8 @@ function generateJobId() {
 }
 
 function now() {
-  return new Date().toISOString();
+  // Airtable date fields only accept YYYY-MM-DD
+  return new Date().toISOString().slice(0, 10);
 }
 
 // ── triggerSemanticSearch ─────────────────────────────────────────────────────
@@ -53,15 +54,13 @@ export async function triggerSemanticSearch(driverPrefs, isPremiumUser = false) 
   const callbackUrl = `${CALLBACK_BASE}/_functions/completeSearch`;
 
   // 1. Write the PROCESSING record to Airtable (fast — no blocking Railway call yet)
+  // Only pass fields with values — nulls cause 422 on Airtable date/text fields
   await dataAccess.insertRecord('searchJobs', {
     job_id:       jobId,
     status:       'PROCESSING',
     started_at:   now(),
     driver_prefs: JSON.stringify(driverPrefs),
     is_premium:   isPremiumUser ? 'Yes' : 'No',
-    results:      null,
-    error:        null,
-    completed_at: null,
   }, { suppressAuth: true });
 
   // 2. Fire Railway in the background — intentionally NOT awaited
@@ -122,8 +121,10 @@ export async function checkSearchStatus(jobId) {
     if (!record) return { status: 'FAILED', error: 'Job not found' };
 
     // Timeout guard — if job is still PROCESSING after 90 seconds, fail it
-    if (record.status === 'PROCESSING' && record.started_at) {
-      const ageMs = Date.now() - new Date(record.started_at).getTime();
+    // Use _createdDate (Airtable's createdTime) for full timestamp precision
+    const createdAt = record._createdDate || record.started_at;
+    if (record.status === 'PROCESSING' && createdAt) {
+      const ageMs = Date.now() - new Date(createdAt).getTime();
       if (ageMs > 90_000) {
         await dataAccess.updateRecord('searchJobs', record._id, {
           status: 'FAILED',

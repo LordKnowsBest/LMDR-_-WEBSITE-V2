@@ -1054,7 +1054,7 @@ export async function post_completeSearch(request) {
       status:       status,
       results:      results ? JSON.stringify(results) : null,
       error:        jobError || null,
-      completed_at: new Date().toISOString(),
+      completed_at: new Date().toISOString().slice(0, 10),
       total_found:  totalFound  || 0,
       total_scored: totalScored || 0,
       elapsed_ms:   elapsedMs   || 0,
