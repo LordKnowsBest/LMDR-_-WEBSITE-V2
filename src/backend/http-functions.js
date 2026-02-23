@@ -5,6 +5,7 @@
 
 import { ok, badRequest, serverError } from 'wix-http-functions';
 import { getSecret } from 'wix-secrets-backend';
+import * as crypto from 'crypto';
 import {
   upsertSubscription,
   upsertApiSubscriptionFromStripe,
@@ -123,10 +124,17 @@ async function verifyStripeSignature(payload, signature) {
 
     // Compute expected signature
     const signedPayload = `${timestamp}.${payload}`;
-    const expectedSignature = await computeHmacSignature(signedPayload, webhookSecret);
+    const expectedSignature = computeHmacSignature(signedPayload, webhookSecret);
 
     // Compare signatures (timing-safe comparison)
-    if (expectedSignature !== signatureHash) {
+    const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+    const signatureBuffer = Buffer.from(signatureHash, 'hex');
+
+    if (expectedBuffer.length !== signatureBuffer.length) {
+      return { success: false, error: 'Signature mismatch' };
+    }
+
+    if (!crypto.timingSafeEqual(expectedBuffer, signatureBuffer)) {
       return { success: false, error: 'Signature mismatch' };
     }
 
@@ -139,36 +147,12 @@ async function verifyStripeSignature(payload, signature) {
 
 /**
  * Compute HMAC-SHA256 signature
- * Wix Velo uses Web Crypto API
+ * Uses Node.js crypto module
  */
-async function computeHmacSignature(message, secret) {
-  try {
-    // Encode the key and message
-    const encoder = new TextEncoder();
-    const keyData = encoder.encode(secret);
-    const messageData = encoder.encode(message);
-
-    // Import key for HMAC
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign']
-    );
-
-    // Sign the message
-    const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageData);
-
-    // Convert to hex string
-    const hashArray = Array.from(new Uint8Array(signature));
-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-    return hashHex;
-  } catch (error) {
-    console.error('[Webhook] HMAC computation error:', error);
-    throw error;
-  }
+function computeHmacSignature(message, secret) {
+  return crypto.createHmac('sha256', secret)
+    .update(message)
+    .digest('hex');
 }
 
 // ============================================================================
