@@ -26,7 +26,9 @@ const MESSAGE_REGISTRY = {
     'agentResponse', // Agent orchestration response
     'agentTyping', // Agent is processing
     'agentToolResult', // Agent tool execution result
-    'voiceReady' // Voice configuration ready
+    'voiceReady', // Voice configuration ready
+    'searchJobStarted', // Async Option B search kicked off — { jobId }
+    'searchJobStatus', // Async search poll response — { status, error? }
   ],
   // Messages TO Velo that HTML sends
   outbound: [
@@ -48,6 +50,7 @@ const MESSAGE_REGISTRY = {
     'startVoiceCall', // Initiate voice call
     'endVoiceCall', // End voice call
     'getVoiceConfig', // Request voice configuration
+    'pollSearchJob', // Option B: poll async search job status
     'ping' // Health check
   ]
 };

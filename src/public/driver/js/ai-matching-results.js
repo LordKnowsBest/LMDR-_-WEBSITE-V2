@@ -58,7 +58,105 @@ function renderFilteredResults() {
   }
 }
 
-function showLoading() {
+// ── Async Option B polling loop ───────────────────────────────────────────────
+
+let _asyncPollInterval = null;
+let _asyncPollTimeout  = null;
+const POLL_INTERVAL_MS = 3000;
+const POLL_MAX_MS      = 90000;
+
+const LOADING_STEPS_ASYNC = [
+  { id: 'step1', text: 'Embedding your driver profile...' },
+  { id: 'step2', text: 'Scanning 600,000+ carriers...' },
+  { id: 'step3', text: 'Ranking semantic matches...' },
+  { id: 'step4', text: 'Enriching top results...' },
+];
+
+function startAsyncPolling(jobId) {
+  stopAsyncPolling(); // clear any previous poll
+
+  let stepIndex = 0;
+  function advanceStep() {
+    if (stepIndex >= LOADING_STEPS_ASYNC.length) return;
+    const steps = LOADING_STEPS_ASYNC;
+    for (let j = 0; j < stepIndex; j++) {
+      const prev = document.getElementById(steps[j].id);
+      if (prev) {
+        prev.classList.remove('active');
+        prev.classList.add('complete');
+        const icon = prev.querySelector('i');
+        if (icon) icon.className = 'fa-solid fa-check';
+      }
+    }
+    const curr = document.getElementById(steps[stepIndex].id);
+    if (curr) {
+      curr.classList.add('active');
+      const icon = curr.querySelector('i');
+      if (icon) icon.className = 'fa-solid fa-circle-notch fa-spin';
+      const label = curr.querySelector('.step-label, span:last-child, p');
+      if (label && steps[stepIndex].text) label.textContent = steps[stepIndex].text;
+    }
+    stepIndex++;
+  }
+
+  advanceStep();
+  const stepTimer = setInterval(advanceStep, 7000);
+
+  _asyncPollInterval = setInterval(() => {
+    sendToWix('pollSearchJob', { jobId });
+  }, POLL_INTERVAL_MS);
+
+  _asyncPollTimeout = setTimeout(() => {
+    stopAsyncPolling();
+    clearInterval(stepTimer);
+    showError('Search timed out. Please try again.');
+  }, POLL_MAX_MS);
+
+  // Return cleanup for stepTimer
+  return stepTimer;
+}
+
+function stopAsyncPolling() {
+  if (_asyncPollInterval) { clearInterval(_asyncPollInterval); _asyncPollInterval = null; }
+  if (_asyncPollTimeout)  { clearTimeout(_asyncPollTimeout);   _asyncPollTimeout  = null; }
+}
+
+// Called when Velo sends 'searchJobStarted' — kicks off polling
+window._handleSearchJobStarted = function(data) {
+  const { jobId } = data;
+  if (!jobId) return;
+  console.log('[async] Search job started:', jobId);
+  window._currentJobId = jobId;
+  showLoading(true); // true = async mode (shows different step labels)
+  const stepTimer = startAsyncPolling(jobId);
+  window._asyncStepTimer = stepTimer;
+};
+
+// Called when Velo sends 'searchJobStatus'
+window._handleSearchJobStatus = function(data) {
+  if (data.status === 'FAILED') {
+    stopAsyncPolling();
+    if (window._asyncStepTimer) clearInterval(window._asyncStepTimer);
+    showError(data.error || 'Search failed. Please try again.');
+  }
+  // PROCESSING: continue polling (Velo will send another event when complete)
+};
+
+function showError(msg) {
+  hideLoading();
+  formSection.style.display = '';
+  const existing = document.getElementById('searchErrorBanner');
+  if (existing) existing.remove();
+  const banner = document.createElement('div');
+  banner.id = 'searchErrorBanner';
+  banner.className = 'search-error-banner';
+  banner.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i> ${msg}`;
+  if (formSection) formSection.insertAdjacentElement('beforebegin', banner);
+}
+
+// ── Loading state (shared sync + async) ──────────────────────────────────────
+
+function showLoading(asyncMode = false) {
   formSection.style.display = 'none';
   const errorBanner = document.getElementById('searchErrorBanner');
   if (errorBanner) errorBanner.remove();
@@ -66,18 +164,26 @@ function showLoading() {
   resultsSection.style.display = ''; // Clear any inline override
   resultsSection.classList.remove('active');
 
+  if (asyncMode) return; // async mode: polling loop drives step animation
+
   const steps = ['step1', 'step2', 'step3', 'step4'];
   steps.forEach((id, i) => {
     setTimeout(() => {
       for (let j = 0; j < i; j++) {
         const prev = document.getElementById(steps[j]);
-        prev.classList.remove('active');
-        prev.classList.add('complete');
-        prev.querySelector('i').className = 'fa-solid fa-check';
+        if (prev) {
+          prev.classList.remove('active');
+          prev.classList.add('complete');
+          const icon = prev.querySelector('i');
+          if (icon) icon.className = 'fa-solid fa-check';
+        }
       }
       const curr = document.getElementById(id);
-      curr.classList.add('active');
-      curr.querySelector('i').className = 'fa-solid fa-circle-notch fa-spin';
+      if (curr) {
+        curr.classList.add('active');
+        const icon = curr.querySelector('i');
+        if (icon) icon.className = 'fa-solid fa-circle-notch fa-spin';
+      }
     }, i * 800);
   });
 }

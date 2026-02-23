@@ -1,0 +1,154 @@
+/**
+ * asyncSearchService.jsw
+ *
+ * Phase 1 & Poll side of the async carrier search pipeline.
+ *
+ * Architecture:
+ *   1. triggerSemanticSearch(driverPrefs, isPremiumUser)
+ *      - Creates a SearchJobs record (status: PROCESSING)
+ *      - Fires a non-awaited fetch to Railway /v1/search/carriers-async
+ *      - Returns { jobId } immediately (~500ms — well under the 14s Velo limit)
+ *
+ *   2. checkSearchStatus(jobId)
+ *      - Reads the SearchJobs record
+ *      - Returns { status, results? }
+ *      - Called by page code on behalf of the HTML polling loop every 3s
+ *
+ * Railway handles: Voyage AI embedding, Pinecone search, Airtable batch-enrich,
+ * FMCSA-only carrier enrichment from Pinecone metadata, ranking, and callback.
+ *
+ * The Railway callback fires POST /_functions/completeSearch which writes
+ * the final results into the SearchJobs record (status: COMPLETE).
+ */
+
+import { getSecret }  from 'wix-secrets-backend';
+import * as dataAccess from 'backend/dataAccess';
+
+const RAILWAY_BASE    = 'https://lmdr-ai-intelligence-production.up.railway.app';
+const CALLBACK_BASE   = 'https://www.lastmiledr.app';
+const JOB_TTL_MS      = 10 * 60 * 1000; // 10 minutes — purge stale jobs
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function generateJobId() {
+  return 'srch_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function now() {
+  return new Date().toISOString();
+}
+
+// ── triggerSemanticSearch ─────────────────────────────────────────────────────
+
+/**
+ * Kick off an async carrier search via Railway.
+ * Returns { jobId } immediately.
+ *
+ * @param {object} driverPrefs  - Driver search preferences from HTML form
+ * @param {boolean} isPremiumUser
+ * @returns {{ jobId: string }}
+ */
+export async function triggerSemanticSearch(driverPrefs, isPremiumUser = false) {
+  const jobId      = generateJobId();
+  const callbackUrl = `${CALLBACK_BASE}/_functions/completeSearch`;
+
+  // 1. Write the PROCESSING record to Airtable (fast — no blocking Railway call yet)
+  await dataAccess.insertRecord('searchJobs', {
+    job_id:       jobId,
+    status:       'PROCESSING',
+    started_at:   now(),
+    driver_prefs: JSON.stringify(driverPrefs),
+    is_premium:   isPremiumUser ? 'Yes' : 'No',
+    results:      null,
+    error:        null,
+    completed_at: null,
+  }, { suppressAuth: true });
+
+  // 2. Fire Railway in the background — intentionally NOT awaited
+  _kickRailway(jobId, driverPrefs, isPremiumUser, callbackUrl).catch(err => {
+    console.error(`[asyncSearch] Railway kick failed for job ${jobId}:`, err.message);
+    // Mark job as FAILED so the poller doesn't spin forever
+    dataAccess.queryRecords('searchJobs', {
+      filters: { job_id: jobId }, limit: 1
+    }).then(r => {
+      const rec = r.items?.[0];
+      if (rec) {
+        dataAccess.updateRecord('searchJobs', rec._id, {
+          status: 'FAILED',
+          error: err.message,
+          completed_at: now(),
+        }, { suppressAuth: true }).catch(() => {});
+      }
+    }).catch(() => {});
+  });
+
+  return { jobId };
+}
+
+async function _kickRailway(jobId, driverPrefs, isPremiumUser, callbackUrl) {
+  const key = await getSecret('LMDR_INTERNAL_KEY');
+
+  await fetch(`${RAILWAY_BASE}/v1/search/carriers-async`, {
+    method: 'POST',
+    headers: {
+      'Content-Type':        'application/json',
+      'x-lmdr-internal-key': key,
+      'x-lmdr-timestamp':    String(Date.now()),
+    },
+    body: JSON.stringify({ jobId, driverPrefs, isPremiumUser, callbackUrl }),
+  });
+  // Response body intentionally ignored — Railway will call back
+}
+
+// ── checkSearchStatus ─────────────────────────────────────────────────────────
+
+/**
+ * Poll the status of a search job.
+ * Called by page code on behalf of the HTML setInterval loop.
+ *
+ * @param {string} jobId
+ * @returns {{ status: 'PROCESSING'|'COMPLETE'|'FAILED', results?: object[], error?: string }}
+ */
+export async function checkSearchStatus(jobId) {
+  if (!jobId) return { status: 'FAILED', error: 'No jobId provided' };
+
+  try {
+    const result = await dataAccess.queryRecords('searchJobs', {
+      filters: { job_id: jobId },
+      limit: 1,
+    });
+
+    const record = result.items?.[0];
+    if (!record) return { status: 'FAILED', error: 'Job not found' };
+
+    // Timeout guard — if job is still PROCESSING after 90 seconds, fail it
+    if (record.status === 'PROCESSING' && record.started_at) {
+      const ageMs = Date.now() - new Date(record.started_at).getTime();
+      if (ageMs > 90_000) {
+        await dataAccess.updateRecord('searchJobs', record._id, {
+          status: 'FAILED',
+          error: 'Search timed out (90s)',
+          completed_at: now(),
+        }, { suppressAuth: true }).catch(() => {});
+        return { status: 'FAILED', error: 'Search timed out. Please try again.' };
+      }
+    }
+
+    if (record.status === 'COMPLETE') {
+      let results = [];
+      try { results = JSON.parse(record.results || '[]'); } catch { results = []; }
+      return { status: 'COMPLETE', results };
+    }
+
+    if (record.status === 'FAILED') {
+      return { status: 'FAILED', error: record.error || 'Search failed' };
+    }
+
+    // Still PROCESSING
+    return { status: 'PROCESSING' };
+
+  } catch (err) {
+    console.error('[asyncSearch] checkSearchStatus error:', err.message);
+    return { status: 'FAILED', error: err.message };
+  }
+}

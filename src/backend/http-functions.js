@@ -999,3 +999,72 @@ export async function post_admin_semantic_backfill(request) {
     return serverError({ error: error.message });
   }
 }
+
+// ============================================================================
+// ASYNC SEARCH CALLBACK
+// POST https://www.lastmiledr.app/_functions/completeSearch
+//
+// Called by the Railway ai-intelligence microservice when an async carrier
+// search job (POST /v1/search/carriers-async) finishes.
+// Writes results into the v2_Search Jobs Airtable collection so the Wix
+// frontend polling loop can pick them up.
+// ============================================================================
+
+export async function post_completeSearch(request) {
+  try {
+    // Validate internal key
+    const internalKey = await getSecret('LMDR_INTERNAL_KEY');
+    const providedKey = request.headers.get
+      ? request.headers.get('x-lmdr-internal-key')
+      : request.headers['x-lmdr-internal-key'];
+
+    if (providedKey !== internalKey) {
+      console.warn('[completeSearch] Unauthorized callback attempt');
+      return badRequest({ error: 'Unauthorized' });
+    }
+
+    // Parse body
+    let body;
+    try {
+      body = JSON.parse(await request.body.text());
+    } catch {
+      return badRequest({ error: 'Invalid JSON body' });
+    }
+
+    const { jobId, status, results, error: jobError, totalFound, totalScored, elapsedMs } = body;
+
+    if (!jobId || !status) {
+      return badRequest({ error: 'jobId and status required' });
+    }
+
+    // Find the SearchJobs record
+    const queryResult = await dataAccess.queryRecords('searchJobs', {
+      filters: { job_id: jobId },
+      limit: 1,
+    });
+
+    const record = queryResult.items?.[0];
+    if (!record) {
+      console.warn(`[completeSearch] Job ${jobId} not found in SearchJobs`);
+      return ok({ received: true, jobId, warning: 'Job record not found' });
+    }
+
+    // Update the record with results
+    await dataAccess.updateRecord('searchJobs', record._id, {
+      status:       status,
+      results:      results ? JSON.stringify(results) : null,
+      error:        jobError || null,
+      completed_at: new Date().toISOString(),
+      total_found:  totalFound  || 0,
+      total_scored: totalScored || 0,
+      elapsed_ms:   elapsedMs   || 0,
+    }, { suppressAuth: true });
+
+    console.log(`[completeSearch] Job ${jobId} → ${status} (${results?.length || 0} results, ${elapsedMs}ms)`);
+    return ok({ received: true, jobId, status });
+
+  } catch (error) {
+    console.error('[completeSearch] Error:', error.message);
+    return serverError({ error: error.message });
+  }
+}

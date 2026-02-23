@@ -337,6 +337,11 @@ export const DATA_SOURCE = {
   cannedResponses: 'airtable',
 
   // -------------------------------------------------------------------------
+  // Async Search Jobs (Option B — async Pinecone search via Railway)
+  // -------------------------------------------------------------------------
+  searchJobs: 'airtable',
+
+  // -------------------------------------------------------------------------
   // Agent & Voice Platform
   // -------------------------------------------------------------------------
   agentConversations: 'airtable',
@@ -804,6 +809,9 @@ export const WIX_COLLECTION_NAMES = {
   chatMessages: 'ChatMessages',
   cannedResponses: 'CannedResponses',
 
+  // Async Search Jobs
+  searchJobs: 'SearchJobs',
+
   // Agent & Voice Platform
   agentConversations: 'AgentConversations',
   agentTurns: 'AgentTurns',
@@ -1168,6 +1176,9 @@ export const AIRTABLE_TABLE_NAMES = {
   chatSessions: 'v2_Chat Sessions',
   chatMessages: 'v2_Chat Messages',
   cannedResponses: 'v2_Canned Responses',
+
+  // Async Search Jobs
+  searchJobs: 'v2_Search Jobs',
 
   // Agent & Voice Platform
   agentConversations: 'v2_Agent Conversations',

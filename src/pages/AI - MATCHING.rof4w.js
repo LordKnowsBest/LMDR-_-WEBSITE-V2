@@ -1,4 +1,5 @@
 import { findMatchingCarriers, logMatchEvent, getDriverSavedCarriers } from 'backend/carrierMatching.jsw';
+import { triggerSemanticSearch, checkSearchStatus } from 'backend/asyncSearchService.jsw';
 import { getMutualInterestForDriver } from 'backend/mutualInterestService.jsw';
 import { enrichCarrier } from 'backend/aiEnrichment.jsw';
 import { getOrCreateDriverProfile, setDiscoverability, getDriverInterests, updateDriverDocuments } from 'backend/driverProfiles.jsw';
@@ -74,6 +75,7 @@ const MESSAGE_REGISTRY = {
     'startVoiceCall', // Initiate voice call
     'endVoiceCall', // End voice call
     'getVoiceConfig', // Request voice configuration
+    'pollSearchJob', // Async search poll — HTML checks job status every 3s
     'ping' // Health check
   ],
   // Messages TO HTML that page code sends
@@ -101,6 +103,8 @@ const MESSAGE_REGISTRY = {
     'agentToolResult', // Tool execution result
     'agentApprovalRequired', // Agent requires user approval to proceed
     'voiceReady', // Voice configuration ready
+    'searchJobStarted', // Async search kicked off — contains { jobId }
+    'searchJobStatus', // Async search poll response — { status, results? }
     'pong' // Health check response
   ]
 };
@@ -265,7 +269,31 @@ async function handleHtmlMessage(msg) {
       // Get fresh user status before searching
       const freshStatus = await getUserStatus();
       cachedUserStatus = freshStatus;
-      await handleFindMatches(msg.data, freshStatus);
+      // Try async Option B path first; fall back to synchronous Airtable search on error
+      try {
+        await handleFindMatchesAsync(msg.data, freshStatus);
+      } catch (asyncErr) {
+        console.warn('[findMatches] Async path failed, falling back to sync:', asyncErr.message);
+        await handleFindMatches(msg.data, freshStatus);
+      }
+      break;
+    }
+
+    case 'pollSearchJob': {
+      // HTML polling loop — check job status and relay to HTML
+      const { jobId } = msg.data || {};
+      if (!jobId) break;
+      try {
+        const poll = await checkSearchStatus(jobId);
+        if (poll.status === 'COMPLETE') {
+          // Reshape Railway results into the format handleFindMatches normally returns
+          await _deliverAsyncResults(poll.results, msg.data, cachedUserStatus);
+        } else {
+          sendToHtml('searchJobStatus', { jobId, status: poll.status, error: poll.error });
+        }
+      } catch (err) {
+        sendToHtml('searchJobStatus', { jobId, status: 'FAILED', error: err.message });
+      }
       break;
     }
 
@@ -625,7 +653,95 @@ async function handleNavigateToLogin() {
 }
 
 // ============================================================================
-// FIND MATCHES - Now returns profile info
+// FIND MATCHES — ASYNC OPTION B PATH
+// Kicks off the Railway async search, returns jobId to HTML immediately.
+// HTML polls via 'pollSearchJob' until status is COMPLETE.
+// ============================================================================
+
+async function handleFindMatchesAsync(driverPrefs, userStatus) {
+  const isPremium = userStatus?.isPremium || false;
+
+  console.log('🚀 [async] Triggering Option B carrier search...');
+
+  const { jobId } = await triggerSemanticSearch(driverPrefs, isPremium);
+
+  console.log(`📡 [async] Job ${jobId} started — sending to HTML for polling`);
+
+  // Tell the HTML to start its 3-second polling loop
+  sendToHtml('searchJobStarted', { jobId });
+}
+
+/**
+ * Called when polling detects COMPLETE.
+ * Enriches the top Airtable-backed result (dot:{number} carriers skip enrichment)
+ * and delivers the final matchResults payload to the HTML.
+ */
+async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
+  if (!rawResults || rawResults.length === 0) {
+    sendToHtml('matchError', { error: 'No carriers found. Try adjusting your preferences.' });
+    return;
+  }
+
+  const driverPrefs = origPrefs?.driverPrefs || origPrefs || {};
+
+  // Phase 1: Merge mutual interests for logged-in users
+  let enrichedMatches = rawResults;
+  if (userStatus?.userId || userStatus?.loggedIn) {
+    try {
+      const driverId = userStatus.userId || wixUsers?.currentUser?.id;
+      if (driverId) {
+        const interestResult = await getMutualInterestForDriver(driverId);
+        if (interestResult.success && interestResult.mutualInterests?.length > 0) {
+          const mutualMap = {};
+          interestResult.mutualInterests.forEach(m => { mutualMap[String(m.carrierDot)] = m; });
+          enrichedMatches = rawResults.map(match => {
+            const dot = String(match.carrier?.DOT_NUMBER);
+            return mutualMap[dot]
+              ? { ...match, isMutualMatch: true, mutualStrength: mutualMap[dot].mutualStrength, mutualSignals: mutualMap[dot].signals }
+              : match;
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[async] Mutual interest merge failed (non-blocking):', err.message);
+    }
+  }
+
+  lastSearchResults = { matches: enrichedMatches, totalScored: enrichedMatches.length };
+
+  // Auto-enrich top Airtable-backed carrier only (fmcsaOnly carriers skip enrichment)
+  const airtableTop = enrichedMatches.find(m => !m.fmcsaOnly && m.needsEnrichment);
+  const autoEnrichDot = airtableTop ? String(airtableTop.carrier.DOT_NUMBER) : null;
+
+  sendToHtml('matchResults', {
+    matches:      enrichedMatches,
+    totalScored:  enrichedMatches.length,
+    totalMatches: enrichedMatches.length,
+    userTier:     userStatus?.tier || 'free',
+    maxAllowed:   userStatus?.isPremium ? 10 : 2,
+    isPremium:    userStatus?.isPremium || false,
+    driverProfile: cachedDriverProfile ? {
+      id: cachedDriverProfile._id,
+      displayName: cachedDriverProfile.display_name,
+      completeness: cachedDriverProfile.profile_completeness_score,
+    } : null,
+    autoEnrichDot,
+    source: 'async-option-b',
+  });
+
+  // Enrich top Airtable carrier in the background
+  if (airtableTop) {
+    const dotNumber = airtableTop.carrier.DOT_NUMBER;
+    sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'loading', position: 1, total: 1 });
+    const enrichment = await enrichWithRetry(dotNumber, airtableTop.carrier, driverPrefs);
+    const enrichStatus = enrichment.building ? 'building' : enrichment.error ? 'error' : 'complete';
+    sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: enrichStatus, ...enrichment });
+    sendToHtml('enrichmentComplete', { totalEnriched: 1 });
+  }
+}
+
+// ============================================================================
+// FIND MATCHES - Synchronous Airtable path (fallback / existing behavior)
 // ============================================================================
 
 async function handleFindMatches(driverPrefs, userStatus) {
