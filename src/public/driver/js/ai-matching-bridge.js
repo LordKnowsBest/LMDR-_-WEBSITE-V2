@@ -120,3 +120,31 @@ function verifyConnection() {
   }, 3000);
 }
 
+// ── Inbound message dispatcher ─────────────────────────────────────────────
+// Handles async Option B messages directly so the HTML switch isn't required.
+// Other message types fall through to the switch in AI_MATCHING.html.
+window.addEventListener('message', function(event) {
+  if (!isValidOrigin(event)) return;
+  const msg = event.data;
+  if (!validateMessageSchema(msg)) return;
+
+  const type = msg.type;
+  if (!validateInboundMessage(type)) return;
+  logMessageFlow('in', type, msg.data);
+
+  if (type === 'pong') {
+    connectionVerified = true;
+    return;
+  }
+
+  // Direct dispatch for async search messages — bypasses stale HTML switch
+  if (type === 'searchJobStarted' && typeof window._handleSearchJobStarted === 'function') {
+    window._handleSearchJobStarted(msg.data);
+    return;
+  }
+  if (type === 'searchJobStatus' && typeof window._handleSearchJobStatus === 'function') {
+    window._handleSearchJobStatus(msg.data);
+    return;
+  }
+});
+
