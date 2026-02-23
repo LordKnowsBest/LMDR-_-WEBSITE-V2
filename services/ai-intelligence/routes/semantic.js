@@ -58,14 +58,14 @@ semanticRouter.post('/embed/driver', async (c) => {
     const text   = buildDriverText(profile);
     const vector = await withTimeout(embed(text), EMBED_TIMEOUT_MS);
 
-    const metadata = stripNulls({
+    const metadata = {
       profileUpdatedAt,
-      cdl_class:        profile.cdl_class        || undefined,
-      home_state:       profile.home_state        || undefined,
+      cdl_class:        profile.cdl_class        || 'unknown',
+      home_state:       profile.home_state        || 'unknown',
       experience_years: profile.experience_years  || 0,
       is_discoverable:  profile.is_discoverable   || 'No',
       last_active:      new Date().toISOString(),
-    });
+    };
 
     await upsertVector('drivers', driverId, vector, metadata);
 
