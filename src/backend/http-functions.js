@@ -1050,7 +1050,8 @@ export async function post_completeSearch(request) {
     }
 
     // Update the record with results
-    await dataAccess.updateRecord('searchJobs', record._id, {
+    await dataAccess.updateRecord('searchJobs', {
+      _id:          record._id,
       status:       status,
       results:      results ? JSON.stringify(results) : null,
       error:        jobError || null,
