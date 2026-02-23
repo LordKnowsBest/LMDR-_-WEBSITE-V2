@@ -201,11 +201,11 @@ semanticRouter.post('/search/carriers-async', async (c) => {
     return c.json({ error: { code: 'MISSING_FIELD', message: 'jobId, driverPrefs, callbackUrl required', requestId } }, 400);
   }
 
-  // Respond 202 immediately — pipeline runs in background
-  c.executionCtx?.waitUntil?.(_runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbackUrl, requestId));
-  // For non-Cloudflare runtimes (Node.js/Railway), fire-and-forget
-  _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbackUrl, requestId)
+  // Respond 202 immediately — pipeline runs in background (once only)
+  const pipeline = _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbackUrl, requestId)
     .catch(err => console.error(`[search/carriers-async] Background error for ${jobId}:`, err.message));
+  // On Cloudflare Workers, waitUntil keeps the VM alive past response; on Node.js/Railway it's a no-op
+  if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(pipeline);
 
   return c.json({ jobId, status: 'PROCESSING', requestId }, 202);
 });
