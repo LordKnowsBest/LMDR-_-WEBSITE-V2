@@ -125,6 +125,7 @@ async function fetchFmcsaCarrier(dotNumber) {
   const res = await fetch(url);
 
   if (res.status === 404) return null;
+  if (res.status === 403) return null; // Restricted record (investigation hold, revocation pending) — skip silently
   if (!res.ok) throw new Error(`FMCSA API ${res.status} for DOT ${dotNumber}`);
 
   const data = await res.json();
