@@ -87,6 +87,12 @@ async function fetchFmcsaCarrier(dotNumber) {
   if (!res.ok) throw new Error(`FMCSA API ${res.status} for DOT ${dotNumber}`);
 
   const data = await res.json();
+
+  // Detect invalid web key — FMCSA returns HTTP 200 with string content "Webkey not found"
+  if (typeof data?.content === 'string' && data.content.toLowerCase().includes('webkey')) {
+    throw new Error(`FMCSA web key invalid or not set (FMCSA_WEB_KEY env var missing)`);
+  }
+
   return data?.content?.carrier || data?.carrier || null;
 }
 
