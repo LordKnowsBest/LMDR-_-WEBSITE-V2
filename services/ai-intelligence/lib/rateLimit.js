@@ -15,6 +15,11 @@ function getIp(c) {
 
 export function rateLimitMiddleware() {
   return async (c, next) => {
+    // Internal bulk operations bypass per-IP rate limiting
+    if (c.req.header('x-lmdr-internal-key')) {
+      return next();
+    }
+
     const ip  = getIp(c);
     const now = Date.now();
 

@@ -37,6 +37,7 @@ export const DATA_SOURCE = {
   driverApplications: 'airtable',
   fbCampaignDrivers: 'airtable',
   scoredDrivers: 'airtable',
+  quickAppJotform: 'airtable',
 
   // -------------------------------------------------------------------------
   // Matching & Interests
@@ -570,6 +571,7 @@ export const WIX_COLLECTION_NAMES = {
   driverApplications: 'DriverApplications',
   fbCampaignDrivers: 'FBCampaignDrivers',
   scoredDrivers: 'ScoredDrivers',
+  quickAppJotform: 'QuickAppJotform',
 
   // Matching & Interests
   driverCarrierInterests: 'DriverCarrierInterests',
@@ -898,6 +900,7 @@ export const AIRTABLE_TABLE_NAMES = {
   driverApplications: 'Applications',
   fbCampaignDrivers: 'CDL DRIVERS NJ FB CAMPAIGN',
   scoredDrivers: 'Scored Drivers',
+  quickAppJotform: 'Quick APP- JOTFORM',
 
   // Matching & Interests
   driverCarrierInterests: 'v2_Driver Carrier Interests',

@@ -38,22 +38,55 @@ function sleep(ms) {
 
 // ── Driver backfill ──────────────────────────────────────────────────────────
 
-/**
- * Embed all discoverable driver profiles into lmdr-drivers Pinecone index.
- * @returns {{ processed, skipped, failed, errors }}
- */
-async function _backfillDrivers() {
-  const version = todayVersionString();
-  const stats   = { processed: 0, skipped: 0, failed: 0, errors: [] };
+/** Normalize CDL class strings to single letter: "Class A" / "cdl_a" → "A" */
+function _normalizeCdlClass(raw) {
+  if (!raw) return null;
+  const s = String(raw).toUpperCase();
+  if (s.includes('A')) return 'A';
+  if (s.includes('B')) return 'B';
+  if (s.includes('C')) return 'C';
+  return null;
+}
 
+/** Normalize experience text to integer years */
+function _normalizeExperience(raw) {
+  if (!raw) return 0;
+  if (typeof raw === 'number') return raw;
+  const s = String(raw).toLowerCase();
+  if (s.includes('10') || s.includes('more than 10')) return 10;
+  if (s.includes('5') || s.includes('5-9'))            return 7;
+  if (s.includes('3') || s.includes('less'))            return 2;
+  if (s.includes('1') || s.includes('1-4'))             return 2;
+  const n = parseInt(s);
+  return isNaN(n) ? 0 : n;
+}
+
+/** Combine route type fields into comma-separated string */
+function _normalizeHaulTypes(...fields) {
+  const seen = new Set();
+  const out = [];
+  for (const f of fields) {
+    if (!f) continue;
+    const items = Array.isArray(f) ? f : [f];
+    for (const item of items) {
+      const v = String(item).trim();
+      if (v && !seen.has(v)) { seen.add(v); out.push(v); }
+    }
+  }
+  return out.length ? out.join(', ') : null;
+}
+
+/**
+ * Generic paged driver embedder — shared by all three driver table backfills.
+ */
+async function _embedDriverPage(collectionKey, profileBuilder, stats, version) {
   let offset = 0;
   let hasMore = true;
 
   while (hasMore) {
     let page;
     try {
-      const result = await dataAccess.queryRecords('driverProfiles', {
-        filters: { is_discoverable: 'Yes' },
+      const result = await dataAccess.queryRecords(collectionKey, {
         limit:  PAGE_SIZE,
         offset,
         suppressAuth: true,
@@ -62,7 +95,7 @@ async function _backfillDrivers() {
       hasMore = page.length === PAGE_SIZE;
       offset += page.length;
     } catch (err) {
-      console.error('[semanticBackfill] Driver page fetch failed at offset', offset, ':', err.message);
+      console.error(`[semanticBackfill] ${collectionKey} page fetch failed at offset`, offset, ':', err.message);
       break;
     }
 
@@ -70,36 +103,91 @@ async function _backfillDrivers() {
 
     const chunks = chunkArray(page, CHUNK_SIZE);
     for (const chunk of chunks) {
-      await Promise.all(chunk.map(async (driver) => {
-        if (!driver._id) { stats.skipped++; return; }
-
+      await Promise.all(chunk.map(async (record) => {
+        if (!record._id) { stats.skipped++; return; }
         try {
-          await embedDriver(
-            driver._id,
-            version,
-            {
-              cdl_class:        driver.cdl_class        || null,
-              endorsements:     driver.endorsements      || null,
-              home_state:       driver.home_state        || null,
-              experience_years: driver.years_experience  || 0,   // field name mapping
-              haul_types:       driver.haul_types        || null,
-              pay_min:          driver.pay_min_cpm       || driver.minimum_pay || null,
-              is_discoverable:  driver.is_discoverable   || 'Yes',
-              bio:              driver.bio               || null,
-            }
-          );
+          await embedDriver(record._id, version, profileBuilder(record));
           stats.processed++;
         } catch (err) {
           stats.failed++;
-          stats.errors.push({ id: driver._id, error: err.message });
+          stats.errors.push({ id: record._id, error: err.message });
         }
       }));
-
       await sleep(CHUNK_DELAY_MS);
     }
 
-    console.log(`[semanticBackfill] Drivers: offset=${offset} processed=${stats.processed} failed=${stats.failed}`);
+    console.log(`[semanticBackfill] ${collectionKey}: offset=${offset} processed=${stats.processed} failed=${stats.failed}`);
   }
+}
+
+/**
+ * Embed all driver sources into lmdr-drivers Pinecone index.
+ * Sources: v2_Driver Profiles, Applications, Scored Drivers.
+ * @returns {{ processed, skipped, failed, errors }}
+ */
+async function _backfillDrivers() {
+  const version = todayVersionString();
+  const stats   = { processed: 0, skipped: 0, failed: 0, errors: [] };
+
+  // 1. V2 Driver Profiles (active platform drivers)
+  await _embedDriverPage('driverProfiles', (d) => ({
+    cdl_class:        _normalizeCdlClass(d['CDL Class'] || d.cdl_class),
+    endorsements:     d['Endorsements'] || d.endorsements || null,
+    home_state:       d['Home State']   || d.home_state   || null,
+    experience_years: _normalizeExperience(d['Years Experience'] || d.years_experience),
+    haul_types:       d['Preferred Operation Type'] || d.haul_types || null,
+    pay_min:          d['Min CPM'] || d.pay_min_cpm || d.minimum_pay || null,
+    is_discoverable:  d['Is Discoverable'] || d.is_discoverable || 'No',
+    bio:              d['Bio'] || d.bio || null,
+  }), stats, version);
+
+  // 2. Applications (job application form submissions)
+  await _embedDriverPage('driverApplications', (d) => ({
+    cdl_class:        _normalizeCdlClass(d['CDL Class']),
+    endorsements:     d['Endorsements?'] !== 'None' ? d['Endorsements?'] : null,
+    home_state:       d['State of Issue'] || null,
+    experience_years: _normalizeExperience(d['Years of Experience']),
+    haul_types:       _normalizeHaulTypes(
+                        d['Route Types - First Option'],
+                        d['Route Types - Second Option'],
+                        d['Route Types - Third Option']
+                      ),
+    pay_min:          null,
+    is_discoverable:  'Yes',
+    bio:              null,
+  }), stats, version);
+
+  // 3. Scored Drivers
+  await _embedDriverPage('scoredDrivers', (d) => ({
+    cdl_class:        _normalizeCdlClass(d.cdl_class),
+    endorsements:     d.endorsements !== 'None' ? d.endorsements : null,
+    home_state:       d['State of Issue'] || null,
+    experience_years: _normalizeExperience(d.years_experience),
+    haul_types:       _normalizeHaulTypes(
+                        d['Route Types - First Option'],
+                        d['Route Types - Second Option'],
+                        d['Route Types - Third Option']
+                      ),
+    pay_min:          null,
+    is_discoverable:  'Yes',
+    bio:              null,
+  }), stats, version);
+
+  // 4. Quick APP- JOTFORM (same field structure as Applications)
+  await _embedDriverPage('quickAppJotform', (d) => ({
+    cdl_class:        _normalizeCdlClass(d['CDL Class']),
+    endorsements:     d['Endorsements?'] !== 'None' ? d['Endorsements?'] : null,
+    home_state:       d['State of Issue'] || null,
+    experience_years: _normalizeExperience(d['Years of Experience']),
+    haul_types:       _normalizeHaulTypes(
+                        d['Route Types - First Option'],
+                        d['Route Types - Second Option'],
+                        d['Route Types - Third Option']
+                      ),
+    pay_min:          null,
+    is_discoverable:  'Yes',
+    bio:              null,
+  }), stats, version);
 
   return stats;
 }

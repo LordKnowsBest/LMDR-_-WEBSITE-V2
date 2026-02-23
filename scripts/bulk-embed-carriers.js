@@ -27,8 +27,8 @@ const AIRTABLE_PAT   = process.env.AIRTABLE_PAT;
 const INTERNAL_KEY   = process.env.LMDR_INTERNAL_KEY;
 const DRY_RUN        = process.env.DRY_RUN === 'true';
 
-const CHUNK_SIZE     = 10;
-const CHUNK_DELAY_MS = 300;
+const CHUNK_SIZE     = 5;
+const CHUNK_DELAY_MS = 600;
 const PAGE_SIZE      = 100;
 const TODAY          = new Date().toISOString().split('T')[0];
 
@@ -112,6 +112,11 @@ async function embedCarrier(record) {
       profile,
     }),
   });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
 
   return res.json();
 }
