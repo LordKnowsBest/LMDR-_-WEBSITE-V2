@@ -654,8 +654,9 @@ async function handleNavigateToLogin() {
 
 // ============================================================================
 // FIND MATCHES — ASYNC OPTION B PATH
-// Kicks off the Railway async search, returns jobId to HTML immediately.
-// HTML polls via 'pollSearchJob' until status is COMPLETE.
+// Kicks off the Railway async search, then Velo polls internally every 3s.
+// HTML stays in loading state until matchResults arrives — no bridge messages
+// needed for the polling loop, so stale HTML cache is not a problem.
 // ============================================================================
 
 async function handleFindMatchesAsync(driverPrefs, userStatus) {
@@ -665,10 +666,44 @@ async function handleFindMatchesAsync(driverPrefs, userStatus) {
 
   const { jobId } = await triggerSemanticSearch(driverPrefs, isPremium);
 
-  console.log(`📡 [async] Job ${jobId} started — sending to HTML for polling`);
+  console.log(`📡 [async] Job ${jobId} started — Velo polling loop starting`);
 
-  // Tell the HTML to start its 3-second polling loop
-  sendToHtml('searchJobStarted', { jobId });
+  // Velo owns the polling loop — no dependency on HTML handling searchJobStarted
+  _pollUntilComplete(jobId, driverPrefs, userStatus, 0);
+}
+
+/**
+ * Recursive setTimeout-based polling loop (runs in Velo page code / browser).
+ * Checks job status every 3s, up to 30 attempts (90s max).
+ * On COMPLETE: calls _deliverAsyncResults → sends matchResults to HTML.
+ * On FAILED or timeout: sends matchError to HTML.
+ */
+function _pollUntilComplete(jobId, driverPrefs, userStatus, attempts) {
+  const MAX_ATTEMPTS = 30;
+  if (attempts >= MAX_ATTEMPTS) {
+    console.warn(`[async poll] Job ${jobId} timed out after ${MAX_ATTEMPTS} attempts`);
+    sendToHtml('matchError', { error: 'Search timed out. Please try again.' });
+    return;
+  }
+  setTimeout(async () => {
+    try {
+      console.log(`[async poll] Checking job ${jobId} (attempt ${attempts + 1})`);
+      const poll = await checkSearchStatus(jobId);
+      if (poll.status === 'COMPLETE') {
+        console.log(`✅ [async poll] Job ${jobId} complete — delivering results`);
+        await _deliverAsyncResults(poll.results, driverPrefs, userStatus);
+      } else if (poll.status === 'FAILED') {
+        console.warn(`[async poll] Job ${jobId} failed:`, poll.error);
+        sendToHtml('matchError', { error: poll.error || 'Search failed. Please try again.' });
+      } else {
+        // Still PROCESSING — poll again
+        _pollUntilComplete(jobId, driverPrefs, userStatus, attempts + 1);
+      }
+    } catch (err) {
+      console.error('[async poll] Unexpected error:', err.message);
+      sendToHtml('matchError', { error: err.message });
+    }
+  }, 3000);
 }
 
 /**
