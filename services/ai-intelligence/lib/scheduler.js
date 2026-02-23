@@ -5,6 +5,7 @@
  * it fires a POST to localhost so the job runs inside the same process.
  *
  * Schedules (all UTC):
+ *   fmcsa-mass-embed   — Daily at 01:00         (Airtable → Pinecone backfill, 300/run)
  *   fmcsa-sync         — Every Monday at 02:00  (weekly safety data refresh)
  *   eia-fuel           — Every Monday at 03:00  (EIA publishes Mon morning)
  *   freight-signals    — 1st of month at 04:00  (FRED monthly data)
@@ -50,7 +51,8 @@ const SCHEDULES = [
   {
     name:    'fmcsa-mass-embed',
     path:    '/v1/jobs/fmcsa-mass-embed',
-    // Every day at 01:00 UTC — scans 2000 DOTs per run (~3 min, 10 DOTs/sec)
+    // Every day at 01:00 UTC — backfills Airtable carriers missing from Pinecone
+    // (3 Airtable pages × 100 carriers = 300 records per run)
     // Resumes from Pinecone progress sentinel automatically.
     matches: (d) => d.getUTCHours() === 1,
   },
@@ -112,7 +114,7 @@ export function startScheduler(port) {
 
   console.log('[scheduler] Started — checking every hour');
   console.log('[scheduler] Schedules:');
-  console.log('  fmcsa-mass-embed  → Daily 01:00 UTC (2000 DOTs/run, Pinecone-direct)');
+  console.log('  fmcsa-mass-embed  → Daily 01:00 UTC (300 Airtable carriers/run → Pinecone backfill)');
   console.log('  fmcsa-sync        → Mon 02:00 UTC (weekly)');
   console.log('  eia-fuel          → Mon 03:00 UTC (weekly)');
   console.log('  market-signals    → Mon 04:00 UTC (weekly, after eia-fuel)');
