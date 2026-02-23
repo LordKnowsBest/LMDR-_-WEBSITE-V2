@@ -17,10 +17,12 @@ export const eiaFuelRouter = new Hono();
 const DATALAKE_BASE  = 'appt00rHHBOiKx9xl';
 const DATALAKE_TABLE = 'RAW_Fuel Prices';
 
+// EPD2D = No. 2 Diesel Retail Prices; NUS = US National average
 const EIA_URL = 'https://api.eia.gov/v2/petroleum/pri/gnd/data/'
   + '?frequency=weekly'
   + '&data[]=value'
-  + '&facets[product][]=DPF'
+  + '&facets[duoarea][]=NUS'
+  + '&facets[product][]=EPD2D'
   + '&sort[0][column]=period'
   + '&sort[0][direction]=desc'
   + '&length=10';
