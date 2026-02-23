@@ -218,3 +218,148 @@ export async function getInterventionSuggestions(driverId, riskData) {
         return { success: false, error: error.message, suggestions: [] };
     }
 }
+
+// ===========================================
+// RETENTION OUTCOMES (Task 3)
+// ===========================================
+
+/**
+ * Log when a driver-carrier match converts to a hire.
+ * @param {string} driverId
+ * @param {string} carrierDot
+ * @param {string} matchedDate - ISO date string of original match
+ */
+export async function logHireEvent(driverId, carrierDot, matchedDate) {
+    try {
+        await dataAccess.insertRecord(COLLECTION_KEYS.retentionOutcomes, {
+            driver_id: driverId,
+            carrier_dot: carrierDot,
+            matched_date: matchedDate,
+            hire_date: new Date().toISOString().split('T')[0],
+            event_type: 'hire',
+            still_employed: true,
+            days_elapsed: 0
+        }, { suppressAuth: true });
+        return { success: true };
+    } catch (error) {
+        console.error('logHireEvent error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Called at 90/180/365-day checkpoints to record retention status.
+ * @param {string} driverId
+ * @param {string} carrierDot
+ * @param {number} daysElapsed
+ * @param {boolean} stillEmployed
+ */
+export async function logRetentionCheckpoint(driverId, carrierDot, daysElapsed, stillEmployed) {
+    try {
+        await dataAccess.insertRecord(COLLECTION_KEYS.retentionOutcomes, {
+            driver_id: driverId,
+            carrier_dot: carrierDot,
+            event_type: 'checkpoint',
+            days_elapsed: daysElapsed,
+            still_employed: stillEmployed,
+            checkpoint_date: new Date().toISOString().split('T')[0]
+        }, { suppressAuth: true });
+        return { success: true };
+    } catch (error) {
+        console.error('logRetentionCheckpoint error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Returns avg tenure and 12-month retention rate for a carrier.
+ * @param {string} carrierDot
+ * @returns {Promise<Object>} { avgTenureDays, twelveMonthRetentionRate, totalHires }
+ */
+export async function getRetentionStats(carrierDot) {
+    try {
+        const result = await dataAccess.queryRecords(COLLECTION_KEYS.retentionOutcomes, {
+            filters: { carrier_dot: carrierDot, event_type: 'hire' },
+            limit: 1000,
+            suppressAuth: true
+        });
+        const hireRecords = result.items || [];
+
+        if (hireRecords.length === 0) {
+            return { success: true, avgTenureDays: 0, twelveMonthRetentionRate: 0, totalHires: 0 };
+        }
+
+        // Pull checkpoint records for the same carrier to compute 365-day retention
+        const checkpointResult = await dataAccess.queryRecords(COLLECTION_KEYS.retentionOutcomes, {
+            filters: { carrier_dot: carrierDot, event_type: 'checkpoint', days_elapsed: 365 },
+            limit: 1000,
+            suppressAuth: true
+        });
+        const yearCheckpoints = checkpointResult.items || [];
+
+        const stillAt365 = yearCheckpoints.filter(r => r.still_employed).length;
+        const twelveMonthRetentionRate = yearCheckpoints.length > 0
+            ? Math.round((stillAt365 / yearCheckpoints.length) * 100)
+            : 0;
+
+        // Avg tenure from hire records that have a known end (still_employed = false)
+        const terminatedRecords = hireRecords.filter(r => !r.still_employed && r.days_elapsed > 0);
+        const avgTenureDays = terminatedRecords.length > 0
+            ? Math.round(terminatedRecords.reduce((sum, r) => sum + (r.days_elapsed || 0), 0) / terminatedRecords.length)
+            : 0;
+
+        return {
+            success: true,
+            avgTenureDays,
+            twelveMonthRetentionRate,
+            totalHires: hireRecords.length
+        };
+    } catch (error) {
+        console.error('getRetentionStats error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Heuristic predicted retention score (0-1) based on carrier signals.
+ * Base 0.5 + pay match bonus (+0.2) + low turnover (+0.15) + low accident rate (+0.1) + fleet size fit (+0.05)
+ * @param {Object} driverProfile - Driver profile fields
+ * @param {Object} carrierProfile - Carrier profile fields
+ * @returns {Promise<number>} Score between 0 and 1
+ */
+export async function getPredictedRetentionScore(driverProfile, carrierProfile) {
+    try {
+        let score = 0.5;
+
+        // Pay match bonus: driver expected CPM vs carrier offered CPM
+        const driverPayExpectation = Number(driverProfile.desired_pay_cpm) || 0;
+        const carrierOfferedCpm = Number(carrierProfile.pay_cpm) || 0;
+        if (carrierOfferedCpm > 0 && driverPayExpectation > 0) {
+            const payRatio = carrierOfferedCpm / driverPayExpectation;
+            if (payRatio >= 1.0) score += 0.2;
+            else if (payRatio >= 0.9) score += 0.1;
+        }
+
+        // Low turnover bonus: carrier annual turnover < 50% is below avg
+        const turnoverPct = Number(carrierProfile.driver_turnover_rate) || 90;
+        if (turnoverPct < 50) score += 0.15;
+        else if (turnoverPct < 70) score += 0.07;
+
+        // Low accident rate bonus
+        const accidentRate = Number(carrierProfile.accident_rate) || 0;
+        if (accidentRate < 1) score += 0.1;
+        else if (accidentRate < 2) score += 0.05;
+
+        // Fleet size fit bonus: driver prefers small/mid-carrier
+        const fleetSize = Number(carrierProfile.total_power_units) || 0;
+        const driverPreference = driverProfile.preferred_fleet_size || '';
+        if (driverPreference === 'small' && fleetSize <= 50) score += 0.05;
+        else if (driverPreference === 'mid' && fleetSize > 50 && fleetSize <= 500) score += 0.05;
+        else if (driverPreference === 'large' && fleetSize > 500) score += 0.05;
+
+        return { success: true, score: Math.min(1, Math.round(score * 100) / 100) };
+    } catch (error) {
+        console.error('getPredictedRetentionScore error:', error);
+        return { success: false, score: 0.5, error: error.message };
+    }
+}

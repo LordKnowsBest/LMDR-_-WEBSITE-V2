@@ -17,6 +17,7 @@ import { healthRouter }   from './routes/health.js';
 import { streamRouter }   from './routes/stream.js';
 import { semanticRouter } from './routes/semantic.js';
 import { researchRouter } from './routes/research.js';
+import { jobsRouter }     from './jobs/index.js';
 
 const app = new Hono();
 
@@ -34,6 +35,7 @@ app.route('/v1/agent',    agentRouter);
 app.route('/v1/stream',   streamRouter);
 app.route('/v1',          semanticRouter);   // /v1/embed/*, /v1/search/*
 app.route('/v1/research', researchRouter);
+app.route('/v1/jobs',     jobsRouter);
 
 // ── 404 catch-all ─────────────────────────────────────────────────────────
 app.notFound((c) => c.json({ error: { code: 'not_found', message: `${c.req.method} ${c.req.path} not found` } }, 404));

@@ -1,0 +1,269 @@
+import * as dataAccess from 'backend/dataAccess';
+import { getRetentionStats, getPredictedRetentionScore } from 'backend/retentionService';
+
+// ===========================================
+// CONFIGURATION & CONSTANTS
+// ===========================================
+
+const COLLECTION_KEYS = {
+    carriers: 'carrierAccounts',
+    driverPerformance: 'driverPerformance',
+    retentionRiskLogs: 'retentionRiskLogs'
+};
+
+// Industry benchmark: 90% annual turnover is average for trucking
+const INDUSTRY_TURNOVER_BENCHMARK = 90;
+// Carriers with >4 crashes per 100 power units are above avg
+const ACCIDENT_RATE_BENCHMARK = 4;
+// Truck age threshold in years
+const TRUCK_AGE_THRESHOLD = 5;
+
+// ===========================================
+// CLUSTER LOGIC
+// ===========================================
+
+/**
+ * Classify a carrier into a retention cluster based on their profile signals.
+ * Cluster: 'pay_gap' | 'home_time' | 'equipment' | 'communication' | 'healthy'
+ * @param {string} carrierDot
+ * @returns {Promise<Object>} { success, cluster, reasons }
+ */
+export async function getRetentionCluster(carrierDot) {
+    try {
+        const carrierResult = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+            filters: { dot_number: carrierDot },
+            limit: 1,
+            suppressAuth: true
+        });
+        const carrier = carrierResult.items && carrierResult.items[0];
+        if (!carrier) {
+            return { success: false, error: 'Carrier not found' };
+        }
+
+        const reasons = [];
+        let cluster = 'healthy';
+
+        const turnoverRate = Number(carrier.driver_turnover_rate) || 0;
+        const avgTruckAge = Number(carrier.avg_truck_age_years) || 0;
+        const homeDaysPerWeek = Number(carrier.home_time_days_per_week) || 0;
+        const payCpm = Number(carrier.pay_cpm) || 0;
+        const industryAvgCpm = Number(carrier.industry_avg_pay_cpm) || payCpm;
+
+        // Pay gap check
+        if (industryAvgCpm > 0 && payCpm < industryAvgCpm * 0.9) {
+            cluster = 'pay_gap';
+            reasons.push(`Pay CPM (${payCpm}) is more than 10% below industry average (${industryAvgCpm})`);
+        }
+
+        // Home time check
+        if (homeDaysPerWeek < 2) {
+            if (cluster === 'healthy') cluster = 'home_time';
+            reasons.push(`Home time (${homeDaysPerWeek} days/week) is below driver expectations`);
+        }
+
+        // Equipment check
+        if (avgTruckAge > TRUCK_AGE_THRESHOLD) {
+            if (cluster === 'healthy') cluster = 'equipment';
+            reasons.push(`Average truck age (${avgTruckAge} yrs) exceeds ${TRUCK_AGE_THRESHOLD}-year threshold`);
+        }
+
+        // Communication / engagement check: high turnover with no other obvious cause
+        if (turnoverRate > INDUSTRY_TURNOVER_BENCHMARK && cluster === 'healthy') {
+            cluster = 'communication';
+            reasons.push(`Turnover rate (${turnoverRate}%) exceeds industry average (${INDUSTRY_TURNOVER_BENCHMARK}%)`);
+        }
+
+        return { success: true, cluster, reasons };
+    } catch (error) {
+        console.error('getRetentionCluster error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ===========================================
+// COACHING INSIGHTS
+// ===========================================
+
+/**
+ * Returns 3-5 actionable insights for a carrier.
+ * Each insight: { factor, current_value, benchmark, recommendation, impact_score }
+ * @param {string} carrierDot
+ * @returns {Promise<Object>} { success, insights }
+ */
+export async function getCoachingInsights(carrierDot) {
+    try {
+        const carrierResult = await dataAccess.queryRecords(COLLECTION_KEYS.carriers, {
+            filters: { dot_number: carrierDot },
+            limit: 1,
+            suppressAuth: true
+        });
+        const carrier = carrierResult.items && carrierResult.items[0];
+        if (!carrier) {
+            return { success: false, error: 'Carrier not found' };
+        }
+
+        const insights = [];
+
+        const payCpm = Number(carrier.pay_cpm) || 0;
+        const industryAvgCpm = Number(carrier.industry_avg_pay_cpm) || 0;
+        const turnoverRate = Number(carrier.driver_turnover_rate) || 0;
+        const accidentRate = Number(carrier.accident_rate) || 0;
+        const avgTruckAge = Number(carrier.avg_truck_age_years) || 0;
+        const homeDays = Number(carrier.home_time_days_per_week) || 0;
+
+        // Pay CPM vs driver expectations
+        if (industryAvgCpm > 0) {
+            const payGapPct = Math.round(((industryAvgCpm - payCpm) / industryAvgCpm) * 100);
+            insights.push({
+                factor: 'Pay CPM vs Industry Average',
+                current_value: `$${payCpm.toFixed(2)}/mile`,
+                benchmark: `$${industryAvgCpm.toFixed(2)}/mile`,
+                recommendation: payGapPct > 0
+                    ? `Increase pay by ~${payGapPct}% to match industry. Even a $0.02 CPM increase reduces turnover intent by 15%.`
+                    : 'Pay is at or above market. Highlight this in driver communications.',
+                impact_score: payGapPct > 10 ? 0.9 : payGapPct > 0 ? 0.6 : 0.2
+            });
+        }
+
+        // Turnover % vs 90% industry avg
+        insights.push({
+            factor: 'Annual Driver Turnover Rate',
+            current_value: `${turnoverRate}%`,
+            benchmark: `${INDUSTRY_TURNOVER_BENCHMARK}% (industry avg)`,
+            recommendation: turnoverRate > INDUSTRY_TURNOVER_BENCHMARK
+                ? `Your turnover is ${turnoverRate - INDUSTRY_TURNOVER_BENCHMARK}pts above average. Consider structured 30/60/90-day check-ins to catch flight-risk early.`
+                : 'Turnover is below industry average. Document your retention practices to scale them.',
+            impact_score: turnoverRate > INDUSTRY_TURNOVER_BENCHMARK ? 0.85 : 0.1
+        });
+
+        // Accident rate
+        if (accidentRate > 0) {
+            insights.push({
+                factor: 'Accident Rate (per 100 power units)',
+                current_value: `${accidentRate}`,
+                benchmark: `${ACCIDENT_RATE_BENCHMARK} (industry avg)`,
+                recommendation: accidentRate > ACCIDENT_RATE_BENCHMARK
+                    ? 'High accident rate signals driver stress or poor route planning. Implement defensive driving training and telematics review.'
+                    : 'Safety record is strong. Use this as a recruiting differentiator.',
+                impact_score: accidentRate > ACCIDENT_RATE_BENCHMARK ? 0.75 : 0.15
+            });
+        }
+
+        // Avg truck age
+        if (avgTruckAge > 0) {
+            insights.push({
+                factor: 'Average Truck Age',
+                current_value: `${avgTruckAge} years`,
+                benchmark: `${TRUCK_AGE_THRESHOLD} years (driver preference threshold)`,
+                recommendation: avgTruckAge > TRUCK_AGE_THRESHOLD
+                    ? `Trucks averaging ${avgTruckAge} years are a top driver complaint. Prioritize upgrading the oldest 20% of the fleet to reduce breakdowns and dissatisfaction.`
+                    : 'Fleet age is within acceptable range. Mention model years in job postings.',
+                impact_score: avgTruckAge > TRUCK_AGE_THRESHOLD ? 0.7 : 0.1
+            });
+        }
+
+        // Home time
+        insights.push({
+            factor: 'Home Time (days/week)',
+            current_value: `${homeDays} days/week`,
+            benchmark: '2+ days/week (driver expectation floor)',
+            recommendation: homeDays < 2
+                ? 'Home time below 2 days/week is a primary churn driver. Explore regional lanes or relay runs to improve schedule predictability.'
+                : 'Home time meets expectations. Ensure dispatchers are honoring committed schedules.',
+            impact_score: homeDays < 2 ? 0.8 : 0.2
+        });
+
+        // Sort by impact descending, return top 5
+        insights.sort((a, b) => b.impact_score - a.impact_score);
+
+        return { success: true, insights: insights.slice(0, 5) };
+    } catch (error) {
+        console.error('getCoachingInsights error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ===========================================
+// RETENTION RISK DRIVERS
+// ===========================================
+
+/**
+ * Returns drivers placed at this carrier with flight-risk signals.
+ * @param {string} carrierDot
+ * @returns {Promise<Object>} { success, drivers }
+ */
+export async function getRetentionRiskDrivers(carrierDot) {
+    try {
+        const riskResult = await dataAccess.queryRecords(COLLECTION_KEYS.retentionRiskLogs, {
+            filters: { carrier_dot: carrierDot },
+            limit: 200,
+            suppressAuth: true
+        });
+        const riskLogs = riskResult.items || [];
+
+        // Deduplicate: keep the most recent risk entry per driver
+        const latestByDriver = {};
+        for (const log of riskLogs) {
+            const driverId = log.driver_id;
+            if (!latestByDriver[driverId] || log.assessment_date > latestByDriver[driverId].assessment_date) {
+                latestByDriver[driverId] = log;
+            }
+        }
+
+        const flightRiskDrivers = Object.values(latestByDriver)
+            .filter(r => r.risk_level === 'HIGH' || r.risk_level === 'CRITICAL')
+            .sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0));
+
+        return {
+            success: true,
+            drivers: flightRiskDrivers.map(r => ({
+                driver_id: r.driver_id,
+                risk_level: r.risk_level,
+                risk_score: r.risk_score,
+                primary_factor: r.primary_factor,
+                assessment_date: r.assessment_date
+            }))
+        };
+    } catch (error) {
+        console.error('getRetentionRiskDrivers error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+// ===========================================
+// FULL DASHBOARD PAYLOAD
+// ===========================================
+
+/**
+ * Full dashboard payload combining cluster, insights, risk drivers, and retention stats.
+ * @param {string} carrierDot
+ * @returns {Promise<Object>}
+ */
+export async function getCarrierRetentionReport(carrierDot) {
+    try {
+        const [clusterResult, insightsResult, riskDriversResult, statsResult] = await Promise.all([
+            getRetentionCluster(carrierDot),
+            getCoachingInsights(carrierDot),
+            getRetentionRiskDrivers(carrierDot),
+            getRetentionStats(carrierDot)
+        ]);
+
+        return {
+            success: true,
+            carrier_dot: carrierDot,
+            cluster: clusterResult.success ? clusterResult.cluster : 'unknown',
+            cluster_reasons: clusterResult.success ? clusterResult.reasons : [],
+            coaching_insights: insightsResult.success ? insightsResult.insights : [],
+            flight_risk_drivers: riskDriversResult.success ? riskDriversResult.drivers : [],
+            retention_stats: statsResult.success ? {
+                avg_tenure_days: statsResult.avgTenureDays,
+                twelve_month_retention_rate: statsResult.twelveMonthRetentionRate,
+                total_hires: statsResult.totalHires
+            } : {},
+            generated_at: new Date().toISOString()
+        };
+    } catch (error) {
+        console.error('getCarrierRetentionReport error:', error);
+        return { success: false, error: error.message };
+    }
+}
