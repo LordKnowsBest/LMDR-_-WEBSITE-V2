@@ -709,9 +709,12 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
 
   lastSearchResults = { matches: enrichedMatches, totalScored: enrichedMatches.length };
 
-  // Auto-enrich top Airtable-backed carrier only (fmcsaOnly carriers skip enrichment)
-  const airtableTop = enrichedMatches.find(m => !m.fmcsaOnly && m.needsEnrichment);
-  const autoEnrichDot = airtableTop ? String(airtableTop.carrier.DOT_NUMBER) : null;
+  // Detect which carriers Railway already enriched via Perplexity.
+  // needsEnrichment=false means Railway already did it — we surface it immediately.
+  // needsEnrichment=true means Railway skipped it (fallback) — Wix enriches as before.
+  const preEnriched   = enrichedMatches.filter(m => !m.needsEnrichment && m.enrichment);
+  const needsWixEnrich = enrichedMatches.find(m => m.needsEnrichment && !m.fmcsaOnly);
+  const autoEnrichDot  = needsWixEnrich ? String(needsWixEnrich.carrier.DOT_NUMBER) : null;
 
   sendToHtml('matchResults', {
     matches:      enrichedMatches,
@@ -729,14 +732,30 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
     source: 'async-option-b',
   });
 
-  // Enrich top Airtable carrier in the background
-  if (airtableTop) {
-    const dotNumber = airtableTop.carrier.DOT_NUMBER;
-    sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'loading', position: 1, total: 1 });
-    const enrichment = await enrichWithRetry(dotNumber, airtableTop.carrier, driverPrefs);
+  // Fire enrichmentUpdate for every carrier Railway pre-enriched via Perplexity
+  // so the renderer paints immediately without waiting for a second round-trip.
+  if (preEnriched.length > 0) {
+    for (const m of preEnriched) {
+      const dotNumber = String(m.carrier.DOT_NUMBER);
+      sendToHtml('enrichmentUpdate', {
+        dot_number: dotNumber,
+        status:     m.enrichment.error ? 'error' : 'complete',
+        ...m.enrichment,
+      });
+    }
+    sendToHtml('enrichmentComplete', { totalEnriched: preEnriched.length });
+  }
+
+  // Fall back to Wix-side Groq enrichment only for carriers Railway didn't cover
+  if (needsWixEnrich) {
+    const dotNumber = needsWixEnrich.carrier.DOT_NUMBER;
+    sendToHtml('enrichmentUpdate', { dot_number: String(dotNumber), status: 'loading', position: 1, total: 1 });
+    const enrichment = await enrichWithRetry(dotNumber, needsWixEnrich.carrier, driverPrefs);
     const enrichStatus = enrichment.building ? 'building' : enrichment.error ? 'error' : 'complete';
-    sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: enrichStatus, ...enrichment });
-    sendToHtml('enrichmentComplete', { totalEnriched: 1 });
+    sendToHtml('enrichmentUpdate', { dot_number: String(dotNumber), status: enrichStatus, ...enrichment });
+    if (!preEnriched.length) {
+      sendToHtml('enrichmentComplete', { totalEnriched: 1 });
+    }
   }
 }
 

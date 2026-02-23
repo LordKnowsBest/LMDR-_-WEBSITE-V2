@@ -11,6 +11,7 @@ import { Hono } from 'hono';
 import crypto from 'node:crypto';
 import { embed, buildDriverText, buildCarrierText } from '../lib/embeddings.js';
 import { upsertVector, queryVectors, fetchVector } from '../lib/pinecone.js';
+import { enrichCarriersBatch } from '../lib/perplexity.js';
 
 export const semanticRouter = new Hono();
 
@@ -379,15 +380,53 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
 
     const maxResults = isPremiumUser ? 10 : 2;
     const finalResults = results.slice(0, maxResults);
+
+    // 6. Perplexity enrichment — runs for all top results (both tiers) in parallel.
+    //    We're async on Railway so there's no timeout ceiling to worry about.
+    //    Each carrier gets web-sourced pay data, driver sentiment, and forum reviews
+    //    BEFORE the callback fires, so the card renders fully on first paint.
+    const ENRICH_TOP_N = Math.min(finalResults.length, isPremiumUser ? 10 : 2);
+    const enrichTargets = finalResults.slice(0, ENRICH_TOP_N).map(r => ({
+      name:      r.carrier.LEGAL_NAME || r.carrier.DBA_NAME || 'Unknown Carrier',
+      dotNumber: String(r.carrier.DOT_NUMBER),
+      knownData: {
+        city:              r.carrier.PHY_CITY,
+        state:             r.carrier.PHY_STATE,
+        fleet_size:        r.carrier.NBR_POWER_UNIT,
+        safety_rating:     r.carrier.SAFETY_RATING,
+        carrier_operation: r.carrier.CARRIER_OPERATION,
+      },
+    }));
+
+    let enrichmentMap = {};
+    if (enrichTargets.length > 0) {
+      console.log(`[search/carriers-async] ${jobId}: enriching ${enrichTargets.length} carriers via Perplexity`);
+      try {
+        enrichmentMap = await enrichCarriersBatch(enrichTargets, { maxConcurrent: 5 });
+        console.log(`[search/carriers-async] ${jobId}: enrichment complete for ${Object.keys(enrichmentMap).length} carriers`);
+      } catch (enrichErr) {
+        console.warn(`[search/carriers-async] ${jobId}: enrichment batch failed (non-blocking):`, enrichErr.message);
+      }
+    }
+
+    // Attach enrichment to each result — renderer reads match.enrichment directly
+    const enrichedFinalResults = finalResults.map(r => {
+      const dot = String(r.carrier.DOT_NUMBER);
+      const enrichment = enrichmentMap[dot] || null;
+      return {
+        ...r,
+        enrichment,
+        needsEnrichment: enrichment ? false : !r.fmcsaOnly, // already done; Wix skips re-enrichment
+      };
+    });
+
     const elapsed = Date.now() - started;
+    console.log(`[search/carriers-async] ${jobId}: returning ${enrichedFinalResults.length} results (with enrichment) in ${elapsed}ms`);
 
-    console.log(`[search/carriers-async] ${jobId}: returning ${finalResults.length} results in ${elapsed}ms`);
-
-    // 6. POST results back to Wix callbackUrl
     await _postCallback(callbackUrl, {
       jobId,
       status:      'COMPLETE',
-      results:     finalResults,
+      results:     enrichedFinalResults,
       totalFound:  results.length,
       totalScored: pineconeMatches.length,
       elapsedMs:   elapsed,

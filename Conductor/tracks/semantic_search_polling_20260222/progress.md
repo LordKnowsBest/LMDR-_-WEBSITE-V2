@@ -13,43 +13,59 @@
 
 ---
 
-## Phase 1: Backend Search Job Kickoff & Caching
+## Phase 1: Backend Search Job Kickoff & Caching ✅ COMPLETE
 
-- [ ] Create `v2_Search Jobs` Airtable collection (or Wix in-memory cache) with fields: `jobId`, `status`, `results`, `createdAt`
-- [ ] Write `triggerSemanticSearch(driverProfile, filters)` in `.jsw` — generates jobId, writes PROCESSING, fires non-awaited fetch to Railway, returns jobId
-- [ ] Write `checkSearchStatus(jobId)` in `.jsw` — reads job record, returns `{ status, results }`
+- [x] Create `v2_Search Jobs` Airtable table — fields: `job_id`, `status` (PROCESSING/COMPLETE/FAILED), `started_at`, `completed_at`, `driver_prefs`, `results`, `error`, `total_found`, `total_scored`, `elapsed_ms`, `is_premium`
+- [x] `src/backend/configData.js` — added `searchJobs` in DATA_SOURCES, WIX_COLLECTION_NAMES, AIRTABLE_TABLE_NAMES
+- [x] `src/backend/asyncSearchService.jsw` — `triggerSemanticSearch(driverPrefs, isPremiumUser)`: generates jobId, writes PROCESSING to Airtable, fires non-awaited Railway call, returns `{ jobId }` in ~500ms
+- [x] `src/backend/asyncSearchService.jsw` — `checkSearchStatus(jobId)`: reads job record, 90s timeout guard marks stale PROCESSING jobs as FAILED, returns `{ status, results? }`
 
 ---
 
-## Phase 2: Railway Search Pipeline & Callback (Option B core)
+## Phase 2: Railway Search Pipeline & Callback (Option B core) ✅ COMPLETE
 
-- [ ] Build `POST /v1/search/carriers-async` on Railway:
-  - [ ] Embed driver profile via Voyage AI
-  - [ ] Query Pinecone `lmdr-carriers` top-75 with `includeMetadata: true`
-  - [ ] Split results: `rec****` (Airtable-backed) vs `dot:****` (FMCSA-only)
-  - [ ] Batch-fetch Airtable fields for `rec****` carriers and merge with Pinecone metadata
-  - [ ] Use Pinecone metadata directly for `dot:****` carriers (no Airtable lookup needed)
-  - [ ] Merge, score, and rank both tiers
-  - [ ] POST results to `callbackUrl` with `{ jobId, status: 'COMPLETE', results }`
-- [ ] Build Wix HTTP Function `post_completeSearch`:
-  - [ ] Validate `x-lmdr-internal-key`
-  - [ ] Find `SearchJobs` record by `jobId`
-  - [ ] Write results JSON, set status `COMPLETE`
-- [ ] Verify `local-mass-embed.js` stores all required metadata fields for FMCSA-only enrichment
+- [x] `POST /v1/search/carriers-async` on Railway (`services/ai-intelligence/routes/semantic.js`):
+  - [x] Responds 202 immediately, runs `_runAsyncCarrierSearch` in background
+  - [x] Embeds driver profile via Voyage AI (`voyage-3`)
+  - [x] Queries Pinecone `lmdr-carriers` top-75 with `includeMetadata: true`
+  - [x] Splits results: `rec****` (Airtable-backed) vs `dot:****` (FMCSA-only)
+  - [x] Batch-fetches Airtable fields for `rec****` carriers via `RECORD_ID()` formula filter
+  - [x] Uses Pinecone metadata directly for `dot:****` carriers (no Airtable/FMCSA call needed)
+  - [x] Merges, scores, and ranks both tiers — `fmcsaOnly: true` flag on FMCSA-only carriers
+  - [x] POSTs results to `callbackUrl` with `{ jobId, status: 'COMPLETE', results, totalFound, totalScored, elapsedMs }`
+- [x] `post_completeSearch` Wix HTTP Function (`src/backend/http-functions.js`):
+  - [x] Validates `x-lmdr-internal-key`
+  - [x] Finds `SearchJobs` record by `jobId`
+  - [x] Writes results JSON, sets status `COMPLETE` or `FAILED`
+- [x] `local-mass-embed.js` stores all required metadata for FMCSA-only enrichment (legal_name, state, fleet_size, safety_rating, carrier_operation, driver_count)
 
 ---
 
 ## Phase 3: Frontend Polling Loop & Two-Tier Rendering
 
-- [ ] Update `ai-matching-logic.js` — call `triggerSemanticSearch()` on submit, receive `jobId`, start `setInterval` polling every 3s, clear on `COMPLETE` or 90s timeout
-- [ ] Add multi-stage loading states to `ai-matching-render.js`:
+- [x] `src/pages/AI - MATCHING.rof4w.js` — async `findMatches` path: calls `triggerSemanticSearch()`, sends `searchJobStarted` to HTML, handles `pollSearchJob` (calls `checkSearchStatus` every 3s from HTML), delivers results via `_deliverAsyncResults` on COMPLETE
+- [x] `src/pages/AI - MATCHING.rof4w.js` — fallback to sync `findMatchingCarriers` if async trigger fails (no regression)
+- [x] `src/public/driver/js/ai-matching-bridge.js` — added `searchJobStarted`, `searchJobStatus` (inbound) and `pollSearchJob` (outbound) to MESSAGE_REGISTRY
+- [x] `src/public/driver/AI_MATCHING.html` — added `searchJobStarted` and `searchJobStatus` switch cases
+- [x] `src/public/driver/js/ai-matching-results.js` — polling loop (`startAsyncPolling` / `stopAsyncPolling`), 3s interval, 90s max timeout, `window._handleSearchJobStarted`, `window._handleSearchJobStatus`
+- [x] Multi-stage async loading states:
   - "Embedding your driver profile..."
   - "Scanning 600,000+ carriers..."
   - "Ranking semantic matches..."
   - "Enriching top results..."
-- [ ] Update `ai-matching-renderers.js` for two card tiers:
-  - [ ] Platform carrier card (`source !== 'fmcsa-mass-embed'`) — existing full card
-  - [ ] FMCSA-only carrier card (`source === 'fmcsa-mass-embed'`) — streamlined card with "Limited data available" badge or "Claim this carrier profile" CTA
+- [x] **Perplexity enrichment on Railway** — `services/ai-intelligence/lib/perplexity.js`
+  - `sonar-pro` model, targets TheTruckersReport / CDLLife / TruckingTruth / Indeed / Glassdoor
+  - Runs for ALL top results (both `rec****` and `dot:****` tiers) in parallel before callback fires
+  - Output: `ai_summary`, `driver_sentiment`, `sentiment_pros/cons`, `pay_estimate`, `benefits`, `hiring_status`, `data_confidence`, `sources_found` — matches `aiEnrichment.jsw` shape
+  - Graceful fallback if key missing or request fails
+- [x] `_deliverAsyncResults` (Wix page code) updated:
+  - Pre-enriched carriers (`needsEnrichment=false, enrichment!=null`) → `enrichmentUpdate` fires immediately on first paint, no round-trip
+  - Only falls back to Wix-side Groq enrichment for carriers Railway didn't cover
+- [x] `services/ai-intelligence/.env` — `PERPLEXITY_API_KEY` placeholder added
+  - **Action required:** Add real key to Railway dashboard → Environment Variables
+- [ ] `ai-matching-renderers.js` — FMCSA-only explicit card style (optional polish):
+  - Platform carrier: existing full card
+  - FMCSA-only: streamlined card with `sources_found` citation chips (Perplexity citations)
 
 ---
 
