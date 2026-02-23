@@ -1,10 +1,10 @@
 {
     "track_id": "semantic_search_polling_20260222",
-    "title": "Async Polling for Semantic Search via External Microservice",
+    "title": "Async Polling for Semantic Search + Full FMCSA Carrier Universe (Option B)",
     "type": "feature",
     "status": "planned",
     "created": "2026-02-22",
-    "updated": "2026-02-22",
+    "updated": "2026-02-23",
     "priority": "high",
     "estimated_phases": 3,
     "completed_phases": 0,
@@ -19,35 +19,59 @@
         "async",
         "pinecone",
         "voyage-ai",
-        "microservice"
+        "microservice",
+        "fmcsa-universe",
+        "option-b",
+        "carrier-expansion"
     ],
     "business_impact": {
         "type": "performance_and_capability",
-        "description": "Bypass Wix's 14-second HTTP timeout limitation for real-time recruiter searches by moving semantic inference to the Node.js Railway microservice and polling from the frontend."
+        "description": "Two-part impact: (1) Bypass Wix's 14-second HTTP timeout for real-time semantic searches by moving inference to Railway. (2) Expand the driver-facing carrier search space from ~23,000 Airtable carriers to 600,000+ active FMCSA carriers by treating Pinecone as the search source of truth instead of Airtable (Option B)."
     },
-    "architecture_constraint": "Wix Velo limits frontend-to-backend calls to 14 seconds. Heavy semantic matching with Voyage AI and Pinecone often exceeds this. The solution is an async polling architecture: Wix calls Velo -> Velo triggers Railway -> Railway works -> Wix frontend polls Velo until results are cached and ready.",
+    "architecture_constraint": "Wix Velo limits frontend-to-backend calls to 14 seconds. Heavy semantic matching with Voyage AI and Pinecone exceeds this. Solution: async polling — Wix triggers Railway, Railway works unbounded, posts results back to Wix, frontend polls until complete. Railway's IP is blocked by FMCSA QC API (HTTP 403), so FMCSA-only carrier enrichment relies on Pinecone metadata pre-populated by local-mass-embed.js (residential IP).",
+    "option_b_carrier_expansion": {
+        "summary": "Move the carrier search space from Airtable (~23k records) to Pinecone (~600k+ vectors) so drivers see the full FMCSA carrier universe.",
+        "current_state": "carrierMatching.jsw fetches all carriers from Airtable and uses Pinecone only to boost scores of existing records. dot:{number} Pinecone vectors are invisible — they have no Airtable counterpart to attach a score to.",
+        "target_state": "Railway queries Pinecone directly as the search source. Results split into two tiers: rec**** (Airtable-backed, full data) and dot:**** (FMCSA-only, Pinecone metadata). Both tiers surface as real match results in the driver UI.",
+        "carrier_tiers": {
+            "platform_carrier": {
+                "vector_id_prefix": "rec",
+                "data_source": "Airtable fields merged with Pinecone metadata",
+                "richness": "Full: pay, turnover, reviews, AI summary, FMCSA safety data"
+            },
+            "fmcsa_only_carrier": {
+                "vector_id_prefix": "dot:",
+                "data_source": "Pinecone metadata only (pre-enriched at embed time by local-mass-embed.js)",
+                "richness": "Partial: legal name, state, city, fleet size, driver count, safety rating, operation type",
+                "ui_treatment": "Streamlined match card with 'Limited data available' badge or 'Claim this profile' CTA"
+            }
+        },
+        "fmcsa_ip_constraint": "Railway cloud IP is blocked by FMCSA QC API (HTTP 403). Live FMCSA calls during search are not possible from Railway. Pinecone metadata stored at embed time (by local-mass-embed.js on residential IP) is the authoritative enrichment source for FMCSA-only carriers."
+    },
     "phases": {
         "1": {
             "name": "Backend Search Job Kickoff & Caching",
             "priority": "yes",
             "framework": "Wix Data Cache + Velo fetch",
-            "description": "Create Velo endpoints to accept a search request, generate a UUID Job ID, trigger the Railway /v1/search endpoint asynchronously, and immediately return the Job ID."
+            "description": "Create SearchJobs collection. Write triggerSemanticSearch() to generate jobId, write PROCESSING record, fire non-awaited fetch to Railway /v1/search/carriers-async, return jobId. Write checkSearchStatus(jobId) for polling."
         },
         "2": {
-            "name": "Railway Callback & Cache Hydration",
+            "name": "Railway Search Pipeline & Callback (Option B core)",
             "priority": "yes",
             "framework": "Railway Microservice + Wix HTTP Functions",
-            "description": "Modify the Railway semantic search routes to accept a callback URL or utilize a Wix HTTP function to push the completed search results back to the Wix database/cache against the associated Job ID."
+            "description": "Build POST /v1/search/carriers-async on Railway: embed driver profile via Voyage, query Pinecone top-75, split rec vs dot results, enrich rec carriers from Airtable batch-fetch, enrich dot carriers from Pinecone metadata, merge and rank, POST results to Wix completeSearch HTTP function. Also build post_completeSearch Wix HTTP function to receive and cache results."
         },
         "3": {
-            "name": "Frontend Async Polling Loop",
+            "name": "Frontend Async Polling Loop & Two-Tier Rendering",
             "priority": "yes",
-            "framework": "Wix Page Code / HTML Bridges",
-            "description": "Update the recruiter search UI (e.g. driver-search-logic.js) to accept the Job ID, enter a continuous 3-second polling loop, and render the results seamlessly once the data is hydrated."
+            "framework": "Wix Page Code / HTML CDN Modules",
+            "description": "Update ai-matching-logic.js to kick off polling on search submit. Add multi-stage loading UI. Update ai-matching-renderers.js to handle two card tiers: full platform card (rec) and streamlined FMCSA-only card (dot) with appropriate CTA."
         }
     },
     "metrics": {
         "target_search_timeout_errors": "0 timeouts on complex semantic queries",
-        "target_user_experience": "Smooth loading animation that handles >14s queries gracefully"
+        "target_user_experience": "Smooth loading animation handling >14s queries gracefully",
+        "target_carrier_universe": "600,000+ FMCSA carriers visible to drivers (up from ~23,000)",
+        "target_match_quality": "Top matches pulled from full FMCSA universe, not limited to platform roster"
     }
 }
