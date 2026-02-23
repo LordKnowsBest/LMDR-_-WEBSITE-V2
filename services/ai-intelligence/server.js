@@ -18,6 +18,7 @@ import { streamRouter }   from './routes/stream.js';
 import { semanticRouter } from './routes/semantic.js';
 import { researchRouter } from './routes/research.js';
 import { jobsRouter }     from './jobs/index.js';
+import { startScheduler } from './lib/scheduler.js';
 
 const app = new Hono();
 
@@ -51,4 +52,5 @@ const PORT = Number(process.env.PORT) || 3000;
 serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`[lmdr-ai-intelligence] Listening on port ${PORT}`);
   console.log(`[lmdr-ai-intelligence] Provider: ${process.env.RUNTIME_PROVIDER || 'claude'}`);
+  startScheduler(PORT);
 });
