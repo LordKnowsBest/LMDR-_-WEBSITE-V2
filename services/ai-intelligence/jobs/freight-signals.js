@@ -18,7 +18,7 @@ import { Hono } from 'hono';
 export const freightSignalsRouter = new Hono();
 
 const DATALAKE_BASE  = 'appt00rHHBOiKx9xl';
-const DATALAKE_TABLE = 'RAW_Freight Signals';
+const DATALAKE_TABLE = 'RAW_FRED_EconomicData';
 
 const FRED_SERIES = ['WPU3012', 'PPIACO'];
 
@@ -115,11 +115,15 @@ freightSignalsRouter.post('/', async (c) => {
 
       try {
         await insertSignalRecord({
-          period:     obs.date,
-          series_id:  seriesId,
-          value:      obs.value,
-          change_pct: changePct,
-          fetched_at: fetchedAt,
+          series_id:         seriesId,
+          observation_date:  obs.date,                   // date field — YYYY-MM-DD
+          observation_value: obs.value,
+          series_title:      seriesId === 'WPU3012'
+                               ? 'Truck Transportation PPI'
+                               : 'Producer Price Index All Commodities',
+          frequency:         'monthly',
+          fetched_at:        fetchedAt.split('T')[0],    // date field — strip time
+          raw_json:          JSON.stringify({ date: obs.date, value: obs.value, change_pct: changePct }),
         });
         records_written++;
       } catch (err) {

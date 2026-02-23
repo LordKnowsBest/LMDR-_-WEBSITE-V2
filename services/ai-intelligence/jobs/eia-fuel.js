@@ -15,7 +15,7 @@ import { Hono } from 'hono';
 export const eiaFuelRouter = new Hono();
 
 const DATALAKE_BASE  = 'appt00rHHBOiKx9xl';
-const DATALAKE_TABLE = 'RAW_Fuel Prices';
+const DATALAKE_TABLE = 'RAW_Diesel_Prices';
 
 // EPD2D = No. 2 Diesel Retail Prices; NUS = US National average
 const EIA_URL = 'https://api.eia.gov/v2/petroleum/pri/gnd/data/'
@@ -88,10 +88,14 @@ eiaFuelRouter.post('/', async (c) => {
   for (const obs of observations) {
     try {
       await upsertFuelRecord({
-        period:           obs.period || null,
-        region:           obs.area_name || obs['area-name'] || 'US',
-        price_per_gallon: obs.value !== undefined ? Number(obs.value) : null,
-        fetched_at:       fetchedAt,
+        series_id:   'EPD2D',
+        area_name:   obs.area_name || obs['area-name'] || 'U.S.',
+        price_date:  obs.period || null,          // date field — YYYY-MM-DD
+        price_value: obs.value !== undefined ? Number(obs.value) : null,
+        frequency:   'weekly',
+        units:       'Dollars per Gallon',
+        fetched_at:  fetchedAt.split('T')[0],     // date field — strip time
+        raw_json:    JSON.stringify(obs),
       });
       records_written++;
     } catch (err) {
