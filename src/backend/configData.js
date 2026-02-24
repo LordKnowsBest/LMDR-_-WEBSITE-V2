@@ -465,6 +465,12 @@ export const DATA_SOURCE = {
 
   // ── Market Signals ──
   marketSignals: 'airtable',
+
+  // ── RAG + Intent Layer (rag_intent_layer_20260224) ──
+  ragDocuments: 'airtable',
+  ragRetrievalLog: 'airtable',
+  ragAnalytics: 'airtable',
+  intentClassificationLog: 'airtable',
 };
 
 // =============================================================================
@@ -489,6 +495,36 @@ export const FEATURE_FLAGS = {
   semanticToolEnabled: true,
   /** Phase 2: Blend semantic score as a component in driver ranking (driverScoring.js) */
   semanticSearchBlendEnabled: true,
+
+  // ── RAG + Intent Layer (rag_intent_layer_20260224) ──
+  /** Master flag — disables RAG retrieval for all roles */
+  ragEnabled: false,
+  /** Per-role flags for independent rollout */
+  ragEnabledDriver: false,
+  ragEnabledRecruiter: false,
+  ragEnabledAdmin: false,
+  ragEnabledCarrier: false,
+  /** Enable intent classification pre-filter on agent turns */
+  intentClassificationEnabled: false,
+  /** Enable per-user conversation memory in lmdr-memory index */
+  conversationMemoryEnabled: false,
+};
+
+// =============================================================================
+// RAG KNOWLEDGE NAMESPACE CONFIGURATION
+// =============================================================================
+
+/**
+ * TTL (hours) and access config per knowledge namespace.
+ * Used by ragFreshnessJob to determine when documents are stale/expired.
+ */
+export const RAG_NAMESPACE_CONFIG = {
+  carrier_intel:       { ttl_hours: 168, access: ['driver', 'recruiter', 'admin', 'carrier', 'b2b'] },
+  driver_market:       { ttl_hours: 24,  access: ['driver', 'recruiter', 'admin', 'carrier'] },
+  platform_ops:        { ttl_hours: 720, access: ['driver', 'recruiter', 'admin', 'carrier'] },
+  industry_regs:       { ttl_hours: 2160, access: ['driver', 'recruiter'] },
+  lane_market:         { ttl_hours: 6,   access: ['driver', 'recruiter', 'admin', 'carrier'] },
+  conversation_memory: { ttl_hours: 2160, access: ['driver', 'recruiter', 'carrier'] },
 };
 
 // =============================================================================
@@ -1283,6 +1319,12 @@ export const AIRTABLE_TABLE_NAMES = {
 
   // ── Market Signals ──
   marketSignals: 'v2_Market Signals',
+
+  // ── RAG + Intent Layer (rag_intent_layer_20260224) ──
+  ragDocuments: 'v2_RAG Documents',
+  ragRetrievalLog: 'v2_RAG Retrieval Log',
+  ragAnalytics: 'v2_RAG Analytics',
+  intentClassificationLog: 'v2_Intent Classification Log',
 };
 
 // =============================================================================

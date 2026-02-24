@@ -26,6 +26,7 @@ var AdminObservabilityConfig = (function () {
         'logsLoaded', 'errorsLoaded', 'traceLoaded',
         'healthLoaded', 'aiAnalyticsLoaded', 'agentBehaviorLoaded',
         'activeAnomaliesLoaded', 'anomalyRulesLoaded', 'anomalyHistoryLoaded',
+        'ragAnalyticsLoaded', 'ragFreshnessLoaded', 'debugRetrievalResult', 'reingestSuccess',
         'actionSuccess', 'actionError'
     ];
 

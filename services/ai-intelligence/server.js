@@ -17,6 +17,8 @@ import { healthRouter }   from './routes/health.js';
 import { streamRouter }   from './routes/stream.js';
 import { semanticRouter } from './routes/semantic.js';
 import { researchRouter } from './routes/research.js';
+import { ragRouter }      from './routes/rag.js';
+import { intentRouter }   from './routes/intent.js';
 import { jobsRouter }     from './jobs/index.js';
 import { startScheduler } from './lib/scheduler.js';
 
@@ -36,6 +38,8 @@ app.route('/v1/agent',    agentRouter);
 app.route('/v1/stream',   streamRouter);
 app.route('/v1',          semanticRouter);   // /v1/embed/*, /v1/search/*
 app.route('/v1/research', researchRouter);
+app.route('/v1/rag',      ragRouter);        // /v1/rag/ingest, /v1/rag/retrieve
+app.route('/v1/intent',   intentRouter);     // /v1/intent/classify
 app.route('/v1/jobs',     jobsRouter);
 
 // ── 404 catch-all ─────────────────────────────────────────────────────────

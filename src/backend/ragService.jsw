@@ -1,0 +1,135 @@
+/**
+ * RAG Retrieval Service — Wix Wrapper
+ *
+ * Wraps the Railway POST /v1/rag/retrieve endpoint.
+ * Provides direct retrieval when called separately from agent/turn.
+ *
+ * - 200ms AbortController timeout
+ * - Circuit breaker: 3 failures → 60s open
+ * - Fails open: returns empty context (no user-visible error)
+ *
+ * Track: rag_intent_layer_20260224
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import { FEATURE_FLAGS } from 'backend/configData';
+
+const RUNTIME_BASE = 'https://lmdr-ai-intelligence-production.up.railway.app';
+const RETRIEVE_TIMEOUT_MS = 200;
+const CIRCUIT_THRESHOLD = 3;
+const CIRCUIT_OPEN_MS = 60_000;
+
+// Circuit breaker state
+let _circuitFailures = 0;
+let _circuitOpenUntil = 0;
+
+function _circuitIsOpen() {
+  return Date.now() < _circuitOpenUntil;
+}
+
+function _recordFailure() {
+  _circuitFailures += 1;
+  if (_circuitFailures >= CIRCUIT_THRESHOLD) {
+    _circuitOpenUntil = Date.now() + CIRCUIT_OPEN_MS;
+    console.error(`[ragService] Circuit OPENED after ${_circuitFailures} failures. Retry after ${new Date(_circuitOpenUntil).toISOString()}`);
+  }
+}
+
+function _recordSuccess() {
+  if (_circuitFailures > 0) {
+    console.log('[ragService] Circuit closed — RAG retrieval healthy.');
+  }
+  _circuitFailures = 0;
+  _circuitOpenUntil = 0;
+}
+
+async function _authHeaders() {
+  const key = await getSecret('LMDR_INTERNAL_KEY');
+  return {
+    'Content-Type': 'application/json',
+    'x-lmdr-internal-key': key,
+    'x-lmdr-timestamp': String(Date.now()),
+  };
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
+/**
+ * Retrieve relevant knowledge context for a query.
+ *
+ * @param {string} query - The user's message or reformulated retrieval query
+ * @param {string[]} namespaces - Namespaces to search
+ * @param {string} role - driver | recruiter | admin | carrier
+ * @param {object} [filters={}] - Pinecone metadata filters
+ * @param {number} [budgetTokens=2000] - Max tokens in assembled context
+ * @returns {Promise<{ contextBlock: string, chunks: Array, retrievalLatencyMs: number, circuitOpen: boolean }>}
+ */
+export async function retrieveContext(query, namespaces, role, filters = {}, budgetTokens = 2000) {
+  const emptyResult = { contextBlock: '', chunks: [], retrievalLatencyMs: 0, circuitOpen: false };
+
+  if (_circuitIsOpen()) {
+    return { ...emptyResult, circuitOpen: true };
+  }
+
+  let headers;
+  try {
+    headers = await _authHeaders();
+  } catch {
+    return emptyResult;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RETRIEVE_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${RUNTIME_BASE}/v1/rag/retrieve`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        query: query.substring(0, 500),
+        namespaces,
+        roleScope: role,
+        topK: 5,
+        filters,
+        contextBudgetTokens: budgetTokens,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      _recordFailure();
+      console.warn(`[ragService] Retrieve returned ${res.status}`);
+      return emptyResult;
+    }
+
+    const data = await res.json();
+    _recordSuccess();
+
+    return {
+      contextBlock: data.contextBlock || '',
+      chunks: data.chunks || [],
+      retrievalLatencyMs: data.retrievalLatencyMs || 0,
+      circuitOpen: false,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    _recordFailure();
+    console.warn('[ragService] Retrieval failed:', err.message);
+    return emptyResult;
+  }
+}
+
+/**
+ * Check if RAG is available for a given role.
+ *
+ * @param {string} role
+ * @returns {boolean}
+ */
+export function isRagAvailable(role) {
+  if (!FEATURE_FLAGS.ragEnabled) return false;
+  const roleFlag = `ragEnabled${role.charAt(0).toUpperCase()}${role.slice(1)}`;
+  if (!FEATURE_FLAGS[roleFlag]) return false;
+  return !_circuitIsOpen();
+}

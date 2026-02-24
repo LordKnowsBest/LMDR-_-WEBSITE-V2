@@ -1,0 +1,399 @@
+/**
+ * RAG Analytics Service
+ *
+ * Weekly rollup of RAG retrieval telemetry and admin query methods.
+ * Tracks citation rate, continuation rate, downstream conversion.
+ * Surfaces metrics for the admin observability RAG Intelligence panel.
+ *
+ * Track: rag_intent_layer_20260224 — Phase 5
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+const COLLECTIONS = {
+  retrievalLog: 'ragRetrievalLog',
+  analytics: 'ragAnalytics',
+  intentLog: 'intentClassificationLog',
+  ragDocuments: 'ragDocuments',
+};
+
+// ── Feedback Loop Signal Updates ──────────────────────────────────────────────
+
+/**
+ * Log a RAG retrieval event with initial telemetry.
+ * Called from agentService.jsw after each RAG-augmented turn.
+ *
+ * @param {object} telemetry
+ * @param {string} telemetry.turn_id
+ * @param {string} telemetry.user_id_hash - sha256(userId + salt)
+ * @param {string} telemetry.role
+ * @param {string} telemetry.intent_class
+ * @param {string[]} telemetry.namespaces_queried
+ * @param {number} telemetry.chunks_retrieved
+ * @param {number} telemetry.chunks_injected
+ * @param {number} telemetry.top_chunk_score
+ * @param {number} telemetry.rag_latency_ms
+ * @param {boolean} telemetry.response_contains_retrieval
+ */
+export async function logRetrievalTelemetry(telemetry) {
+  try {
+    await dataAccess.insertRecord(COLLECTIONS.retrievalLog, {
+      turn_id: telemetry.turn_id || '',
+      user_id_hash: telemetry.user_id_hash || '',
+      role: telemetry.role || '',
+      intent_class: telemetry.intent_class || '',
+      namespaces_queried: (telemetry.namespaces_queried || []).join(', '),
+      chunks_retrieved: telemetry.chunks_retrieved || 0,
+      chunks_injected: telemetry.chunks_injected || 0,
+      top_chunk_score: telemetry.top_chunk_score || 0,
+      rag_latency_ms: telemetry.rag_latency_ms || 0,
+      response_contains_retrieval: telemetry.response_contains_retrieval || false,
+      user_continued_conversation: false,
+      followed_by_application: false,
+      created_at: new Date().toISOString(),
+    }, { suppressAuth: true });
+  } catch (err) {
+    console.warn('[ragAnalytics] Failed to log retrieval telemetry:', err.message);
+  }
+}
+
+/**
+ * Signal 2 — Mark conversation continuation on a previous retrieval log.
+ * Called when user sends a follow-up message after a RAG-augmented turn.
+ *
+ * @param {string} previousTurnId - The turn_id of the RAG-augmented turn
+ */
+export async function markConversationContinuation(previousTurnId) {
+  if (!previousTurnId) return;
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.retrievalLog, {
+      filters: { turn_id: previousTurnId },
+      limit: 1,
+      suppressAuth: true,
+    });
+    if (result.success && result.items?.length) {
+      await dataAccess.updateRecord(COLLECTIONS.retrievalLog, result.items[0]._id, {
+        user_continued_conversation: true,
+      }, { suppressAuth: true });
+    }
+  } catch (err) {
+    console.warn('[ragAnalytics] Failed to mark continuation:', err.message);
+  }
+}
+
+/**
+ * Signal 3 — Mark downstream conversion (application/interest) after a RAG turn.
+ * Called asynchronously when a driver submits an interest or a recruiter initiates contact.
+ *
+ * @param {string} userId - User who performed the conversion action
+ * @param {string} role
+ */
+export async function markDownstreamConversion(userId, role) {
+  if (!userId) return;
+  try {
+    // Find the most recent retrieval log for this user
+    const result = await dataAccess.queryRecords(COLLECTIONS.retrievalLog, {
+      filters: { user_id_hash: userId, role },
+      limit: 5,
+      suppressAuth: true,
+    });
+    if (result.success && result.items?.length) {
+      // Mark the most recent one (first item assuming sorted by created_at desc)
+      const latest = result.items[0];
+      await dataAccess.updateRecord(COLLECTIONS.retrievalLog, latest._id, {
+        followed_by_application: true,
+      }, { suppressAuth: true });
+    }
+  } catch (err) {
+    console.warn('[ragAnalytics] Failed to mark conversion:', err.message);
+  }
+}
+
+/**
+ * Log an intent classification event.
+ * Called from agentService.jsw after each intent classification.
+ *
+ * @param {object} classification
+ */
+export async function logIntentClassification(classification) {
+  try {
+    await dataAccess.insertRecord(COLLECTIONS.intentLog, {
+      message_hash: classification.message_hash || '',
+      role: classification.role || '',
+      intent_class: classification.intent_class || '',
+      confidence: classification.confidence || 0,
+      namespaces_selected: (classification.namespaces_selected || []).join(', '),
+      tool_hints_count: classification.tool_hints_count || 0,
+      latency_ms: classification.latency_ms || 0,
+      model: classification.model || '',
+      used_fallback: classification.used_fallback || false,
+      created_at: new Date().toISOString(),
+    }, { suppressAuth: true });
+  } catch (err) {
+    console.warn('[ragAnalytics] Failed to log intent classification:', err.message);
+  }
+}
+
+// ── Weekly Rollup Job ─────────────────────────────────────────────────────────
+
+/**
+ * Weekly rollup of RAG analytics.
+ * Aggregates ragRetrievalLog into ragAnalytics by role + namespace.
+ * Called by scheduled job (weekly on Monday at 03:00 UTC).
+ */
+export async function runWeeklyRagAnalyticsRollup() {
+  console.log('[ragAnalytics] Starting weekly rollup...');
+
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - 7);
+  weekStart.setHours(0, 0, 0, 0);
+  // Align to Monday
+  const dayOfWeek = weekStart.getDay();
+  const diff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  weekStart.setDate(weekStart.getDate() + diff);
+
+  try {
+    // Fetch all retrieval logs from the past week
+    const result = await dataAccess.queryRecords(COLLECTIONS.retrievalLog, {
+      limit: 500,
+      suppressAuth: true,
+    });
+
+    if (!result.success || !result.items?.length) {
+      console.log('[ragAnalytics] No retrieval logs found for rollup.');
+      return { records: 0 };
+    }
+
+    // Filter to current week only
+    const weekStartMs = weekStart.getTime();
+    const weekEndMs = weekStartMs + 7 * 24 * 60 * 60 * 1000;
+    const weekLogs = result.items.filter(item => {
+      const created = new Date(item.created_at).getTime();
+      return created >= weekStartMs && created < weekEndMs;
+    });
+
+    if (weekLogs.length === 0) {
+      console.log('[ragAnalytics] No logs in current week window.');
+      return { records: 0 };
+    }
+
+    // Group by role + namespace
+    const groups = {};
+    for (const log of weekLogs) {
+      const role = log.role || 'unknown';
+      const namespaces = (log.namespaces_queried || '').split(', ').filter(Boolean);
+
+      for (const ns of namespaces) {
+        const key = `${role}:${ns}`;
+        if (!groups[key]) {
+          groups[key] = { role, namespace: ns, logs: [] };
+        }
+        groups[key].logs.push(log);
+      }
+    }
+
+    // Build analytics records
+    const records = [];
+    for (const [, group] of Object.entries(groups)) {
+      const logs = group.logs;
+      const latencies = logs.map(l => l.rag_latency_ms || 0).sort((a, b) => a - b);
+      const citationCount = logs.filter(l => l.response_contains_retrieval).length;
+      const continuationCount = logs.filter(l => l.user_continued_conversation).length;
+      const topScores = logs.map(l => l.top_chunk_score || 0).filter(s => s > 0);
+
+      records.push({
+        week_start: weekStart.toISOString(),
+        role: group.role,
+        namespace: group.namespace,
+        retrieval_count: logs.length,
+        avg_latency_ms: logs.length > 0 ? Math.round(latencies.reduce((a, b) => a + b, 0) / logs.length) : 0,
+        p95_latency_ms: logs.length > 0 ? latencies[Math.floor(logs.length * 0.95)] || 0 : 0,
+        citation_rate: logs.length > 0 ? Math.round((citationCount / logs.length) * 100) : 0,
+        continuation_rate: logs.length > 0 ? Math.round((continuationCount / logs.length) * 100) : 0,
+        avg_top_chunk_score: topScores.length > 0 ? Math.round((topScores.reduce((a, b) => a + b, 0) / topScores.length) * 1000) / 1000 : 0,
+        namespace_fresh_pct: 0,
+        namespace_stale_pct: 0,
+        namespace_expired_pct: 0,
+      });
+    }
+
+    // Enrich with freshness data
+    try {
+      const freshResult = await dataAccess.queryRecords(COLLECTIONS.ragDocuments, {
+        limit: 500,
+        suppressAuth: true,
+      });
+
+      if (freshResult.success && freshResult.items?.length) {
+        const freshByNs = {};
+        for (const doc of freshResult.items) {
+          const ns = doc.namespace || 'unknown';
+          if (!freshByNs[ns]) freshByNs[ns] = { fresh: 0, stale: 0, expired: 0, total: 0 };
+          freshByNs[ns][doc.freshness_status || 'expired']++;
+          freshByNs[ns].total++;
+        }
+
+        for (const record of records) {
+          const nsData = freshByNs[record.namespace];
+          if (nsData && nsData.total > 0) {
+            record.namespace_fresh_pct = Math.round((nsData.fresh / nsData.total) * 100);
+            record.namespace_stale_pct = Math.round((nsData.stale / nsData.total) * 100);
+            record.namespace_expired_pct = Math.round((nsData.expired / nsData.total) * 100);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[ragAnalytics] Freshness enrichment failed:', err.message);
+    }
+
+    // Write analytics records
+    const chunks = chunkArray(records, 10);
+    for (const chunk of chunks) {
+      await Promise.all(
+        chunk.map(record =>
+          dataAccess.insertRecord(COLLECTIONS.analytics, record, { suppressAuth: true })
+            .catch(err => console.warn('[ragAnalytics] Insert failed:', err.message))
+        )
+      );
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    console.log(`[ragAnalytics] Weekly rollup complete: ${records.length} records created.`);
+    return { records: records.length };
+  } catch (err) {
+    console.error('[ragAnalytics] Weekly rollup error:', err.message);
+    return { records: 0, error: err.message };
+  }
+}
+
+// ── Admin Dashboard Query Methods ─────────────────────────────────────────────
+
+/**
+ * Get RAG analytics summary for admin observability dashboard.
+ * Covers the last 7 days.
+ *
+ * @returns {Promise<object>} Summary with retrieval volume, latency, citation rate, etc.
+ */
+export async function getRagAnalyticsSummary() {
+  try {
+    const [logResult, analyticsResult, intentResult] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.retrievalLog, {
+        limit: 200,
+        suppressAuth: true,
+      }),
+      dataAccess.queryRecords(COLLECTIONS.analytics, {
+        limit: 50,
+        suppressAuth: true,
+      }),
+      dataAccess.queryRecords(COLLECTIONS.intentLog, {
+        limit: 200,
+        suppressAuth: true,
+      }),
+    ]);
+
+    const logs = (logResult.success && logResult.items) || [];
+    const analytics = (analyticsResult.success && analyticsResult.items) || [];
+    const intents = (intentResult.success && intentResult.items) || [];
+
+    // Filter to last 7 days
+    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const recentLogs = logs.filter(l => new Date(l.created_at).getTime() > sevenDaysAgo);
+    const recentIntents = intents.filter(i => new Date(i.created_at).getTime() > sevenDaysAgo);
+
+    // Volume by namespace
+    const volumeByNamespace = {};
+    for (const log of recentLogs) {
+      const namespaces = (log.namespaces_queried || '').split(', ').filter(Boolean);
+      for (const ns of namespaces) {
+        volumeByNamespace[ns] = (volumeByNamespace[ns] || 0) + 1;
+      }
+    }
+
+    // Latency stats
+    const latencies = recentLogs.map(l => l.rag_latency_ms || 0).sort((a, b) => a - b);
+    const avgLatency = latencies.length > 0 ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : 0;
+    const p95Latency = latencies.length > 0 ? latencies[Math.floor(latencies.length * 0.95)] || 0 : 0;
+
+    // Citation rate
+    const citationCount = recentLogs.filter(l => l.response_contains_retrieval).length;
+    const citationRate = recentLogs.length > 0 ? Math.round((citationCount / recentLogs.length) * 100) : 0;
+
+    // Continuation rate
+    const continuationCount = recentLogs.filter(l => l.user_continued_conversation).length;
+    const continuationRate = recentLogs.length > 0 ? Math.round((continuationCount / recentLogs.length) * 100) : 0;
+
+    // Intent accuracy — % that used fallback (low confidence)
+    const fallbackCount = recentIntents.filter(i => i.used_fallback).length;
+    const intentAccuracy = recentIntents.length > 0 ? Math.round(((recentIntents.length - fallbackCount) / recentIntents.length) * 100) : 0;
+
+    // Top retrieved documents
+    const docCounts = {};
+    for (const log of recentLogs) {
+      const turnId = log.turn_id || '';
+      if (turnId) {
+        docCounts[turnId] = (docCounts[turnId] || 0) + 1;
+      }
+    }
+
+    // Volume by role
+    const volumeByRole = {};
+    for (const log of recentLogs) {
+      const role = log.role || 'unknown';
+      volumeByRole[role] = (volumeByRole[role] || 0) + 1;
+    }
+
+    // Recent failures (high latency or zero chunks)
+    const recentFailures = recentLogs
+      .filter(l => l.chunks_injected === 0 || l.rag_latency_ms > 400)
+      .slice(0, 10)
+      .map(l => ({
+        turn_id: l.turn_id,
+        role: l.role,
+        intent_class: l.intent_class,
+        rag_latency_ms: l.rag_latency_ms,
+        chunks_injected: l.chunks_injected,
+        created_at: l.created_at,
+      }));
+
+    return {
+      summary: {
+        totalRetrievals: recentLogs.length,
+        avgLatencyMs: avgLatency,
+        p95LatencyMs: p95Latency,
+        citationRate,
+        continuationRate,
+        intentAccuracy,
+        totalIntentClassifications: recentIntents.length,
+      },
+      volumeByNamespace,
+      volumeByRole,
+      recentFailures,
+      weeklyAnalytics: analytics.slice(0, 20),
+    };
+  } catch (err) {
+    console.error('[ragAnalytics] getRagAnalyticsSummary error:', err.message);
+    return {
+      summary: { totalRetrievals: 0, avgLatencyMs: 0, p95LatencyMs: 0, citationRate: 0, continuationRate: 0, intentAccuracy: 0, totalIntentClassifications: 0 },
+      volumeByNamespace: {},
+      volumeByRole: {},
+      recentFailures: [],
+      weeklyAnalytics: [],
+    };
+  }
+}
+
+/**
+ * Debug retrieval — admin enters a query, sees what chunks would be retrieved.
+ * Routes through ragService.jsw for a real retrieval attempt.
+ *
+ * @param {string} query - Admin test query
+ * @param {string[]} namespaces - Namespaces to search
+ * @param {string} role - Role scope
+ * @returns {Promise<object>} Retrieval result with chunks, scores, latency
+ */
+export async function debugRetrieval(query, namespaces, role) {
+  const { retrieveContext } = await import('backend/ragService');
+  return retrieveContext(query, namespaces || ['carrier_intel'], role || 'admin', {}, 2000);
+}

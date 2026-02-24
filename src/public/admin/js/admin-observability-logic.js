@@ -84,6 +84,9 @@ var AdminObservabilityLogic = (function () {
         if (tab === 'agents' && !state.agentBehavior) {
             loadAgentBehavior();
         }
+        if (tab === 'rag' && typeof AdminObservabilityRAG !== 'undefined') {
+            AdminObservabilityRAG.loadRagData();
+        }
     }
 
     /* --- Auto-refresh --- */
@@ -306,7 +309,15 @@ var AdminObservabilityLogic = (function () {
         initAutoRefresh();
         initEventListeners();
 
-        B.listen({
+        // Initialize RAG module if available
+        if (typeof AdminObservabilityRAG !== 'undefined') {
+            AdminObservabilityRAG.init();
+        }
+
+        // Build message handler map (merge base + RAG handlers)
+        var ragHandlers = (typeof AdminObservabilityRAG !== 'undefined') ? AdminObservabilityRAG.getMessageHandlers() : {};
+
+        var baseHandlers = {
             'init': function () {
                 B.sendInit();
             },
@@ -351,7 +362,17 @@ var AdminObservabilityLogic = (function () {
             'actionError': function (data) {
                 R.showToast(data.message, 'error');
             }
-        });
+        };
+
+        // Merge RAG handlers into base handlers
+        var allHandlers = baseHandlers;
+        for (var key in ragHandlers) {
+            if (ragHandlers.hasOwnProperty(key)) {
+                allHandlers[key] = ragHandlers[key];
+            }
+        }
+
+        B.listen(allHandlers);
     }
 
     return {
