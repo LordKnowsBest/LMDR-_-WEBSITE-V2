@@ -59,6 +59,14 @@ if ($normalizedPath -match "src/backend/(carrierLeads|application|driverProfiles
     $docsToInject += "wix-record-linking"
 }
 
+# Rule 6: LLM-calling services -> prompt-standards.md
+# Targets any service whose name signals it contains system prompts or AI calls:
+# b2bContentAI, b2bResearchAgent, agentService, aiRouter, matchExplanation,
+# voiceService, voiceCampaign, healthService (community tips moderation)
+if ($normalizedPath -match "src/backend/(b2bContent|b2bResearch|b2bAgent|b2bAI|agentService|agentConversation|aiRouter|matchExplanation|voiceService|voiceCampaign|voice).*\.jsw$") {
+    $docsToInject += "prompt-standards"
+}
+
 if ($docsToInject.Count -eq 0) {
     exit 0
 }
