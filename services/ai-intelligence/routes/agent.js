@@ -49,6 +49,7 @@
 
 import { Hono } from 'hono';
 import { ClaudeAdapter } from '../runtime/claudeAdapter.js';
+import { retrieveContext } from '../lib/retrieval.js';
 import crypto from 'node:crypto';
 
 export const agentRouter = new Hono();
@@ -66,10 +67,32 @@ agentRouter.post('/turn', async (c) => {
     return c.json({ error: { code: 'validation_error', message: 'Invalid JSON body', requestId } }, 400);
   }
 
-  const { systemPrompt, messages, tools = [], modelId, maxTokens, traceId } = body;
+  const { systemPrompt, messages, tools = [], modelId, maxTokens, traceId, ragConfig } = body;
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     return c.json({ error: { code: 'validation_error', message: 'messages array is required and must be non-empty', requestId } }, 400);
+  }
+
+  // ── RAG Context Retrieval (inline, before Claude call) ──
+  let augmentedPrompt = systemPrompt;
+  let ragResult = null;
+
+  if (ragConfig?.enabled && ragConfig.namespaces?.length > 0) {
+    try {
+      const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+      const queryText = typeof lastUserMsg?.content === 'string'
+        ? lastUserMsg.content
+        : (lastUserMsg?.content?.[0]?.text || '');
+
+      if (queryText) {
+        ragResult = await retrieveContext(ragConfig, queryText.substring(0, 500));
+        if (ragResult.contextBlock) {
+          augmentedPrompt = `${ragResult.contextBlock}\n\n${systemPrompt}`;
+        }
+      }
+    } catch (err) {
+      console.warn('[agent/turn] RAG retrieval failed (non-blocking):', err.message);
+    }
   }
 
   // Internal timeout guard
@@ -79,11 +102,25 @@ agentRouter.post('/turn', async (c) => {
 
   try {
     const result = await Promise.race([
-      adapter.runStep({ systemPrompt, messages, tools, modelId, maxTokens }),
+      adapter.runStep({ systemPrompt: augmentedPrompt, messages, tools, modelId, maxTokens }),
       timeoutPromise,
     ]);
 
-    return c.json({ ...result, traceId: traceId || null, requestId });
+    const response = { ...result, traceId: traceId || null, requestId };
+
+    if (ragResult) {
+      response.ragLatencyMs = ragResult.retrievalLatencyMs;
+      response.retrievedChunks = (ragResult.chunks || []).map(ch => ({
+        documentId: ch.documentId,
+        namespace: ch.namespace,
+        combinedScore: ch.combinedScore,
+      }));
+      if (!ragResult.contextBlock && ragResult.noContextReason) {
+        response.ragNoContextReason = ragResult.noContextReason;
+      }
+    }
+
+    return c.json(response);
 
   } catch (err) {
     if (err.message === 'INTERNAL_TIMEOUT') {

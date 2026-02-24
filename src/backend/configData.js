@@ -465,6 +465,12 @@ export const DATA_SOURCE = {
 
   // ── Market Signals ──
   marketSignals: 'airtable',
+
+  // ── RAG + Intent Layer (rag_intent_layer_20260224) ──
+  ragDocuments: 'airtable',
+  ragRetrievalLog: 'airtable',
+  ragAnalytics: 'airtable',
+  intentClassificationLog: 'airtable',
 };
 
 // =============================================================================
@@ -489,6 +495,19 @@ export const FEATURE_FLAGS = {
   semanticToolEnabled: true,
   /** Phase 2: Blend semantic score as a component in driver ranking (driverScoring.js) */
   semanticSearchBlendEnabled: true,
+
+  // ── RAG + Intent Layer (rag_intent_layer_20260224) ──
+  /** Master flag — disables RAG retrieval for all roles */
+  ragEnabled: false,
+  /** Per-role flags for independent rollout */
+  ragEnabledDriver: false,
+  ragEnabledRecruiter: false,
+  ragEnabledAdmin: false,
+  ragEnabledCarrier: false,
+  /** Enable intent classification pre-filter on agent turns */
+  intentClassificationEnabled: false,
+  /** Enable per-user conversation memory in lmdr-memory index */
+  conversationMemoryEnabled: false,
 };
 
 // =============================================================================

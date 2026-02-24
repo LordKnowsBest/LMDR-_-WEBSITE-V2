@@ -1,0 +1,203 @@
+/**
+ * Intent Classification Service — Wix Wrapper
+ *
+ * Wraps the Railway POST /v1/intent/classify endpoint.
+ * Provides fast intent classification for every agent message.
+ *
+ * - 150ms AbortController timeout
+ * - In-memory cache (5 min TTL) for identical (message, role) pairs
+ * - Fails open: returns defaultIntent(role) on any error
+ *
+ * Track: rag_intent_layer_20260224
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import { FEATURE_FLAGS } from 'backend/configData';
+
+const RUNTIME_BASE = 'https://lmdr-ai-intelligence-production.up.railway.app';
+const CLASSIFY_TIMEOUT_MS = 150;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// In-memory classification cache: key → { result, expiresAt }
+const _cache = new Map();
+const MAX_CACHE_SIZE = 500;
+
+// ── Role Default Namespace Scopes ───────────────────────────────────────────
+
+const ROLE_DEFAULT_NAMESPACES = {
+  driver:    ['carrier_intel', 'driver_market', 'platform_ops', 'industry_regs', 'lane_market'],
+  recruiter: ['driver_market', 'carrier_intel', 'lane_market', 'platform_ops', 'industry_regs'],
+  admin:     ['platform_ops', 'carrier_intel', 'driver_market', 'lane_market'],
+  carrier:   ['driver_market', 'carrier_intel', 'lane_market', 'platform_ops'],
+};
+
+// ── Auth Headers ────────────────────────────────────────────────────────────
+
+async function _authHeaders() {
+  const key = await getSecret('LMDR_INTERNAL_KEY');
+  return {
+    'Content-Type': 'application/json',
+    'x-lmdr-internal-key': key,
+    'x-lmdr-timestamp': String(Date.now()),
+  };
+}
+
+// ── Cache Helpers ───────────────────────────────────────────────────────────
+
+function _cacheKey(message, role) {
+  // Simple hash: role + first 200 chars of message
+  return `${role}:${message.substring(0, 200)}`;
+}
+
+function _getCached(key) {
+  const entry = _cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    _cache.delete(key);
+    return null;
+  }
+  return entry.result;
+}
+
+function _setCache(key, result) {
+  // Evict oldest entries if cache is full
+  if (_cache.size >= MAX_CACHE_SIZE) {
+    const firstKey = _cache.keys().next().value;
+    _cache.delete(firstKey);
+  }
+  _cache.set(key, { result, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+// ── Public API ──────────────────────────────────────────────────────────────
+
+/**
+ * Classify user intent for a message and role.
+ * Returns intent result with namespace scope, tool hints, and frame guidance.
+ *
+ * @param {string} message - User's raw message
+ * @param {string} role - driver | recruiter | admin | carrier
+ * @param {string[]} [recentContext=[]] - Last 2-3 turn summaries
+ * @returns {Promise<IntentResult>}
+ */
+export async function classifyUserIntent(message, role, recentContext = []) {
+  if (!FEATURE_FLAGS.intentClassificationEnabled) {
+    return defaultIntent(role);
+  }
+
+  // Check cache
+  const key = _cacheKey(message, role);
+  const cached = _getCached(key);
+  if (cached) return cached;
+
+  let headers;
+  try {
+    headers = await _authHeaders();
+  } catch {
+    return defaultIntent(role);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLASSIFY_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${RUNTIME_BASE}/v1/intent/classify`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        message: message.substring(0, 500),
+        role,
+        recentContext: (recentContext || []).slice(0, 3),
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      console.warn(`[intentService] Classify returned ${res.status} — using fallback`);
+      return defaultIntent(role);
+    }
+
+    const result = await res.json();
+
+    // Normalize and validate
+    const intentResult = {
+      intentClass: result.intentClass || 'general_inquiry',
+      confidence: result.confidence || 0,
+      namespaceScope: result.namespaceScope || ROLE_DEFAULT_NAMESPACES[role] || [],
+      toolPriorityHints: result.toolPriorityHints || [],
+      frameHint: result.frameHint || 'neutral_helpful',
+      entities: result.entities || {},
+      retrievalFilters: result.retrievalFilters || {},
+      latencyMs: result.latencyMs || 0,
+      model: result.model || 'unknown',
+    };
+
+    _setCache(key, intentResult);
+    return intentResult;
+  } catch (err) {
+    clearTimeout(timer);
+    console.warn('[intentService] Classification failed:', err.message);
+    return defaultIntent(role);
+  }
+}
+
+/**
+ * Returns safe fallback intent result with general_inquiry class
+ * and role-appropriate default namespace scope.
+ *
+ * @param {string} role
+ * @returns {IntentResult}
+ */
+export function defaultIntent(role) {
+  return {
+    intentClass: 'general_inquiry',
+    confidence: 0,
+    namespaceScope: ROLE_DEFAULT_NAMESPACES[role] || [],
+    toolPriorityHints: [],
+    frameHint: 'neutral_helpful',
+    entities: {},
+    retrievalFilters: {},
+    latencyMs: 0,
+    model: 'fallback',
+  };
+}
+
+/**
+ * Translate intent result into ragConfig object for the agent/turn call.
+ * Respects per-role feature flags.
+ *
+ * @param {IntentResult} intentResult
+ * @param {string} role
+ * @param {object} context - Agent context
+ * @param {string} userId - Hashed user ID
+ * @returns {object|null} ragConfig object or null if RAG disabled
+ */
+export function buildRagConfig(intentResult, role, context, userId) {
+  // Check master flag and per-role flag
+  if (!FEATURE_FLAGS.ragEnabled) return null;
+
+  const roleFlag = `ragEnabled${role.charAt(0).toUpperCase()}${role.slice(1)}`;
+  if (!FEATURE_FLAGS[roleFlag]) return null;
+
+  const namespaces = intentResult.namespaceScope || [];
+  if (namespaces.length === 0) return null;
+
+  // Filter out conversation_memory if disabled
+  const filteredNamespaces = FEATURE_FLAGS.conversationMemoryEnabled
+    ? namespaces
+    : namespaces.filter(ns => ns !== 'conversation_memory');
+
+  if (filteredNamespaces.length === 0) return null;
+
+  return {
+    enabled: true,
+    intentClass: intentResult.intentClass,
+    namespaces: filteredNamespaces,
+    roleScope: role,
+    topK: intentResult.intentClass === 'general_inquiry' ? 3 : 5,
+    contextBudgetTokens: 2000,
+    filters: intentResult.retrievalFilters || {},
+    userId: userId || undefined,
+  };
+}

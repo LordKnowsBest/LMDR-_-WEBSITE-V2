@@ -9,6 +9,8 @@ import { createConversation, addTurn, getRecentContext } from 'backend/agentConv
 import * as dataAccess from 'backend/dataAccess';
 import { startRun, logStep, createGate, completeRun } from 'backend/agentRunLedgerService';
 import { isRuntimeAvailable, callRuntimeStep } from 'backend/agentRuntimeService';
+import { classifyUserIntent, buildRagConfig } from 'backend/intentService';
+import { ingestTurnMemory } from 'backend/ragIngestionService';
 
 // ── Cost Control Configuration ──
 const COST_CONTROLS = {
@@ -2013,6 +2015,28 @@ function getToolsForRole(role) {
   return buildToolList(role);
 }
 
+/**
+ * Reorder tools array in-place so intent-suggested tools appear first.
+ * This influences the AI's tool selection when multiple tools are relevant.
+ */
+function _reorderToolsByPriority(tools, priorityHints) {
+  if (!priorityHints || priorityHints.length === 0) return;
+  const hintSet = new Set(priorityHints);
+  const prioritized = [];
+  const rest = [];
+  for (const tool of tools) {
+    if (hintSet.has(tool.name)) {
+      prioritized.push(tool);
+    } else {
+      rest.push(tool);
+    }
+  }
+  // Sort prioritized by hint order
+  prioritized.sort((a, b) => priorityHints.indexOf(a.name) - priorityHints.indexOf(b.name));
+  tools.length = 0;
+  tools.push(...prioritized, ...rest);
+}
+
 // Execute a tool call against the real backend service
 // Exported for VAPI webhook template-scoped tool access
 export async function executeTool(toolName, toolInput, runContext = {}) {
@@ -2253,8 +2277,37 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
     };
   }
 
-  // Get recent context
-  const recentTurns = await getRecentContext(conversationId, 20);
+  // Get recent context + run intent classification in parallel
+  const recentContextPromise = getRecentContext(conversationId, 20);
+  const recentSummaries = [];
+
+  // Intent classification pre-flight (non-blocking on failure)
+  let intentResult;
+  let ragConfig = null;
+  try {
+    const [recentTurnsRaw, intentRes] = await Promise.all([
+      recentContextPromise,
+      classifyUserIntent(message, role, recentSummaries),
+    ]);
+    var recentTurns = recentTurnsRaw;
+    intentResult = intentRes;
+
+    // Build summaries from recent turns for intent context
+    if (recentTurns && recentTurns.length > 0) {
+      const lastFew = recentTurns.slice(-3);
+      for (const t of lastFew) {
+        recentSummaries.push(`${t.role}: ${(t.content || '').substring(0, 100)}`);
+      }
+    }
+
+    // Build RAG config from intent result
+    ragConfig = buildRagConfig(intentResult, role, context, userId);
+  } catch (intentErr) {
+    console.warn('[agentService] Intent pre-flight failed (non-blocking):', intentErr.message);
+    var recentTurns = await recentContextPromise.catch(() => []);
+    intentResult = null;
+    ragConfig = null;
+  }
 
   // Build messages array
   const messages = [];
@@ -2266,8 +2319,11 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
   // Save user turn
   await addTurn(conversationId, 'user', message);
 
-  // Get role-scoped tools
+  // Get role-scoped tools (optionally reordered by intent tool priority hints)
   const tools = getToolsForRole(role);
+  if (intentResult?.toolPriorityHints?.length > 0) {
+    _reorderToolsByPriority(tools, intentResult.toolPriorityHints);
+  }
 
   // Agent loop - keep calling AI until we get a text response (not tool_use)
   let currentMessages = [...messages];
@@ -2310,6 +2366,7 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
           tools,
           maxTokens: 2048,
           traceId: runId || undefined,
+          ragConfig: ragConfig || undefined,
         });
       } catch (runtimeErr) {
         console.warn('[agentService] Runtime step failed, falling back to legacy:', runtimeErr.message);
@@ -2396,11 +2453,17 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
           .catch(err => console.error('Run completion failed:', err));
       }
 
+      // Fire-and-forget: ingest turn into conversation memory for RAG
+      ingestTurnMemory(userId, role, conversationId, message, responseText)
+        .catch(err => console.warn('[agentService] Turn memory ingestion failed (non-blocking):', err.message));
+
       return {
         conversationId,
         runId,
         response: responseText,
         toolsUsed: currentMessages.length > messages.length + 1,
+        intentClass: intentResult?.intentClass || null,
+        ragUsed: !!ragConfig,
         role
       };
     }

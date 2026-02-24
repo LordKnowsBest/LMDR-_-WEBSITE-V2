@@ -1,0 +1,290 @@
+/**
+ * RAG Ingestion Service
+ *
+ * Manages ingestion of documents into the RAG knowledge base.
+ * Handles scheduled corpus construction and per-turn memory ingestion.
+ *
+ * Entry points:
+ *   - Scheduled jobs (jobs.config) call ingestAllCarrierIntel, ingestDriverMarketAggregate, ingestLaneMarket
+ *   - agentService.jsw calls ingestTurnMemory after each agent turn (fire-and-forget)
+ *   - Admin dashboard calls reingestCarrier, reingestDocument for manual refresh
+ *
+ * Track: rag_intent_layer_20260224
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import * as dataAccess from 'backend/dataAccess';
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+const RUNTIME_BASE = 'https://lmdr-ai-intelligence-production.up.railway.app';
+const INGEST_TIMEOUT_MS = 3000;
+
+async function _authHeaders() {
+  const key = await getSecret('LMDR_INTERNAL_KEY');
+  return {
+    'Content-Type': 'application/json',
+    'x-lmdr-internal-key': key,
+    'x-lmdr-timestamp': String(Date.now()),
+  };
+}
+
+/**
+ * Ingest a single document into a knowledge namespace via Railway.
+ *
+ * @param {string} namespace
+ * @param {string} documentId
+ * @param {string} text
+ * @param {object} metadata
+ * @param {string} sourceUpdatedAt - ISO timestamp
+ * @returns {Promise<{ status: string, error?: string }>}
+ */
+async function _ingestOne(namespace, documentId, text, metadata, sourceUpdatedAt) {
+  let headers;
+  try {
+    headers = await _authHeaders();
+  } catch (err) {
+    return { status: 'error', error: `Auth failed: ${err.message}` };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), INGEST_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${RUNTIME_BASE}/v1/rag/ingest`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ namespace, documentId, text, metadata, sourceUpdatedAt }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { status: 'error', error: `HTTP ${res.status}: ${body}` };
+    }
+
+    const data = await res.json();
+    return { status: data.status || 'ingested' };
+  } catch (err) {
+    clearTimeout(timer);
+    return { status: 'error', error: err.message };
+  }
+}
+
+// ── Carrier Intel Ingestion ─────────────────────────────────────────────────
+
+/**
+ * Build four document chunks from a carrier enrichment record.
+ */
+function _buildCarrierChunks(enrichment) {
+  const dot = enrichment.dot_number || enrichment.dotNumber;
+  const name = enrichment.carrier_name || enrichment.legal_name || `DOT ${dot}`;
+  const enrichedAt = enrichment.enriched_at || enrichment._updatedDate || new Date().toISOString();
+
+  const chunks = [];
+  const baseMeta = { dot_number: String(dot), carrier_name: name, enriched_at: enrichedAt };
+
+  // Safety profile chunk
+  if (enrichment.safety_rating || enrichment.crashes_12mo != null) {
+    chunks.push({
+      documentId: `carrier_dot_${dot}_safety`,
+      text: `${name} safety profile. FMCSA rating: ${enrichment.safety_rating || 'N/A'}. Crashes (12mo): ${enrichment.crashes_12mo ?? 'N/A'}. OOS rate: ${enrichment.oos_rate ?? 'N/A'}%. Inspections: ${enrichment.inspections ?? 'N/A'}. Violations: ${enrichment.violations ?? 'N/A'}.`,
+      metadata: { ...baseMeta, chunk_type: 'safety_profile' },
+    });
+  }
+
+  // Driver intelligence chunk
+  if (enrichment.driver_sentiment || enrichment.pay_cpm_min) {
+    const sentiment = enrichment.driver_sentiment || 'N/A';
+    const paySummary = enrichment.pay_cpm_min && enrichment.pay_cpm_max
+      ? `$${enrichment.pay_cpm_min}–$${enrichment.pay_cpm_max}/mi`
+      : 'N/A';
+    chunks.push({
+      documentId: `carrier_dot_${dot}_driver_intel`,
+      text: `${name} driver intelligence. Driver sentiment: ${sentiment}. Solo pay range: ${paySummary}. Home time policy: ${enrichment.home_time_policy || 'N/A'}. Top driver concerns: ${enrichment.top_driver_concerns || 'N/A'}.`,
+      metadata: { ...baseMeta, chunk_type: 'driver_intelligence' },
+    });
+  }
+
+  // Operational profile chunk
+  if (enrichment.fleet_size || enrichment.haul_types) {
+    const hauls = Array.isArray(enrichment.haul_types) ? enrichment.haul_types.join(', ') : (enrichment.haul_types || 'N/A');
+    chunks.push({
+      documentId: `carrier_dot_${dot}_ops`,
+      text: `${name} operational profile. Fleet size: ${enrichment.fleet_size ?? 'N/A'} trucks. Haul types: ${hauls}. Equipment: ${enrichment.equipment || 'N/A'}. Lanes: ${enrichment.primary_lanes || 'N/A'}.`,
+      metadata: { ...baseMeta, chunk_type: 'operational_profile' },
+    });
+  }
+
+  // Recent signals chunk
+  chunks.push({
+    documentId: `carrier_dot_${dot}_signals`,
+    text: `${name} recent signals. Last enriched: ${enrichedAt}. Hiring activity: ${enrichment.hiring_activity || 'unknown'}. Open positions: ${enrichment.open_positions || 'N/A'}.`,
+    metadata: { ...baseMeta, chunk_type: 'recent_signals' },
+  });
+
+  return chunks;
+}
+
+/**
+ * Ingest all carrier enrichments updated since last run.
+ * Called by scheduled job.
+ */
+export async function ingestAllCarrierIntel() {
+  console.log('[ragIngestion] Starting carrier intel ingestion...');
+  let ingested = 0;
+  let failed = 0;
+
+  try {
+    const result = await dataAccess.queryRecords('carrierEnrichments', {
+      limit: 200,
+      suppressAuth: true,
+    });
+
+    if (!result.success || !result.items?.length) {
+      console.log('[ragIngestion] No carrier enrichments found.');
+      return { ingested: 0, failed: 0 };
+    }
+
+    const allChunks = result.items.flatMap(e => _buildCarrierChunks(e));
+    const batches = chunkArray(allChunks, 10);
+
+    for (const batch of batches) {
+      const results = await Promise.all(
+        batch.map(chunk => _ingestOne(
+          'carrier_intel',
+          chunk.documentId,
+          chunk.text,
+          chunk.metadata,
+          chunk.metadata.enriched_at
+        ))
+      );
+
+      for (const r of results) {
+        if (r.status === 'ingested' || r.status === 'skipped') ingested++;
+        else failed++;
+      }
+
+      await new Promise(r => setTimeout(r, 200));
+    }
+  } catch (err) {
+    console.error('[ragIngestion] Carrier intel ingestion error:', err.message);
+  }
+
+  console.log(`[ragIngestion] Carrier intel complete: ${ingested} ingested, ${failed} failed`);
+  return { ingested, failed };
+}
+
+// ── Driver Market Aggregate Ingestion ───────────────────────────────────────
+
+/**
+ * Aggregate driver profiles into anonymized thematic documents.
+ * Called by scheduled job (nightly).
+ */
+export async function ingestDriverMarketAggregate() {
+  console.log('[ragIngestion] Starting driver market aggregate ingestion...');
+  // This is a stub that will be expanded with actual aggregation logic.
+  // For now, it creates a placeholder document.
+  const now = new Date().toISOString();
+
+  const result = await _ingestOne(
+    'driver_market',
+    'driver_market_overview',
+    'LMDR platform driver market overview. Aggregate data from driver profiles. Pay expectations, home time preferences, endorsement distribution, and regional hiring demand. Updated regularly from anonymized platform data.',
+    { topic_category: 'market_overview', generated_at: now },
+    now
+  );
+
+  console.log(`[ragIngestion] Driver market aggregate: ${result.status}`);
+  return result;
+}
+
+// ── Lane Market Ingestion ───────────────────────────────────────────────────
+
+/**
+ * Ingest lane market data from VelocityMatch DataLake.
+ * Called by scheduled job (every 6 hours).
+ */
+export async function ingestLaneMarket() {
+  console.log('[ragIngestion] Starting lane market ingestion...');
+  // Stub — will pull from DataLake (appt00rHHBOiKx9xl) when configured
+  const now = new Date().toISOString();
+
+  const result = await _ingestOne(
+    'lane_market',
+    'lane_market_national',
+    'National freight market overview. Current diesel prices, spot rate trends, and regional demand signals. Data from VelocityMatch DataLake.',
+    { lane_region: 'National', data_date: now },
+    now
+  );
+
+  console.log(`[ragIngestion] Lane market: ${result.status}`);
+  return result;
+}
+
+// ── Turn Memory Ingestion ───────────────────────────────────────────────────
+
+/**
+ * Ingest a summarized agent turn into per-user conversation memory.
+ * Fire-and-forget — never awaited in the critical path.
+ *
+ * @param {string} userId - Hashed user ID
+ * @param {string} role
+ * @param {string} conversationId
+ * @param {string} userMessage
+ * @param {string} agentResponse
+ */
+export async function ingestTurnMemory(userId, role, conversationId, userMessage, agentResponse) {
+  try {
+    const turnIndex = Date.now();
+    const summary = `User (${role}): ${userMessage.substring(0, 100)}. Agent: ${agentResponse.substring(0, 200)}`;
+
+    await _ingestOne(
+      'conversation_memory',
+      `memory_${userId}_${turnIndex}`,
+      summary,
+      {
+        user_id: userId,
+        role,
+        conversation_id: conversationId,
+        turn_index: turnIndex,
+        created_at: new Date().toISOString(),
+      },
+      new Date().toISOString()
+    );
+  } catch (err) {
+    console.warn('[ragIngestion] Turn memory ingestion failed (non-blocking):', err.message);
+  }
+}
+
+// ── Manual Re-ingestion ─────────────────────────────────────────────────────
+
+/**
+ * Re-ingest a specific carrier's intelligence.
+ * @param {string} dotNumber
+ */
+export async function reingestCarrier(dotNumber) {
+  const result = await dataAccess.queryRecords('carrierEnrichments', {
+    filters: { dot_number: Number(dotNumber) },
+    limit: 1,
+    suppressAuth: true,
+  });
+
+  if (!result.success || !result.items?.length) {
+    return { status: 'not_found', dotNumber };
+  }
+
+  const chunks = _buildCarrierChunks(result.items[0]);
+  const results = await Promise.all(
+    chunks.map(c => _ingestOne('carrier_intel', c.documentId, c.text, c.metadata, c.metadata.enriched_at))
+  );
+
+  return {
+    status: 'complete',
+    dotNumber,
+    chunks: results.length,
+    ingested: results.filter(r => r.status === 'ingested').length,
+    failed: results.filter(r => r.status === 'error').length,
+  };
+}
