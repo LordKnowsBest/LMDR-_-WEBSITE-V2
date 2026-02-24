@@ -204,8 +204,11 @@ semanticRouter.post('/search/carriers-async', async (c) => {
   // Respond 202 immediately — pipeline runs in background (once only)
   const pipeline = _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbackUrl, requestId)
     .catch(err => console.error(`[search/carriers-async] Background error for ${jobId}:`, err.message));
-  // On Cloudflare Workers, waitUntil keeps the VM alive past response; on Node.js/Railway it's a no-op
-  if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(pipeline);
+  // On Cloudflare Workers, waitUntil keeps the VM alive past response.
+  // On Node.js/Railway, c.executionCtx is a getter that THROWS — guard with try-catch.
+  try {
+    if (c.executionCtx?.waitUntil) c.executionCtx.waitUntil(pipeline);
+  } catch { /* Node.js has no ExecutionContext — pipeline runs as detached microtask */ }
 
   return c.json({ jobId, status: 'PROCESSING', requestId }, 202);
 });
@@ -298,8 +301,8 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
 
     console.log(`[search/carriers-async] ${jobId}: ${recMatches.length} Airtable + ${dotMatches.length} FMCSA-only from Pinecone`);
 
-    // 4. Enrich Airtable-backed carriers via batch fetch
-    const recIds    = recMatches.map(m => m.id);
+    // 4. Enrich Airtable-backed carriers via batch fetch — only top MAX_RESULTS needed
+    const recIds    = recMatches.slice(0, MAX_RESULTS).map(m => m.id);
     const airtableMap = await fetchAirtableByRecordIds(recIds);
 
     // 5. Build unified result set
