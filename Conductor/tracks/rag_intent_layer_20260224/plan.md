@@ -743,13 +743,13 @@ Every 2 weeks, run `intentClassificationLog` analysis:
 This is intentionally lightweight — no ML training, no model fine-tuning. Just prompt engineering informed by real data.
 
 ### Exit Criteria — Phase 5
-- [ ] Freshness monitor running every 30 minutes, re-ingesting stale documents
+- [x] Freshness monitor running every 30 minutes, re-ingesting stale documents
 - [ ] < 5% stale documents per namespace at steady state
-- [ ] RAG analytics panel live in admin observability with all 5 metric cards
-- [ ] Signal capture for all 3 feedback loop signals (citation, continuation, conversion)
-- [ ] Weekly `ragAnalytics` rollup job running and producing records
+- [x] RAG analytics panel live in admin observability with all 5 metric cards
+- [x] Signal capture for all 3 feedback loop signals (citation, continuation, conversion)
+- [x] Weekly `ragAnalytics` rollup job running and producing records
 - [ ] At least 2 weeks of telemetry analyzed — citation rate and continuation rate baselined
-- [ ] Intelligence flywheel documented as a named platform metric in the admin dashboard
+- [x] Intelligence flywheel documented as a named platform metric in the admin dashboard
 
 ---
 

@@ -15,6 +15,9 @@ import {
     deleteAnomalyRule,
     getAnomalyHistory
 } from 'backend/observabilityService';
+import { getRagAnalyticsSummary, debugRetrieval } from 'backend/ragAnalyticsService';
+import { getFreshnessDistribution, forceReingestNamespace } from 'backend/ragFreshnessJob';
+import { reingestCarrier } from 'backend/ragIngestionService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
@@ -138,6 +141,23 @@ async function handleMessage(component, message) {
                 await handleGetAnomalyHistory(component, message.period);
                 break;
 
+            // RAG Intelligence actions
+            case 'getRagAnalytics':
+                await handleGetRagAnalytics(component);
+                break;
+            case 'getRagFreshness':
+                await handleGetRagFreshness(component);
+                break;
+            case 'forceReingestNamespace':
+                await handleForceReingestNamespace(component, message.namespace);
+                break;
+            case 'reingestCarrier':
+                await handleReingestCarrier(component, message.dotNumber);
+                break;
+            case 'debugRetrieval':
+                await handleDebugRetrieval(component, message.query, message.role);
+                break;
+
             default:
                 console.warn('[ADMIN_OBSERVABILITY] Unknown action:', message.action);
                 break;
@@ -246,6 +266,53 @@ async function handleDeleteAnomalyRule(component, ruleId) {
 async function handleGetAnomalyHistory(component, period) {
     const data = await getAnomalyHistory(period || 'week');
     postToComponent(component, { action: 'anomalyHistoryLoaded', payload: data });
+}
+
+// ============================================
+// RAG INTELLIGENCE HANDLERS
+// ============================================
+
+async function handleGetRagAnalytics(component) {
+    const data = await getRagAnalyticsSummary();
+    postToComponent(component, { action: 'ragAnalyticsLoaded', payload: data });
+}
+
+async function handleGetRagFreshness(component) {
+    const data = await getFreshnessDistribution();
+    postToComponent(component, { action: 'ragFreshnessLoaded', payload: data });
+}
+
+async function handleForceReingestNamespace(component, namespace) {
+    if (!namespace) {
+        postToComponent(component, { action: 'actionError', message: 'Namespace is required' });
+        return;
+    }
+    const result = await forceReingestNamespace(namespace);
+    postToComponent(component, {
+        action: 'reingestSuccess',
+        message: `Re-ingested ${result.refreshed} docs in ${namespace} (${result.failed} failed)`
+    });
+}
+
+async function handleReingestCarrier(component, dotNumber) {
+    if (!dotNumber) {
+        postToComponent(component, { action: 'actionError', message: 'DOT number is required' });
+        return;
+    }
+    await reingestCarrier(dotNumber);
+    postToComponent(component, {
+        action: 'reingestSuccess',
+        message: `Carrier DOT ${dotNumber} re-ingested successfully`
+    });
+}
+
+async function handleDebugRetrieval(component, query, role) {
+    if (!query) {
+        postToComponent(component, { action: 'actionError', message: 'Query is required' });
+        return;
+    }
+    const result = await debugRetrieval(query, undefined, role);
+    postToComponent(component, { action: 'debugRetrievalResult', payload: result });
 }
 
 // ============================================

@@ -261,6 +261,63 @@ export async function ingestTurnMemory(userId, role, conversationId, userMessage
 // ── Manual Re-ingestion ─────────────────────────────────────────────────────
 
 /**
+ * Re-ingest a single ragDocument record.
+ * Called by ragFreshnessJob when a document is stale/expired.
+ *
+ * @param {object} ragDoc - A record from ragDocuments collection
+ * @returns {Promise<{ status: string, error?: string }>}
+ */
+export async function reingestDocument(ragDoc) {
+  if (!ragDoc || !ragDoc.document_id || !ragDoc.namespace) {
+    return { status: 'error', error: 'Invalid ragDocument record — missing document_id or namespace' };
+  }
+
+  const namespace = ragDoc.namespace;
+  const sourceKey = ragDoc.source_key;
+
+  // Route based on namespace to rebuild document from source data
+  switch (namespace) {
+    case 'carrier_intel': {
+      if (!sourceKey) return { status: 'error', error: 'No source_key for carrier_intel doc' };
+      // sourceKey is the dot_number for carrier_intel
+      const carrierResult = await dataAccess.queryRecords('carrierEnrichments', {
+        filters: { dot_number: Number(sourceKey) },
+        limit: 1,
+        suppressAuth: true,
+      });
+      if (!carrierResult.success || !carrierResult.items?.length) {
+        return { status: 'error', error: `Carrier enrichment not found for DOT ${sourceKey}` };
+      }
+      const chunks = _buildCarrierChunks(carrierResult.items[0]);
+      const target = chunks.find(c => c.documentId === ragDoc.document_id);
+      if (!target) {
+        return { status: 'error', error: `Chunk ${ragDoc.document_id} not found in rebuilt carrier chunks` };
+      }
+      return _ingestOne(namespace, target.documentId, target.text, target.metadata, target.metadata.enriched_at);
+    }
+
+    case 'driver_market':
+    case 'lane_market':
+    case 'platform_ops':
+    case 'industry_regs': {
+      // For aggregate/static namespaces, trigger the full namespace ingestion
+      // The individual doc will be refreshed as part of the batch
+      if (namespace === 'driver_market') {
+        return ingestDriverMarketAggregate().then(() => ({ status: 'ingested' }));
+      }
+      if (namespace === 'lane_market') {
+        return ingestLaneMarket().then(() => ({ status: 'ingested' }));
+      }
+      // platform_ops and industry_regs are static — just mark as fresh
+      return { status: 'skipped', reason: 'static_namespace' };
+    }
+
+    default:
+      return { status: 'error', error: `Unsupported namespace for re-ingestion: ${namespace}` };
+  }
+}
+
+/**
  * Re-ingest a specific carrier's intelligence.
  * @param {string} dotNumber
  */

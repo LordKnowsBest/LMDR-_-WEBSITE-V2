@@ -511,6 +511,23 @@ export const FEATURE_FLAGS = {
 };
 
 // =============================================================================
+// RAG KNOWLEDGE NAMESPACE CONFIGURATION
+// =============================================================================
+
+/**
+ * TTL (hours) and access config per knowledge namespace.
+ * Used by ragFreshnessJob to determine when documents are stale/expired.
+ */
+export const RAG_NAMESPACE_CONFIG = {
+  carrier_intel:       { ttl_hours: 168, access: ['driver', 'recruiter', 'admin', 'carrier', 'b2b'] },
+  driver_market:       { ttl_hours: 24,  access: ['driver', 'recruiter', 'admin', 'carrier'] },
+  platform_ops:        { ttl_hours: 720, access: ['driver', 'recruiter', 'admin', 'carrier'] },
+  industry_regs:       { ttl_hours: 2160, access: ['driver', 'recruiter'] },
+  lane_market:         { ttl_hours: 6,   access: ['driver', 'recruiter', 'admin', 'carrier'] },
+  conversation_memory: { ttl_hours: 2160, access: ['driver', 'recruiter', 'carrier'] },
+};
+
+// =============================================================================
 // SOCIAL POSTING SETTINGS
 // =============================================================================
 
@@ -1302,6 +1319,12 @@ export const AIRTABLE_TABLE_NAMES = {
 
   // ── Market Signals ──
   marketSignals: 'v2_Market Signals',
+
+  // ── RAG + Intent Layer (rag_intent_layer_20260224) ──
+  ragDocuments: 'v2_RAG Documents',
+  ragRetrievalLog: 'v2_RAG Retrieval Log',
+  ragAnalytics: 'v2_RAG Analytics',
+  intentClassificationLog: 'v2_Intent Classification Log',
 };
 
 // =============================================================================

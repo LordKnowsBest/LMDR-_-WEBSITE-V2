@@ -1,0 +1,246 @@
+/**
+ * RAG Freshness Monitor Job
+ *
+ * Runs every 30 minutes to check knowledge document freshness.
+ * Finds stale and expired documents, triggers re-ingestion.
+ *
+ * Freshness transitions:
+ *   fresh:   hours_since_ingested < ttl_hours * 0.8
+ *   stale:   ttl_hours * 0.8 <= hours_since_ingested < ttl_hours
+ *   expired: hours_since_ingested >= ttl_hours
+ *
+ * Dead-letter: After 3 consecutive ingestion failures, doc is skipped.
+ *
+ * Track: rag_intent_layer_20260224 — Phase 5
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+import { chunkArray } from 'backend/utils/arrayUtils';
+import { reingestDocument } from 'backend/ragIngestionService';
+import { RAG_NAMESPACE_CONFIG } from 'backend/configData';
+
+const COLLECTION = 'ragDocuments';
+const BATCH_LIMIT = 100;
+const CHUNK_SIZE = 10;
+const RATE_LIMIT_MS = 200;
+const DEAD_LETTER_THRESHOLD = 3;
+
+/**
+ * Scheduled job entry point — runs every 30 minutes.
+ * 1. Query ragDocuments for stale/expired docs
+ * 2. Update freshness_status for all docs
+ * 3. Re-ingest stale + expired docs (skip dead-lettered)
+ */
+export async function runRagFreshnessCheck() {
+  console.log('[ragFreshness] Starting freshness check...');
+  const now = Date.now();
+  let refreshed = 0;
+  let skipped = 0;
+  let deadLettered = 0;
+  let statusUpdated = 0;
+
+  try {
+    // Fetch all tracked RAG documents
+    const result = await dataAccess.queryRecords(COLLECTION, {
+      limit: BATCH_LIMIT,
+      suppressAuth: true,
+    });
+
+    if (!result.success || !result.items?.length) {
+      console.log('[ragFreshness] No RAG documents found to check.');
+      return { refreshed: 0, skipped: 0, deadLettered: 0, statusUpdated: 0 };
+    }
+
+    const docs = result.items;
+    const toReingest = [];
+
+    // Evaluate freshness for each document
+    for (const doc of docs) {
+      const namespace = doc.namespace;
+      const nsConfig = RAG_NAMESPACE_CONFIG[namespace];
+      const ttlHours = nsConfig ? nsConfig.ttl_hours : (doc.ttl_hours || 168);
+
+      const lastIngested = doc.last_ingested_at ? new Date(doc.last_ingested_at).getTime() : 0;
+      const hoursSinceIngested = lastIngested > 0 ? (now - lastIngested) / (1000 * 60 * 60) : Infinity;
+
+      let newStatus;
+      if (hoursSinceIngested < ttlHours * 0.8) {
+        newStatus = 'fresh';
+      } else if (hoursSinceIngested < ttlHours) {
+        newStatus = 'stale';
+      } else {
+        newStatus = 'expired';
+      }
+
+      // Update status if changed
+      if (newStatus !== doc.freshness_status) {
+        try {
+          await dataAccess.updateRecord(COLLECTION, doc._id, {
+            freshness_status: newStatus,
+          }, { suppressAuth: true });
+          statusUpdated++;
+        } catch (err) {
+          console.warn(`[ragFreshness] Failed to update status for ${doc.document_id}:`, err.message);
+        }
+      }
+
+      // Queue for re-ingestion if stale or expired
+      if (newStatus === 'stale' || newStatus === 'expired') {
+        const failures = doc.ingestion_failures || 0;
+        if (failures >= DEAD_LETTER_THRESHOLD) {
+          deadLettered++;
+          continue;
+        }
+        toReingest.push(doc);
+      }
+    }
+
+    // Process re-ingestion in batches
+    if (toReingest.length > 0) {
+      console.log(`[ragFreshness] Re-ingesting ${toReingest.length} stale/expired documents...`);
+      const chunks = chunkArray(toReingest, CHUNK_SIZE);
+
+      for (const chunk of chunks) {
+        const results = await Promise.all(
+          chunk.map(async (doc) => {
+            try {
+              const result = await reingestDocument(doc);
+              if (result.status === 'ingested' || result.status === 'skipped') {
+                // Reset failure count and update freshness
+                await dataAccess.updateRecord(COLLECTION, doc._id, {
+                  freshness_status: 'fresh',
+                  last_ingested_at: new Date().toISOString(),
+                  ingestion_failures: 0,
+                }, { suppressAuth: true });
+                return { success: true };
+              } else {
+                // Increment failure count
+                await dataAccess.updateRecord(COLLECTION, doc._id, {
+                  ingestion_failures: (doc.ingestion_failures || 0) + 1,
+                }, { suppressAuth: true });
+                return { success: false };
+              }
+            } catch (err) {
+              console.warn(`[ragFreshness] Re-ingest failed for ${doc.document_id}:`, err.message);
+              try {
+                await dataAccess.updateRecord(COLLECTION, doc._id, {
+                  ingestion_failures: (doc.ingestion_failures || 0) + 1,
+                }, { suppressAuth: true });
+              } catch (_) { /* ignore update failure */ }
+              return { success: false };
+            }
+          })
+        );
+
+        refreshed += results.filter(r => r.success).length;
+        skipped += results.filter(r => !r.success).length;
+
+        // Rate limit between chunks
+        await new Promise(r => setTimeout(r, RATE_LIMIT_MS));
+      }
+    }
+  } catch (err) {
+    console.error('[ragFreshness] Freshness check error:', err.message);
+  }
+
+  const summary = { refreshed, skipped, deadLettered, statusUpdated };
+  console.log(`[ragFreshness] Complete:`, JSON.stringify(summary));
+  return summary;
+}
+
+/**
+ * Get freshness distribution across all namespaces.
+ * Returns { namespace: { fresh, stale, expired, total, freshPct } }.
+ * Used by admin observability dashboard.
+ */
+export async function getFreshnessDistribution() {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTION, {
+      limit: 500,
+      suppressAuth: true,
+    });
+
+    if (!result.success || !result.items?.length) {
+      return {};
+    }
+
+    const distribution = {};
+
+    for (const doc of result.items) {
+      const ns = doc.namespace || 'unknown';
+      if (!distribution[ns]) {
+        distribution[ns] = { fresh: 0, stale: 0, expired: 0, total: 0 };
+      }
+
+      const status = doc.freshness_status || 'expired';
+      distribution[ns][status] = (distribution[ns][status] || 0) + 1;
+      distribution[ns].total++;
+    }
+
+    // Calculate percentages
+    for (const ns of Object.keys(distribution)) {
+      const d = distribution[ns];
+      d.freshPct = d.total > 0 ? Math.round((d.fresh / d.total) * 100) : 0;
+      d.stalePct = d.total > 0 ? Math.round((d.stale / d.total) * 100) : 0;
+      d.expiredPct = d.total > 0 ? Math.round((d.expired / d.total) * 100) : 0;
+    }
+
+    return distribution;
+  } catch (err) {
+    console.error('[ragFreshness] getFreshnessDistribution error:', err.message);
+    return {};
+  }
+}
+
+/**
+ * Force re-ingest all documents in a namespace.
+ * Admin action from observability dashboard.
+ *
+ * @param {string} namespace
+ * @returns {Promise<{ refreshed: number, failed: number }>}
+ */
+export async function forceReingestNamespace(namespace) {
+  console.log(`[ragFreshness] Force re-ingesting namespace: ${namespace}`);
+
+  const result = await dataAccess.queryRecords(COLLECTION, {
+    filters: { namespace },
+    limit: 200,
+    suppressAuth: true,
+  });
+
+  if (!result.success || !result.items?.length) {
+    return { refreshed: 0, failed: 0, message: `No documents found in namespace ${namespace}` };
+  }
+
+  let refreshed = 0;
+  let failed = 0;
+  const chunks = chunkArray(result.items, CHUNK_SIZE);
+
+  for (const chunk of chunks) {
+    const results = await Promise.all(
+      chunk.map(async (doc) => {
+        try {
+          const res = await reingestDocument(doc);
+          if (res.status === 'ingested' || res.status === 'skipped') {
+            await dataAccess.updateRecord(COLLECTION, doc._id, {
+              freshness_status: 'fresh',
+              last_ingested_at: new Date().toISOString(),
+              ingestion_failures: 0,
+            }, { suppressAuth: true });
+            return true;
+          }
+          return false;
+        } catch {
+          return false;
+        }
+      })
+    );
+
+    refreshed += results.filter(Boolean).length;
+    failed += results.filter(r => !r).length;
+    await new Promise(r => setTimeout(r, RATE_LIMIT_MS));
+  }
+
+  console.log(`[ragFreshness] Force re-ingest ${namespace}: ${refreshed} refreshed, ${failed} failed`);
+  return { refreshed, failed };
+}
