@@ -351,6 +351,18 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
       const meta = m.metadata || {};
       if (!meta.legal_name || meta.source === 'progress-tracker') continue;
 
+      // Build a partial fmcsa object from Pinecone metadata so the safety badge renders immediately.
+      // Full inspection/crash/BASIC data is fetched on-demand when driver clicks "Get AI Profile".
+      const partialFmcsa = {
+        safety_rating:    meta.safety_rating    || null,
+        dot_number:       meta.dot_number       || m.id.replace('dot:', ''),
+        is_authorized:    true,   // mass-embed only ingests active/authorized carriers
+        operating_status: 'AUTHORIZED',
+        inspections_24mo: {},
+        crashes_24mo:     {},
+        basics:           {},
+      };
+
       results.push({
         carrier: {
           DOT_NUMBER:        meta.dot_number     || m.id.replace('dot:', ''),
@@ -368,11 +380,12 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           TURNOVER_PERCENT:  null,
           AVG_TRUCK_AGE:     null,
         },
+        fmcsa:           partialFmcsa,
         overallScore:    Math.round(m.score * 100),
         semanticScore:   m.score,
         scores:          {},
         enrichment:      null,
-        needsEnrichment: false,  // FMCSA-only carriers skip AI enrichment (no DOT safety data on Railway)
+        needsEnrichment: true,   // Show "Get AI Profile" button — enrichCarrier works for any DOT
         fromCache:       false,
         fmcsaOnly:       true,
         source:          'fmcsa-mass-embed',
@@ -395,7 +408,9 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
     const rawResults = finalResults.map(r => ({
       ...r,
       enrichment:      null,
-      needsEnrichment: !r.fmcsaOnly, // Wix triggers lazy enrichment on Airtable-backed carriers
+      // needsEnrichment: true for ALL carriers — renderer shows "Get AI Profile" button on every card.
+      // Page code uses !m.fmcsaOnly to decide whether to auto-enrich; FMCSA-only cards are on-demand only.
+      needsEnrichment: true,
     }));
 
     await _postCallback(callbackUrl, {
