@@ -40,6 +40,26 @@ Tim connected with Levy Rivers via LinkedIn through the PAEN network. Initial ex
 **Analogy that lands with Tim specifically:**
 > "What procurement automation did for manufacturer sourcing — that's what VelocityMatch is doing for how carriers acquire CDL drivers."
 
+**What we actually place — job types Tim can speak to:**
+
+These are the roles VelocityMatch recruits for. Knowing this lets Tim (or anyone he introduces us to) immediately map us to their open positions.
+
+| Driver Type | Description | Who hires in Indy |
+|-------------|-------------|-------------------|
+| **Class A CDL — OTR** | Long-haul, multi-state routes, 5–14 day cycles | ProTrans, Venture Logistics, regional carriers |
+| **Class A CDL — Regional** | Home weekly, 500–800mi radius, highest demand category | ProTrans, Buske, MD Logistics |
+| **Class A CDL — Dedicated** | Fixed route, fixed customer, predictable schedule | Manufacturing fleet arms (Eli Lilly, Allison) |
+| **Class A CDL — Flatbed** | Open-deck freight, steel, equipment, construction materials | Manufacturing/industrial suppliers |
+| **Class A CDL — Tanker** | Liquid/gas bulk transport, hazmat endorsement common | Chemical, pharma, fuel distributors |
+| **Class B CDL — Local/City** | Straight trucks, urban delivery, home daily | Distribution centers, last-mile operations |
+| **Owner-Operator / Lease-Op** | Independent contractor, own equipment | Asset-light carriers, brokers, spot freight |
+| **Team Drivers** | Two-driver teams, maximum miles, time-sensitive freight | National freight lanes, time-definite 3PLs |
+| **Hazmat Endorsement** | Any class, HAZMAT certification required | Pharma (Eli Lilly distribution), chemical, fuel |
+| **Intermodal / Drayage** | Port and rail yard moves, container transport | Logistics hubs, ProTrans intermodal ops |
+
+**The shortage reality Tim should know:**
+The industry is short ~80,000 CDL drivers now. Projected to reach 160,000 by 2030. Every carrier on that Indianapolis target list is actively struggling with this. This isn't a nice-to-have product — it's infrastructure for a crisis.
+
 ---
 
 ## Draft Response — Version 2 (2026-02-24)
