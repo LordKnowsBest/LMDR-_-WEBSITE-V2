@@ -215,10 +215,11 @@ semanticRouter.post('/search/carriers-async', async (c) => {
 
 const AIRTABLE_BASE    = 'app9N1YCJ3gdhExA0';
 const AIRTABLE_TABLE   = 'Carriers (Master)';
-const AIRTABLE_FIELDS  = ['DOT_NUMBER', 'LEGAL_NAME', 'DBA_NAME', 'CARRIER_OPERATION',
-                          'NBR_POWER_UNIT', 'TOTAL_DRIVERS', 'SAFETY_RATING',
+const AIRTABLE_FIELDS  = ['DOT_NUMBER', 'LEGAL_NAME', 'CARRIER_OPERATION',
+                          'NBR_POWER_UNIT', 'DRIVER_TOTAL', 'ACCIDENT_RATE',
                           'PHY_CITY', 'PHY_STATE', 'PHY_ZIP', 'TELEPHONE',
-                          'PAY_CPM', 'TURNOVER_PERCENT', 'AVG_TRUCK_AGE', 'combined_score'];
+                          'PAY_CPM', 'TURNOVER_PERCENT', 'AVG_TRUCK_AGE',
+                          'COMBINED_SCORE', 'PRIORITY_SCORE', 'RECRUITMENT_SCORE'];
 const TOP_K_PINECONE   = 75;
 const MAX_RESULTS      = 10; // cap per-tier; total up to 20
 
@@ -319,18 +320,19 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           // Use uppercase keys to match existing renderer expectations
           DOT_NUMBER:         fields.DOT_NUMBER        || m.metadata?.dot_number || '',
           LEGAL_NAME:         fields.LEGAL_NAME        || m.metadata?.legal_name || 'Unknown Carrier',
-          DBA_NAME:           fields.DBA_NAME          || null,
           CARRIER_OPERATION:  fields.CARRIER_OPERATION || m.metadata?.operation_type || null,
           NBR_POWER_UNIT:     fields.NBR_POWER_UNIT    || m.metadata?.fleet_size    || null,
-          TOTAL_DRIVERS:      fields.TOTAL_DRIVERS     || m.metadata?.driver_count  || null,
-          SAFETY_RATING:      fields.SAFETY_RATING     || m.metadata?.safety_rating || null,
+          DRIVER_TOTAL:       fields.DRIVER_TOTAL      || m.metadata?.driver_count  || null,
+          ACCIDENT_RATE:      fields.ACCIDENT_RATE     || m.metadata?.accident_rate || null,
           PHY_CITY:           fields.PHY_CITY          || null,
           PHY_STATE:          fields.PHY_STATE         || m.metadata?.state         || null,
           PHY_ZIP:            fields.PHY_ZIP           || null,
           TELEPHONE:          fields.TELEPHONE         || null,
-          PAY_CPM:            fields.PAY_CPM           || null,
-          TURNOVER_PERCENT:   fields.TURNOVER_PERCENT  || null,
+          PAY_CPM:            fields.PAY_CPM           || m.metadata?.pay_cpm       || null,
+          TURNOVER_PERCENT:   fields.TURNOVER_PERCENT  || m.metadata?.turnover_pct  || null,
           AVG_TRUCK_AGE:      fields.AVG_TRUCK_AGE     || null,
+          COMBINED_SCORE:     fields.COMBINED_SCORE    || null,
+          PRIORITY_SCORE:     fields.PRIORITY_SCORE    || m.metadata?.priority_score || null,
         },
         overallScore:    Math.round(m.score * 100),
         semanticScore:   m.score,
