@@ -405,13 +405,44 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
     const elapsed = Date.now() - started;
     console.log(`[search/carriers-async] ${jobId}: returning ${finalResults.length} raw results in ${elapsed}ms`);
 
-    const rawResults = finalResults.map(r => ({
-      ...r,
-      enrichment:      null,
-      // needsEnrichment: true for ALL carriers — renderer shows "Get AI Profile" button on every card.
-      // Page code uses !m.fmcsaOnly to decide whether to auto-enrich; FMCSA-only cards are on-demand only.
-      needsEnrichment: true,
-    }));
+    // Pre-enrich top carriers with Perplexity before sending callback.
+    // Non-blocking — failure falls through to needsEnrichment=true (on-demand fallback).
+    const carriersToEnrich = finalResults
+      .filter(r => r.carrier.LEGAL_NAME && r.carrier.LEGAL_NAME !== 'Unknown Carrier')
+      .slice(0, 5)
+      .map(r => ({
+        name:      r.carrier.LEGAL_NAME,
+        dotNumber: String(r.carrier.DOT_NUMBER),
+        knownData: {
+          city:              r.carrier.PHY_CITY,
+          state:             r.carrier.PHY_STATE,
+          fleet_size:        r.carrier.NBR_POWER_UNIT,
+          safety_rating:     r.fmcsa?.safety_rating || r.carrier.SAFETY_RATING,
+          carrier_operation: r.carrier.CARRIER_OPERATION,
+        },
+      }));
+
+    let enrichmentMap = {};
+    if (carriersToEnrich.length > 0) {
+      try {
+        console.log(`[search/carriers-async] ${jobId}: Perplexity enriching ${carriersToEnrich.length} carriers`);
+        enrichmentMap = await enrichCarriersBatch(carriersToEnrich, { maxConcurrent: 5 });
+        console.log(`[search/carriers-async] ${jobId}: Perplexity enrichment complete`);
+      } catch (enrichErr) {
+        console.warn(`[search/carriers-async] ${jobId}: Perplexity enrichment failed (non-blocking):`, enrichErr.message);
+      }
+    }
+
+    const rawResults = finalResults.map(r => {
+      const dot            = String(r.carrier.DOT_NUMBER);
+      const enrichment     = enrichmentMap[dot] || null;
+      const hasEnrichment  = enrichment && !enrichment.error;
+      return {
+        ...r,
+        enrichment:      hasEnrichment ? enrichment : null,
+        needsEnrichment: !hasEnrichment,
+      };
+    });
 
     await _postCallback(callbackUrl, {
       jobId,
