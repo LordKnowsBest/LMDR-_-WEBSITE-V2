@@ -1,5 +1,5 @@
 import { findMatchingCarriers, logMatchEvent, getDriverSavedCarriers } from 'backend/carrierMatching.jsw';
-import { triggerSemanticSearch, checkSearchStatus } from 'backend/asyncSearchService.jsw';
+import { triggerSemanticSearch, checkSearchStatus, enrichCarrierViaRailway } from 'backend/asyncSearchService.jsw';
 import { getMutualInterestForDriver } from 'backend/mutualInterestService.jsw';
 import { enrichCarrier } from 'backend/aiEnrichment.jsw';
 import { getOrCreateDriverProfile, setDiscoverability, getDriverInterests, updateDriverDocuments } from 'backend/driverProfiles.jsw';
@@ -983,26 +983,34 @@ async function handleRetryEnrichment(data) {
   const dotNumber = data.dot || data.dot_number;
   if (!dotNumber) return;
 
-  console.log(`🔄 Retrying enrichment for DOT: ${dotNumber}`);
+  console.log(`🔄 Enriching via Railway/Perplexity for DOT: ${dotNumber}`);
 
-  sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'loading', message: 'Retrying...' });
-
-  await delay(2000);
+  sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'loading', message: 'Researching...' });
 
   try {
-    // Look up full carrier data from last search results so enrichment has the carrier name
-    const matchData = lastSearchResults?.matches?.find(
+    // Pull carrier name and known data from the last search results for better Perplexity context
+    const matchData   = lastSearchResults?.matches?.find(
       m => String(m.carrier?.DOT_NUMBER) === String(dotNumber)
     );
-    const carrierData = matchData?.carrier || { DOT_NUMBER: dotNumber };
-    const enrichment = await enrichCarrier(dotNumber, carrierData, {});
-    sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'complete', ...enrichment });
+    const carrier     = matchData?.carrier || {};
+    const carrierName = carrier.LEGAL_NAME || carrier.DBA_NAME || `DOT ${dotNumber}`;
+    const knownData   = {
+      city:              carrier.PHY_CITY          || null,
+      state:             carrier.PHY_STATE         || null,
+      fleet_size:        carrier.NBR_POWER_UNIT    || null,
+      safety_rating:     carrier.SAFETY_RATING     || null,
+      carrier_operation: carrier.CARRIER_OPERATION || null,
+    };
+
+    const enrichment = await enrichCarrierViaRailway(dotNumber, carrierName, knownData);
+    sendToHtml('enrichmentUpdate', { dot_number: String(dotNumber), status: 'complete', ...enrichment });
   } catch (error) {
+    console.error(`[retryEnrichment] Railway failed for DOT ${dotNumber}:`, error.message);
     sendToHtml('enrichmentUpdate', {
-      dot_number: dotNumber,
+      dot_number: String(dotNumber),
       status: 'error',
       error: true,
-      ai_summary: 'Retry failed. Check FMCSA directly.'
+      ai_summary: 'AI profile unavailable. Check FMCSA records directly.'
     });
   }
 }

@@ -11,12 +11,44 @@ import { Hono } from 'hono';
 import crypto from 'node:crypto';
 import { embed, buildDriverText, buildCarrierText } from '../lib/embeddings.js';
 import { upsertVector, queryVectors, fetchVector } from '../lib/pinecone.js';
-import { enrichCarriersBatch } from '../lib/perplexity.js';
+import { enrichCarriersBatch, enrichCarrierWithPerplexity } from '../lib/perplexity.js';
 
 export const semanticRouter = new Hono();
 
 const EMBED_TIMEOUT_MS  = 5_000;
 const SEARCH_TIMEOUT_MS = 3_000;
+
+// ── FMCSA lookup (used for Pinecone-only carriers missing city/fleet data) ────
+
+async function fetchFmcsaCarrier(dotNumber) {
+  const key = process.env.FMCSA_WEB_KEY;
+  if (!key) return null;
+  try {
+    const res = await fetch(
+      `https://mobile.fmcsa.dot.gov/qc/services/carriers/${dotNumber}?webKey=${key}`,
+      { signal: AbortSignal.timeout(4_000) }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.content?.carrier || data?.carrier || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Batch-fetch FMCSA data for a list of DOT numbers in parallel.
+ * Returns a map of { [dotNumber]: carrierObj | null }
+ */
+async function fetchFmcsaBatch(dotNumbers) {
+  const pairs = await Promise.all(
+    dotNumbers.map(async dot => {
+      const carrier = await fetchFmcsaCarrier(dot);
+      return [dot, carrier];
+    })
+  );
+  return Object.fromEntries(pairs);
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -402,6 +434,34 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
     // 6. Fire callback immediately with raw results so Wix renders cards fast.
     //    All carriers get needsEnrichment=true — the Wix aiEnrichment.jsw handles
     //    lazy per-card enrichment after the results view is visible.
+    // Fill in FMCSA data for Pinecone-only carriers (city, fleet size, etc. missing from metadata).
+    const fmcsaOnlyResults = finalResults.filter(r => r.fmcsaOnly);
+    if (fmcsaOnlyResults.length > 0) {
+      const dots = fmcsaOnlyResults.map(r => String(r.carrier.DOT_NUMBER)).filter(Boolean);
+      try {
+        const fmcsaMap = await fetchFmcsaBatch(dots);
+        for (const r of fmcsaOnlyResults) {
+          const dot = String(r.carrier.DOT_NUMBER);
+          const f   = fmcsaMap[dot];
+          if (!f) continue;
+          r.carrier.LEGAL_NAME        = f.legalName        || f.legal_name        || r.carrier.LEGAL_NAME;
+          r.carrier.PHY_CITY          = f.phyCity          || f.phy_city          || r.carrier.PHY_CITY;
+          r.carrier.PHY_STATE         = f.phyState         || f.phy_state         || r.carrier.PHY_STATE;
+          r.carrier.NBR_POWER_UNIT    = f.nbrPowerUnit     ?? f.nbr_power_unit    ?? r.carrier.NBR_POWER_UNIT;
+          r.carrier.TOTAL_DRIVERS     = f.totalDrivers     ?? f.total_drivers     ?? r.carrier.TOTAL_DRIVERS;
+          r.carrier.CARRIER_OPERATION = f.carrierOperation || f.carrier_operation || r.carrier.CARRIER_OPERATION;
+          r.carrier.SAFETY_RATING     = f.safetyRating     || f.safety_rating     || r.carrier.SAFETY_RATING;
+          // Update the fmcsa object too so the FMCSA badge renders correctly
+          if (r.fmcsa) {
+            r.fmcsa.safety_rating = r.carrier.SAFETY_RATING;
+          }
+        }
+        console.log(`[search/carriers-async] ${jobId}: FMCSA hydrated ${fmcsaOnlyResults.length} Pinecone-only carriers`);
+      } catch (fmcsaErr) {
+        console.warn(`[search/carriers-async] ${jobId}: FMCSA batch hydration failed (non-blocking):`, fmcsaErr.message);
+      }
+    }
+
     const elapsed = Date.now() - started;
     console.log(`[search/carriers-async] ${jobId}: returning ${finalResults.length} raw results in ${elapsed}ms`);
 
@@ -518,6 +578,44 @@ semanticRouter.post('/search/carriers', async (c) => {
     });
   } catch (err) {
     console.error('[search/carriers]', err.message);
+    return c.json({ error: { code: 'INTERNAL_ERROR', message: err.message, requestId } }, 500);
+  }
+});
+
+// ── POST /v1/enrich/carrier ───────────────────────────────────────────────────
+// On-demand single-carrier enrichment via Perplexity sonar-pro.
+// Called by Wix handleRetryEnrichment ("Get AI Profile" button).
+
+semanticRouter.post('/enrich/carrier', async (c) => {
+  const requestId = crypto.randomUUID();
+  let body;
+  try { body = await c.req.json(); } catch {
+    return c.json({ error: { code: 'INVALID_BODY', message: 'Invalid JSON', requestId } }, 400);
+  }
+
+  const { dotNumber, carrierName, knownData = {} } = body;
+  if (!dotNumber || !carrierName) {
+    return c.json({ error: { code: 'MISSING_FIELD', message: 'dotNumber and carrierName required', requestId } }, 400);
+  }
+
+  try {
+    // If we don't have city/state from the caller, try a live FMCSA lookup first
+    // so Perplexity gets better context (location helps narrow web search results)
+    let enrichKnownData = { ...knownData };
+    if (!enrichKnownData.city || !enrichKnownData.state) {
+      const fmcsa = await fetchFmcsaCarrier(String(dotNumber));
+      if (fmcsa) {
+        enrichKnownData.city          = enrichKnownData.city  || fmcsa.phyCity  || fmcsa.phy_city;
+        enrichKnownData.state         = enrichKnownData.state || fmcsa.phyState || fmcsa.phy_state;
+        enrichKnownData.fleet_size    = enrichKnownData.fleet_size    ?? fmcsa.nbrPowerUnit ?? fmcsa.nbr_power_unit;
+        enrichKnownData.safety_rating = enrichKnownData.safety_rating || fmcsa.safetyRating || fmcsa.safety_rating;
+      }
+    }
+
+    const enrichment = await enrichCarrierWithPerplexity(carrierName, String(dotNumber), enrichKnownData);
+    return c.json({ enrichment, requestId });
+  } catch (err) {
+    console.error('[enrich/carrier]', err.message);
     return c.json({ error: { code: 'INTERNAL_ERROR', message: err.message, requestId } }, 500);
   }
 });
