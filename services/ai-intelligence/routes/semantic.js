@@ -406,6 +406,7 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           SAFETY_RATING:     meta.safety_rating  || null,
           PHY_CITY:          meta.city           || null,
           PHY_STATE:         meta.state          || null,
+          PHY_STREET:        null,
           PHY_ZIP:           null,
           TELEPHONE:         null,
           PAY_CPM:           null,
@@ -447,13 +448,17 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           r.carrier.LEGAL_NAME        = f.legalName        || f.legal_name        || r.carrier.LEGAL_NAME;
           r.carrier.PHY_CITY          = f.phyCity          || f.phy_city          || r.carrier.PHY_CITY;
           r.carrier.PHY_STATE         = f.phyState         || f.phy_state         || r.carrier.PHY_STATE;
+          r.carrier.PHY_STREET        = f.phyStreet        || f.phy_street        || r.carrier.PHY_STREET;
+          r.carrier.PHY_ZIP           = f.phyZip           || f.phy_zip           || r.carrier.PHY_ZIP;
+          r.carrier.TELEPHONE         = f.telephone        || f.TELEPHONE         || r.carrier.TELEPHONE;
           r.carrier.NBR_POWER_UNIT    = f.nbrPowerUnit     ?? f.nbr_power_unit    ?? r.carrier.NBR_POWER_UNIT;
           r.carrier.TOTAL_DRIVERS     = f.totalDrivers     ?? f.total_drivers     ?? r.carrier.TOTAL_DRIVERS;
           r.carrier.CARRIER_OPERATION = f.carrierOperation || f.carrier_operation || r.carrier.CARRIER_OPERATION;
           r.carrier.SAFETY_RATING     = f.safetyRating     || f.safety_rating     || r.carrier.SAFETY_RATING;
-          // Update the fmcsa object too so the FMCSA badge renders correctly
+          // Update the fmcsa object too so the FMCSA safety section renders correctly
           if (r.fmcsa) {
-            r.fmcsa.safety_rating = r.carrier.SAFETY_RATING;
+            r.fmcsa.safety_rating = r.carrier.SAFETY_RATING || r.fmcsa.safety_rating;
+            r.fmcsa.dot_number    = r.carrier.DOT_NUMBER;
           }
         }
         console.log(`[search/carriers-async] ${jobId}: FMCSA hydrated ${fmcsaOnlyResults.length} Pinecone-only carriers`);

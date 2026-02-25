@@ -8,7 +8,20 @@ function renderMatchCard(match, rank) {
   const fromCache = match.fromCache;
 
   const carrierName = carrier.LEGAL_NAME || carrier.DBA_NAME || 'Unknown Carrier';
-  const location = `${carrier.PHY_CITY || ''}, ${carrier.PHY_STATE || ''}`.replace(/^, |, $/g, '') || 'Location Unknown';
+
+  // Build location: prefer full address when street is available
+  const cityState = `${carrier.PHY_CITY || ''}, ${carrier.PHY_STATE || ''}`.replace(/^, |, $/g, '');
+  const fullAddress = carrier.PHY_STREET
+    ? `${carrier.PHY_STREET}, ${cityState}${carrier.PHY_ZIP ? ' ' + carrier.PHY_ZIP : ''}`
+    : cityState;
+  const location = fullAddress || 'Location Unknown';
+
+  // Phone: format 10-digit string → (XXX) XXX-XXXX
+  const phoneRaw = carrier.TELEPHONE ? String(carrier.TELEPHONE).replace(/\D/g, '') : null;
+  const phoneDisplay = phoneRaw && phoneRaw.length >= 10
+    ? `(${phoneRaw.slice(-10, -7)}) ${phoneRaw.slice(-7, -4)}-${phoneRaw.slice(-4)}`
+    : null;
+
   const dotNumber = carrier.DOT_NUMBER || 'N/A';
   const payDisplay = carrier.PAY_CPM ? `$${carrier.PAY_CPM.toFixed(2)}` : 'N/A';
   const fleetDisplay = carrier.NBR_POWER_UNIT || 'N/A';
@@ -81,7 +94,12 @@ function renderMatchCard(match, rank) {
           <div class="match-name">${escapeHtml(carrierName)}</div>
           <div class="match-location">
             <i class="fa-solid fa-location-dot"></i> ${escapeHtml(location)}
-         </div>
+          </div>
+          ${phoneDisplay ? `
+          <div class="match-phone">
+            <i class="fa-solid fa-phone"></i>
+            <a href="tel:${phoneRaw}" style="color: inherit; text-decoration: none;">${escapeHtml(phoneDisplay)}</a>
+          </div>` : ''}
           <div class="match-dot-number">DOT: ${dotNumber}</div>
        </div>
         <div class="match-score-block">
