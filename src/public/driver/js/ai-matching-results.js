@@ -632,45 +632,17 @@ function loadApplications() {
   // Show loading spinner
   list.innerHTML = '<div class="loading-spinner" style="margin: 40px auto;"></div>';
 
-  // Request applications from parent page
   if (window.parent) {
     console.log('📡 Requesting driver applications from backend...');
     window.parent.postMessage({ type: 'getDriverApplications' }, '*');
 
-    // Set a timeout to show mock data if no response (for development/demo)
-    // In production, this would handle the error case
+    // Timeout fallback — backend didn't respond, show empty state
     window.appLoadTimeout = setTimeout(() => {
-      console.warn('⚠️ No response from backend, loading mock data for demo...');
-      loadMockApplications();
-    }, 3000);
+      console.warn('⚠️ No response from backend for getDriverApplications');
+      renderApplications([]);
+    }, 5000);
   } else {
-    // Standalone mode - load mock data
-    loadMockApplications();
+    renderApplications([]);
   }
-}
-
-function loadMockApplications() {
-  const mockApps = [
-    {
-      id: 'app_1',
-      carrierName: 'Swift Transportation (Demo)',
-      status: 'viewed',
-      submittedDate: '2025-01-28T10:00:00Z',
-      statusHistory: [
-        { status: 'Applied', date: '2025-01-28T10:00:00Z' },
-        { status: 'Viewed by Carrier', date: '2025-01-29T14:30:00Z' }
-      ]
-    },
-    {
-      id: 'app_2',
-      carrierName: 'J.B. Hunt (Demo)',
-      status: 'applied',
-      submittedDate: '2025-01-30T09:15:00Z',
-      statusHistory: [
-        { status: 'Applied', date: '2025-01-30T09:15:00Z' }
-      ]
-    }
-  ];
-  renderApplications(mockApps);
 }
 

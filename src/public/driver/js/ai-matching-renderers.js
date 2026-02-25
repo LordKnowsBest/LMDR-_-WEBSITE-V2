@@ -461,7 +461,7 @@ function renderErrorState(data, dotNumber, carrier) {
   `;
 }
 
-function renderIntelItem(label, value) {
+function renderIntelItem(label, value, isLowConfidence = false) {
   if (!value) return '';
   const isGeneric = !checkValidData(value);
 
@@ -471,7 +471,7 @@ function renderIntelItem(label, value) {
   }
 
   return `
-    <div class="ai-intel-item">
+    <div class="ai-intel-item${isLowConfidence ? ' low-confidence' : ''}">
       <strong>${label}</strong>
       <span>${escapeHtml(value)}</span>
    </div>
