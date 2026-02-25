@@ -1,5 +1,5 @@
 import { findMatchingCarriers, logMatchEvent, getDriverSavedCarriers } from 'backend/carrierMatching.jsw';
-import { triggerSemanticSearch, checkSearchStatus, enrichCarrierViaRailway } from 'backend/asyncSearchService.jsw';
+import { triggerSemanticSearch, checkSearchStatus, triggerEnrichmentJob, checkEnrichmentStatus } from 'backend/asyncSearchService.jsw';
 import { getMutualInterestForDriver } from 'backend/mutualInterestService.jsw';
 import { enrichCarrier } from 'backend/aiEnrichment.jsw';
 import { getOrCreateDriverProfile, setDiscoverability, getDriverInterests, updateDriverDocuments } from 'backend/driverProfiles.jsw';
@@ -983,12 +983,11 @@ async function handleRetryEnrichment(data) {
   const dotNumber = data.dot || data.dot_number;
   if (!dotNumber) return;
 
-  console.log(`🔄 Enriching via Railway/Perplexity for DOT: ${dotNumber}`);
-
+  console.log(`🔄 [async] Triggering Railway/Perplexity enrichment for DOT: ${dotNumber}`);
   sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'loading', message: 'Researching...' });
 
   try {
-    // Pull carrier name and known data from the last search results for better Perplexity context
+    // Pull carrier context from last search results for better Perplexity accuracy
     const matchData   = lastSearchResults?.matches?.find(
       m => String(m.carrier?.DOT_NUMBER) === String(dotNumber)
     );
@@ -1002,15 +1001,57 @@ async function handleRetryEnrichment(data) {
       carrier_operation: carrier.CARRIER_OPERATION || null,
     };
 
-    const enrichment = await enrichCarrierViaRailway(dotNumber, carrierName, knownData);
-    sendToHtml('enrichmentUpdate', { dot_number: String(dotNumber), status: 'complete', ...enrichment });
+    // Generate a job ID and kick Railway async (returns immediately, <1s)
+    const jobId = 'enr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    await triggerEnrichmentJob(jobId, dotNumber, carrierName, knownData);
+
+    console.log(`📡 [enrich] Job ${jobId} started for DOT ${dotNumber} — polling...`);
+
+    // Poll every 3s until Railway/Perplexity finishes (max 90s = 30 attempts)
+    let attempts = 0;
+    const maxAttempts = 30;
+    await new Promise((resolve) => {
+      const timer = setInterval(async () => {
+        attempts++;
+        try {
+          const statusResult = await checkEnrichmentStatus(jobId);
+          if (statusResult.status === 'COMPLETE') {
+            clearInterval(timer);
+            console.log(`✅ [enrich] Job ${jobId} complete — delivering enrichment`);
+            sendToHtml('enrichmentUpdate', {
+              dot_number: String(dotNumber),
+              status: 'complete',
+              ...statusResult.enrichment,
+            });
+            resolve();
+          } else if (statusResult.status === 'FAILED') {
+            clearInterval(timer);
+            throw new Error(statusResult.error || 'Enrichment failed');
+          } else if (attempts >= maxAttempts) {
+            clearInterval(timer);
+            throw new Error('Enrichment timed out after 90s');
+          }
+        } catch (pollErr) {
+          clearInterval(timer);
+          console.error(`[retryEnrichment] Poll error for DOT ${dotNumber}:`, pollErr.message);
+          sendToHtml('enrichmentUpdate', {
+            dot_number: String(dotNumber),
+            status: 'error',
+            error: true,
+            ai_summary: 'AI profile unavailable. Check FMCSA records directly.',
+          });
+          resolve();
+        }
+      }, 3000);
+    });
+
   } catch (error) {
-    console.error(`[retryEnrichment] Railway failed for DOT ${dotNumber}:`, error.message);
+    console.error(`[retryEnrichment] Failed for DOT ${dotNumber}:`, error.message);
     sendToHtml('enrichmentUpdate', {
       dot_number: String(dotNumber),
       status: 'error',
       error: true,
-      ai_summary: 'AI profile unavailable. Check FMCSA records directly.'
+      ai_summary: 'AI profile unavailable. Check FMCSA records directly.',
     });
   }
 }

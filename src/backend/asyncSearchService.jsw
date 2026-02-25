@@ -89,6 +89,82 @@ export async function triggerSemanticSearch(driverPrefs, isPremiumUser = false) 
   return { jobId };
 }
 
+// ── triggerEnrichmentJob ──────────────────────────────────────────────────────
+
+/**
+ * Kick off an async single-carrier enrichment via Railway.
+ * Returns { jobId } immediately (~500ms — well under the 14s Velo limit).
+ *
+ * Railway fires POST /_functions/completeEnrichment when done.
+ * Page code polls checkEnrichmentStatus(jobId) every 3s.
+ *
+ * @param {string} jobId       Pre-generated job ID (prefix: 'enr_')
+ * @param {string|number} dotNumber
+ * @param {string} carrierName
+ * @param {object} [knownData]
+ * @returns {{ jobId: string }}
+ */
+export async function triggerEnrichmentJob(jobId, dotNumber, carrierName, knownData = {}) {
+  const callbackUrl = `${CALLBACK_BASE}/_functions/completeEnrichment`;
+
+  // 1. Write PROCESSING record to Airtable
+  await dataAccess.insertRecord('searchJobs', {
+    job_id:       jobId,
+    status:       'PROCESSING',
+    started_at:   now(),
+    driver_prefs: JSON.stringify({ dotNumber, carrierName, type: 'enrichment' }),
+    is_premium:   'No',
+  }, { suppressAuth: true });
+
+  // 2. Kick Railway async enrichment endpoint
+  try {
+    const key = await getSecret('LMDR_INTERNAL_KEY');
+    await fetch(`${RAILWAY_BASE}/v1/enrich/carrier/async`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':        'application/json',
+        'x-lmdr-internal-key': key,
+        'x-lmdr-timestamp':    String(Date.now()),
+      },
+      body: JSON.stringify({ jobId, dotNumber: String(dotNumber), carrierName, knownData, callbackUrl }),
+    });
+  } catch (err) {
+    console.error(`[enrichmentJob] Railway kick failed for DOT ${dotNumber}:`, err.message);
+    await dataAccess.queryRecords('searchJobs', {
+      filters: { job_id: jobId }, limit: 1
+    }).then(r => {
+      const rec = r.items?.[0];
+      if (rec) {
+        return dataAccess.updateRecord('searchJobs', {
+          _id: rec._id,
+          status: 'FAILED',
+          error: err.message,
+          completed_at: now(),
+        }, { suppressAuth: true });
+      }
+    }).catch(() => {});
+  }
+
+  return { jobId };
+}
+
+/**
+ * Poll the status of an enrichment job.
+ * Returns { status, enrichment? } where enrichment is the full enrichment payload.
+ *
+ * @param {string} jobId
+ * @returns {{ status: 'PROCESSING'|'COMPLETE'|'FAILED', enrichment?: object, error?: string }}
+ */
+export async function checkEnrichmentStatus(jobId) {
+  const result = await checkSearchStatus(jobId);
+  if (result.status === 'COMPLETE') {
+    // For enrichment jobs, results is the enrichment object (not an array)
+    const enrichment = Array.isArray(result.results) ? result.results[0] : result.results;
+    return { status: 'COMPLETE', enrichment: enrichment || {} };
+  }
+  return result;
+}
+
 // ── enrichCarrierViaRailway ───────────────────────────────────────────────────
 
 /**

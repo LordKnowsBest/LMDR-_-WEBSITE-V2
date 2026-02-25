@@ -1069,3 +1069,65 @@ export async function post_completeSearch(request) {
     return serverError({ error: error.message });
   }
 }
+
+// ============================================================================
+// ASYNC ENRICHMENT CALLBACK
+// POST https://www.lastmiledr.app/_functions/completeEnrichment
+//
+// Called by Railway /v1/enrich/carrier/async when a single-carrier Perplexity
+// enrichment job finishes (triggered by "Get AI Profile" button click).
+// Stores the enrichment result in SearchJobs so the page-code polling loop
+// can pick it up and deliver it to the HTML card.
+// ============================================================================
+
+export async function post_completeEnrichment(request) {
+  try {
+    const internalKey = await getSecret('LMDR_INTERNAL_KEY');
+    const providedKey = request.headers.get
+      ? request.headers.get('x-lmdr-internal-key')
+      : request.headers['x-lmdr-internal-key'];
+
+    if (providedKey !== internalKey) {
+      console.warn('[completeEnrichment] Unauthorized callback attempt');
+      return badRequest({ error: 'Unauthorized' });
+    }
+
+    let body;
+    try {
+      body = JSON.parse(await request.body.text());
+    } catch {
+      return badRequest({ error: 'Invalid JSON body' });
+    }
+
+    const { jobId, dotNumber, status, enrichment, error: jobError } = body;
+    if (!jobId || !status) {
+      return badRequest({ error: 'jobId and status required' });
+    }
+
+    const queryResult = await dataAccess.queryRecords('searchJobs', {
+      filters: { job_id: jobId },
+      limit: 1,
+    });
+
+    const record = queryResult.items?.[0];
+    if (!record) {
+      console.warn(`[completeEnrichment] Job ${jobId} not found in SearchJobs`);
+      return ok({ received: true, jobId, warning: 'Job record not found' });
+    }
+
+    await dataAccess.updateRecord('searchJobs', {
+      _id:          record._id,
+      status:       status,
+      results:      enrichment ? JSON.stringify(enrichment) : null,
+      error:        jobError || null,
+      completed_at: new Date().toISOString().slice(0, 10),
+    }, { suppressAuth: true });
+
+    console.log(`[completeEnrichment] Job ${jobId} → ${status} (DOT ${dotNumber})`);
+    return ok({ received: true, jobId, status });
+
+  } catch (error) {
+    console.error('[completeEnrichment] Error:', error.message);
+    return serverError({ error: error.message });
+  }
+}

@@ -582,9 +582,75 @@ semanticRouter.post('/search/carriers', async (c) => {
   }
 });
 
+// ── POST /v1/enrich/carrier/async ────────────────────────────────────────────
+// Async variant: returns 202 immediately, processes in background, then POSTs
+// to callbackUrl with the enrichment result.
+// Avoids the Wix 14s web-method timeout — same pattern as /v1/search/carriers-async.
+
+semanticRouter.post('/enrich/carrier/async', async (c) => {
+  const requestId = crypto.randomUUID();
+  let body;
+  try { body = await c.req.json(); } catch {
+    return c.json({ error: { code: 'INVALID_BODY', message: 'Invalid JSON', requestId } }, 400);
+  }
+
+  const { jobId, dotNumber, carrierName, knownData = {}, callbackUrl } = body;
+  if (!jobId || !dotNumber || !carrierName || !callbackUrl) {
+    return c.json({ error: { code: 'MISSING_FIELD', message: 'jobId, dotNumber, carrierName, callbackUrl required', requestId } }, 400);
+  }
+
+  // Fire background processing — do NOT await
+  _runEnrichmentAsync(jobId, dotNumber, carrierName, knownData, callbackUrl).catch(err => {
+    console.error(`[enrich/async] Unhandled background error for DOT ${dotNumber}:`, err.message);
+  });
+
+  return c.json({ jobId, status: 'processing', requestId }, 202);
+});
+
+async function _runEnrichmentAsync(jobId, dotNumber, carrierName, knownData, callbackUrl) {
+  const key = process.env.LMDR_INTERNAL_KEY;
+
+  const _callback = async (payload) => {
+    try {
+      await fetch(callbackUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type':        'application/json',
+          'x-lmdr-internal-key': key || '',
+          'x-lmdr-timestamp':    String(Date.now()),
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(8_000),
+      });
+    } catch (cbErr) {
+      console.error(`[enrich/async] Callback failed for job ${jobId}:`, cbErr.message);
+    }
+  };
+
+  try {
+    // Hydrate with live FMCSA data if we're missing city/state
+    let enrichKnownData = { ...knownData };
+    if (!enrichKnownData.city || !enrichKnownData.state) {
+      const fmcsa = await fetchFmcsaCarrier(String(dotNumber));
+      if (fmcsa) {
+        enrichKnownData.city          = enrichKnownData.city          || fmcsa.phyCity   || fmcsa.phy_city;
+        enrichKnownData.state         = enrichKnownData.state         || fmcsa.phyState  || fmcsa.phy_state;
+        enrichKnownData.fleet_size    = enrichKnownData.fleet_size    ?? fmcsa.nbrPowerUnit ?? fmcsa.nbr_power_unit;
+        enrichKnownData.safety_rating = enrichKnownData.safety_rating || fmcsa.safetyRating || fmcsa.safety_rating;
+      }
+    }
+
+    const enrichment = await enrichCarrierWithPerplexity(carrierName, String(dotNumber), enrichKnownData);
+    await _callback({ jobId, dotNumber, status: 'COMPLETE', enrichment });
+  } catch (err) {
+    console.error(`[enrich/async] Failed for DOT ${dotNumber}:`, err.message);
+    await _callback({ jobId, dotNumber, status: 'FAILED', error: err.message });
+  }
+}
+
 // ── POST /v1/enrich/carrier ───────────────────────────────────────────────────
-// On-demand single-carrier enrichment via Perplexity sonar-pro.
-// Called by Wix handleRetryEnrichment ("Get AI Profile" button).
+// Synchronous variant (kept for internal use / testing).
+// NOTE: Too slow for direct Wix calls — use /async from Wix page code.
 
 semanticRouter.post('/enrich/carrier', async (c) => {
   const requestId = crypto.randomUUID();
