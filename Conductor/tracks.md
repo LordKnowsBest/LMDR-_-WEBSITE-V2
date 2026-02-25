@@ -287,11 +287,17 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: In Progress*
 *Completion: 25% (Phase 1 Complete — Runtime Foundation)*
 
-## [ ] Track: Async Polling for Semantic Search via External Microservice
+## [/] Track: RAG + Intent-Based Agent Intelligence Layer
+*Link: [./tracks/rag_intent_layer_20260224/](./tracks/rag_intent_layer_20260224/)*
+*Priority: Critical*
+*Status: In Progress*
+*Completion: 80% (Phases 1-4 Complete, Phase 5 Pending)*
+
+## [/] Track: Async Polling for Semantic Search via External Microservice
 *Link: [./tracks/semantic_search_polling_20260222/](./tracks/semantic_search_polling_20260222/)*
 *Priority: High*
-*Status: Planned*
-*Completion: 0%*
+*Status: In Progress*
+*Completion: 90% (Backend, Pipeline & Polling Complete, Pending E2E Verification)**
 
 ## [ ] Track: CDN Shell Refactor
 *Link: [./tracks/cdn_shell_refactor_20260219/](./tracks/cdn_shell_refactor_20260219/)*

@@ -1,0 +1,212 @@
+/**
+ * REVERSE MATCHING ANALYTICS SERVICE
+ * ==================================
+ * Provides aggregation queries for the reverse matching (carrier -> driver) admin dashboard.
+ * 
+ * @module backend/reverseMatchAnalyticsService.jsw
+ */
+
+import { wixData } from 'wix-data';
+import { currentUser } from 'wix-users-backend';
+
+const COLLECTIONS = {
+    VIEWS: 'CarrierDriverViews',
+    OUTREACH: 'CarrierDriverOutreach',
+    SUBS: 'CarrierSubscriptions',
+    PREFS: 'CarrierHiringPreferences',
+    DRIVERS: 'DriverProfiles' // Using an aggregate of visibility levels for pool size
+};
+
+/**
+ * Validates admin access
+ */
+async function _requireAdmin() {
+    if (!currentUser.loggedIn) {
+        throw new Error("Unauthorized: You must be logged in.");
+    }
+    const roles = await currentUser.getRoles();
+    const isAdmin = roles.some(r => r.name === 'Admin' || r.name === 'Super Admin');
+
+    if (!isAdmin) {
+        throw new Error("Forbidden: Admin access only.");
+    }
+}
+
+/**
+ * Gets a date object N days ago
+ */
+function _getDateNDaysAgo(days) {
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    return d;
+}
+
+/**
+ * Gets overview KPIs for the specified date range.
+ * 
+ * @param {number} days - Number of days to look back (default 30)
+ * @returns {Promise<Object>} The aggregated KPIs
+ */
+export async function getReverseMatchOverview(days = 30) {
+    await _requireAdmin();
+    const sinceDate = _getDateNDaysAgo(days);
+
+    return Promise.all([
+        _getTotalViews(sinceDate),
+        _getTotalOutreach(sinceDate),
+        _getActiveSubscriptions(),
+        _getPoolSize(),
+        _getTopSearchers(sinceDate)
+    ]).then(([views, outreach, subs, poolSize, topSearchers]) => {
+
+        // Calculate basic conversion rates
+        const viewRate = poolSize > 0 ? (views.total / poolSize) * 100 : 0;
+        const contactRate = views.total > 0 ? (outreach.total / views.total) * 100 : 0;
+
+        return {
+            period_days: days,
+            kpis: {
+                total_views: views.total,
+                unique_viewers: views.uniquePublishers,
+                total_contacts: outreach.total,
+                active_paid_subs: subs.activePaid,
+                mrr_estimate: subs.mrrEstimate,
+                contact_rate_pct: Number(contactRate.toFixed(2))
+            },
+            funnel: {
+                pool_size: poolSize,
+                views: views.total,
+                contacts_sent: outreach.total,
+                pipeline_saves: outreach.saves
+            },
+            top_carriers: topSearchers
+        };
+    }).catch(err => {
+        console.error("Failed to load reverse match analytics overview", err);
+        throw new Error("Failed to load analytics: " + err.message);
+    });
+}
+
+/**
+ * Helper: Get view volume
+ */
+async function _getTotalViews(sinceDate) {
+    try {
+        const { items } = await wixData.query(COLLECTIONS.VIEWS)
+            .ge('_createdDate', sinceDate)
+            .find();
+
+        const uniquePublishers = new Set(items.map(item => item.carrier_dot || item.recruiter_id)).size;
+
+        return {
+            total: items.length,
+            uniquePublishers
+        };
+    } catch (err) {
+        console.error("View stats error", err);
+        return { total: 0, uniquePublishers: 0 };
+    }
+}
+
+/**
+ * Helper: Get outreach volume
+ */
+async function _getTotalOutreach(sinceDate) {
+    try {
+        const { items } = await wixData.query(COLLECTIONS.OUTREACH)
+            .ge('_createdDate', sinceDate)
+            .find();
+
+        return {
+            total: items.length,
+            saves: items.filter(i => i.status === 'pipeline' || i.action === 'save').length,
+            contacts: items.filter(i => i.status === 'contacted' || i.action === 'message' || i.action === 'call').length,
+            hires: items.filter(i => i.status === 'hired').length
+        };
+    } catch (err) {
+        console.error("Outreach stats error", err);
+        return { total: 0, saves: 0, contacts: 0, hires: 0 };
+    }
+}
+
+/**
+ * Helper: Get active subscriptions
+ */
+async function _getActiveSubscriptions() {
+    try {
+        const { items } = await wixData.query(COLLECTIONS.SUBS)
+            .eq('is_active', true)
+            .find();
+
+        const activePaid = items.filter(i => i.plan_type === 'pro' || i.plan_type === 'enterprise');
+
+        let mrrEstimate = 0;
+        activePaid.forEach(sub => {
+            if (sub.plan_type === 'pro') mrrEstimate += 249;
+            if (sub.plan_type === 'enterprise') mrrEstimate += 749;
+        });
+
+        return {
+            total: items.length,
+            activePaid: activePaid.length,
+            free: items.filter(i => i.plan_type === 'free').length,
+            pro: items.filter(i => i.plan_type === 'pro').length,
+            enterprise: items.filter(i => i.plan_type === 'enterprise').length,
+            mrrEstimate
+        };
+    } catch (err) {
+        console.error("Subscription stats error", err);
+        return { total: 0, activePaid: 0, free: 0, pro: 0, enterprise: 0, mrrEstimate: 0 };
+    }
+}
+
+/**
+ * Helper: Get driver pool size
+ */
+async function _getPoolSize() {
+    try {
+        const count = await wixData.query(COLLECTIONS.DRIVERS)
+            .eq('is_searchable', true)
+            .ne('visibility_level', 'hidden')
+            .count();
+        return count;
+    } catch (err) {
+        console.error("Pool size error", err);
+        return 0;
+    }
+}
+
+/**
+ * Helper: Identify carriers with most activity
+ */
+async function _getTopSearchers(sinceDate) {
+    try {
+        // Aggregate views by carrier
+        const viewsAggr = await wixData.aggregate(COLLECTIONS.VIEWS)
+            .filter(wixData.filter().ge('_createdDate', sinceDate))
+            .group('carrier_dot')
+            .count()
+            .descending('count')
+            .limit(10)
+            .run();
+
+        return viewsAggr.items.map(item => ({
+            carrier_dot: item._id,
+            activity_count: item.count
+        }));
+    } catch (err) {
+        console.error("Top searchers error", err);
+        return [];
+    }
+}
+
+export async function getSubscriptionDataForChart() {
+    await _requireAdmin();
+    const subs = await _getActiveSubscriptions();
+
+    return [
+        { name: 'Pro', value: subs.pro, fill: '#3b82f6' },        // Blue
+        { name: 'Enterprise', value: subs.enterprise, fill: '#f59e0b' }, // Amber
+        { name: 'Free', value: subs.free, fill: '#94a3b8' }      // Slate
+    ];
+}

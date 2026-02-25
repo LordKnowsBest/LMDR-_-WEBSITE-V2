@@ -1,0 +1,118 @@
+﻿diff --git a/STRIPE_SECURITY_ASSESSMENT_FINAL.md b/STRIPE_SECURITY_ASSESSMENT_FINAL.md
+new file mode 100644
+index 0000000..d52f355
+--- /dev/null
++++ b/STRIPE_SECURITY_ASSESSMENT_FINAL.md
+@@ -0,0 +1,34 @@
++# Stripe Security Assessment & Remediation Report
++
++**Date:** 2026-10-18
++**Status:** PASS (After Remediation)
++
++## Summary
++A security assessment was performed on the Stripe integration, specifically focusing on webhook signature verification, idempotency, and secure handling of payment events. A critical vulnerability was identified in the signature verification logic (timing attack susceptibility) and has been remediated.
++
++## Checkpoint Results
++
++| Checkpoint | Status | Details |
++| :--- | :--- | :--- |
++| **Signature Verification** | **PASS** | Previously FAIL due to non-constant-time comparison. Remediated by implementing `crypto.timingSafeEqual` and `crypto.createHmac`. |
++| **Idempotency Check** | **PASS** | `isEventProcessed(event.id)` checks against `stripeEvents` collection before processing. |
++| **Event Processing** | **PASS** | Webhook handler uses a switch statement and logs unhandled events. Failures return appropriate errors. |
++| **State Update** | **PASS** | `upsertSubscription` correctly updates `carrierSubscriptions` based on verified webhook data. |
++| **Secret Management** | **PASS** | `STRIPE_WEBHOOK_SECRET` and API keys are retrieved via `wix-secrets-backend`. No hardcoded secrets found. |
++| **JSON Parsing** | **PASS** | `JSON.parse(body)` occurs strictly *after* successful signature verification. |
++
++## Remediation Details
++
++### Vulnerability: Timing Attack on Signature Verification
++The original implementation used a standard string comparison (`!==`) for verifying the HMAC signature. This is vulnerable to timing attacks where an attacker can deduce the expected signature byte-by-byte based on response times.
++
++**Fix Applied:**
++- Modified `src/backend/http-functions.js` to use Node.js `crypto` module.
++- Replaced manual HMAC computation with `crypto.createHmac`.
++- Implemented `crypto.timingSafeEqual` for secure, constant-time comparison.
++
++### Verification
++A standalone script (`scripts/verify_stripe_signature.js`) was used to verify the correctness of the HMAC logic and to confirm that the new implementation correctly validates valid signatures and rejects invalid ones.
++
++## Conclusion
++The Stripe webhook integration is now secure against signature forgery and replay attacks. No forged webhook can trigger subscription changes or payment actions.
+diff --git a/src/backend/http-functions.js b/src/backend/http-functions.js
+index fc1cacc..98915bd 100644
+--- a/src/backend/http-functions.js
++++ b/src/backend/http-functions.js
+@@ -3,6 +3,7 @@
+ // Contains webhook handlers for Stripe and other external services
+ // ============================================================================
+ 
++import crypto from 'crypto';
+ import { ok, badRequest, serverError } from 'wix-http-functions';
+ import { getSecret } from 'wix-secrets-backend';
+ import {
+@@ -123,10 +124,22 @@ async function verifyStripeSignature(payload, signature) {
+ 
+     // Compute expected signature
+     const signedPayload = `${timestamp}.${payload}`;
+-    const expectedSignature = await computeHmacSignature(signedPayload, webhookSecret);
++
++    // Create HMAC using Node.js crypto
++    const hmac = crypto.createHmac('sha256', webhookSecret);
++    hmac.update(signedPayload);
++    const expectedSignature = hmac.digest('hex');
+ 
+     // Compare signatures (timing-safe comparison)
+-    if (expectedSignature !== signatureHash) {
++    const expectedBuffer = Buffer.from(expectedSignature);
++    const signatureBuffer = Buffer.from(signatureHash);
++
++    // Ensure buffers are of same length before comparison to avoid information leakage
++    if (expectedBuffer.length !== signatureBuffer.length) {
++      return { success: false, error: 'Signature mismatch' };
++    }
++
++    if (!crypto.timingSafeEqual(expectedBuffer, signatureBuffer)) {
+       return { success: false, error: 'Signature mismatch' };
+     }
+ 
+@@ -137,40 +150,6 @@ async function verifyStripeSignature(payload, signature) {
+   }
+ }
+ 
+-/**
+- * Compute HMAC-SHA256 signature
+- * Wix Velo uses Web Crypto API
+- */
+-async function computeHmacSignature(message, secret) {
+-  try {
+-    // Encode the key and message
+-    const encoder = new TextEncoder();
+-    const keyData = encoder.encode(secret);
+-    const messageData = encoder.encode(message);
+-
+-    // Import key for HMAC
+-    const cryptoKey = await crypto.subtle.importKey(
+-      'raw',
+-      keyData,
+-      { name: 'HMAC', hash: 'SHA-256' },
+-      false,
+-      ['sign']
+-    );
+-
+-    // Sign the message
+-    const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageData);
+-
+-    // Convert to hex string
+-    const hashArray = Array.from(new Uint8Array(signature));
+-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+-
+-    return hashHex;
+-  } catch (error) {
+-    console.error('[Webhook] HMAC computation error:', error);
+-    throw error;
+-  }
+-}
+-
+ // ============================================================================
+ // EVENT HANDLERS
+ // ============================================================================
