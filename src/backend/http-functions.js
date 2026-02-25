@@ -5,6 +5,7 @@
 
 import { ok, badRequest, serverError } from 'wix-http-functions';
 import { getSecret } from 'wix-secrets-backend';
+import crypto from 'crypto';
 import {
   upsertSubscription,
   upsertApiSubscriptionFromStripe,
@@ -126,7 +127,10 @@ async function verifyStripeSignature(payload, signature) {
     const expectedSignature = await computeHmacSignature(signedPayload, webhookSecret);
 
     // Compare signatures (timing-safe comparison)
-    if (expectedSignature !== signatureHash) {
+    const expectedBuffer = Buffer.from(expectedSignature);
+    const signatureBuffer = Buffer.from(signatureHash);
+
+    if (expectedBuffer.length !== signatureBuffer.length || !crypto.timingSafeEqual(expectedBuffer, signatureBuffer)) {
       return { success: false, error: 'Signature mismatch' };
     }
 
