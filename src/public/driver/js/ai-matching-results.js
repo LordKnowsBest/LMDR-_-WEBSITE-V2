@@ -626,6 +626,13 @@ function handleMatchExplanationResult(data) {
       <div class="explanation-summary">${exp.summary}</div>
     </div>
 
+    ${exp.llm_narrative ? `
+      <div class="why-narrative-box">
+        <div class="why-narrative-icon"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
+        <div class="why-narrative-text">${escapeHtml(exp.llm_narrative)}</div>
+      </div>
+    ` : ''}
+
     ${categoriesHtml}
 
     <div class="tip-box">

@@ -12,6 +12,8 @@ import { getDriverProfile } from 'backend/driverProfiles';
 import { currentUser } from 'wix-users-backend';
 import { startTrace, endTrace, log } from 'backend/observabilityService';
 import * as dataAccess from 'backend/dataAccess';
+import { fetch } from 'wix-fetch';
+import { getSecret } from 'wix-secrets-backend';
 
 // ============================================================================
 // PUBLIC API
@@ -72,9 +74,33 @@ export async function getMatchExplanationForDriver(driverId, carrierDot) {
 
         // 4. Calculate Score & Rationale
         const scoreResult = calculateDriverMatchScore(driverProfile, prefs);
-        
+
         // 5. Generate Driver-Facing Explanations
         const explanation = generateDriverFriendlyExplanation(scoreResult, driverProfile, prefs);
+
+        // 6. Fetch cached AI enrichment for the carrier (if available)
+        let cachedEnrichment = null;
+        try {
+            const enrichResult = await dataAccess.queryRecords('carrierEnrichments', {
+                filters: { dot_number: String(carrierDot) },
+                limit: 1,
+                suppressAuth: true
+            });
+            cachedEnrichment = enrichResult.items?.[0] || null;
+        } catch (enrichErr) {
+            // Non-blocking — proceed without enrichment
+        }
+
+        // 7. Generate LLM narrative via Groq (3s timeout, falls back gracefully)
+        try {
+            const llmNarrative = await generateLLMNarrative(driverProfile, prefs, scoreResult, cachedEnrichment, carrierDot);
+            if (llmNarrative) {
+                explanation.llm_narrative = llmNarrative;
+            }
+        } catch (llmErr) {
+            // Non-blocking — explanation still works without narrative
+            log('warn', 'LLM narrative generation failed (non-blocking)', { carrierDot, error: llmErr.message });
+        }
 
         endTrace(traceId);
         return {
@@ -92,6 +118,129 @@ export async function getMatchExplanationForDriver(driverId, carrierDot) {
             error: error.message,
             explanation: getDefaultExplanation()
         };
+    }
+}
+
+// ============================================================================
+// LLM NARRATIVE GENERATION
+// ============================================================================
+
+async function generateLLMNarrative(driver, prefs, scoreResult, enrichment, carrierDot) {
+    const groqApiKey = await getSecret('GROQ_API_KEY');
+    if (!groqApiKey) return null;
+
+    const driverName = driver.display_name || driver.first_name || 'You';
+    const carrierName = prefs.carrier_name || prefs.company_name || `Carrier DOT ${carrierDot}`;
+    const city = prefs.phy_city || prefs.city || '';
+    const state = prefs.phy_state || prefs.state || '';
+    const fleetSize = prefs.fleet_size || prefs.nbr_power_unit || 'N/A';
+    const operationType = prefs.operation_type || prefs.carrier_operation || 'N/A';
+
+    // Score context
+    const overallScore = Math.round(scoreResult.overallScore || 0);
+    const scores = scoreResult.scores || {};
+    const scoreLines = Object.entries(scores)
+        .map(([k, v]) => `  - ${k}: ${Math.round(v)}%`)
+        .join('\n');
+
+    // FMCSA / safety context
+    const safetyRating = prefs.safety_rating || 'Not Rated';
+    const driverOos = prefs.driver_oos_rate != null ? `${prefs.driver_oos_rate}%` : 'N/A';
+    const vehicleOos = prefs.vehicle_oos_rate != null ? `${prefs.vehicle_oos_rate}%` : 'N/A';
+    const crashes = prefs.total_crashes != null ? prefs.total_crashes : 'N/A';
+
+    // AI enrichment context
+    let enrichmentSection = '';
+    if (enrichment) {
+        const pros = enrichment.sentiment_pros || enrichment.pros || '';
+        const cons = enrichment.sentiment_cons || enrichment.cons || '';
+        const pay = enrichment.pay_cpm_range || '';
+        const sentiment = enrichment.driver_sentiment || '';
+        const opportunity = enrichment.hiring_opportunity || '';
+        const summary = enrichment.ai_summary || '';
+        enrichmentSection = `
+AI Enrichment (from web research):
+  - Driver Sentiment: ${sentiment}
+  - Pay Range (CPM): ${pay}
+  - Hiring Opportunity: ${opportunity}
+  - Pros: ${pros}
+  - Cons: ${cons}
+  - Summary: ${summary}`;
+    }
+
+    const prompt = `You are an AI assistant helping a CDL truck driver understand why a specific carrier is a great match for them.
+
+Driver Profile:
+  - Name: ${driverName}
+  - CDL Class: ${driver.cdl_class || 'N/A'}
+  - Years Experience: ${driver.years_experience || 'N/A'}
+  - Home Zip: ${driver.home_zip || driver.zip_code || 'N/A'}
+  - Preferred Operation: ${driver.operation_type || driver.preferred_operation || 'N/A'}
+  - Min CPM: ${driver.min_cpm || 'N/A'}
+  - Max Acceptable Turnover: ${driver.max_turnover || 'N/A'}%
+
+Carrier: ${carrierName}
+  - Location: ${city}, ${state}
+  - Fleet Size: ${fleetSize} trucks
+  - Operation Type: ${operationType}
+  - Safety Rating: ${safetyRating}
+  - Driver OOS Rate: ${driverOos} (national avg: 5.51%)
+  - Vehicle OOS Rate: ${vehicleOos} (national avg: 20.72%)
+  - Total Crashes (24mo): ${crashes}
+${enrichmentSection}
+
+Match Scores (overall: ${overallScore}%):
+${scoreLines}
+
+Write a 4-6 sentence "Why This Job" narrative addressed directly to ${driverName}.
+Requirements:
+1. Start with the driver's name or "You" personally
+2. Mention 2-3 specific data points (safety rating, pay range, fleet size, sentiment highlights)
+3. Explain WHY this specific carrier matches this specific driver based on their preferences
+4. End with an encouraging call-to-action
+5. Keep it conversational, warm, and specific — not generic
+6. Do NOT use bullet points — write in flowing prose paragraphs`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+    try {
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${groqApiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                model: 'llama-3.3-70b-versatile',
+                messages: [
+                    { role: 'system', content: 'You are an expert career coach for CDL truck drivers. Be specific, warm, and data-driven.' },
+                    { role: 'user', content: prompt }
+                ],
+                max_tokens: 300,
+                temperature: 0.7,
+            }),
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            const errText = await response.text();
+            log('warn', 'Groq API error in match explanation', { status: response.status, body: errText });
+            return null;
+        }
+
+        const json = await response.json();
+        const narrative = json.choices?.[0]?.message?.content?.trim();
+        return narrative || null;
+    } catch (fetchErr) {
+        clearTimeout(timeoutId);
+        if (fetchErr.name === 'AbortError') {
+            log('warn', 'Groq LLM narrative timed out after 3s', { carrierDot });
+        } else {
+            log('warn', 'Groq fetch error in match explanation', { error: fetchErr.message, carrierDot });
+        }
+        return null;
     }
 }
 

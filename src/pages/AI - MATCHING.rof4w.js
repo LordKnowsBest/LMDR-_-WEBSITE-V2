@@ -744,20 +744,23 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
 
   lastSearchResults = { matches: enrichedMatches, totalScored: enrichedMatches.length };
 
-  // Detect which carriers Railway already enriched via Perplexity.
-  // needsEnrichment=false means Railway already did it — we surface it immediately.
-  // needsEnrichment=true means Railway skipped it (fallback) — Wix enriches as before.
-  const preEnriched   = enrichedMatches.filter(m => !m.needsEnrichment && m.enrichment);
-  const needsWixEnrich = enrichedMatches.find(m => m.needsEnrichment && !m.fmcsaOnly);
-  const autoEnrichDot  = needsWixEnrich ? String(needsWixEnrich.carrier.DOT_NUMBER) : null;
+  // All users see 2 results initially; remaining stay in enrichedMatches for upsell unlock
+  const visibleMatches = enrichedMatches.slice(0, 2);
+  const hiddenCount = Math.max(0, enrichedMatches.length - 2);
+  const isPremiumUser = userStatus?.isPremium || false;
+  const _needsAutoEnrich = visibleMatches.find(m => m.needsEnrichment && !m.fmcsaOnly);
+  const autoEnrichDot = _needsAutoEnrich ? String(_needsAutoEnrich.carrier.DOT_NUMBER) : null;
 
   sendToHtml('matchResults', {
-    matches:      enrichedMatches,
+    matches:      visibleMatches,
     totalScored:  enrichedMatches.length,
     totalMatches: enrichedMatches.length,
     userTier:     userStatus?.tier || 'free',
-    maxAllowed:   userStatus?.isPremium ? 10 : 2,
-    isPremium:    userStatus?.isPremium || false,
+    maxAllowed:   2,
+    isPremium:    isPremiumUser,
+    upsellMessage: hiddenCount > 0
+      ? `Sign in to see ${hiddenCount + 2} more matches in your area.`
+      : null,
     driverProfile: cachedDriverProfile ? {
       id: cachedDriverProfile._id,
       displayName: cachedDriverProfile.display_name,
@@ -767,10 +770,11 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
     source: 'async-option-b',
   });
 
-  // Fire enrichmentUpdate for every carrier Railway pre-enriched via Perplexity
+  // Fire enrichmentUpdate for every visible carrier Railway pre-enriched via Perplexity
   // so the renderer paints immediately without waiting for a second round-trip.
-  if (preEnriched.length > 0) {
-    for (const m of preEnriched) {
+  const visiblePreEnriched = visibleMatches.filter(m => !m.needsEnrichment && m.enrichment);
+  if (visiblePreEnriched.length > 0) {
+    for (const m of visiblePreEnriched) {
       const dotNumber = String(m.carrier.DOT_NUMBER);
       sendToHtml('enrichmentUpdate', {
         dot_number: dotNumber,
@@ -778,18 +782,65 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
         ...m.enrichment,
       });
     }
-    sendToHtml('enrichmentComplete', { totalEnriched: preEnriched.length });
+    sendToHtml('enrichmentComplete', { totalEnriched: visiblePreEnriched.length });
   }
 
-  // Fall back to Wix-side Groq enrichment only for carriers Railway didn't cover
-  if (needsWixEnrich) {
-    const dotNumber = needsWixEnrich.carrier.DOT_NUMBER;
-    sendToHtml('enrichmentUpdate', { dot_number: String(dotNumber), status: 'loading', position: 1, total: 1 });
-    const enrichment = await enrichWithRetry(dotNumber, needsWixEnrich.carrier, driverPrefs);
-    const enrichStatus = enrichment.building ? 'building' : enrichment.error ? 'error' : 'complete';
-    sendToHtml('enrichmentUpdate', { dot_number: String(dotNumber), status: enrichStatus, ...enrichment });
-    if (!preEnriched.length) {
-      sendToHtml('enrichmentComplete', { totalEnriched: 1 });
+  // For visible carriers Railway didn't enrich, use Railway/Perplexity (richer than Wix Groq)
+  const visibleNeedsEnrich = visibleMatches.find(m => m.needsEnrichment && !m.fmcsaOnly);
+  if (visibleNeedsEnrich) {
+    const dotNumber = String(visibleNeedsEnrich.carrier.DOT_NUMBER);
+    const carrierName = visibleNeedsEnrich.carrier.LEGAL_NAME || visibleNeedsEnrich.carrier.DBA_NAME || `DOT ${dotNumber}`;
+    const knownData = {
+      city:              visibleNeedsEnrich.carrier.PHY_CITY          || null,
+      state:             visibleNeedsEnrich.carrier.PHY_STATE         || null,
+      fleet_size:        visibleNeedsEnrich.carrier.NBR_POWER_UNIT    || null,
+      safety_rating:     visibleNeedsEnrich.carrier.SAFETY_RATING     || null,
+      carrier_operation: visibleNeedsEnrich.carrier.CARRIER_OPERATION || null,
+    };
+    sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'loading', position: 1, total: 1, message: 'AI Researching...' });
+    try {
+      const jobId = 'enr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      await triggerEnrichmentJob(jobId, dotNumber, carrierName, knownData);
+      console.log(`📡 [auto-enrich] Job ${jobId} started for DOT ${dotNumber} — polling...`);
+      let attempts = 0;
+      const maxAttempts = 30;
+      await new Promise((resolve) => {
+        const timer = setInterval(async () => {
+          attempts++;
+          try {
+            const statusResult = await checkEnrichmentStatus(jobId);
+            if (statusResult.status === 'COMPLETE') {
+              clearInterval(timer);
+              console.log(`✅ [auto-enrich] Job ${jobId} complete — delivering enrichment for DOT ${dotNumber}`);
+              sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'complete', ...statusResult.enrichment });
+              if (!visiblePreEnriched.length) sendToHtml('enrichmentComplete', { totalEnriched: 1 });
+              resolve();
+            } else if (statusResult.status === 'FAILED') {
+              clearInterval(timer);
+              throw new Error(statusResult.error || 'Enrichment failed');
+            } else if (attempts >= maxAttempts) {
+              clearInterval(timer);
+              throw new Error('Auto-enrichment timed out');
+            }
+          } catch (pollErr) {
+            clearInterval(timer);
+            console.warn(`[auto-enrich] Poll error for DOT ${dotNumber}:`, pollErr.message);
+            // Fallback to Wix-side Groq if Railway times out
+            const enrichment = await enrichWithRetry(dotNumber, visibleNeedsEnrich.carrier, driverPrefs);
+            const enrichStatus = enrichment.building ? 'building' : enrichment.error ? 'error' : 'complete';
+            sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: enrichStatus, ...enrichment });
+            if (!visiblePreEnriched.length) sendToHtml('enrichmentComplete', { totalEnriched: 1 });
+            resolve();
+          }
+        }, 3000);
+      });
+    } catch (autoEnrichErr) {
+      console.warn(`[auto-enrich] Failed for DOT ${dotNumber}:`, autoEnrichErr.message);
+      // Final fallback to Wix Groq
+      const enrichment = await enrichWithRetry(dotNumber, visibleNeedsEnrich.carrier, driverPrefs);
+      const enrichStatus = enrichment.building ? 'building' : enrichment.error ? 'error' : 'complete';
+      sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: enrichStatus, ...enrichment });
+      if (!visiblePreEnriched.length) sendToHtml('enrichmentComplete', { totalEnriched: 1 });
     }
   }
 }

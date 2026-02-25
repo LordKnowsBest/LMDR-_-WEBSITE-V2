@@ -445,6 +445,9 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           const dot = String(r.carrier.DOT_NUMBER);
           const f   = fmcsaMap[dot];
           if (!f) continue;
+          // Debug: log raw FMCSA response to understand field names
+          console.log('[fmcsa-debug] Raw FMCSA response for DOT', dot, ':', JSON.stringify(f));
+
           r.carrier.LEGAL_NAME        = f.legalName        || f.legal_name        || r.carrier.LEGAL_NAME;
           r.carrier.PHY_CITY          = f.phyCity          || f.phy_city          || r.carrier.PHY_CITY;
           r.carrier.PHY_STATE         = f.phyState         || f.phy_state         || r.carrier.PHY_STATE;
@@ -457,8 +460,23 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           r.carrier.SAFETY_RATING     = f.safetyRating     || f.safety_rating     || r.carrier.SAFETY_RATING;
           // Update the fmcsa object too so the FMCSA safety section renders correctly
           if (r.fmcsa) {
-            r.fmcsa.safety_rating = r.carrier.SAFETY_RATING || r.fmcsa.safety_rating;
-            r.fmcsa.dot_number    = r.carrier.DOT_NUMBER;
+            r.fmcsa.safety_rating   = r.carrier.SAFETY_RATING || r.fmcsa.safety_rating;
+            r.fmcsa.dot_number      = r.carrier.DOT_NUMBER;
+            // Full FMCSA stats hydration for Pinecone-only carriers
+            r.fmcsa.is_authorized   = f.allowedToOperate === 'Y' || f.operatingStatus === 'AUTHORIZED' || r.fmcsa.is_authorized;
+            r.fmcsa.operating_status = f.operatingStatus || f.operating_status || 'AUTHORIZED';
+            r.fmcsa.inspections_24mo = {
+              total:                f.inspTotal          ?? f.totalInspections  ?? 0,
+              driver_oos_rate:      f.driverOosRate      ?? f.driverOOSRate     ?? null,
+              vehicle_oos_rate:     f.vehicleOosRate     ?? f.vehicleOOSRate    ?? null,
+              national_avg_driver_oos:  5.51,
+              national_avg_vehicle_oos: 20.72,
+            };
+            r.fmcsa.crashes_24mo = {
+              total: f.crashTotal ?? f.totalCrashes ?? 0,
+              fatal: f.fatalCrash ?? f.fatalCrashes ?? 0,
+            };
+            r.fmcsa.basics = {}; // BASIC data requires separate SAFER endpoint
           }
         }
         console.log(`[search/carriers-async] ${jobId}: FMCSA hydrated ${fmcsaOnlyResults.length} Pinecone-only carriers`);
