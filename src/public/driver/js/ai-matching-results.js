@@ -480,6 +480,21 @@ function handleLoginSuccess(data) {
 }
 
 function updateUserUIState() {
+  const isLoggedIn = !!userStatus.loggedIn;
+
+  // Guest banner — show when not logged in, hide when logged in
+  const guestBanner = document.getElementById('guestBanner');
+  if (guestBanner) {
+    guestBanner.style.display = isLoggedIn ? 'none' : 'flex';
+  }
+  const guestSignupBtn = document.getElementById('guestSignupBtn');
+  const guestLoginBtn  = document.getElementById('guestLoginBtn');
+  if (guestSignupBtn) guestSignupBtn.onclick = () => sendToWix('navigateToSignup', {});
+  if (guestLoginBtn)  guestLoginBtn.onclick  = () => sendToWix('navigateToLogin', {});
+
+  // Body class for CSS targeting
+  document.body.classList.toggle('user-logged-in', isLoggedIn);
+
   // Update form badge for premium users
   const formBadge = document.querySelector('.form-badge');
   if (formBadge && userStatus.isPremium) {
