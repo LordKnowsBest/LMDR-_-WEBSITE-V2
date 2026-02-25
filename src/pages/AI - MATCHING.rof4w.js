@@ -518,6 +518,9 @@ function buildLocalExplanation(carrierDot) {
 
   const scores = matchData.scores || {};
   const overall = matchData.overallScore || 0;
+  const enrichment = matchData.enrichment || {};
+  const carrier = matchData.carrier || {};
+  const fmcsa = enrichment.fmcsa || matchData.fmcsa || {};
 
   const categories = Object.entries(scores)
     .filter(([key]) => SCORE_LABELS[key])
@@ -541,17 +544,53 @@ function buildLocalExplanation(carrierDot) {
       ? 'This carrier partially matches your preferences.'
       : 'This carrier has some differences from your preferences.';
 
+  // Build a rich narrative from Perplexity AI intel + FMCSA data if available
+  let llm_narrative = null;
+  const carrierName = carrier.LEGAL_NAME || carrier.DBA_NAME || 'This carrier';
+  const parts = [];
+
+  if (enrichment.ai_summary) {
+    // Strip bullet formatting for inline narrative
+    const cleaned = enrichment.ai_summary.replace(/^[•\-]\s*/gm, '').replace(/\*\*/g, '').trim();
+    if (cleaned && cleaned !== 'null') parts.push(cleaned);
+  }
+
+  if (!parts.length) {
+    // Synthesize from individual enrichment fields
+    const city = carrier.PHY_CITY || null;
+    const state = carrier.PHY_STATE || null;
+    const loc = city && state ? `${city}, ${state}` : (state || null);
+    const fleet = carrier.NBR_POWER_UNIT;
+    const pay = carrier.PAY_CPM || enrichment.pay_cpm_range;
+    const sentiment = enrichment.driver_sentiment;
+    const hiringOpp = enrichment.hiring_opportunity;
+    const safety = fmcsa.safety_rating;
+
+    if (loc || fleet || pay) {
+      const intro = `${carrierName}${loc ? ` is based in ${loc}` : ''}${fleet ? ` with a fleet of ${fleet} trucks` : ''}.`;
+      parts.push(intro);
+    }
+    if (safety && safety !== 'UNKNOWN') parts.push(`FMCSA safety rating: ${safety}.`);
+    if (pay && pay !== 'null') parts.push(`Pay: ${pay}.`);
+    if (sentiment && sentiment !== 'No Reviews') parts.push(`Driver sentiment: ${sentiment}.`);
+    if (hiringOpp && hiringOpp !== 'N/A') parts.push(`Hiring opportunity: ${hiringOpp}.`);
+  }
+
+  if (parts.length) {
+    llm_narrative = parts.join(' ');
+  }
+
   // Use the scoring module's rationale if available
   const rationale = matchData.rationale || [];
   const tip = rationale.length > 0
     ? rationale[0]
-    : 'Keep your profile updated to maintain accurate match scores.';
+    : 'Sign in to see your personalized match score and get AI-powered insights tailored to your CDL profile.';
 
   return {
     success: true,
     carrierDot,
     overallScore: overall,
-    explanation: { summary, categories, tip }
+    explanation: { summary, categories, tip, llm_narrative }
   };
 }
 

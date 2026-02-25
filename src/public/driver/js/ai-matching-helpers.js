@@ -42,12 +42,22 @@ function formatAISummary(text) {
   if (isBulleted) {
     const items = lines
       .map(l => l.replace(/^[•-]\s*/, ''))
-      .filter(Boolean)
+      .filter(l => {
+        if (!l) return false;
+        // Drop lines whose value portion is literally "null", "undefined", or empty
+        const colonIdx = l.indexOf(':');
+        if (colonIdx !== -1) {
+          const val = l.slice(colonIdx + 1).trim();
+          if (val === 'null' || val === 'undefined' || val === '') return false;
+        }
+        return true;
+      })
       .map(l => {
         // Bold **word** → <strong>word</strong>, then escape the rest
         const safe = escapeHtml(l);
         return safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
       });
+    if (!items.length) return '';
     return '<ul class="ai-summary-bullets">' + items.map(i => `<li>${i}</li>`).join('') + '</ul>';
   }
   // Fallback: plain paragraph (old-style summaries from cache)
