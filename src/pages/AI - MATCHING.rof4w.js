@@ -820,6 +820,9 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
         status:     m.enrichment.error ? 'error' : 'complete',
         ...m.enrichment,
       });
+      // Backfill lastSearchResults so buildLocalExplanation can access enrichment for WHY THIS JOB
+      const _preIdx = lastSearchResults?.matches?.findIndex(mr => String(mr.carrier?.DOT_NUMBER) === dotNumber);
+      if (_preIdx >= 0) lastSearchResults.matches[_preIdx].enrichment = m.enrichment;
     }
     sendToHtml('enrichmentComplete', { totalEnriched: visiblePreEnriched.length });
   }
