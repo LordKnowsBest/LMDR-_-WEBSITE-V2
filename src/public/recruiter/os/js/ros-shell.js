@@ -3,7 +3,7 @@
 // Renders topbar, left rail, drawers, dock, command bar
 // ============================================================================
 
-(function() {
+(function () {
   'use strict';
 
   const CFG = ROS.config;
@@ -13,7 +13,7 @@
   let openDrawers = new Set();
 
   // ── Init ──
-  ROS.shell = { init, toggleDrawer, openDrawer, closeDrawer };
+  ROS.shell = { init, toggleDrawer, openDrawer, closeDrawer, toggleTheme };
 
   function init() {
     const root = document.getElementById('ros-root');
@@ -21,6 +21,13 @@
     root.innerHTML = buildLayout();
     startClock();
     bindMobileHamburger();
+
+    // Sync theme icon
+    const isDark = document.documentElement.classList.contains('dark');
+    const themeIcon = document.getElementById('theme-icon');
+    if (themeIcon) {
+      themeIcon.textContent = isDark ? 'light_mode' : 'dark_mode';
+    }
   }
 
   // ── Full Layout ──
@@ -71,6 +78,9 @@
         <div class="relative cursor-pointer">
           <span class="material-symbols-outlined text-white/50 text-[18px] hover:text-lmdr-yellow transition-colors">notifications</span>
           <span class="absolute -top-1 -right-1.5 bg-red-500 text-white text-[8px] font-bold px-1 rounded-full leading-tight" id="notifBadge">0</span>
+        </div>
+        <div class="cursor-pointer" onclick="ROS.shell.toggleTheme()">
+          <span class="material-symbols-outlined text-white/50 text-[18px] hover:text-lmdr-yellow transition-colors" id="theme-icon">dark_mode</span>
         </div>
         <span id="ros-clock" class="text-[11px] text-white/50 font-semibold tracking-wide"></span>
       </div>
@@ -254,20 +264,20 @@
   }
 
   // ── Dock Navigation ──
-  ROS.shell.dockNav = function(view, el) {
+  ROS.shell.dockNav = function (view, el) {
     document.querySelectorAll('.dock-pill .dk-i').forEach(d => d.classList.remove('active'));
     if (el) el.classList.add('active');
     ROS.views.showView(view);
   };
 
-  ROS.shell.syncDock = function(viewId) {
+  ROS.shell.syncDock = function (viewId) {
     document.querySelectorAll('.dock-pill .dk-i').forEach(d => {
       d.classList.toggle('active', d.dataset.view === viewId);
     });
   };
 
   // ── Chat Push Layout ──
-  ROS.shell.pushChatLayout = function(open) {
+  ROS.shell.pushChatLayout = function (open) {
     const cmdBar = document.getElementById('cmdBar');
     const dock = document.getElementById('dockPill');
     if (open) {
@@ -278,6 +288,22 @@
       if (dock) dock.style.left = 'calc(50% + 125px)';
     }
   };
+
+  // ── Helpers ──
+  function toggleTheme() {
+    const isDark = document.documentElement.classList.contains('dark');
+    if (isDark) {
+      document.documentElement.classList.remove('dark');
+      document.documentElement.classList.add('light');
+      localStorage.setItem('ros-theme', 'light');
+      document.getElementById('theme-icon').textContent = 'dark_mode';
+    } else {
+      document.documentElement.classList.remove('light');
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('ros-theme', 'dark');
+      document.getElementById('theme-icon').textContent = 'light_mode';
+    }
+  }
 
   // ── Clock ──
   function startClock() {
@@ -307,7 +333,7 @@
   }
 
   // Close rail when a tool is clicked on mobile
-  ROS.shell.closeMobileRail = function() {
+  ROS.shell.closeMobileRail = function () {
     const rail = document.getElementById('ros-rail');
     const overlay = document.getElementById('railOverlay');
     if (rail) rail.classList.remove('open');
