@@ -303,7 +303,7 @@ function buildDriverQuery(prefs) {
 
 const OP_TYPE_LABEL = { A: 'For-Hire', B: 'For-Hire / Private', C: 'Private' };
 function inferOpType(code) {
-  if (!code || code === 'unknown') return null;
+  if (!code || code.toLowerCase() === 'unknown') return null;
   return OP_TYPE_LABEL[code] || code;
 }
 
