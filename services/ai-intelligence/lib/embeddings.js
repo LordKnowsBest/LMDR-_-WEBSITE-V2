@@ -143,10 +143,13 @@ export function buildCarrierText(profile) {
   }
 
   // Location - key for regional/OTR distinction
-  if (profile.city && profile.state) {
-    parts.push(`Based in ${profile.city}, ${profile.state}`);
-  } else if (profile.state) {
-    parts.push(`Operating in ${profile.state}`);
+  // Accept both canonical (city/state) and FMCSA-style (phy_city/phy_state) field names
+  const _city  = profile.city  || profile.phy_city;
+  const _state = profile.state || profile.phy_state;
+  if (_city && _state && _state !== 'unknown') {
+    parts.push(`Based in ${_city}, ${_state}`);
+  } else if (_state && _state !== 'unknown') {
+    parts.push(`Operating in ${_state}`);
   } else if (profile.home_states) {
     const statesStr = Array.isArray(profile.home_states) ? profile.home_states.join(', ') : profile.home_states;
     parts.push(`Operating states: ${statesStr}`);
