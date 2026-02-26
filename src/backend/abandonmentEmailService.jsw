@@ -30,6 +30,17 @@ const CONFIG = {
 };
 
 // ============================================================================
+// FIELD HELPERS
+// Airtable table uses Single Select 'Yes'/'No' for boolean-like fields.
+// Date fields require YYYY-MM-DD format (never full ISO datetime strings).
+// snake_case keys match the FIELD_MAPPINGS in airtableClient.jsw.
+// ============================================================================
+
+const toDate = (d) => (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10);
+const isSent = (val) => val === 'Yes';
+const sentVal = (bool) => bool ? 'Yes' : 'No';
+
+// ============================================================================
 // TRACK ABANDONED CHECKOUT (Called from Stripe Webhook)
 // ============================================================================
 
@@ -39,7 +50,7 @@ export async function trackAbandonedCheckout(session) {
     if (!email) return { success: false, error: 'No email' };
 
     const result = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, {
-      filters: { email, recovered: false },
+      filters: { email, recovered: 'No' },
       sort: [{ field: '_createdDate', direction: 'desc' }],
       limit: 1, suppressAuth: true
     });
@@ -48,12 +59,27 @@ export async function trackAbandonedCheckout(session) {
       const existing = result.items[0];
       const hoursSince = (Date.now() - new Date(existing._createdDate)) / 3600000;
       if (hoursSince < 24) {
-        const updated = await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, { ...existing, stripeSessionId: session.id, abandonedAt: new Date() }, { suppressAuth: true });
+        const updated = await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, {
+          ...existing,
+          stripe_session_id: session.id,
+          abandoned_date: toDate(new Date())
+        }, { suppressAuth: true });
         return { success: true, abandonmentId: updated.record._id, updated: true };
       }
     }
 
-    const abandonmentRecord = { email, carrierDot: session.metadata?.carrier_dot || '', planType: determinePlanType(session), stripeSessionId: session.id, abandonedAt: new Date(), email1Sent: false, email2Sent: false, email3Sent: false, recovered: false };
+    const abandonmentRecord = {
+      email,
+      carrier_dot: session.metadata?.carrier_dot ? Number(session.metadata.carrier_dot) : null,
+      plan: capitalizePlan(determinePlanType(session)),
+      stripe_session_id: session.id,
+      abandoned_date: toDate(new Date()),
+      email_1_sent: 'No',
+      email_2_sent: 'No',
+      email_3_sent: 'No',
+      recovered: 'No',
+      contact_name: session.metadata?.contact_name || ''
+    };
     const res = await dataAccess.insertRecord(COLLECTION_KEYS.checkoutAbandonment, abandonmentRecord, { suppressAuth: true });
     await findOrCreateContact(email, session.metadata?.contact_name || '');
     return { success: true, abandonmentId: res.record._id };
@@ -62,9 +88,17 @@ export async function trackAbandonedCheckout(session) {
 
 export async function markCheckoutRecovered(email, sessionId) {
   try {
-    const result = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, { filters: { email, recovered: false }, limit: 1, suppressAuth: true });
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, {
+      filters: { email, recovered: 'No' },
+      limit: 1, suppressAuth: true
+    });
     if (!result.items?.length) return { success: true, wasAbandoned: false };
-    await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, { ...result.items[0], recovered: true, recoveredAt: new Date(), recoverySessionId: sessionId }, { suppressAuth: true });
+    await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, {
+      ...result.items[0],
+      recovered: 'Yes',
+      recovered_at: toDate(new Date()),
+      recovery_session_id: sessionId
+    }, { suppressAuth: true });
     return { success: true, wasAbandoned: true };
   } catch (error) { return { success: false, error: error.message }; }
 }
@@ -83,7 +117,7 @@ export async function sendAbandonmentEmail1(data) {
             variables: {
                 firstName: data.firstName || 'there',
                 planName: getPlanDisplayName(data.planType),
-                checkoutUrl: 'https://www.lastmiledr.app/pricing' // Placeholder
+                checkoutUrl: 'https://www.lastmiledr.app/pricing'
             }
         });
         await logEmailSend(null, CONFIG.emailTemplates.abandonment1, data.email);
@@ -136,7 +170,11 @@ export async function sendAbandonmentEmail3(data) {
 
 export async function processAbandonmentEmails() {
   try {
-    const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, { filters: { recovered: false, email3Sent: false }, limit: 100, suppressAuth: true });
+    // Fetch all unrecovered records that haven't had email 3 sent yet
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, {
+      filters: { recovered: 'No', email_3_sent: 'No' },
+      limit: 100, suppressAuth: true
+    });
     if (!res.items?.length) return { success: true, count: 0 };
     const chunks = chunkArray(res.items, 5);
     for (const chunk of chunks) {
@@ -148,15 +186,30 @@ export async function processAbandonmentEmails() {
 }
 
 async function processAbandonmentRecord(abandonment) {
-  const hoursSince = (Date.now() - new Date(abandonment.abandonedAt)) / 3600000;
+  // abandoned_date is YYYY-MM-DD string from Airtable — parse to ms
+  const abandonedMs = abandonment.abandoned_date
+    ? new Date(abandonment.abandoned_date).getTime()
+    : (abandonment._createdDate ? new Date(abandonment._createdDate).getTime() : 0);
+  const hoursSince = (Date.now() - abandonedMs) / 3600000;
+
   let emailToSend = null;
-  if (!abandonment.email1Sent && hoursSince >= CONFIG.emailTiming.email1) emailToSend = 1;
-  else if (!abandonment.email2Sent && abandonment.email1Sent && hoursSince >= CONFIG.emailTiming.email2) emailToSend = 2;
-  else if (!abandonment.email3Sent && abandonment.email2Sent && hoursSince >= CONFIG.emailTiming.email3) emailToSend = 3;
+  if (!isSent(abandonment.email_1_sent) && hoursSince >= CONFIG.emailTiming.email1) {
+    emailToSend = 1;
+  } else if (!isSent(abandonment.email_2_sent) && isSent(abandonment.email_1_sent) && hoursSince >= CONFIG.emailTiming.email2) {
+    emailToSend = 2;
+  } else if (!isSent(abandonment.email_3_sent) && isSent(abandonment.email_2_sent) && hoursSince >= CONFIG.emailTiming.email3) {
+    emailToSend = 3;
+  }
 
   if (emailToSend) {
-    const data = { email: abandonment.email, firstName: abandonment.contactName?.split(' ')[0], planType: abandonment.planType };
-    let res = emailToSend === 1 ? await sendAbandonmentEmail1(data) : (emailToSend === 2 ? await sendAbandonmentEmail2(data) : await sendAbandonmentEmail3(data));
+    const data = {
+      email: abandonment.email,
+      firstName: abandonment.contact_name?.split(' ')[0],
+      planType: (abandonment.plan || 'pro').toLowerCase()
+    };
+    const res = emailToSend === 1
+      ? await sendAbandonmentEmail1(data)
+      : (emailToSend === 2 ? await sendAbandonmentEmail2(data) : await sendAbandonmentEmail3(data));
     if (res.success) await markEmailSent(abandonment._id, emailToSend);
   }
 }
@@ -164,17 +217,32 @@ async function processAbandonmentRecord(abandonment) {
 async function findOrCreateContact(email, firstName) {
   const res = await contacts.queryContacts().eq('primaryInfo.email', email).limit(1).find({ suppressAuth: true });
   if (res.items.length) return res.items[0]._id;
-  const contact = await contacts.createContact({ name: { first: firstName || 'Recruiter' }, emails: [{ email, primary: true }] }, { suppressAuth: true });
+  const contact = await contacts.createContact(
+    { name: { first: firstName || 'Recruiter' }, emails: [{ email, primary: true }] },
+    { suppressAuth: true }
+  );
   return contact._id;
 }
 
 export async function markEmailSent(recordId, num) {
   const record = await dataAccess.getRecord(COLLECTION_KEYS.checkoutAbandonment, recordId, { suppressAuth: true });
-  if (record) await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, { ...record, [`email${num}Sent`]: true, [`email${num}SentAt`]: new Date() }, { suppressAuth: true });
+  if (record) {
+    await dataAccess.updateRecord(COLLECTION_KEYS.checkoutAbandonment, {
+      ...record,
+      [`email_${num}_sent`]: 'Yes',
+      [`email_${num}_sent_at`]: toDate(new Date())
+    }, { suppressAuth: true });
+  }
 }
 
 async function logEmailSend(abandonmentId, templateId, recipientEmail) {
-  await dataAccess.insertRecord(COLLECTION_KEYS.abandonmentEmailLog, { abandonmentId, templateId, recipientEmail, sentAt: new Date(), emailType: 'checkout_abandonment' }, { suppressAuth: true });
+  await dataAccess.insertRecord(COLLECTION_KEYS.abandonmentEmailLog, {
+    abandonment_id: abandonmentId,
+    template_id: templateId,
+    recipient_email: recipientEmail,
+    sent_at: toDate(new Date()),
+    email_type: 'checkout_abandonment'
+  }, { suppressAuth: true });
 }
 
 function determinePlanType(session) {
@@ -185,17 +253,35 @@ function determinePlanType(session) {
   return 'pro';
 }
 
+function capitalizePlan(type) {
+  // Airtable Single Select options are 'Pro' and 'Enterprise'
+  return type === 'enterprise' ? 'Enterprise' : 'Pro';
+}
+
 function getPlanDisplayName(type) { return CONFIG.planInfo[type]?.displayName || 'Pro Plan'; }
 
 export async function getAbandonmentStats() {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, { filters: { abandonedAt: { gte: thirtyDaysAgo } }, limit: 1000, suppressAuth: true });
+  const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, {
+    filters: { abandoned_date: { gte: toDate(thirtyDaysAgo) } },
+    limit: 1000, suppressAuth: true
+  });
   const items = res.items || [];
-  const recovered = items.filter(i => i.recovered).length;
-  return { success: true, stats: { total: items.length, recovered, recoveryRate: items.length > 0 ? (recovered / items.length * 100).toFixed(1) : 0 } };
+  const recovered = items.filter(i => i.recovered === 'Yes').length;
+  return {
+    success: true,
+    stats: {
+      total: items.length,
+      recovered,
+      recoveryRate: items.length > 0 ? (recovered / items.length * 100).toFixed(1) : 0
+    }
+  };
 }
 
 export async function getRecentAbandonments(limit = 50) {
-  const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, { sort: [{ field: 'abandonedAt', direction: 'desc' }], limit, suppressAuth: true });
+  const res = await dataAccess.queryRecords(COLLECTION_KEYS.checkoutAbandonment, {
+    sort: [{ field: 'abandoned_date', direction: 'desc' }],
+    limit, suppressAuth: true
+  });
   return { success: true, abandonments: res.items || [] };
 }
