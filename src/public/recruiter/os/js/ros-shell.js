@@ -23,10 +23,14 @@
     bindMobileHamburger();
 
     // Sync theme icon
-    const isDark = document.documentElement.classList.contains('dark');
+    const _theme = document.documentElement.classList.contains('solar') ? 'solar'
+                 : document.documentElement.classList.contains('dark') ? 'dark'
+                 : 'light';
     const themeIcon = document.getElementById('theme-icon');
     if (themeIcon) {
-      themeIcon.textContent = isDark ? 'light_mode' : 'dark_mode';
+      themeIcon.textContent = _theme === 'light' ? 'contrast'
+                            : _theme === 'solar' ? 'dark_mode'
+                            : 'light_mode';
     }
   }
 
@@ -291,17 +295,22 @@
 
   // ── Helpers ──
   function toggleTheme() {
-    const isDark = document.documentElement.classList.contains('dark');
-    if (isDark) {
-      document.documentElement.classList.remove('dark');
-      document.documentElement.classList.add('light');
-      localStorage.setItem('ros-theme', 'light');
-      document.getElementById('theme-icon').textContent = 'dark_mode';
-    } else {
-      document.documentElement.classList.remove('light');
-      document.documentElement.classList.add('dark');
-      localStorage.setItem('ros-theme', 'dark');
-      document.getElementById('theme-icon').textContent = 'light_mode';
+    const html = document.documentElement;
+    const current = html.classList.contains('solar') ? 'solar'
+                  : html.classList.contains('dark') ? 'dark'
+                  : 'light';
+    // Cycle: light → solar → dark → light
+    const next = current === 'light' ? 'solar'
+               : current === 'solar' ? 'dark'
+               : 'light';
+    html.classList.remove('light', 'solar', 'dark');
+    html.classList.add(next);
+    localStorage.setItem('ros-theme', next);
+    const icon = document.getElementById('theme-icon');
+    if (icon) {
+      icon.textContent = next === 'light' ? 'contrast'
+                       : next === 'solar' ? 'dark_mode'
+                       : 'light_mode';
     }
   }
 
