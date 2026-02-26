@@ -557,8 +557,9 @@ function buildLocalExplanation(carrierDot) {
 
   if (!parts.length) {
     // Synthesize from individual enrichment fields
-    const city = carrier.PHY_CITY || null;
-    const state = carrier.PHY_STATE || null;
+    const _clean = v => (v && v.toLowerCase() !== 'unknown' && v.toLowerCase() !== 'n/a') ? v : null;
+    const city = _clean(carrier.PHY_CITY);
+    const state = _clean(carrier.PHY_STATE);
     const loc = (city && state) ? `${city}, ${state}` : (city || state || null);
     const fleet = carrier.NBR_POWER_UNIT;
     const pay = carrier.PAY_CPM || enrichment.pay_cpm_range;
@@ -578,8 +579,6 @@ function buildLocalExplanation(carrierDot) {
   if (parts.length) {
     llm_narrative = parts.join(' ');
   }
-
-  console.log('[WHY-DBG] buildLocalExplanation - DOT:', carrierDot, '| enrichment.ai_summary:', enrichment.ai_summary ? enrichment.ai_summary.substring(0, 80) : null, '| carrier.PHY_CITY:', carrier.PHY_CITY, '| carrier.PHY_STATE:', carrier.PHY_STATE, '| llm_narrative:', llm_narrative ? llm_narrative.substring(0, 80) : null);
 
   // Use the scoring module's rationale if available
   const rationale = matchData.rationale || [];

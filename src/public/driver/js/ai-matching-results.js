@@ -582,7 +582,6 @@ function prefillForm(profile, isAI = false) {
 }
 
 function handleMatchExplanationResult(data) {
-  console.log('[WHY-DBG] handleMatchExplanationResult data:', JSON.stringify(data).substring(0, 600));
   const card = document.querySelector(`.match-card[data-dot="${data.carrierDot}"]`);
   if (!card) return;
 
