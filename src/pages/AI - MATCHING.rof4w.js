@@ -851,7 +851,11 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
             if (statusResult.status === 'COMPLETE') {
               clearInterval(timer);
               console.log(`✅ [auto-enrich] Job ${jobId} complete — delivering enrichment for DOT ${dotNumber}`);
-              sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'complete', ...statusResult.enrichment });
+              const _enrichData = statusResult.enrichment;
+              sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'complete', ..._enrichData });
+              // Backfill lastSearchResults so buildLocalExplanation can access enrichment
+              const _idx = lastSearchResults?.matches?.findIndex(m => String(m.carrier?.DOT_NUMBER) === String(dotNumber));
+              if (_idx >= 0) lastSearchResults.matches[_idx].enrichment = _enrichData;
               if (!visiblePreEnriched.length) sendToHtml('enrichmentComplete', { totalEnriched: 1 });
               resolve();
             } else if (statusResult.status === 'FAILED') {
@@ -868,6 +872,9 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
             const enrichment = await enrichWithRetry(dotNumber, visibleNeedsEnrich.carrier, driverPrefs);
             const enrichStatus = enrichment.building ? 'building' : enrichment.error ? 'error' : 'complete';
             sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: enrichStatus, ...enrichment });
+            // Backfill lastSearchResults so buildLocalExplanation can access enrichment
+            const _idx2 = lastSearchResults?.matches?.findIndex(m => String(m.carrier?.DOT_NUMBER) === String(dotNumber));
+            if (_idx2 >= 0) lastSearchResults.matches[_idx2].enrichment = enrichment;
             if (!visiblePreEnriched.length) sendToHtml('enrichmentComplete', { totalEnriched: 1 });
             resolve();
           }
@@ -879,6 +886,9 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
       const enrichment = await enrichWithRetry(dotNumber, visibleNeedsEnrich.carrier, driverPrefs);
       const enrichStatus = enrichment.building ? 'building' : enrichment.error ? 'error' : 'complete';
       sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: enrichStatus, ...enrichment });
+      // Backfill lastSearchResults so buildLocalExplanation can access enrichment
+      const _idx3 = lastSearchResults?.matches?.findIndex(m => String(m.carrier?.DOT_NUMBER) === String(dotNumber));
+      if (_idx3 >= 0) lastSearchResults.matches[_idx3].enrichment = enrichment;
       if (!visiblePreEnriched.length) sendToHtml('enrichmentComplete', { totalEnriched: 1 });
     }
   }
