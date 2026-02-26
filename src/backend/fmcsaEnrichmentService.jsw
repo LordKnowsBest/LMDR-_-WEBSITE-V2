@@ -1,0 +1,90 @@
+/**
+ * fmcsaEnrichmentService.jsw
+ *
+ * Lazy-promotion pipeline: when Railway returns FMCSA-only (Pinecone Tier 1)
+ * carriers in a search result, automatically create an Airtable record and
+ * kick Railway enrichment so the carrier graduates to Tier 2 (full data).
+ *
+ * Called fire-and-forget from post_completeSearch in http-functions.js.
+ * Failures are logged but never bubble up to the driver's search experience.
+ *
+ * Throughput: top 3 carriers per search, deduped against existing Airtable
+ * records — typically ~0–3 new Perplexity calls per unique search session.
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+import { triggerEnrichmentJob } from 'backend/asyncSearchService';
+
+const COLLECTION_KEY = 'carriers';
+const MAX_PER_SEARCH = 3;
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Promote the top N FMCSA-only search hits to Airtable and kick enrichment.
+ *
+ * @param {Array<{ carrier: object, fmcsa: object }>} fmcsaHits
+ *   The fmcsaOnly result objects from Railway — expects carrier.DOT_NUMBER,
+ *   carrier.LEGAL_NAME, and basic FMCSA fields to already be populated.
+ */
+export async function autoEnrichFmcsaHits(fmcsaHits) {
+  if (!Array.isArray(fmcsaHits) || fmcsaHits.length === 0) return;
+
+  const candidates = fmcsaHits.slice(0, MAX_PER_SEARCH);
+
+  for (const hit of candidates) {
+    try {
+      await _promoteAndEnrich(hit);
+    } catch (err) {
+      console.warn(`[fmcsaEnrichment] Failed for DOT ${hit?.carrier?.DOT_NUMBER}:`, err.message);
+    }
+  }
+}
+
+// ── Internal ──────────────────────────────────────────────────────────────────
+
+async function _promoteAndEnrich(hit) {
+  const dot = String(hit.carrier?.DOT_NUMBER || '').trim();
+  if (!dot) return;
+
+  const name = hit.carrier?.LEGAL_NAME || '';
+  if (!name || name === 'Unknown Carrier') return;
+
+  // Skip if already in Airtable — no need to re-promote
+  const existing = await dataAccess.queryRecords(COLLECTION_KEY, {
+    filters: { dot_number: Number(dot) },
+    limit: 1,
+    suppressAuth: true,
+  });
+  if (existing.items?.length) return;
+
+  // Insert a minimal Airtable record seeded from FMCSA data
+  await dataAccess.insertRecord(COLLECTION_KEY, {
+    dot_number:        Number(dot),
+    legal_name:        name,
+    phy_city:          hit.carrier.PHY_CITY          || null,
+    phy_state:         hit.carrier.PHY_STATE         || null,
+    phy_street:        hit.carrier.PHY_STREET        || null,
+    phy_zip:           hit.carrier.PHY_ZIP           || null,
+    nbr_power_unit:    hit.carrier.NBR_POWER_UNIT    ? Number(hit.carrier.NBR_POWER_UNIT) : null,
+    total_drivers:     hit.carrier.TOTAL_DRIVERS     ? Number(hit.carrier.TOTAL_DRIVERS)  : null,
+    safety_rating:     hit.fmcsa?.safety_rating      || hit.carrier.SAFETY_RATING         || null,
+    carrier_operation: hit.carrier.CARRIER_OPERATION || null,
+    is_searchable:     'Yes',
+    source:            'fmcsa_auto_promote',
+  }, { suppressAuth: true });
+
+  console.log(`[fmcsaEnrichment] Promoted DOT ${dot} (${name}) to Airtable`);
+
+  // Kick Railway async enrichment — fire and forget, failure is non-blocking
+  const jobId = `enr_auto_${Date.now().toString(36)}_${dot}`;
+  await triggerEnrichmentJob(jobId, dot, name, {
+    city:          hit.carrier.PHY_CITY,
+    state:         hit.carrier.PHY_STATE,
+    fleet_size:    hit.carrier.NBR_POWER_UNIT,
+    safety_rating: hit.fmcsa?.safety_rating || hit.carrier.SAFETY_RATING,
+    carrier_operation: hit.carrier.CARRIER_OPERATION,
+  });
+
+  console.log(`[fmcsaEnrichment] Enrichment job ${jobId} kicked for DOT ${dot}`);
+}

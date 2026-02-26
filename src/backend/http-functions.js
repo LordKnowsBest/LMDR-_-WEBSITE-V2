@@ -26,6 +26,7 @@ import {
 } from 'backend/abandonmentEmailService';
 import { handleGatewayRequest } from 'backend/apiGateway';
 import { handleAgentTurn } from 'backend/agentService';
+import { autoEnrichFmcsaHits } from 'backend/fmcsaEnrichmentService';
 import * as dataAccess from 'backend/dataAccess';
 import { processSendGridWebhook } from 'backend/emailCampaignService';
 import {
@@ -1062,6 +1063,17 @@ export async function post_completeSearch(request) {
     }, { suppressAuth: true });
 
     console.log(`[completeSearch] Job ${jobId} → ${status} (${results?.length || 0} results, ${elapsedMs}ms)`);
+
+    // Lazy-promote top FMCSA-only hits to Airtable and kick enrichment in background
+    if (status === 'COMPLETE' && Array.isArray(results)) {
+      const fmcsaHits = results.filter(r => r.fmcsaOnly && r.carrier?.DOT_NUMBER);
+      if (fmcsaHits.length > 0) {
+        autoEnrichFmcsaHits(fmcsaHits).catch(err =>
+          console.warn('[completeSearch] autoEnrichFmcsaHits fire-and-forget error:', err.message)
+        );
+      }
+    }
+
     return ok({ received: true, jobId, status });
 
   } catch (error) {

@@ -447,9 +447,9 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           PHY_STREET:        null,
           PHY_ZIP:           null,
           TELEPHONE:         null,
-          PAY_CPM:           null,
-          TURNOVER_PERCENT:  null,
-          AVG_TRUCK_AGE:     null,
+          PAY_CPM:           meta.pay_cpm       || null,
+          TURNOVER_PERCENT:  meta.turnover_pct  || null,
+          AVG_TRUCK_AGE:     meta.avg_truck_age || null,
         },
         fmcsa:           partialFmcsa,
         inferredOpType:  inferOpType(meta.operation_type),
@@ -608,6 +608,11 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
       const dot            = String(r.carrier.DOT_NUMBER);
       const enrichment     = enrichmentMap[dot] || null;
       const hasEnrichment  = enrichment && !enrichment.error;
+      // For FMCSA-only carriers, backfill PAY_CPM from Perplexity pay_estimate if not already set
+      if (hasEnrichment && r.fmcsaOnly && !r.carrier.PAY_CPM) {
+        const parsedCpm = _parseCpmFromEstimate(enrichment.pay_estimate);
+        if (parsedCpm) r.carrier.PAY_CPM = parsedCpm;
+      }
       return {
         ...r,
         enrichment:      hasEnrichment ? enrichment : null,
@@ -718,6 +723,17 @@ semanticRouter.post('/enrich/carrier/async', async (c) => {
   return c.json({ jobId, status: 'processing', requestId }, 202);
 });
 
+// Parse a CPM value from a pay_estimate string like "$0.52–0.58 CPM" or "$1,200/wk".
+// Returns a float (e.g. 0.55) only when the value looks like a per-mile rate (0.30–1.50).
+// Returns null for weekly/annual pay or unparseable strings.
+function _parseCpmFromEstimate(payEstimate) {
+  if (!payEstimate || typeof payEstimate !== 'string') return null;
+  const match = payEstimate.match(/\$?([\d.]+)/);
+  if (!match) return null;
+  const val = parseFloat(match[1]);
+  return val >= 0.30 && val <= 1.50 ? val : null;
+}
+
 async function _runEnrichmentAsync(jobId, dotNumber, carrierName, knownData, callbackUrl) {
   const key = process.env.LMDR_INTERNAL_KEY;
 
@@ -753,6 +769,25 @@ async function _runEnrichmentAsync(jobId, dotNumber, carrierName, knownData, cal
 
     const enrichment = await enrichCarrierWithPerplexity(carrierName, String(dotNumber), enrichKnownData);
     await _callback({ jobId, dotNumber, status: 'COMPLETE', enrichment });
+
+    // Step 3: write pay data back to Pinecone metadata so future searches see it immediately
+    const parsedCpm = _parseCpmFromEstimate(enrichment.pay_estimate);
+    if (parsedCpm) {
+      const vectorId = `dot:${dotNumber}`;
+      try {
+        const existing = await fetchVector('carriers', vectorId);
+        if (existing?.values) {
+          await upsertVector('carriers', vectorId, existing.values, {
+            ...existing.metadata,
+            pay_cpm:     parsedCpm,
+            enriched_at: new Date().toISOString(),
+          });
+          console.log(`[enrich/async] Pinecone metadata updated DOT ${dotNumber}: pay_cpm=${parsedCpm}`);
+        }
+      } catch (pineconeErr) {
+        console.warn(`[enrich/async] Pinecone metadata update failed DOT ${dotNumber}:`, pineconeErr.message);
+      }
+    }
   } catch (err) {
     console.error(`[enrich/async] Failed for DOT ${dotNumber}:`, err.message);
     await _callback({ jobId, dotNumber, status: 'FAILED', error: err.message });
