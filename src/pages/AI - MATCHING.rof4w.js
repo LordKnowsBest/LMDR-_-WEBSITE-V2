@@ -580,6 +580,8 @@ function buildLocalExplanation(carrierDot) {
     llm_narrative = parts.join(' ');
   }
 
+  console.log('[WHY-DBG] buildLocalExplanation - DOT:', carrierDot, '| enrichment.ai_summary:', enrichment.ai_summary ? enrichment.ai_summary.substring(0, 80) : null, '| carrier.PHY_CITY:', carrier.PHY_CITY, '| carrier.PHY_STATE:', carrier.PHY_STATE, '| llm_narrative:', llm_narrative ? llm_narrative.substring(0, 80) : null);
+
   // Use the scoring module's rationale if available
   const rationale = matchData.rationale || [];
   const tip = rationale.length > 0
