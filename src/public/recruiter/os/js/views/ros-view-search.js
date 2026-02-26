@@ -13,7 +13,7 @@
     'saveWeightPreferencesResult', 'recruiterProfile', 'driverSearchInit',
     'saveSearchResult', 'savedSearchesLoaded', 'savedSearchExecuted',
     'savedSearchDeleted', 'savedSearchUpdated', 'generateAIDraftResult',
-    'noCarrierAssigned'
+    'noCarrierAssigned', 'carrierPreferencesLoaded'
   ];
 
   // ── State ──
@@ -36,6 +36,13 @@
     qualifications: 25, experience: 20, location: 20,
     availability: 15, salary_fit: 10, engagement: 10
   };
+
+  // ── Session Analytics ──
+  let sessionStats = { searchesToday: 0, profilesViewed: 0, messagesSent: 0, pipelineAdds: 0 };
+
+  // ── Carrier Preferences ──
+  let carrierPrefs = null;
+  let prefsExpanded = true;
 
   // ── Filter Definitions ──
   const FILTER_GROUPS = {
@@ -124,6 +131,67 @@
           <button onclick="ROS.views._search.loadSaved()" class="px-3 py-1.5 text-[10px] font-bold rounded-full neu-x text-tan hover:text-lmdr-blue transition-colors">
             <span class="material-symbols-outlined text-[12px] align-middle">bookmark</span> Saved
           </button>
+        </div>
+      </div>
+
+      <!-- Analytics Strip -->
+      <div class="grid grid-cols-4 gap-3 mt-4" id="search-analytics-strip">
+        <div class="neu-x rounded-xl px-4 py-3 flex items-center gap-3 group">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-lmdr-blue/10 to-lmdr-blue/5 flex items-center justify-center group-hover:scale-105 transition-transform">
+            <span class="material-symbols-outlined text-lmdr-blue text-[16px]">search</span>
+          </div>
+          <div>
+            <p class="text-[9px] uppercase font-bold tracking-widest text-tan">Searches Today</p>
+            <p class="text-[20px] font-black text-lmdr-dark leading-none mt-0.5" id="stat-searches">${sessionStats.searchesToday}</p>
+          </div>
+        </div>
+        <div class="neu-x rounded-xl px-4 py-3 flex items-center gap-3 group">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500/10 to-violet-500/5 flex items-center justify-center group-hover:scale-105 transition-transform">
+            <span class="material-symbols-outlined text-violet-500 text-[16px]">visibility</span>
+          </div>
+          <div>
+            <p class="text-[9px] uppercase font-bold tracking-widest text-tan">Profiles Viewed</p>
+            <p class="text-[20px] font-black text-lmdr-dark leading-none mt-0.5" id="stat-profiles">${sessionStats.profilesViewed}</p>
+          </div>
+        </div>
+        <div class="neu-x rounded-xl px-4 py-3 flex items-center gap-3 group">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500/10 to-emerald-500/5 flex items-center justify-center group-hover:scale-105 transition-transform">
+            <span class="material-symbols-outlined text-emerald-500 text-[16px]">send</span>
+          </div>
+          <div>
+            <p class="text-[9px] uppercase font-bold tracking-widest text-tan">Messages Sent</p>
+            <p class="text-[20px] font-black text-lmdr-dark leading-none mt-0.5" id="stat-messages">${sessionStats.messagesSent}</p>
+          </div>
+        </div>
+        <div class="neu-x rounded-xl px-4 py-3 flex items-center gap-3 group">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500/10 to-amber-500/5 flex items-center justify-center group-hover:scale-105 transition-transform">
+            <span class="material-symbols-outlined text-amber-500 text-[16px]">person_add</span>
+          </div>
+          <div>
+            <p class="text-[9px] uppercase font-bold tracking-widest text-tan">Pipeline Adds</p>
+            <p class="text-[20px] font-black text-lmdr-dark leading-none mt-0.5" id="stat-pipeline">${sessionStats.pipelineAdds}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Carrier Preferences Banner -->
+      <div class="neu-s rounded-xl mt-4 overflow-hidden" id="search-carrier-prefs">
+        <div class="flex items-center justify-between px-4 py-2.5 cursor-pointer hover:bg-black/[.02] transition-colors" onclick="ROS.views._search.togglePrefs()">
+          <div class="flex items-center gap-2">
+            <span class="material-symbols-outlined text-lmdr-blue text-[16px]">business_center</span>
+            <span class="text-[12px] font-bold text-lmdr-dark">Your Carrier's Hiring Preferences</span>
+          </div>
+          <span class="material-symbols-outlined text-tan text-[16px] transition-transform" id="prefs-chevron" style="transform:rotate(${prefsExpanded ? '180' : '0'}deg)">expand_more</span>
+        </div>
+        <div id="prefs-body" class="${prefsExpanded ? '' : 'hidden'}">
+          <div class="px-4 pb-3 flex items-center justify-between gap-3">
+            <div class="flex gap-2 flex-wrap flex-1" id="prefs-pills">
+              ${renderCarrierPrefsPills()}
+            </div>
+            <button onclick="ROS.views.showView('carriers')" class="text-[10px] font-bold text-lmdr-blue hover:underline whitespace-nowrap flex items-center gap-1">
+              <span class="material-symbols-outlined text-[12px]">edit</span>Edit
+            </button>
+          </div>
         </div>
       </div>
 
@@ -228,11 +296,54 @@
     return html;
   }
 
+  // ── Carrier Preferences Pills ──
+  function renderCarrierPrefsPills() {
+    if (!carrierPrefs) {
+      return '<span class="text-[10px] text-tan italic">No carrier preferences loaded yet</span>';
+    }
+    const pills = [];
+    const pill = (color, text) => `<span class="px-2.5 py-1 text-[10px] font-bold rounded-full bg-${color}/10 text-${color} border border-${color}/20">${text}</span>`;
+
+    if (carrierPrefs.cdlClass) pills.push(pill('lmdr-blue', 'CDL-' + escapeHtml(carrierPrefs.cdlClass) + ' Required'));
+    if (carrierPrefs.routeTypes && carrierPrefs.routeTypes.length) {
+      pills.push(pill('indigo-500', escapeHtml(carrierPrefs.routeTypes.join(' / '))));
+    }
+    if (carrierPrefs.minExperience) {
+      pills.push(pill('violet-500', carrierPrefs.minExperience + '+ Years Exp'));
+    }
+    if (carrierPrefs.payRange) {
+      pills.push(pill('emerald-600', '$' + escapeHtml(carrierPrefs.payRange)));
+    }
+    if (carrierPrefs.endorsements && carrierPrefs.endorsements.length) {
+      carrierPrefs.endorsements.forEach(function (e) {
+        pills.push(pill('amber-600', escapeHtml(e) + ' Preferred'));
+      });
+    }
+    if (carrierPrefs.cleanMVR) pills.push(pill('red-500', 'Clean MVR'));
+    if (carrierPrefs.homeTime) pills.push(pill('teal-500', escapeHtml(carrierPrefs.homeTime)));
+
+    return pills.length > 0 ? pills.join('') : '<span class="text-[10px] text-tan italic">Configure preferences in Carriers view</span>';
+  }
+
+  // ── Session Stat Update ──
+  function updateSessionStat(key, increment) {
+    sessionStats[key] = (sessionStats[key] || 0) + (increment || 1);
+    var map = { searchesToday: 'stat-searches', profilesViewed: 'stat-profiles', messagesSent: 'stat-messages', pipelineAdds: 'stat-pipeline' };
+    var el = document.getElementById(map[key]);
+    if (el) {
+      el.textContent = sessionStats[key];
+      el.style.animation = 'none';
+      void el.offsetWidth;
+      el.style.animation = 'fadeUp .3s ease';
+    }
+  }
+
   // ── onMount ──
   function onMount() {
     ROS.bridge.sendToVelo('driverSearchReady', {});
     ROS.bridge.sendToVelo('getQuotaStatus', {});
     ROS.bridge.sendToVelo('getWeightPreferences', {});
+    ROS.bridge.sendToVelo('getCarrierPreferences', {});
   }
 
   function onUnmount() {
@@ -279,6 +390,7 @@
           }
           currentPage = 0;
           applySortAndPaginate();
+          updateSessionStat('searchesToday');
         } else {
           const err = data && data.error ? data.error : 'Search failed';
           if (err.toLowerCase().includes('no carrier')) {
@@ -299,6 +411,7 @@
           selectedDriverData = data.driver;
           if (selectedDriver) viewedDriverIds.add(selectedDriver);
           renderProfileModal(data.driver);
+          updateSessionStat('profilesViewed');
         } else if (data && data.quotaExceeded) {
           if (data.quotaStatus) {
             quotaStatus = data.quotaStatus;
@@ -313,6 +426,7 @@
       case 'saveDriverResult':
         if (data && data.success) {
           showToast(data.alreadyExists ? 'Driver already in pipeline' : 'Driver saved to pipeline');
+          if (!data.alreadyExists) updateSessionStat('pipelineAdds');
         } else {
           showToast(data && data.error ? data.error : 'Failed to save driver', 'error');
         }
@@ -320,6 +434,7 @@
 
       case 'contactDriverResult':
         closeModal('message-modal');
+        if (data && data.success) updateSessionStat('messagesSent');
         showToast(data && data.success ? 'Message sent successfully' : (data && data.error ? data.error : 'Failed to send message'), data && data.success ? 'success' : 'error');
         break;
 
@@ -370,6 +485,14 @@
       case 'noCarrierAssigned':
         hasCarrier = false;
         renderNoCarrierState();
+        break;
+
+      case 'carrierPreferencesLoaded':
+        if (data && data.preferences) {
+          carrierPrefs = data.preferences;
+          var pillsEl = document.getElementById('prefs-pills');
+          if (pillsEl) pillsEl.innerHTML = renderCarrierPrefsPills();
+        }
         break;
     }
   }
@@ -1253,6 +1376,14 @@
 
     upgrade: function () {
       ROS.bridge.sendToVelo('navigateTo', { page: '/pricing' });
+    },
+
+    togglePrefs: function () {
+      prefsExpanded = !prefsExpanded;
+      var body = document.getElementById('prefs-body');
+      var chev = document.getElementById('prefs-chevron');
+      if (body) body.classList.toggle('hidden', !prefsExpanded);
+      if (chev) chev.style.transform = 'rotate(' + (prefsExpanded ? '180' : '0') + 'deg)';
     }
   };
 
