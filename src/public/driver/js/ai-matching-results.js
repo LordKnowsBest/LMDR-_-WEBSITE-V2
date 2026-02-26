@@ -600,8 +600,8 @@ function handleMatchExplanationResult(data) {
 
   const exp = data.explanation;
 
-  // Render Categories
-  const categoriesHtml = exp.categories.map(cat => `
+  // Render Categories — guard against missing scores (Pinecone-only carriers)
+  const categoriesHtml = (exp.categories || []).map(cat => `
     <div class="category-row">
       <div class="category-label">
         <i class="fa-solid fa-check-circle" style="color: ${cat.score >= 70 ? 'var(--color-success)' : '#cbd5e1'}"></i>
@@ -654,17 +654,13 @@ function loadApplications() {
   // Show loading spinner
   list.innerHTML = '<div class="loading-spinner" style="margin: 40px auto;"></div>';
 
-  if (window.parent) {
-    console.log('📡 Requesting driver applications from backend...');
-    window.parent.postMessage({ type: 'getDriverApplications' }, '*');
+  console.log('📡 Requesting driver applications from backend...');
+  sendToWix('getDriverApplications', {});
 
-    // Timeout fallback — backend didn't respond, show empty state
-    window.appLoadTimeout = setTimeout(() => {
-      console.warn('⚠️ No response from backend for getDriverApplications');
-      renderApplications([]);
-    }, 5000);
-  } else {
+  // Timeout fallback — backend didn't respond, show empty state
+  window.appLoadTimeout = setTimeout(() => {
+    console.warn('⚠️ No response from backend for getDriverApplications');
     renderApplications([]);
-  }
+  }, 5000);
 }
 

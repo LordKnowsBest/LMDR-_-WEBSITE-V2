@@ -4,7 +4,25 @@
 function renderMatchCard(match, rank) {
   const carrier = match.carrier || {};
   const enrichment = match.enrichment || {};
-  const fmcsa = enrichment.fmcsa || match.fmcsa || {};
+  // Prefer dedicated FMCSA block; fall back to building one from Pinecone carrier fields
+  // (Railway/Pinecone carriers have SAFETY_RATING etc. directly on the carrier object)
+  let fmcsa = enrichment.fmcsa || match.fmcsa || {};
+  if (!fmcsa.safety_rating && carrier.SAFETY_RATING) {
+    fmcsa = {
+      safety_rating: carrier.SAFETY_RATING,
+      dot_number: carrier.DOT_NUMBER,
+      is_authorized: carrier.CARRIER_STATUS !== 'NOT AUTHORIZED',
+      inspections_24mo: {
+        driver_oos_rate: carrier.DRIVER_OOS_RATE != null ? Number(carrier.DRIVER_OOS_RATE) : null,
+        vehicle_oos_rate: carrier.VEHICLE_OOS_RATE != null ? Number(carrier.VEHICLE_OOS_RATE) : null,
+        total: carrier.NBR_DRIVER_INSP || null,
+      },
+      crashes_24mo: {
+        total: carrier.CRASH_TOTAL || 0,
+        fatal: carrier.CRASH_FATAL || 0,
+      },
+    };
+  }
   const fromCache = match.fromCache;
 
   const _legalName = (carrier.LEGAL_NAME && carrier.LEGAL_NAME !== 'unknown') ? carrier.LEGAL_NAME : null;

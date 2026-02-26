@@ -44,6 +44,11 @@ let cachedDriverProfile = null;
 let cachedDriverInterests = [];
 let lastSearchResults = null;
 
+// Init synchronization — prevents carrierMatchingReady from being dropped
+// when the HTML iframe fires before Velo's async profile/interest fetches finish
+let _veloInitDone = false;
+let _htmlReadyPending = false;
+
 // ============================================================================
 // MESSAGE VALIDATION SYSTEM
 // ============================================================================
@@ -140,6 +145,12 @@ $w.onReady(async function () {
 
   console.log('✅ HTML component found:', CONFIG.htmlComponentId);
 
+  // Wire listener FIRST — before any awaits so carrierMatchingReady is never dropped
+  // if the iframe DOMContentLoaded fires before our async profile fetch completes
+  htmlComponent.onMessage((event) => {
+    handleHtmlMessage(event.data);
+  });
+
   // Get initial user status and driver profile
   cachedUserStatus = await getUserStatus();
   console.log('👤 Initial user status:', cachedUserStatus);
@@ -166,10 +177,14 @@ $w.onReady(async function () {
     }
   }
 
-  // Set up message listener
-  htmlComponent.onMessage((event) => {
-    handleHtmlMessage(event.data);
-  });
+  _veloInitDone = true;
+
+  // If HTML fired carrierMatchingReady before our async init finished, send pageReady now
+  if (_htmlReadyPending) {
+    _htmlReadyPending = false;
+    console.log('📬 Sending deferred pageReady (HTML was ready before Velo init)');
+    _sendPageReady();
+  }
 });
 
 // ============================================================================
@@ -342,37 +357,14 @@ async function handleHtmlMessage(msg) {
       break;
 
     case 'carrierMatchingReady':
-      console.log('✅ HTML Embed Ready - Sending initial state');
-      sendToHtml('pageReady', {
-        userStatus: cachedUserStatus,
-        memberId: wixUsers?.currentUser?.id || null,
-        driverProfile: cachedDriverProfile ? {
-          id: cachedDriverProfile._id,
-          displayName: cachedDriverProfile.display_name,
-          homeZip: cachedDriverProfile.home_zip,
-          maxDistance: cachedDriverProfile.max_commute_miles,
-          minCPM: cachedDriverProfile.min_cpm,
-          operationType: cachedDriverProfile.preferred_operation_type,
-          maxTurnover: cachedDriverProfile.max_turnover_percent,
-          maxTruckAge: cachedDriverProfile.max_truck_age_years,
-          fleetSize: cachedDriverProfile.fleet_size_preference,
-          completeness: cachedDriverProfile.profile_completeness_score,
-          totalSearches: cachedDriverProfile.total_searches,
-          isComplete: cachedDriverProfile.is_complete,
-          missingFields: cachedDriverProfile.missing_fields,
-          isDiscoverable: cachedDriverProfile.is_discoverable,
-          cdl_front_image: cachedDriverProfile.cdl_front_image,
-          cdl_back_image: cachedDriverProfile.cdl_back_image,
-          med_card_image: cachedDriverProfile.med_card_image,
-          resume_file: cachedDriverProfile.resume_file
-        } : null,
-        appliedCarriers: cachedDriverInterests.map(i => ({
-          carrierDOT: i.carrier_dot,
-          carrierName: i.carrier_name,
-          actionType: i.action_type,
-          timestamp: i.action_timestamp
-        }))
-      });
+      console.log('✅ HTML Embed Ready');
+      if (!_veloInitDone) {
+        // Async init not done yet — defer pageReady until profile/interests are loaded
+        _htmlReadyPending = true;
+        console.log('⏳ Deferring pageReady until Velo init completes...');
+        break;
+      }
+      _sendPageReady();
       break;
 
     case 'submitApplication':
@@ -1391,6 +1383,43 @@ async function handleExtractDocumentOCR(data) {
       error: error.message
     });
   }
+}
+
+// ============================================================================
+// PAGE READY PAYLOAD
+// ============================================================================
+
+function _sendPageReady() {
+  sendToHtml('pageReady', {
+    userStatus: cachedUserStatus,
+    memberId: wixUsers?.currentUser?.id || null,
+    driverProfile: cachedDriverProfile ? {
+      id: cachedDriverProfile._id,
+      displayName: cachedDriverProfile.display_name,
+      homeZip: cachedDriverProfile.home_zip,
+      maxDistance: cachedDriverProfile.max_commute_miles,
+      minCPM: cachedDriverProfile.min_cpm,
+      operationType: cachedDriverProfile.preferred_operation_type,
+      maxTurnover: cachedDriverProfile.max_turnover_percent,
+      maxTruckAge: cachedDriverProfile.max_truck_age_years,
+      fleetSize: cachedDriverProfile.fleet_size_preference,
+      completeness: cachedDriverProfile.profile_completeness_score,
+      totalSearches: cachedDriverProfile.total_searches,
+      isComplete: cachedDriverProfile.is_complete,
+      missingFields: cachedDriverProfile.missing_fields,
+      isDiscoverable: cachedDriverProfile.is_discoverable,
+      cdl_front_image: cachedDriverProfile.cdl_front_image,
+      cdl_back_image: cachedDriverProfile.cdl_back_image,
+      med_card_image: cachedDriverProfile.med_card_image,
+      resume_file: cachedDriverProfile.resume_file
+    } : null,
+    appliedCarriers: cachedDriverInterests.map(i => ({
+      carrierDOT: i.carrier_dot,
+      carrierName: i.carrier_name,
+      actionType: i.action_type,
+      timestamp: i.action_timestamp
+    }))
+  });
 }
 
 // ============================================================================

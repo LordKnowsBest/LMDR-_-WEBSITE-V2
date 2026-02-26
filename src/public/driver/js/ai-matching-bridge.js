@@ -29,6 +29,10 @@ const MESSAGE_REGISTRY = {
     'voiceReady', // Voice configuration ready
     'searchJobStarted', // Async Option B search kicked off — { jobId }
     'searchJobStatus', // Async search poll response — { status, error? }
+    'driverApplications', // Application history response
+    'ocrResult', // Real-time OCR extraction result
+    'agentApprovalRequired', // Agent requires user approval
+    'profileSaved', // Profile save confirmation
   ],
   // Messages TO Velo that HTML sends
   outbound: [
@@ -51,6 +55,7 @@ const MESSAGE_REGISTRY = {
     'endVoiceCall', // End voice call
     'getVoiceConfig', // Request voice configuration
     'pollSearchJob', // Option B: poll async search job status
+    'getDriverApplications', // Fetch driver application history
     'ping' // Health check
   ]
 };
