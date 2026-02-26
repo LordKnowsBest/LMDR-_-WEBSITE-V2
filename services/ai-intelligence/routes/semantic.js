@@ -282,17 +282,29 @@ function buildDriverQuery(prefs) {
     ? prefs.operation_types.join(', ')
     : (prefs.operationType || prefs.operation_type || '');
   const state = prefs.home_state || prefs.homeState || '';
+  const zip   = prefs.homeZip   || prefs.home_zip   || '';
   const pay   = (prefs.pay_range_min || prefs.minPay)
     ? `seeking minimum $${prefs.pay_range_min || prefs.minPay}/mi` : '';
   const fleet = prefs.fleet_size_preference ? `fleet size ${prefs.fleet_size_preference}` : '';
 
+  // Prefer explicit state; fall back to zip code as a location signal for Voyage AI
+  const location = state
+    ? `based in or near ${state}`
+    : zip ? `based near zip code ${zip}` : '';
+
   return [
     cdl   && `CDL-${cdl} driver`,
     ops   && `looking for ${ops} freight`,
-    state && `based in or near ${state}`,
+    location,
     pay,
     fleet,
   ].filter(Boolean).join(', ') || 'CDL truck driver carrier match';
+}
+
+const OP_TYPE_LABEL = { A: 'For-Hire', B: 'For-Hire / Private', C: 'Private' };
+function inferOpType(code) {
+  if (!code) return null;
+  return OP_TYPE_LABEL[code] || code;
 }
 
 /**
@@ -360,12 +372,13 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
       const fields = airtableMap[m.id];
       if (!fields) continue; // record may have been deleted
 
+      const _opCode = fields.CARRIER_OPERATION || m.metadata?.operation_type || null;
       results.push({
         carrier: {
           // Use uppercase keys to match existing renderer expectations
           DOT_NUMBER:         fields.DOT_NUMBER        || m.metadata?.dot_number || '',
           LEGAL_NAME:         fields.LEGAL_NAME        || m.metadata?.legal_name || 'Unknown Carrier',
-          CARRIER_OPERATION:  fields.CARRIER_OPERATION || m.metadata?.operation_type || null,
+          CARRIER_OPERATION:  _opCode,
           NBR_POWER_UNIT:     fields.NBR_POWER_UNIT    || m.metadata?.fleet_size    || null,
           DRIVER_TOTAL:       fields.DRIVER_TOTAL      || m.metadata?.driver_count  || null,
           ACCIDENT_RATE:      fields.ACCIDENT_RATE     || m.metadata?.accident_rate || null,
@@ -378,7 +391,19 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           AVG_TRUCK_AGE:      fields.AVG_TRUCK_AGE     || null,
           COMBINED_SCORE:     fields.COMBINED_SCORE    || null,
           PRIORITY_SCORE:     fields.PRIORITY_SCORE    || m.metadata?.priority_score || null,
+          SAFETY_RATING:      fields.SAFETY_RATING     || m.metadata?.safety_rating || null,
         },
+        // Minimal fmcsa stub so the FMCSA section renders; hydrated below with live FMCSA data
+        fmcsa: {
+          safety_rating:    fields.SAFETY_RATING    || m.metadata?.safety_rating || null,
+          dot_number:       fields.DOT_NUMBER        || m.metadata?.dot_number    || '',
+          is_authorized:    true,
+          operating_status: 'AUTHORIZED',
+          inspections_24mo: {},
+          crashes_24mo:     {},
+          basics:           {},
+        },
+        inferredOpType:  inferOpType(_opCode),
         overallScore:    Math.round(m.score * 100),
         semanticScore:   m.score,
         scores:          {},
@@ -427,6 +452,7 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           AVG_TRUCK_AGE:     null,
         },
         fmcsa:           partialFmcsa,
+        inferredOpType:  inferOpType(meta.operation_type),
         overallScore:    Math.round(m.score * 100),
         semanticScore:   m.score,
         scores:          {},
@@ -493,6 +519,54 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
         console.log(`[search/carriers-async] ${jobId}: FMCSA hydrated ${fmcsaOnlyResults.length} Pinecone-only carriers`);
       } catch (fmcsaErr) {
         console.warn(`[search/carriers-async] ${jobId}: FMCSA batch hydration failed (non-blocking):`, fmcsaErr.message);
+      }
+    }
+
+    // Hydrate Airtable-backed carriers with live FMCSA data for OOS rates, crash counts, etc.
+    const airtableResults = finalResults.filter(r => !r.fmcsaOnly && r.carrier.DOT_NUMBER);
+    if (airtableResults.length > 0) {
+      const dots = airtableResults.map(r => String(r.carrier.DOT_NUMBER)).filter(Boolean);
+      try {
+        const fmcsaMap = await fetchFmcsaBatch(dots);
+        for (const r of airtableResults) {
+          const dot = String(r.carrier.DOT_NUMBER);
+          const f   = fmcsaMap[dot];
+          if (!f) continue;
+          // Fill in missing carrier fields with live FMCSA data
+          r.carrier.NBR_POWER_UNIT    = r.carrier.NBR_POWER_UNIT    || f.nbrPowerUnit     ?? f.nbr_power_unit    ?? null;
+          r.carrier.TOTAL_DRIVERS     = r.carrier.TOTAL_DRIVERS     || f.totalDrivers     ?? f.total_drivers     ?? null;
+          r.carrier.SAFETY_RATING     = r.carrier.SAFETY_RATING     || f.safetyRating     || f.safety_rating     || null;
+          r.carrier.PHY_CITY          = r.carrier.PHY_CITY          || f.phyCity          || f.phy_city          || null;
+          r.carrier.PHY_STATE         = r.carrier.PHY_STATE         || f.phyState         || f.phy_state         || null;
+          r.carrier.PHY_STREET        = r.carrier.PHY_STREET        || f.phyStreet        || f.phy_street        || null;
+          r.carrier.PHY_ZIP           = r.carrier.PHY_ZIP           || f.phyZip           || f.phy_zip           || null;
+          r.carrier.TELEPHONE         = r.carrier.TELEPHONE         || f.telephone        || f.TELEPHONE         || null;
+          r.carrier.CARRIER_OPERATION = r.carrier.CARRIER_OPERATION || f.carrierOperation || f.carrier_operation || null;
+          // Hydrate fmcsa stats object
+          if (r.fmcsa) {
+            r.fmcsa.safety_rating    = r.carrier.SAFETY_RATING;
+            r.fmcsa.is_authorized    = f.allowedToOperate === 'Y' || f.operatingStatus === 'AUTHORIZED' || true;
+            r.fmcsa.operating_status = f.operatingStatus || f.operating_status || 'AUTHORIZED';
+            r.fmcsa.inspections_24mo = {
+              total:               f.inspTotal      ?? f.totalInspections  ?? 0,
+              driver_oos_rate:     f.driverOosRate  ?? f.driverOOSRate     ?? null,
+              vehicle_oos_rate:    f.vehicleOosRate ?? f.vehicleOOSRate    ?? null,
+              national_avg_driver_oos:  5.51,
+              national_avg_vehicle_oos: 20.72,
+            };
+            r.fmcsa.crashes_24mo = {
+              total: f.crashTotal ?? f.totalCrashes ?? 0,
+              fatal: f.fatalCrash ?? f.fatalCrashes ?? 0,
+            };
+          }
+          // Update inferredOpType if now resolved
+          if (!r.inferredOpType && r.carrier.CARRIER_OPERATION) {
+            r.inferredOpType = inferOpType(r.carrier.CARRIER_OPERATION);
+          }
+        }
+        console.log(`[search/carriers-async] ${jobId}: FMCSA hydrated ${airtableResults.length} Airtable-backed carriers`);
+      } catch (airtableFmcsaErr) {
+        console.warn(`[search/carriers-async] ${jobId}: FMCSA hydration for Airtable carriers failed (non-blocking):`, airtableFmcsaErr.message);
       }
     }
 

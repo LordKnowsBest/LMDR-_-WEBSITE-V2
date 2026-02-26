@@ -70,8 +70,12 @@ function renderMatchCard(match, rank) {
     tags.push(`<span class="match-tag applied" style="background: #10b98115; color: #10b981; border: 1px solid #10b98130; font-weight: 800;"><i class="fa-solid fa-check-circle"></i> Applied</span>`);
   }
 
-  tags.push(`<span class="match-tag operation">${match.inferredOpType || 'Regional'}</span>`);
-  tags.push(`<span class="match-tag fleet">${categorizeFleet(carrier.NBR_POWER_UNIT)}</span>`);
+  if (match.inferredOpType) {
+    tags.push(`<span class="match-tag operation">${match.inferredOpType}</span>`);
+  }
+  if (carrier.NBR_POWER_UNIT) {
+    tags.push(`<span class="match-tag fleet">${categorizeFleet(carrier.NBR_POWER_UNIT)}</span>`);
+  }
   if (fromCache) {
     tags.push(`<span class="match-tag cached"><i class="fa-solid fa-bolt"></i> Instant</span>`);
   }

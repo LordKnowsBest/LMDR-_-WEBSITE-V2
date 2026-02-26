@@ -783,10 +783,11 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
 
   lastSearchResults = { matches: enrichedMatches, totalScored: enrichedMatches.length };
 
-  // All users see 2 results initially; remaining stay in enrichedMatches for upsell unlock
-  const visibleMatches = enrichedMatches.slice(0, 2);
-  const hiddenCount = Math.max(0, enrichedMatches.length - 2);
   const isPremiumUser = userStatus?.isPremium || false;
+  const isLoggedIn = !!(userStatus?.loggedIn || userStatus?.userId);
+  const maxVisible = isPremiumUser ? 10 : 2;
+  const visibleMatches = enrichedMatches.slice(0, maxVisible);
+  const hiddenCount = Math.max(0, enrichedMatches.length - maxVisible);
   const _needsAutoEnrich = visibleMatches.find(m => m.needsEnrichment && !m.fmcsaOnly);
   const autoEnrichDot = _needsAutoEnrich ? String(_needsAutoEnrich.carrier.DOT_NUMBER) : null;
 
@@ -795,10 +796,10 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
     totalScored:  enrichedMatches.length,
     totalMatches: enrichedMatches.length,
     userTier:     userStatus?.tier || 'free',
-    maxAllowed:   2,
+    maxAllowed:   maxVisible,
     isPremium:    isPremiumUser,
-    upsellMessage: hiddenCount > 0
-      ? `Sign in to see ${hiddenCount + 2} more matches in your area.`
+    upsellMessage: !isLoggedIn && hiddenCount > 0
+      ? `Sign up free to see ${hiddenCount} more matches in your area.`
       : null,
     driverProfile: cachedDriverProfile ? {
       id: cachedDriverProfile._id,
@@ -1126,6 +1127,9 @@ async function handleRetryEnrichment(data) {
               status: 'complete',
               ...statusResult.enrichment,
             });
+            // Backfill lastSearchResults so buildLocalExplanation can use ai_summary for WHY THIS JOB
+            const _retryIdx = lastSearchResults?.matches?.findIndex(m => String(m.carrier?.DOT_NUMBER) === String(dotNumber));
+            if (_retryIdx >= 0) lastSearchResults.matches[_retryIdx].enrichment = statusResult.enrichment;
             resolve();
           } else if (statusResult.status === 'FAILED') {
             clearInterval(timer);
@@ -1147,6 +1151,9 @@ async function handleRetryEnrichment(data) {
               status: groqResult.error ? 'error' : 'complete',
               ...groqResult,
             });
+            // Backfill lastSearchResults so buildLocalExplanation can use ai_summary for WHY THIS JOB
+            const _groqIdx = lastSearchResults?.matches?.findIndex(m => String(m.carrier?.DOT_NUMBER) === String(dotNumber));
+            if (_groqIdx >= 0) lastSearchResults.matches[_groqIdx].enrichment = groqResult;
           } catch (groqErr) {
             sendToHtml('enrichmentUpdate', {
               dot_number: String(dotNumber),
