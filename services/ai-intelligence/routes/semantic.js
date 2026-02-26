@@ -458,8 +458,6 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           const dot = String(r.carrier.DOT_NUMBER);
           const f   = fmcsaMap[dot];
           if (!f) continue;
-          // Debug: log raw FMCSA response to understand field names
-          console.log('[fmcsa-debug] Raw FMCSA response for DOT', dot, ':', JSON.stringify(f));
 
           r.carrier.LEGAL_NAME        = f.legalName        || f.legal_name        || r.carrier.LEGAL_NAME;
           r.carrier.PHY_CITY          = f.phyCity          || f.phy_city          || r.carrier.PHY_CITY;

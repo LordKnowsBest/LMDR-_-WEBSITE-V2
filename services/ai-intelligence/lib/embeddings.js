@@ -137,8 +137,12 @@ export function buildCarrierText(profile) {
   }
 
   // Operation type - repeat 2x (operational model signal)
-  if (profile.operation_type) {
-    const opTypeStr = OP_TYPE[profile.operation_type] || profile.operation_type;
+  // Accept both Airtable-canonical (operation_type) and FMCSA-style (carrier_operation) field names
+  const _opRaw = profile.operation_type || (typeof profile.carrier_operation === 'object'
+    ? profile.carrier_operation?.carrierOperationCode
+    : profile.carrier_operation);
+  if (_opRaw) {
+    const opTypeStr = OP_TYPE[_opRaw] || _opRaw;
     parts.push(`${opTypeStr}. Operating as a ${opTypeStr}.`);
   }
 

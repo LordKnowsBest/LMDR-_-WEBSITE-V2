@@ -1133,13 +1133,25 @@ async function handleRetryEnrichment(data) {
           }
         } catch (pollErr) {
           clearInterval(timer);
-          console.error(`[retryEnrichment] Poll error for DOT ${dotNumber}:`, pollErr.message);
-          sendToHtml('enrichmentUpdate', {
-            dot_number: String(dotNumber),
-            status: 'error',
-            error: true,
-            ai_summary: 'AI profile unavailable. Check FMCSA records directly.',
-          });
+          console.warn(`[retryEnrichment] Railway failed for DOT ${dotNumber} — falling back to Groq:`, pollErr.message);
+          try {
+            const carrier = lastSearchResults?.matches?.find(
+              m => String(m.carrier?.DOT_NUMBER) === String(dotNumber)
+            )?.carrier || {};
+            const groqResult = await enrichWithRetry(dotNumber, carrier, null);
+            sendToHtml('enrichmentUpdate', {
+              dot_number: String(dotNumber),
+              status: groqResult.error ? 'error' : 'complete',
+              ...groqResult,
+            });
+          } catch (groqErr) {
+            sendToHtml('enrichmentUpdate', {
+              dot_number: String(dotNumber),
+              status: 'error',
+              error: true,
+              ai_summary: 'AI profile unavailable. Check FMCSA records directly.',
+            });
+          }
           resolve();
         }
       }, 3000);
