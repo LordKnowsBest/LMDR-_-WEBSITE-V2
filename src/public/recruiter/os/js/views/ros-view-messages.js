@@ -71,12 +71,12 @@
   }
 
   function onMount() {
-    ROS.bridge.sendToVelo('getNewMessages', {});
+    ROS.bridge.sendToVelo('getConversations', {});
     ROS.bridge.sendToVelo('getUnreadCount', {});
-    // Poll for new messages
+    // Refresh conversation list every 30s
     pollInterval = setInterval(() => {
-      ROS.bridge.sendToVelo('getNewMessages', {});
-    }, 15000);
+      ROS.bridge.sendToVelo('getConversations', {});
+    }, 30000);
   }
 
   let pollInterval;

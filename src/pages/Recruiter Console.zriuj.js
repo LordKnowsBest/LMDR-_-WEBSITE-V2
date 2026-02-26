@@ -508,6 +508,10 @@ async function handleHtmlMessage(msg, component) {
         await handleSaveWeightPreferences(msg.data, component);
         break;
 
+      case 'getCarrierPreferences':
+        await handleGetCarrierPreferences(component);
+        break;
+
       case 'generateAIDraft':
         await handleGenerateAIDraft(msg.data, component);
         break;
@@ -1395,6 +1399,19 @@ function handleNavigateTo(data) {
 
   const route = pageRoutes[data.page] || data.page;
   wixLocation.to(route);
+}
+
+async function handleGetCarrierPreferences(component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'carrierPreferencesLoaded', { success: true, preferences: null });
+    return;
+  }
+  try {
+    const result = await getCarrierPreferences(currentCarrierDOT);
+    sendToHtml(component, 'carrierPreferencesLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'carrierPreferencesLoaded', { success: false, error: error.message });
+  }
 }
 
 // ============================================================================
