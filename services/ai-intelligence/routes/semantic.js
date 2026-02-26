@@ -97,6 +97,14 @@ semanticRouter.post('/embed/driver', async (c) => {
       home_state:       profile.home_state        || 'unknown',
       experience_years: profile.experience_years  || 0,
       is_discoverable:  profile.is_discoverable   || 'No',
+      // driver_type: 'legacy' for leads imported from Legacy Driver Leads (name/phone/email only)
+      // driver_type: 'active' (default) for drivers with full profiles
+      driver_type:      profile.driver_type       || 'active',
+      // Contact fields stored for legacy leads so recruiters can reach out directly from search results
+      first_name:       profile.first_name        || '',
+      last_name:        profile.last_name         || '',
+      phone:            profile.phone             || '',
+      email:            profile.email             || '',
       last_active:      new Date().toISOString(),
     };
 
