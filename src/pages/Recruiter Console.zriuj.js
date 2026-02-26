@@ -23,7 +23,7 @@ import {
   getInterviewState
 } from 'backend/interviewScheduler.jsw';
 
-import { sendMessage, getConversation, markAsRead } from 'backend/messaging.jsw';
+import { sendMessage, getConversation, markAsRead, getRecruiterConversations } from 'backend/messaging.jsw';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
 
@@ -109,6 +109,8 @@ import {
   getLeaderboardSummary,
   getUserLeaderboardPosition
 } from 'backend/leaderboardService.jsw';
+
+import { getCarrierPreferences } from 'backend/carrierPreferences.jsw';
 
 import wixLocation from 'wix-location';
 
@@ -437,6 +439,7 @@ async function handleHtmlMessage(msg, component) {
         break;
 
       case 'addNotes':
+      case 'addCandidateNote':
         await handleAddNotes(msg.data, component);
         break;
 
@@ -458,6 +461,10 @@ async function handleHtmlMessage(msg, component) {
 
       case 'getUnreadCount':
         await handleGetUnreadCount(component);
+        break;
+
+      case 'getConversations':
+        await handleGetConversations(component);
         break;
 
       case 'requestAvailability':
@@ -906,9 +913,11 @@ async function handleGetPipeline(data, component) {
 }
 
 async function handleUpdateStatus(data, component) {
-  console.log('Updating status:', data.interestId, '->', data.newStatus);
+  const id = data.interestId || data.candidateId;
+  const status = data.newStatus || data.status;
+  console.log('Updating status:', id, '->', status);
 
-  const result = await updateCandidateStatus(data.interestId, data.newStatus, data.notes || '');
+  const result = await updateCandidateStatus(id, status, data.notes || '');
   sendToHtml(component, 'statusUpdated', result);
 }
 
@@ -925,22 +934,36 @@ async function handleGetStats(component) {
 }
 
 async function handleGetDetails(data, component) {
-  console.log('Loading candidate details:', data.interestId);
+  const id = data.interestId || data.candidateId;
+  console.log('Loading candidate details:', id);
 
-  const result = await getCandidateDetails(data.interestId);
+  const result = await getCandidateDetails(id);
   sendToHtml(component, 'candidateDetails', result);
 }
 
 async function handleAddNotes(data, component) {
-  console.log('Adding notes to:', data.interestId);
+  const id = data.interestId || data.candidateId;
+  const notes = data.notes || data.note;
+  console.log('Adding notes to:', id);
 
-  const result = await addRecruiterNotes(data.interestId, data.notes);
+  const result = await addRecruiterNotes(id, notes);
   sendToHtml(component, 'notesAdded', result);
 }
 
 async function handleSendMessage(data, component) {
   try {
-    const result = await sendMessage(data.applicationId, data.content, data.receiverId, 'recruiter');
+    const appId = data.applicationId || data.conversationId;
+    const content = data.content || data.message;
+    let receiverId = data.receiverId;
+
+    // Look up receiver (driver_id) from the interest record if not provided
+    if (!receiverId && appId) {
+      const details = await getCandidateDetails(appId);
+      const record = (details && details.candidate) || details || {};
+      receiverId = record.driver_id || record.user_id;
+    }
+
+    const result = await sendMessage(appId, content, receiverId, 'recruiter');
     if (result.success) {
       sendToHtml(component, 'messageSent', { success: true, message: result.message });
     } else {
@@ -953,9 +976,10 @@ async function handleSendMessage(data, component) {
 
 async function handleGetConversation(data, component) {
   try {
-    const result = await getConversation(data.applicationId);
+    const appId = data.applicationId || data.conversationId;
+    const result = await getConversation(appId);
     if (result.success) {
-      sendToHtml(component, 'conversationData', { applicationId: data.applicationId, messages: result.messages });
+      sendToHtml(component, 'conversationData', { applicationId: appId, messages: result.messages });
     } else {
       sendToHtml(component, 'error', { message: result.error });
     }
@@ -966,7 +990,7 @@ async function handleGetConversation(data, component) {
 
 async function handleMarkAsRead(data, component) {
   try {
-    await markAsRead(data.applicationId);
+    await markAsRead(data.applicationId || data.conversationId);
   } catch (error) {
     console.error('Error marking as read:', error);
   }
@@ -1029,6 +1053,20 @@ async function handleGetUnreadCount(component) {
   } catch (error) {
     console.warn('Could not fetch unread count:', error.message);
     sendToHtml(component, 'unreadCountData', { count: 0, byApplication: {} });
+  }
+}
+
+async function handleGetConversations(component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'newMessagesData', { conversations: [] });
+    return;
+  }
+  try {
+    const result = await getRecruiterConversations(currentCarrierDOT);
+    sendToHtml(component, 'newMessagesData', { conversations: result.conversations || [] });
+  } catch (error) {
+    console.warn('Could not fetch conversations:', error.message);
+    sendToHtml(component, 'newMessagesData', { conversations: [] });
   }
 }
 
