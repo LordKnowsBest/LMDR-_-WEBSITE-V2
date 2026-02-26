@@ -559,17 +559,16 @@ function buildLocalExplanation(carrierDot) {
     // Synthesize from individual enrichment fields
     const city = carrier.PHY_CITY || null;
     const state = carrier.PHY_STATE || null;
-    const loc = city && state ? `${city}, ${state}` : (state || null);
+    const loc = (city && state) ? `${city}, ${state}` : (city || state || null);
     const fleet = carrier.NBR_POWER_UNIT;
     const pay = carrier.PAY_CPM || enrichment.pay_cpm_range;
     const sentiment = enrichment.driver_sentiment;
     const hiringOpp = enrichment.hiring_opportunity;
     const safety = fmcsa.safety_rating;
 
-    if (loc || fleet || pay) {
-      const intro = `${carrierName}${loc ? ` is based in ${loc}` : ''}${fleet ? ` with a fleet of ${fleet} trucks` : ''}.`;
-      parts.push(intro);
-    }
+    // Always push intro — carrier name is always available as a minimum
+    const intro = `${carrierName}${loc ? ` is based in ${loc}` : ''}${fleet ? ` with a fleet of ${fleet} trucks` : ''}.`;
+    parts.push(intro);
     if (safety && safety !== 'UNKNOWN') parts.push(`FMCSA safety rating: ${safety}.`);
     if (pay && pay !== 'null') parts.push(`Pay: ${pay}.`);
     if (sentiment && sentiment !== 'No Reviews') parts.push(`Driver sentiment: ${sentiment}.`);
