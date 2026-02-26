@@ -147,13 +147,13 @@ async function embedCarrier(recordId, fields) {
 
   const profile = {
     dot_number:        String(fields.DOT_NUMBER        || ''),
-    legal_name:        fields.LEGAL_NAME               || 'unknown',
-    carrier_operation: fields.CARRIER_OPERATION        || 'unknown',
+    legal_name:        fields.LEGAL_NAME               || '',
+    carrier_operation: fields.CARRIER_OPERATION        || '',
     nbr_power_unit:    Number(fields.NBR_POWER_UNIT)   || 0,
     total_drivers:     Number(fields.TOTAL_DRIVERS)    || 0,
-    safety_rating:     fields.SAFETY_RATING            || 'unknown',
-    phy_state:         fields.PHY_STATE                || 'unknown',
-    phy_city:          fields.PHY_CITY                 || 'unknown',
+    safety_rating:     fields.SAFETY_RATING            || '',
+    phy_state:         fields.PHY_STATE                || '',
+    phy_city:          fields.PHY_CITY                 || '',
   };
 
   const controller = new AbortController();

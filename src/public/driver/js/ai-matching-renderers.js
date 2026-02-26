@@ -7,10 +7,15 @@ function renderMatchCard(match, rank) {
   const fmcsa = enrichment.fmcsa || match.fmcsa || {};
   const fromCache = match.fromCache;
 
-  const carrierName = carrier.LEGAL_NAME || carrier.DBA_NAME || 'Unknown Carrier';
+  const _legalName = (carrier.LEGAL_NAME && carrier.LEGAL_NAME !== 'unknown') ? carrier.LEGAL_NAME : null;
+  const _dbaName   = (carrier.DBA_NAME   && carrier.DBA_NAME   !== 'unknown') ? carrier.DBA_NAME   : null;
+  const carrierName = _legalName || _dbaName || 'Unknown Carrier';
 
   // Build location: prefer full address when street is available
-  const cityState = `${carrier.PHY_CITY || ''}, ${carrier.PHY_STATE || ''}`.replace(/^, |, $/g, '');
+  // Guard 'unknown' sentinel values from Pinecone metadata
+  const _city  = (carrier.PHY_CITY  && carrier.PHY_CITY  !== 'unknown') ? carrier.PHY_CITY  : '';
+  const _state = (carrier.PHY_STATE && carrier.PHY_STATE !== 'unknown') ? carrier.PHY_STATE : '';
+  const cityState = `${_city}, ${_state}`.replace(/^, |, $/g, '');
   const fullAddress = carrier.PHY_STREET
     ? `${carrier.PHY_STREET}, ${cityState}${carrier.PHY_ZIP ? ' ' + carrier.PHY_ZIP : ''}`
     : cityState;

@@ -152,14 +152,14 @@ semanticRouter.post('/embed/carrier', async (c) => {
     const metadata = {
       profileUpdatedAt,
       dot_number:     profile.dot_number     || 0,
-      legal_name:     profile.legal_name     || 'unknown',
+      legal_name:     profile.legal_name     || '',
       // Accept both canonical (state/city) and FMCSA-style (phy_state/phy_city) field names
       // carrier_operation may arrive as an object {carrierOperationCode,carrierOperationDesc} — extract the code string
       operation_type: profile.operation_type
                    || (typeof profile.carrier_operation === 'object' ? profile.carrier_operation?.carrierOperationCode : profile.carrier_operation)
-                   || 'unknown',
-      state:          profile.state          || profile.phy_state          || 'unknown',
-      city:           profile.city           || profile.phy_city           || 'unknown',
+                   || '',
+      state:          profile.state          || profile.phy_state          || '',
+      city:           profile.city           || profile.phy_city           || '',
       fleet_size:     profile.fleet_size     || profile.nbr_power_unit     || 0,
       driver_count:   profile.driver_count   || profile.total_drivers      || 0,
       pay_cpm:        profile.pay_cpm        || profile.pay_range_min      || 0,
@@ -303,7 +303,7 @@ function buildDriverQuery(prefs) {
 
 const OP_TYPE_LABEL = { A: 'For-Hire', B: 'For-Hire / Private', C: 'Private' };
 function inferOpType(code) {
-  if (!code) return null;
+  if (!code || code === 'unknown') return null;
   return OP_TYPE_LABEL[code] || code;
 }
 
@@ -515,6 +515,9 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
             };
             r.fmcsa.basics = {}; // BASIC data requires separate SAFER endpoint
           }
+          // Refresh inferredOpType with live FMCSA carrier operation (overrides stale Pinecone metadata)
+          const liveOp = f.carrierOperation || f.carrier_operation || r.carrier.CARRIER_OPERATION;
+          if (liveOp) r.inferredOpType = inferOpType(liveOp);
         }
         console.log(`[search/carriers-async] ${jobId}: FMCSA hydrated ${fmcsaOnlyResults.length} Pinecone-only carriers`);
       } catch (fmcsaErr) {
