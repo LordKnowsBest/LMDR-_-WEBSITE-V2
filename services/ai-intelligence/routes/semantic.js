@@ -146,7 +146,10 @@ semanticRouter.post('/embed/carrier', async (c) => {
       dot_number:     profile.dot_number     || 0,
       legal_name:     profile.legal_name     || 'unknown',
       // Accept both canonical (state/city) and FMCSA-style (phy_state/phy_city) field names
-      operation_type: profile.operation_type || profile.carrier_operation || 'unknown',
+      // carrier_operation may arrive as an object {carrierOperationCode,carrierOperationDesc} — extract the code string
+      operation_type: profile.operation_type
+                   || (typeof profile.carrier_operation === 'object' ? profile.carrier_operation?.carrierOperationCode : profile.carrier_operation)
+                   || 'unknown',
       state:          profile.state          || profile.phy_state          || 'unknown',
       city:           profile.city           || profile.phy_city           || 'unknown',
       fleet_size:     profile.fleet_size     || profile.nbr_power_unit     || 0,

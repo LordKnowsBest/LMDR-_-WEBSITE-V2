@@ -89,7 +89,9 @@ async function embedCarrier(dot, fmcsa) {
   const profile = {
     dot_number:     dot,
     legal_name:     fmcsa.legalName        || fmcsa.legal_name        || 'unknown',
-    carrier_operation: fmcsa.carrierOperation || fmcsa.carrier_operation || 'unknown',
+    // FMCSA returns carrierOperation as an object {carrierOperationCode, carrierOperationDesc} — extract the code string
+    carrier_operation: (typeof fmcsa.carrierOperation === 'object' ? fmcsa.carrierOperation?.carrierOperationCode : fmcsa.carrierOperation)
+                    || fmcsa.carrier_operation || 'unknown',
     nbr_power_unit: fmcsa.nbrPowerUnit  != null ? Number(fmcsa.nbrPowerUnit)  :
                     fmcsa.nbr_power_unit!= null ? Number(fmcsa.nbr_power_unit) : 0,
     total_drivers:  fmcsa.totalDrivers  != null ? Number(fmcsa.totalDrivers)  :
