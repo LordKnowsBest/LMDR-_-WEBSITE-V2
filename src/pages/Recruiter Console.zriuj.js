@@ -227,7 +227,8 @@ const MESSAGE_REGISTRY = {
     'getPaidMediaReportStatus',
     'downloadPaidMediaReport',
     'getPaidMediaOptimizationSuggestions',
-    'saveIntel'
+    'saveIntel',
+    'getTimelineEvents'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -618,6 +619,9 @@ async function handleHtmlMessage(msg, component) {
         break;
       case 'saveIntel':
         await handleSaveIntel(msg.data, component);
+        break;
+      case 'getTimelineEvents':
+        sendToHtml(component, 'timelineEventsLoaded', { events: [] });
         break;
       case 'getPredictionsData':
         await handleGetPredictionsData(msg.data, component);
