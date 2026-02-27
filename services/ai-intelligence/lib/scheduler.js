@@ -18,6 +18,7 @@
 const INTERNAL_KEY = process.env.LMDR_INTERNAL_KEY;
 
 const SCHEDULES = [
+  // ── Native Railway jobs ──────────────────────────────────────────────────
   {
     name:    'fmcsa-sync',
     path:    '/v1/jobs/fmcsa-sync',
@@ -52,9 +53,55 @@ const SCHEDULES = [
     name:    'fmcsa-mass-embed',
     path:    '/v1/jobs/fmcsa-mass-embed',
     // Every day at 01:00 UTC — backfills Airtable carriers missing from Pinecone
-    // (3 Airtable pages × 100 carriers = 300 records per run)
-    // Resumes from Pinecone progress sentinel automatically.
     matches: (d) => d.getUTCHours() === 1,
+  },
+
+  // ── Wix-proxied jobs (moved off Wix jobs.config 20-job limit) ────────────
+  {
+    name:    'wix:semanticBackfill',
+    path:    '/v1/jobs/wix/runNightlySemanticBackfill',
+    // Daily 04:00 UTC
+    matches: (d) => d.getUTCHours() === 4,
+  },
+  {
+    name:    'wix:ingestCarrierIntel',
+    path:    '/v1/jobs/wix/ingestAllCarrierIntel',
+    // Every 8 hours: 00, 08, 16 UTC — use hourly key so it fires 3×/day
+    hourly:  true,
+    matches: (d) => [0, 8, 16].includes(d.getUTCHours()),
+  },
+  {
+    name:    'wix:ingestDriverMarket',
+    path:    '/v1/jobs/wix/ingestDriverMarketAggregate',
+    // Daily 03:00 UTC
+    matches: (d) => d.getUTCHours() === 3,
+  },
+  {
+    name:    'wix:ingestLaneMarket',
+    path:    '/v1/jobs/wix/ingestLaneMarket',
+    // Every 6 hours: 06, 12, 18 UTC
+    hourly:  true,
+    matches: (d) => [6, 12, 18].includes(d.getUTCHours()),
+  },
+  {
+    name:    'wix:ragFreshness',
+    path:    '/v1/jobs/wix/runRagFreshnessCheck',
+    // Every hour (was every 30 min in Wix — acceptable degradation)
+    hourly:  true,
+    matches: () => true,
+  },
+  {
+    name:    'wix:ragAnalyticsRollup',
+    path:    '/v1/jobs/wix/runWeeklyRagAnalyticsRollup',
+    // Monday 05:00 UTC (after fmcsa-roster-sync)
+    matches: (d) => d.getUTCDay() === 1 && d.getUTCHours() === 5,
+  },
+  {
+    name:    'wix:anomalyDetection',
+    path:    '/v1/jobs/wix/runAnomalyDetection',
+    // Every hour (was every 5 min in Wix — acceptable for admin-facing)
+    hourly:  true,
+    matches: () => true,
   },
 ];
 
@@ -63,6 +110,13 @@ const lastRun = {};
 
 function todayUTC(d) {
   return d.toISOString().split('T')[0];
+}
+
+// For hourly jobs, key by YYYY-MM-DDTHH so they fire once per hour not once per day
+function runKey(job, d) {
+  return job.hourly
+    ? d.toISOString().slice(0, 13)   // "2026-02-27T04"
+    : todayUTC(d);                   // "2026-02-27"
 }
 
 async function fireJob(job, port) {
@@ -92,12 +146,13 @@ function tick(port) {
 
   for (const job of SCHEDULES) {
     if (!job.matches(now)) continue;
-    if (lastRun[job.name] === today) {
-      console.log(`[scheduler] ${job.name} already ran today (${today}), skipping`);
+    const key = runKey(job, now);
+    if (lastRun[job.name] === key) {
+      console.log(`[scheduler] ${job.name} already ran this window (${key}), skipping`);
       continue;
     }
 
-    lastRun[job.name] = today;
+    lastRun[job.name] = key;
     fireJob(job, port); // intentionally not awaited — runs in background
   }
 }

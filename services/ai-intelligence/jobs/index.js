@@ -18,6 +18,7 @@ import { fmcsaMassEmbedRouter }   from './fmcsa-mass-embed.js';
 import { eiaFuelRouter }          from './eia-fuel.js';
 import { freightSignalsRouter }   from './freight-signals.js';
 import { marketSignalsRouter }    from './market-signals.js';
+import { wixProxyRouter }         from './wix-proxy.js';
 
 export const jobsRouter = new Hono();
 
@@ -27,3 +28,4 @@ jobsRouter.route('/fmcsa-mass-embed',  fmcsaMassEmbedRouter);
 jobsRouter.route('/eia-fuel',          eiaFuelRouter);
 jobsRouter.route('/freight-signals',   freightSignalsRouter);
 jobsRouter.route('/market-signals',    marketSignalsRouter);
+jobsRouter.route('/wix',               wixProxyRouter); // /v1/jobs/wix/:jobName

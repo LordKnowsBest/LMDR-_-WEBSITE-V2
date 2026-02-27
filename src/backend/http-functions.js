@@ -27,6 +27,11 @@ import {
 import { handleGatewayRequest } from 'backend/apiGateway';
 import { handleAgentTurn } from 'backend/agentService';
 import { autoEnrichFmcsaHits } from 'backend/fmcsaEnrichmentService';
+import { runNightlySemanticBackfill } from 'backend/semanticBackfillJob';
+import { ingestAllCarrierIntel, ingestDriverMarketAggregate, ingestLaneMarket } from 'backend/ragIngestionService';
+import { runRagFreshnessCheck } from 'backend/ragFreshnessJob';
+import { runWeeklyRagAnalyticsRollup } from 'backend/ragAnalyticsService';
+import { runAnomalyDetection } from 'backend/observabilityService';
 import * as dataAccess from 'backend/dataAccess';
 import { processSendGridWebhook } from 'backend/emailCampaignService';
 import {
@@ -1140,6 +1145,59 @@ export async function post_completeEnrichment(request) {
 
   } catch (error) {
     console.error('[completeEnrichment] Error:', error.message);
+    return serverError({ error: error.message });
+  }
+}
+
+// ============================================================================
+// RAILWAY-PROXIED SCHEDULED JOBS
+// POST https://www.lastmiledr.app/_functions/runScheduledJob
+//
+// Called by the Railway ai-intelligence scheduler for jobs that need Wix
+// backend APIs (Wix CMS, triggered emails, etc.) but benefit from Railway's
+// flexible cron over Wix's 20-job hard limit.
+// ============================================================================
+
+export async function post_runScheduledJob(request) {
+  try {
+    const internalKey = await getSecret('LMDR_INTERNAL_KEY');
+    const providedKey = request.headers.get
+      ? request.headers.get('x-lmdr-internal-key')
+      : request.headers['x-lmdr-internal-key'];
+
+    if (providedKey !== internalKey) {
+      console.warn('[runScheduledJob] Unauthorized attempt');
+      return badRequest({ error: 'Unauthorized' });
+    }
+
+    let body;
+    try {
+      body = JSON.parse(await request.body.text());
+    } catch {
+      return badRequest({ error: 'Invalid JSON body' });
+    }
+
+    const { jobName } = body;
+    if (!jobName) return badRequest({ error: 'jobName required' });
+
+    let result;
+    switch (jobName) {
+      case 'runNightlySemanticBackfill':   result = await runNightlySemanticBackfill();     break;
+      case 'ingestAllCarrierIntel':        result = await ingestAllCarrierIntel();          break;
+      case 'ingestDriverMarketAggregate':  result = await ingestDriverMarketAggregate();    break;
+      case 'ingestLaneMarket':             result = await ingestLaneMarket();               break;
+      case 'runRagFreshnessCheck':         result = await runRagFreshnessCheck();           break;
+      case 'runWeeklyRagAnalyticsRollup':  result = await runWeeklyRagAnalyticsRollup();    break;
+      case 'runAnomalyDetection':          result = await runAnomalyDetection();            break;
+      default:
+        return badRequest({ error: `Unknown job: ${jobName}` });
+    }
+
+    console.log(`[runScheduledJob] ${jobName} completed`);
+    return ok({ jobName, result });
+
+  } catch (error) {
+    console.error('[runScheduledJob] Error:', error.message);
     return serverError({ error: error.message });
   }
 }
