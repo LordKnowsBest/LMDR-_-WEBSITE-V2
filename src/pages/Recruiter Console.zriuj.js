@@ -1130,6 +1130,31 @@ async function handleDriverSearchReady(component) {
   }
 }
 
+// Maps HTML filter display labels → endorsement codes stored by parseEndorsements
+const ENDORSEMENT_CODE_MAP = {
+  'HazMat': 'H', 'Tanker': 'T', 'Doubles/Triples': 'T', 'Passenger': 'P', 'School Bus': 'S'
+};
+
+// Normalize raw driverProfiles record for HTML renderers
+function normalizeDriverForHtml(d, matchScore, rationale, isMutualMatch) {
+  const name = d.display_name ||
+    [d.first_name, d.last_name].filter(Boolean).join(' ') ||
+    d.full_name || d.name || '';
+  const rawEndo = d.endorsements || [];
+  const endorsements = Array.isArray(rawEndo)
+    ? rawEndo
+    : (typeof rawEndo === 'string' && rawEndo ? rawEndo.split(',').map(e => e.trim()) : []);
+  return {
+    ...d,
+    name,
+    cdlClass: d.cdl_class || d.cdlClass || d.cdl_type || '',
+    endorsements,
+    matchScore: matchScore ?? d.matchScore ?? d.match_score ?? 0,
+    rationale: rationale ?? d.rationale,
+    isMutualMatch: isMutualMatch ?? d.isMutualMatch ?? false
+  };
+}
+
 async function handleSearchDrivers(data, component) {
   if (!currentCarrierDOT) {
     sendToHtml(component, 'searchDriversResult', {
@@ -1137,6 +1162,11 @@ async function handleSearchDrivers(data, component) {
       error: 'No carrier selected. Please add a carrier first.'
     });
     return;
+  }
+
+  // Map endorsement display labels → stored codes before backend call
+  if (data && Array.isArray(data.endorsements) && data.endorsements.length > 0) {
+    data.endorsements = data.endorsements.map(e => ENDORSEMENT_CODE_MAP[e] || e);
   }
 
   console.log('Searching drivers for carrier:', currentCarrierDOT);
@@ -1147,14 +1177,10 @@ async function handleSearchDrivers(data, component) {
     // Get quota status
     const quotaStatus = await getQuotaStatus(currentCarrierDOT);
 
-    // matches is [{ driver, score, rationale, isMutualMatch }] — flatten for HTML renderer
+    // matches is [{ driver, score, rationale, isMutualMatch }] — flatten + normalize for HTML renderer
     const flatDrivers = result.success
-      ? (result.matches || []).map(m => ({
-          ...(m.driver || m),
-          matchScore: m.score ?? m.matchScore,
-          rationale: m.rationale,
-          isMutualMatch: m.isMutualMatch
-        }))
+      ? (result.matches || []).map(m =>
+          normalizeDriverForHtml(m.driver || m, m.score, m.rationale, m.isMutualMatch))
       : [];
 
     sendToHtml(component, 'searchDriversResult', {
@@ -1202,7 +1228,8 @@ async function handleViewDriverProfile(data, component) {
     if (result.success) {
       sendToHtml(component, 'viewDriverProfileResult', {
         success: true,
-        driver: result.driver,
+        driver: normalizeDriverForHtml(result.driver),
+        quota: result.quota,
         quotaStatus: quotaStatus
       });
     } else if (result.error === 'QUOTA_EXCEEDED') {
@@ -1438,14 +1465,20 @@ async function handleGenerateAIDraft(data, component) {
     const mode = data.mode || 'email';
     const isText = mode === 'text';
 
+    const rawEndo = driver.endorsements || [];
+    const endorsementsArr = Array.isArray(rawEndo)
+      ? rawEndo
+      : (typeof rawEndo === 'string' && rawEndo ? rawEndo.split(',').map(e => e.trim()) : []);
+    const equipmentArr = Array.isArray(driver.equipment) ? driver.equipment : [];
+
     const driverSummary = [
       driver.name ? `Name: ${driver.name}` : null,
       driver.cdlClass ? `CDL: Class ${driver.cdlClass}` : null,
-      driver.endorsements?.length ? `Endorsements: ${driver.endorsements.join(', ')}` : null,
-      driver.experienceYears ? `Experience: ${driver.experienceYears} years` : null,
-      driver.location ? `Location: ${driver.location}` : null,
+      endorsementsArr.length ? `Endorsements: ${endorsementsArr.join(', ')}` : null,
+      (driver.years_experience || driver.experienceYears) ? `Experience: ${driver.years_experience || driver.experienceYears} years` : null,
+      driver.city ? `Location: ${driver.city}, ${driver.state}` : (driver.location ? `Location: ${driver.location}` : null),
       driver.availability ? `Availability: ${driver.availability}` : null,
-      driver.equipment?.length ? `Equipment: ${driver.equipment.join(', ')}` : null
+      equipmentArr.length ? `Equipment: ${equipmentArr.join(', ')}` : null
     ].filter(Boolean).join('\n');
 
     const prompt = isText
