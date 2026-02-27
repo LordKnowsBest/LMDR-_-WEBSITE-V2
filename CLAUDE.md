@@ -38,6 +38,22 @@ npm run dev          # Start Local Editor for real-time testing (wix dev)
 npm run lint         # Run ESLint
 ```
 
+## CRITICAL: Never Modify package.json or package-lock.json
+
+**These files are locked to specific Wix CLI versions. Any change breaks the live site with a 404.**
+
+- `@wix/cli` is pinned to exactly `1.1.162` — do NOT change this version
+- `package-lock.json` must never be regenerated or modified
+- If either file appears in `git diff` or `git status` before a commit, **exclude them** unless the user has explicitly asked to update the Wix CLI
+- The symptom of breakage is a 404 on the live Wix site immediately after the next sync
+
+**Before every commit, verify these files are NOT staged:**
+```bash
+git diff --name-only HEAD package.json package-lock.json
+# Must return empty — if either file appears, unstage it
+git restore package.json package-lock.json
+```
+
 The Wix CLI must be installed globally: `npm install -g @wix/cli`
 
 ## Critical Data Routing: Dual-Source Pattern (Wix + Airtable)
