@@ -125,8 +125,8 @@ ROS.TOOL_REGISTRY = [
   // ── Analytics (5) ──
   { id: 'funnel', name: 'Funnel', desc: 'Conversion', icon: 'filter_alt', color: '#475569', gradient: 'from-slate-700 to-lmdr-dark', view: 'funnel', drawer: 'anl', status: 'consolidate', iconColor: 'text-lmdr-yellow' },
   { id: 'cost-hire', name: 'Cost/Hire', desc: 'Budget', icon: 'payments', color: '#475569', gradient: 'from-slate-600 to-slate-800', view: 'cost-analysis', drawer: 'anl', status: 'ready', iconColor: 'text-lmdr-yellow' },
-  { id: 'source', name: 'Source', desc: 'Attribution', icon: 'pie_chart', color: '#475569', gradient: 'from-lmdr-dark to-blue-900', view: 'attribution', drawer: 'anl', status: 'future', iconColor: 'text-lmdr-yellow' },
-  { id: 'lifecycle', name: 'Lifecycle', desc: 'Driver health', icon: 'monitoring', color: '#475569', gradient: 'from-slate-800 to-slate-900', view: 'lifecycle', drawer: 'anl', status: 'future', iconColor: 'text-emerald-400' },
+  { id: 'source', name: 'Source', desc: 'Attribution', icon: 'pie_chart', color: '#475569', gradient: 'from-lmdr-dark to-blue-900', view: 'attribution', drawer: 'anl', status: 'consolidate', iconColor: 'text-lmdr-yellow' },
+  { id: 'lifecycle', name: 'Lifecycle', desc: 'Driver health', icon: 'monitoring', color: '#475569', gradient: 'from-slate-800 to-slate-900', view: 'lifecycle', drawer: 'anl', status: 'consolidate', iconColor: 'text-emerald-400' },
   { id: 'retention', name: 'Retain', desc: 'Risk signals', icon: 'shield', color: '#dc2626', gradient: 'from-red-600 to-rose-700', view: 'retention', drawer: 'anl', status: 'consolidate' },
 
   // ── Rank & Compete (3) ──

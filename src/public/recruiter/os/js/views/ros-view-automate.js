@@ -98,7 +98,7 @@
     function showToast(msg) { const t = document.createElement('div'); t.className = 'fixed top-16 right-4 z-[9999] px-4 py-2.5 rounded-xl neu-s text-[12px] font-bold text-lmdr-dark flex items-center gap-2'; t.style.animation = 'fadeUp .3s ease'; t.innerHTML = `<span class="material-symbols-outlined text-emerald-500 text-[16px]">check_circle</span>${msg}`; document.body.appendChild(t); setTimeout(() => t.remove(), 3000); }
 
     ROS.views._automate = {
-        create() { showToast('Automation builder — coming soon'); },
+        create() { /* builder UI — bridge wiring in progress */ },
         useTemplate(name) { showToast('Setting up: ' + name); },
         toggle(id) { ROS.bridge.sendToVelo('toggleAutomation', { id }); }
     };

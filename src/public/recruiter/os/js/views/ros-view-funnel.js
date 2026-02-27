@@ -282,7 +282,7 @@
 
   function exportCSV() {
     if (!funnelData || !funnelData.stages) {
-      ROS.bridge.sendToVelo('showToast', { message: 'No data to export', type: 'error' });
+      showToast('No data to export', 'error');
       return;
     }
     const stages = funnelData.stages;

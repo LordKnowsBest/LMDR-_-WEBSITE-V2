@@ -89,8 +89,19 @@ import {
   addCompetitorIntel,
   generateHiringForecast,
   getTurnoverRiskAnalysis,
-  getPayBenchmarks
+  getPayBenchmarks,
+  recordRecruitingSpend
 } from 'backend/recruiterAnalyticsService.jsw';
+
+// Recruiter OS — New View imports
+import { getBGCStatus, getDrugTestStatus, getOrientationSlots } from 'backend/recruiterOnboardingService';
+import { getFMCSAAlerts } from 'backend/complianceService';
+import { requestDocuments } from 'backend/documentCollectionService';
+import { createEmailCampaign, sendEmailCampaign } from 'backend/emailCampaignService';
+import { initializeProgression } from 'backend/gamificationService';
+import { getJobPostings, connectJobBoard } from 'backend/jobBoardService';
+import { createSMSCampaign, sendSMSCampaign } from 'backend/smsCampaignService';
+import { getSocialPosts, connectSocialAccount, publishSocialPost } from 'backend/socialPostingService';
 
 // Recruiter OS — Onboarding imports
 import {
@@ -228,7 +239,26 @@ const MESSAGE_REGISTRY = {
     'downloadPaidMediaReport',
     'getPaidMediaOptimizationSuggestions',
     'saveIntel',
-    'getTimelineEvents'
+    'getTimelineEvents',
+    // ── New View Messages ──
+    'fetchAutomations',
+    'toggleAutomation',
+    'fetchCompliance',
+    'fetchDriverDocs',
+    'fetchBgChecks',
+    'fetchDrugTests',
+    'fetchOrientations',
+    'fetchCostAnalysis',
+    'fetchEmailCampaigns',
+    'sendEmailCampaign',
+    'fetchGamification',
+    'fetchJobBoards',
+    'connectJobBoard',
+    'fetchSmsCampaigns',
+    'sendSmsCampaign',
+    'fetchSocialPosts',
+    'connectSocialAccount',
+    'publishSocialPost'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -317,7 +347,26 @@ const MESSAGE_REGISTRY = {
     'paidMediaReportJobCreated',
     'paidMediaReportStatusLoaded',
     'paidMediaReportDownloaded',
-    'paidMediaSuggestionsLoaded'
+    'paidMediaSuggestionsLoaded',
+    // ── New View Responses ──
+    'automationsLoaded',
+    'automationToggled',
+    'complianceLoaded',
+    'driverDocsLoaded',
+    'bgChecksLoaded',
+    'drugTestsLoaded',
+    'orientationsLoaded',
+    'costAnalysisLoaded',
+    'emailCampaignsLoaded',
+    'emailCampaignSent',
+    'gamificationLoaded',
+    'jobBoardsLoaded',
+    'jobBoardConnected',
+    'smsCampaignsLoaded',
+    'smsCampaignSent',
+    'socialPostsLoaded',
+    'socialAccountConnected',
+    'socialPostPublished'
   ]
 };
 
@@ -761,6 +810,192 @@ async function handleHtmlMessage(msg, component) {
       case 'getPaidMediaOptimizationSuggestions': {
         const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
         await handleGetPaidMediaOptimizationSuggestions(recruiterId, msg.data, component);
+        break;
+      }
+
+      // ========== Automation Handlers (new views) ==========
+      case 'fetchAutomations': {
+        try {
+          const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+          const rules = await getAutomationRules(recruiterId);
+          sendToHtml(component, 'automationsLoaded', { rules });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'toggleAutomation': {
+        try {
+          const rule = await toggleRuleStatus(msg.data?.ruleId, msg.data?.enable);
+          sendToHtml(component, 'automationToggled', { rule });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Compliance Handlers ==========
+      case 'fetchCompliance': {
+        try {
+          const alerts = await getFMCSAAlerts(msg.data?.options || {});
+          sendToHtml(component, 'complianceLoaded', { alerts });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Document Collection Handlers ==========
+      case 'fetchDriverDocs': {
+        try {
+          const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+          const docs = await requestDocuments(recruiterId, msg.data?.params || {});
+          sendToHtml(component, 'driverDocsLoaded', { docs });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Recruiter Onboarding Handlers ==========
+      case 'fetchBgChecks': {
+        try {
+          const checks = await getBGCStatus(msg.data?.checkId || null);
+          sendToHtml(component, 'bgChecksLoaded', { checks });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'fetchDrugTests': {
+        try {
+          const tests = await getDrugTestStatus(msg.data?.testId || null);
+          sendToHtml(component, 'drugTestsLoaded', { tests });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'fetchOrientations': {
+        try {
+          const slots = await getOrientationSlots(msg.data?.carrierId || currentCarrierDOT, msg.data?.filters || {});
+          sendToHtml(component, 'orientationsLoaded', { slots });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Cost Analysis Handlers ==========
+      case 'fetchCostAnalysis': {
+        try {
+          const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+          const analysis = await recordRecruitingSpend({ recruiterId, ...msg.data?.params });
+          sendToHtml(component, 'costAnalysisLoaded', { analysis });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Email Campaign Handlers ==========
+      case 'fetchEmailCampaigns': {
+        try {
+          const campaigns = await createEmailCampaign(currentCarrierDOT, msg.data?.campaignData || {});
+          sendToHtml(component, 'emailCampaignsLoaded', { campaigns });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'sendEmailCampaign': {
+        try {
+          const result = await sendEmailCampaign(msg.data?.campaignId);
+          sendToHtml(component, 'emailCampaignSent', { result });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Gamification Handlers ==========
+      case 'fetchGamification': {
+        try {
+          const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+          const progression = await initializeProgression(recruiterId, 'recruiter');
+          sendToHtml(component, 'gamificationLoaded', { progression });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Job Board Handlers ==========
+      case 'fetchJobBoards': {
+        try {
+          const postings = await getJobPostings(currentCarrierDOT, msg.data?.filters || {});
+          sendToHtml(component, 'jobBoardsLoaded', { postings });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'connectJobBoard': {
+        try {
+          const result = await connectJobBoard(currentCarrierDOT, msg.data?.board, msg.data?.credentials || {});
+          sendToHtml(component, 'jobBoardConnected', { result });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== SMS Campaign Handlers ==========
+      case 'fetchSmsCampaigns': {
+        try {
+          const campaigns = await createSMSCampaign(currentCarrierDOT, msg.data?.campaignData || {});
+          sendToHtml(component, 'smsCampaignsLoaded', { campaigns });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'sendSmsCampaign': {
+        try {
+          const result = await sendSMSCampaign(msg.data?.campaignId);
+          sendToHtml(component, 'smsCampaignSent', { result });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Social Posting Handlers ==========
+      case 'fetchSocialPosts': {
+        try {
+          const posts = await getSocialPosts(currentCarrierDOT, msg.data?.filters || {});
+          sendToHtml(component, 'socialPostsLoaded', { posts });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'connectSocialAccount': {
+        try {
+          const result = await connectSocialAccount(currentCarrierDOT, msg.data?.platform, msg.data?.authCode);
+          sendToHtml(component, 'socialAccountConnected', { result });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'publishSocialPost': {
+        try {
+          const result = await publishSocialPost(msg.data?.postId);
+          sendToHtml(component, 'socialPostPublished', { result });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
         break;
       }
 

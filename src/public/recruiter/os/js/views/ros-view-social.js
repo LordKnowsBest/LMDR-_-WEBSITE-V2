@@ -306,7 +306,7 @@
             if (document.getElementById('social-ig')?.checked) platforms.push('instagram');
             ROS.bridge.sendToVelo('publishSocialPost', { content, platforms });
         },
-        generateAI() { showToast('AI content generation — coming soon'); }
+        generateAI() { /* AI generation — bridge wiring in progress */ }
     };
 
     // ── Register ──
