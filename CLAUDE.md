@@ -42,7 +42,7 @@ npm run lint         # Run ESLint
 
 **These files are locked to specific Wix CLI versions. Any change breaks the live site with a 404.**
 
-- `@wix/cli` is pinned to exactly `1.1.162` — do NOT change this version
+- `@wix/cli` is pinned to exactly `1.1.164` — do NOT change this version
 - `package-lock.json` must never be regenerated or modified
 - If either file appears in `git diff` or `git status` before a commit, **exclude them** unless the user has explicitly asked to update the Wix CLI
 - The symptom of breakage is a 404 on the live Wix site immediately after the next sync
