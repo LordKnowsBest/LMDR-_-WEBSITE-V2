@@ -1147,9 +1147,19 @@ async function handleSearchDrivers(data, component) {
     // Get quota status
     const quotaStatus = await getQuotaStatus(currentCarrierDOT);
 
+    // matches is [{ driver, score, rationale, isMutualMatch }] — flatten for HTML renderer
+    const flatDrivers = result.success
+      ? (result.matches || []).map(m => ({
+          ...(m.driver || m),
+          matchScore: m.score ?? m.matchScore,
+          rationale: m.rationale,
+          isMutualMatch: m.isMutualMatch
+        }))
+      : [];
+
     sendToHtml(component, 'searchDriversResult', {
       success: result.success,
-      drivers: result.success ? (result.matches || []) : [],
+      drivers: flatDrivers,
       total: result.success ? (result.pagination?.totalCount || 0) : 0,
       pagination: result.pagination,
       quotaStatus: quotaStatus,
