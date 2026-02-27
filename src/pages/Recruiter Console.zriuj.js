@@ -23,7 +23,7 @@ import {
   getInterviewState
 } from 'backend/interviewScheduler.jsw';
 
-import { sendMessage, getConversation, markAsRead, getRecruiterConversations } from 'backend/messaging.jsw';
+import { sendMessage, getConversation, markAsRead, getRecruiterConversations, getUnreadCount } from 'backend/messaging.jsw';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
 
@@ -1047,12 +1047,10 @@ async function handleGetNewMessages(data, component) {
 
 async function handleGetUnreadCount(component) {
   try {
-    const { getUnreadCountForUser } = await import('backend/messagingRealtime');
-    const result = await getUnreadCountForUser();
-
+    const result = await getUnreadCount();
     sendToHtml(component, 'unreadCountData', {
       count: result.count || 0,
-      byApplication: result.byApplication || {}
+      byApplication: {}
     });
   } catch (error) {
     console.warn('Could not fetch unread count:', error.message);
