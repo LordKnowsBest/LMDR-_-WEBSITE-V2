@@ -8,13 +8,21 @@
   const VIEW_ID = 'home';
   const BRAND = ROS.config.brand;
 
+  function getGreeting() {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 17) return 'Good afternoon';
+    if (h < 21) return 'Good evening';
+    return 'Working late';
+  }
+
   function render() {
     return `
       <div class="h-full overflow-y-auto px-2 pb-12" style="animation:fadeIn 0.6s ease">
-        
+
         <!-- Welcome Header -->
         <div class="mb-8 mt-2">
-          <h1 class="text-[28px] font-black text-lmdr-dark tracking-tight">Good morning, Recruiter!</h1>
+          <h1 class="text-[28px] font-black text-lmdr-dark tracking-tight">${getGreeting()}, Recruiter!</h1>
           <p class="text-[13px] text-tan mt-1 font-medium">Here's what's happening in your portfolio today.</p>
         </div>
 
