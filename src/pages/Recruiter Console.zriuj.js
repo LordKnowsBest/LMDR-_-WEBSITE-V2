@@ -101,7 +101,7 @@ import { createEmailCampaign, sendEmailCampaign } from 'backend/emailCampaignSer
 import { initializeProgression } from 'backend/gamificationService';
 import { getJobPostings, connectJobBoard } from 'backend/jobBoardService';
 import { createSMSCampaign, sendSMSCampaign } from 'backend/smsCampaignService';
-import { getSocialPosts, connectSocialAccount, publishSocialPost } from 'backend/socialPostingService';
+import { getSocialPosts, getConnectedAccounts, connectSocialAccount, createSocialPost, publishSocialPost } from 'backend/socialPostingService';
 
 // Recruiter OS — Onboarding imports
 import {
@@ -976,8 +976,25 @@ async function handleHtmlMessage(msg, component) {
       // ========== Social Posting Handlers ==========
       case 'fetchSocialPosts': {
         try {
-          const posts = await getSocialPosts(currentCarrierDOT, msg.data?.filters || {});
-          sendToHtml(component, 'socialPostsLoaded', { posts });
+          const [postsResult, accountsResult] = await Promise.all([
+            getSocialPosts(currentCarrierDOT, msg.data?.filters || {}),
+            getConnectedAccounts(currentCarrierDOT)
+          ]);
+          const posts = postsResult.posts || [];
+          const connectedList = accountsResult.accounts || [];
+          const accounts = {
+            facebook: connectedList.some(a => a.platform === 'facebook'),
+            linkedin: connectedList.some(a => a.platform === 'linkedin'),
+            instagram: connectedList.some(a => a.platform === 'instagram')
+          };
+          const published = posts.filter(p => p.status === 'published');
+          const stats = {
+            published: published.length,
+            impressions: published.reduce((sum, p) => sum + (p.engagement?.impressions || 0), 0),
+            engagement: published.reduce((sum, p) => sum + (p.engagement?.likes || 0) + (p.engagement?.comments || 0) + (p.engagement?.shares || 0), 0),
+            accounts: connectedList.length
+          };
+          sendToHtml(component, 'socialPostsLoaded', { posts, accounts, stats });
         } catch (err) {
           sendToHtml(component, 'error', { message: err.message });
         }
@@ -985,8 +1002,9 @@ async function handleHtmlMessage(msg, component) {
       }
       case 'connectSocialAccount': {
         try {
-          const result = await connectSocialAccount(currentCarrierDOT, msg.data?.platform, msg.data?.authCode);
-          sendToHtml(component, 'socialAccountConnected', { result });
+          const platform = msg.data?.platform;
+          const result = await connectSocialAccount(currentCarrierDOT, platform, msg.data?.authCode);
+          sendToHtml(component, 'socialAccountConnected', { platform, success: result.success, error: result.error });
         } catch (err) {
           sendToHtml(component, 'error', { message: err.message });
         }
@@ -994,8 +1012,17 @@ async function handleHtmlMessage(msg, component) {
       }
       case 'publishSocialPost': {
         try {
-          const result = await publishSocialPost(msg.data?.postId);
-          sendToHtml(component, 'socialPostPublished', { result });
+          // Create draft first, then publish immediately
+          const createResult = await createSocialPost(currentCarrierDOT, {
+            content: msg.data?.content,
+            platforms: msg.data?.platforms || []
+          });
+          if (!createResult.success) {
+            sendToHtml(component, 'error', { message: createResult.error });
+            break;
+          }
+          const publishResult = await publishSocialPost(createResult.postId);
+          sendToHtml(component, 'socialPostPublished', { success: publishResult.success, error: publishResult.error });
         } catch (err) {
           sendToHtml(component, 'error', { message: err.message });
         }
