@@ -809,11 +809,32 @@
       : (driver.location || phoneAreaLocation || 'Unknown');
     const locationIsInferred = !driver.city && !driver.location && !!phoneAreaLocation;
     const phoneDigits = phone ? String(phone).replace(/\D/g, '') : '';
-    const phoneDisplay = phoneDigits.length === 10
-      ? `(${phoneDigits.slice(0,3)}) ${phoneDigits.slice(3,6)}-${phoneDigits.slice(6)}`
-      : phoneDigits.length === 11 && phoneDigits.startsWith('1')
-        ? `(${phoneDigits.slice(1,4)}) ${phoneDigits.slice(4,7)}-${phoneDigits.slice(7)}`
-        : phone;
+    const digitsNorm = phoneDigits.startsWith('1') && phoneDigits.length === 11 ? phoneDigits.slice(1) : phoneDigits;
+    const phoneDisplay = digitsNorm.length === 10
+      ? '(' + digitsNorm.slice(0,3) + ') ' + digitsNorm.slice(3,6) + '-' + digitsNorm.slice(6)
+      : phone || '';
+    const telHref = digitsNorm.length === 10 ? 'tel:+1' + digitsNorm : '';
+
+    // Pre-build phone contact row HTML (avoids nested ternaries inside template literal)
+    const phoneRowHtml = phoneDisplay
+      ? '<div class="flex items-center gap-1.5 mt-1 px-2 py-1 rounded-lg" style="background:rgba(37,99,235,0.08);border:1px solid rgba(37,99,235,0.15)">'
+        + '<span class="material-symbols-outlined text-lmdr-blue" style="font-size:13px">call</span>'
+        + (telHref
+            ? '<a href="' + escapeHtml(telHref) + '" style="font-size:11px;font-weight:600;color:#2563eb;text-decoration:none;letter-spacing:0.01em" onmouseover="this.style.textDecoration=\'underline\'" onmouseout="this.style.textDecoration=\'none\'">' + escapeHtml(phoneDisplay) + '</a>'
+            : '<span style="font-size:11px;font-weight:600;color:#2563eb">' + escapeHtml(phoneDisplay) + '</span>')
+        + '</div>'
+      : '<div class="flex items-center gap-1.5 mt-1 px-2 py-1 rounded-lg" style="background:rgba(200,184,150,0.12);border:1px solid rgba(200,184,150,0.2)">'
+        + '<span class="material-symbols-outlined" style="font-size:13px;color:#C8B896">phone_disabled</span>'
+        + '<span style="font-size:11px;color:#C8B896;font-style:italic">No phone on file</span>'
+        + '</div>';
+
+    // Pre-build call action button
+    const callBtnHtml = phoneDisplay && telHref
+      ? '<a href="' + escapeHtml(telHref) + '" class="px-4 py-2.5 rounded-xl neu-x text-sm font-bold flex items-center gap-2" style="color:#16a34a;text-decoration:none" onmouseover="this.style.color=\'#15803d\'" onmouseout="this.style.color=\'#16a34a\'">'
+        + '<span class="material-symbols-outlined" style="font-size:16px">call</span>Call</a>'
+      : '<button disabled class="px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 cursor-not-allowed" style="background:rgba(200,184,150,0.12);color:#C8B896;border:none" title="No phone on file">'
+        + '<span class="material-symbols-outlined" style="font-size:16px">phone_disabled</span>Call</button>';
+
     const expYears = driver.years_experience || driver.experienceYears || 0;
     const scoreColor = getScoreColor(matchScore);
     const availability = driver.availability || 'Unknown';
@@ -844,12 +865,7 @@
               <span>${escapeHtml(location)}${locationIsInferred ? ' \u00b7 area code' : ''}</span>
               ${expYears ? `<span>\u00b7 ${expYears}yr exp</span>` : ''}
             </div>
-            <div class="text-[11px] mt-0.5 flex items-center gap-1 ${phone ? 'text-lmdr-blue' : 'text-tan/50'}">
-              <span class="material-symbols-outlined text-[12px]">call</span>
-              ${phone
-                ? `<span class="font-medium" data-phone="${escapeHtml(phoneDigits)}" onclick="if(this.dataset.phone)window.location.href='tel:+1'+this.dataset.phone" style="cursor:pointer">${escapeHtml(phoneDisplay)}</span>`
-                : `<span class="italic">No phone on file</span>`}
-            </div>
+            ${phoneRowHtml}
           </div>
           <div class="text-center shrink-0">
             <div class="text-3xl font-black ${scoreColor}">${matchScore}%</div>
@@ -924,9 +940,7 @@
           <button onclick="ROS.views._search.openMessageModal('text')" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan hover:text-lmdr-blue transition-colors flex items-center gap-2">
             <span class="material-symbols-outlined text-[16px]">sms</span>Text
           </button>
-          ${phoneDigits
-            ? `<button onclick="window.location.href='tel:+1${escapeHtml(phoneDigits.startsWith('1')?phoneDigits.slice(1):phoneDigits)}'" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-emerald-600 hover:text-emerald-700 transition-colors flex items-center gap-2" title="${escapeHtml(phoneDisplay)}"><span class="material-symbols-outlined text-[16px]">call</span>Call</button>`
-            : `<button disabled class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan/40 flex items-center gap-2 cursor-not-allowed" title="No phone number on file"><span class="material-symbols-outlined text-[16px]">call</span>Call</button>`}
+          ${callBtnHtml}
         </div>
       </div>`;
 
