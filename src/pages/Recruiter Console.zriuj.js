@@ -1164,9 +1164,22 @@ async function handleSearchDrivers(data, component) {
     return;
   }
 
-  // Map endorsement display labels → stored codes before backend call
-  if (data && Array.isArray(data.endorsements) && data.endorsements.length > 0) {
-    data.endorsements = data.endorsements.map(e => ENDORSEMENT_CODE_MAP[e] || e);
+  // Normalize HTML filter keys → backend filter keys
+  if (data) {
+    // cdlClasses → cdl_types
+    if (Array.isArray(data.cdlClasses) && data.cdlClasses.length > 0) {
+      data.cdl_types = data.cdlClasses;
+      delete data.cdlClasses;
+    }
+    // minExperience → min_experience
+    if (data.minExperience != null) {
+      data.min_experience = Number(data.minExperience);
+      delete data.minExperience;
+    }
+    // endorsement display labels → stored codes
+    if (Array.isArray(data.endorsements) && data.endorsements.length > 0) {
+      data.endorsements = data.endorsements.map(e => ENDORSEMENT_CODE_MAP[e] || e);
+    }
   }
 
   console.log('Searching drivers for carrier:', currentCarrierDOT);
