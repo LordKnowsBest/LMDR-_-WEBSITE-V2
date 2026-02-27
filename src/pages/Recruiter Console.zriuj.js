@@ -999,6 +999,146 @@ async function handleHtmlMessage(msg, component) {
         break;
       }
 
+      // ========== AI Match Handlers ==========
+      case 'getAIMatches': {
+        const mockMatches = [
+          {
+            id: 'mock-aim-1',
+            name: 'Marcus Johnson',
+            cdlClass: 'A',
+            location: 'Dallas, TX',
+            experience: 8,
+            jobsLast3Years: 1,
+            scores: { experience: 85, cdlClass: 92, safety: 88, availability: 90, location: 72, stability: 95 },
+            matchPct: 89,
+            synopsis: 'Top-tier CDL-A driver with 8 years OTR experience, clean MVR, and long-term stability at his last carrier. Strong hazmat endorsement and excellent safety record.',
+            phone: '',
+            email: ''
+          },
+          {
+            id: 'mock-aim-2',
+            name: 'Derrick Williams',
+            cdlClass: 'A',
+            location: 'Houston, TX',
+            experience: 5,
+            jobsLast3Years: 2,
+            scores: { experience: 72, cdlClass: 88, safety: 95, availability: 85, location: 68, stability: 78 },
+            matchPct: 81,
+            synopsis: 'Safety-first driver with zero incidents in 5 years. Holds tanker and doubles/triples endorsements. Currently available for immediate placement.',
+            phone: '',
+            email: ''
+          },
+          {
+            id: 'mock-aim-3',
+            name: 'Sandra Torres',
+            cdlClass: 'A',
+            location: 'San Antonio, TX',
+            experience: 12,
+            jobsLast3Years: 1,
+            scores: { experience: 95, cdlClass: 90, safety: 82, availability: 75, location: 88, stability: 92 },
+            matchPct: 87,
+            synopsis: 'Veteran regional driver with 12 years of consistent performance. Strong preference for regional routes and excellent client-facing communication skills.',
+            phone: '',
+            email: ''
+          }
+        ];
+        sendToHtml(component, 'aiMatchesLoaded', { matches: mockMatches });
+        break;
+      }
+
+      case 'regenerateAIMatch': {
+        const regenerated = {
+          id: msg.driverId || ('mock-aim-regen-' + Date.now()),
+          name: 'James Patterson',
+          cdlClass: 'A',
+          location: 'Austin, TX',
+          experience: 6,
+          jobsLast3Years: 2,
+          scores: { experience: 78, cdlClass: 85, safety: 91, availability: 88, location: 80, stability: 82 },
+          matchPct: 84,
+          synopsis: 'Dependable CDL-A driver with 6 years regional experience. Excellent attendance record and strong references from two long-term carriers.',
+          phone: '',
+          email: ''
+        };
+        sendToHtml(component, 'aiMatchRegenerated', regenerated);
+        break;
+      }
+
+      case 'regenerateAIMatches': {
+        // Bulk regen — re-fetch all matches
+        sendToHtml(component, 'aiMatchesLoaded', { matches: [] });
+        break;
+      }
+
+      // ========== Alert Handlers ==========
+      case 'getAlerts': {
+        const now = Date.now();
+        const mockAlerts = [
+          {
+            id: 'alrt-001',
+            category: 'matches',
+            title: '3 new top matches in your area',
+            preview: 'Marcus J., Derrick W., and Sandra T. match your active search criteria',
+            detail: 'Based on your saved search filters, 3 new CDL-A drivers have been identified as strong matches for your open Dallas routes. All have clean MVRs and are actively seeking opportunities.',
+            timestamp: new Date(now - 7200000).toISOString(),
+            read: false,
+            targetId: null,
+            actionLabel: 'View Matches'
+          },
+          {
+            id: 'alrt-002',
+            category: 'pipeline',
+            title: 'Mike R. advanced to Background Check stage',
+            preview: 'Application moved from Phone Screen → Background Check',
+            detail: 'Michael Roberts has been moved to the Background Check stage in your pipeline. Background check provider integration is ready — initiate from the Pipeline view.',
+            timestamp: new Date(now - 14400000).toISOString(),
+            read: false,
+            targetId: 'rec_mike_r',
+            actionLabel: 'View Pipeline'
+          },
+          {
+            id: 'alrt-003',
+            category: 'compliance',
+            title: 'DOT medical card expiring in 14 days',
+            preview: 'Driver David Kim — medical certification renewal needed',
+            detail: 'David Kim\'s DOT medical card expires on ' + new Date(now + 1209600000).toLocaleDateString() + '. Action required: schedule renewal appointment or update documentation in the Comply view.',
+            timestamp: new Date(now - 86400000).toISOString(),
+            read: true,
+            targetId: 'rec_david_k',
+            actionLabel: 'View Compliance'
+          },
+          {
+            id: 'alrt-004',
+            category: 'retention',
+            title: 'At-risk driver signal detected',
+            preview: 'James T. has not logged in for 12 days — retention flag triggered',
+            detail: 'James Thompson hasn\'t accessed the driver portal in 12 days and has not responded to last 2 messages. Historical data indicates this pattern precedes voluntary departure. Recommend proactive outreach within 48 hours.',
+            timestamp: new Date(now - 172800000).toISOString(),
+            read: false,
+            targetId: 'rec_james_t',
+            actionLabel: 'View Retention'
+          }
+        ];
+        sendToHtml(component, 'alertsLoaded', { alerts: mockAlerts });
+        break;
+      }
+
+      case 'markAlertRead': {
+        sendToHtml(component, 'alertMarkedRead', { alertId: msg.alertId });
+        break;
+      }
+
+      case 'markAllAlertsRead': {
+        sendToHtml(component, 'allAlertsMarkedRead', {});
+        break;
+      }
+
+      case 'updateAlertPrefs': {
+        // Alert prefs stored client-side in localStorage; this hook for future Airtable persistence
+        sendToHtml(component, 'actionSuccess', { message: 'Alert preferences saved' });
+        break;
+      }
+
       default:
         console.warn('⚠️ Unhandled action:', action);
     }

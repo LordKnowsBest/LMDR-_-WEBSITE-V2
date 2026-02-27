@@ -97,8 +97,8 @@ ROS.config = {
 ROS.TOOL_REGISTRY = [
   // ── Discover (6) ──
   { id: 'search', name: 'Search', desc: 'AI matching', icon: 'person_search', color: '#2563eb', gradient: 'from-lmdr-blue to-lmdr-deep', view: 'search', drawer: 'discover', status: 'ready' },
-  { id: 'ai-match', name: 'AI Match', desc: 'Neural matching', icon: 'neurology', color: '#4f46e5', gradient: 'from-blue-500 to-indigo-600', view: 'search', drawer: 'discover', status: 'ready', animate: 'float' },
-  { id: 'alerts', name: 'Alerts', desc: 'Saved search alerts', icon: 'bookmark', color: '#6366f1', gradient: 'from-indigo-500 to-violet-600', view: 'search', drawer: 'discover', status: 'ready', badge: true },
+  { id: 'ai-match', name: 'AI Match', desc: 'Neural matching', icon: 'neurology', color: '#4f46e5', gradient: 'from-blue-500 to-indigo-600', view: 'ai-match', drawer: 'discover', status: 'ready', animate: 'float' },
+  { id: 'alerts', name: 'Alerts', desc: 'Saved search alerts', icon: 'bookmark', color: '#6366f1', gradient: 'from-indigo-500 to-violet-600', view: 'alerts', drawer: 'discover', status: 'ready', badge: true },
   { id: 'job-boards', name: 'Job Boards', desc: 'Indeed, Zip', icon: 'campaign', color: '#0284c7', gradient: 'from-sky-500 to-blue-600', view: 'job-boards', drawer: 'discover', status: 'ready' },
   { id: 'social', name: 'Social', desc: 'Social posting', icon: 'share', color: '#0284c7', gradient: 'from-sky-400 to-blue-500', view: 'social', drawer: 'discover', status: 'ready' },
   { id: 'intel', name: 'Intel', desc: 'Competitor intel', icon: 'visibility', color: '#6366f1', gradient: 'from-violet-500 to-purple-600', view: 'intel', drawer: 'discover', status: 'consolidate' },
