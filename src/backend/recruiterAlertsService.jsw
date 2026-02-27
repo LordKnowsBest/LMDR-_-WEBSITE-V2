@@ -1,0 +1,272 @@
+// ============================================================================
+// RECRUITER ALERTS SERVICE
+// Aggregates real-time alerts from matching, retention, and pipeline engines.
+// Also provides AI Match candidate cards with per-dimension score breakdowns.
+// ============================================================================
+
+import { findMatchingDrivers } from 'backend/driverMatching.jsw';
+import { getCarrierRetentionDashboard } from 'backend/retentionService.jsw';
+import { calculateDriverMatchScore, generateDriverMatchRationale } from 'backend/driverScoring';
+import { getCarrierPreferences } from 'backend/carrierPreferences.jsw';
+import * as dataAccess from 'backend/dataAccess';
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function safeStr(val) {
+  return (val == null ? '' : String(val)).trim();
+}
+
+function driverDisplayName(driver) {
+  return safeStr(driver.full_name || driver.name || driver.first_name || '');
+}
+
+function driverLocation(driver) {
+  if (driver.city && driver.state) return driver.city + ', ' + driver.state;
+  if (driver.state) return driver.state;
+  if (driver.location) return safeStr(driver.location);
+  if (driver.zip_code) return 'ZIP ' + driver.zip_code;
+  return '';
+}
+
+function driverCdlClass(driver) {
+  const raw = Array.isArray(driver.cdl_class)
+    ? driver.cdl_class[0]
+    : (driver.cdl_class || driver.cdl_type || 'A');
+  return safeStr(raw).replace(/CDL-?/i, '').toUpperCase() || 'A';
+}
+
+function buildMatchSynopsis(rationalePoints, matchSummary, driver, score) {
+  if (matchSummary) return matchSummary;
+  if (Array.isArray(rationalePoints) && rationalePoints.length > 0) {
+    return rationalePoints.slice(0, 2).join('. ');
+  }
+  const name = driverDisplayName(driver) || 'This driver';
+  const pct = Math.round(score || 0);
+  const yrs = driver.years_experience || driver.experience || 0;
+  return `${name} scored ${pct}% against your criteria with ${yrs} years of CDL experience.`;
+}
+
+// ── AI Match Candidates ────────────────────────────────────────────────────
+
+/**
+ * Returns top AI-matched driver candidates with per-dimension score breakdowns.
+ * Used by the AI Match view spider charts.
+ *
+ * @param {string|number} carrierDot
+ * @param {object} options  { limit: 3, offset: 0 }
+ * @returns {{ success: boolean, matches: Array }}
+ */
+export async function getAIMatchCandidates(carrierDot, options = {}) {
+  const limit = options.limit || 3;
+  const offset = options.offset || 0;
+
+  try {
+    // Fetch ranked candidates
+    const matchResult = await findMatchingDrivers(carrierDot, {}, {
+      limit: limit + offset + 5, // fetch extra so offset + regen variation works
+      pageSize: limit + offset + 5
+    });
+
+    if (!matchResult.success) {
+      return { success: false, error: matchResult.error, matches: [] };
+    }
+
+    const rawMatches = (matchResult.matches || []).slice(offset, offset + limit);
+    if (rawMatches.length === 0) {
+      return { success: true, matches: [] };
+    }
+
+    // Load carrier preferences once for scoring
+    let prefs = {};
+    try {
+      const prefsResult = await getCarrierPreferences(carrierDot);
+      prefs = prefsResult?.preferences || prefsResult || {};
+    } catch (_) { /* preferences unavailable — scoring uses defaults */ }
+
+    // Score each candidate for per-dimension breakdown
+    const matches = rawMatches.map(m => {
+      const driver = m.driver || m;
+
+      // Per-dimension breakdown
+      let dimScores = {
+        experience:    0,
+        qualifications: 0,
+        availability:  0,
+        location:      0,
+        salaryFit:     0,
+        engagement:    0
+      };
+
+      try {
+        const scoreResult = calculateDriverMatchScore(driver, prefs);
+        const s = scoreResult.scores || {};
+        dimScores = {
+          experience:    Math.round(s.experience    || 0),
+          qualifications: Math.round(s.qualifications || 0),
+          availability:  Math.round(s.availability  || 0),
+          location:      Math.round(s.location      || 0),
+          salaryFit:     Math.round(s.salaryFit     || 0),
+          engagement:    Math.round(s.engagement    || 0)
+        };
+      } catch (_) { /* scoring failed — leave zeroes */ }
+
+      // Build synopsis from rationale
+      const synopsis = buildMatchSynopsis(m.rationale, m.summary, driver, m.score);
+
+      return {
+        id:            driver._id || driver.id || ('driver-' + Math.random().toString(36).slice(2)),
+        name:          driverDisplayName(driver) || 'CDL Driver',
+        cdlClass:      driverCdlClass(driver),
+        location:      driverLocation(driver),
+        experience:    Number(driver.years_experience || driver.experience || 0),
+        jobsLast3Years: driver.jobs_last_3_years != null ? Number(driver.jobs_last_3_years) : undefined,
+        scores:        dimScores,
+        matchPct:      Math.round(m.score || 0),
+        synopsis,
+        phone:         safeStr(driver.phone || driver.phone_number || driver.mobile || ''),
+        email:         safeStr(driver.email || driver.email_address || ''),
+        isMutualMatch: m.isMutualMatch || false
+      };
+    });
+
+    return { success: true, matches };
+  } catch (error) {
+    console.error('[recruiterAlertsService] getAIMatchCandidates error:', error);
+    return { success: false, error: error.message, matches: [] };
+  }
+}
+
+// ── Recruiter Alerts Aggregator ────────────────────────────────────────────
+
+/**
+ * Aggregates real-time recruiter alerts from three live sources:
+ *   1. AI Matches  — top-scoring new candidates (score >= 75)
+ *   2. Retention   — HIGH/CRITICAL at-risk drivers in carrier's roster
+ *   3. Pipeline    — recently updated driverCarrierInterests records
+ *
+ * @param {string|number} carrierDot
+ * @returns {{ success: boolean, alerts: Array }}
+ */
+export async function getRecruiterAlerts(carrierDot, options = {}) {
+  const alerts = [];
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
+
+  // Run all three sources in parallel; never let one failure block others
+  await Promise.allSettled([
+
+    // ── 1. Match Alerts ──────────────────────────────────────────────────────
+    (async () => {
+      const result = await findMatchingDrivers(carrierDot, {}, { limit: 10, pageSize: 10 });
+      if (!result.success || !result.matches?.length) return;
+
+      const highScoreMatches = result.matches
+        .filter(m => (m.score || 0) >= 75)
+        .slice(0, 5);
+
+      if (highScoreMatches.length === 0) return;
+
+      const firstName = n => (driverDisplayName(n.driver || n) || 'Driver').split(' ')[0];
+      const names = highScoreMatches.slice(0, 3).map(firstName);
+      const topScore = Math.round(highScoreMatches[0].score || 0);
+      const topName = names[0];
+      const topSynopsis = highScoreMatches[0].summary
+        || (Array.isArray(highScoreMatches[0].rationale) ? highScoreMatches[0].rationale[0] : '')
+        || '';
+
+      alerts.push({
+        id:          'match-' + now.getTime(),
+        category:    'matches',
+        title:       highScoreMatches.length + ' new high-quality match' + (highScoreMatches.length > 1 ? 'es' : '') + ' found',
+        preview:     names.join(', ') + (highScoreMatches.length > 3 ? ' and ' + (highScoreMatches.length - 3) + ' more' : '') + ' match your hiring criteria',
+        detail:      highScoreMatches.length + ' CDL drivers scored 75%+ against your current criteria. ' +
+                     'Top candidate: ' + topName + ' at ' + topScore + '%' +
+                     (topSynopsis ? ' — ' + topSynopsis : '') + '.',
+        timestamp:   now.toISOString(),
+        read:        false,
+        targetId:    null,
+        actionLabel: 'View Matches'
+      });
+    })(),
+
+    // ── 2. Retention Alerts ──────────────────────────────────────────────────
+    (async () => {
+      const result = await getCarrierRetentionDashboard(carrierDot);
+      if (!result.success || !result.atRiskWatchlist?.length) return;
+
+      const critical = result.atRiskWatchlist
+        .filter(d => ['HIGH', 'CRITICAL'].includes(d.risk?.level))
+        .slice(0, 5);
+
+      if (critical.length === 0) return;
+
+      const top = critical[0];
+      const topName = top.driverName || 'A driver';
+      const topScore = top.risk?.score || '?';
+      const topLevel = top.risk?.level || 'HIGH';
+
+      alerts.push({
+        id:          'retention-' + now.getTime(),
+        category:    'retention',
+        title:       critical.length + ' driver' + (critical.length > 1 ? 's' : '') + ' at ' + (topLevel === 'CRITICAL' ? 'critical' : 'high') + ' flight risk',
+        preview:     topName + ' — risk score ' + topScore + '/100',
+        detail:      critical.length + ' driver' + (critical.length > 1 ? 's' : '') + ' in your roster show elevated flight-risk signals. ' +
+                     topName + ' has a risk score of ' + topScore + '/100. ' +
+                     'Proactive outreach within 48 hours significantly reduces turnover probability.',
+        timestamp:   new Date(now.getTime() - 3600000).toISOString(),
+        read:        false,
+        targetId:    top.driverId || null,
+        actionLabel: 'View Retention'
+      });
+    })(),
+
+    // ── 3. Pipeline Alerts ───────────────────────────────────────────────────
+    (async () => {
+      const result = await dataAccess.queryRecords('driverCarrierInterests', {
+        filters:      { carrier_dot: String(carrierDot) },
+        sort:         [{ field: '_updatedDate', direction: 'desc' }],
+        limit:        30,
+        suppressAuth: true
+      });
+
+      const items = result.items || [];
+      const recent = items.filter(item => {
+        if (!item._updatedDate) return false;
+        return new Date(item._updatedDate) >= sevenDaysAgo;
+      });
+
+      // Look for items that have a meaningful status (beyond initial "new")
+      const stageChanges = recent
+        .filter(i => i.status && i.status !== 'new' && i.status !== 'interested')
+        .slice(0, 5);
+
+      if (stageChanges.length === 0) return;
+
+      const top = stageChanges[0];
+      const topName = safeStr(top.driver_name || top.full_name || top.name || 'A candidate');
+      const topStage = safeStr(top.status || top.stage || 'next stage');
+      const topTs = top._updatedDate
+        ? new Date(top._updatedDate).toISOString()
+        : new Date(now.getTime() - 7200000).toISOString();
+
+      alerts.push({
+        id:          'pipeline-' + safeStr(top._id || now.getTime()),
+        category:    'pipeline',
+        title:       stageChanges.length + ' pipeline ' + (stageChanges.length === 1 ? 'update' : 'updates') + ' in the last 7 days',
+        preview:     topName + ' moved to "' + topStage + '"',
+        detail:      stageChanges.length + ' candidate' + (stageChanges.length > 1 ? 's' : '') + ' advanced in your pipeline this week. ' +
+                     'Most recent: ' + topName + ' is now in "' + topStage + '" status. ' +
+                     'Review and take action to keep momentum.',
+        timestamp:   topTs,
+        read:        false,
+        targetId:    safeStr(top._id || ''),
+        actionLabel: 'View Pipeline'
+      });
+    })()
+  ]);
+
+  // Sort newest first
+  alerts.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  return { success: true, alerts };
+}

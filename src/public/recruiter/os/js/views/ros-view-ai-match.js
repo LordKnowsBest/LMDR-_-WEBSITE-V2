@@ -40,8 +40,8 @@
   // ── Spider Chart SVG ───────────────────────────────────────────────────────
 
   function renderSpider(scores, id) {
-    var axes = ['experience', 'cdlClass', 'safety', 'availability', 'location', 'stability'];
-    var labels = ['Exp', 'CDL', 'Safe', 'Avail', 'Loc', 'Stable'];
+    var axes = ['experience', 'qualifications', 'availability', 'location', 'salaryFit', 'engagement'];
+    var labels = ['Exp', 'CDL', 'Avail', 'Loc', 'Pay', 'Stable'];
     var cx = 80, cy = 80, maxR = 60;
 
     var rings = [0.25, 0.5, 0.75, 1.0].map(function (f) {
