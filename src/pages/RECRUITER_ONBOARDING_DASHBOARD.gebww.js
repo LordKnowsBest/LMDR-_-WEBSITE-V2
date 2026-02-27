@@ -222,7 +222,7 @@ async function handleDashboardReady(component) {
   // Check authentication
   if (!wixUsers || !wixUsers.currentUser.loggedIn) {
     console.log('User not logged in, redirecting...');
-    wixLocation.to('/account/my-account');
+    wixLocation.to('/login');
     return;
   }
 
@@ -745,7 +745,7 @@ function handleNavigateTo(data) {
     'messaging': '/recruiter-console',
     'new-onboarding': '/recruiter-console',
     'pipeline': '/recruiter-console',
-    'settings': '/account/my-account',
+    'settings': '/login',
     'onboarding': '/recruiter-onboarding-dashboard'
   };
 

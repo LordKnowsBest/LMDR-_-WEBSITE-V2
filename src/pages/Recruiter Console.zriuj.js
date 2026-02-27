@@ -1106,7 +1106,7 @@ async function handleDashboardReady(component) {
   // Check if user is logged in
   if (!wixUsers || !wixUsers.currentUser.loggedIn) {
     console.log('User not logged in, redirecting...');
-    wixLocation.to('/account/my-account');
+    wixLocation.to('/login');
     return;
   }
 
@@ -1799,7 +1799,7 @@ function handleNavigateTo(data) {
     'driver-search': '/recruiter-driver-search',
     'pipeline': '/recruiter-console',
     'retention': '/carrier-retention',
-    'settings': '/account/my-account',
+    'settings': '/login',
     'compliance-calendar': '/carrier-compliance-calendar',
     'document-vault': '/carrier-document-vault',
     'dq-tracker': '/carrier-dq-tracker',
@@ -2133,7 +2133,7 @@ async function handleRecruiterOSReady(component) {
   console.log('Recruiter OS ready, initializing...');
 
   if (!wixUsers || !wixUsers.currentUser.loggedIn) {
-    wixLocation.to('/account/my-account');
+    wixLocation.to('/login');
     return;
   }
 
