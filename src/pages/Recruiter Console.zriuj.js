@@ -1083,6 +1083,10 @@ async function handleHtmlMessage(msg, component) {
         break;
       }
 
+      case 'saveAccountSettings':
+        await handleSaveAccountSettings(msg.data, component);
+        break;
+
       default:
         console.warn('⚠️ Unhandled action:', action);
     }
@@ -1751,6 +1755,36 @@ async function handleSaveWeightPreferences(data, component) {
       success: false,
       error: error.message
     });
+  }
+}
+
+async function handleSaveAccountSettings(data, component) {
+  if (!data || !data.account) {
+    sendToHtml(component, 'accountSettingsError', { message: 'Account data required' });
+    return;
+  }
+
+  try {
+    const { account } = data;
+    const result = await updateRecruiterProfile({
+      displayName:   account.displayName,
+      email:         account.email,
+      phone:         account.phone,
+      agencyName:    account.agencyName,
+      isIndependent: account.isIndependent
+    });
+
+    if (result.success && result.profile) {
+      cachedRecruiterProfile = result.profile;
+    }
+
+    sendToHtml(component, result.success ? 'accountSettingsSaved' : 'accountSettingsError', {
+      profile: result.profile,
+      message: result.error
+    });
+  } catch (error) {
+    console.error('Save account settings error:', error);
+    sendToHtml(component, 'accountSettingsError', { message: error.message });
   }
 }
 

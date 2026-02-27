@@ -64,12 +64,28 @@
       });
       readyCallbacks.length = 0;
 
-      // Update settings if profile data came in
-      if (payload.profile && ROS.settings && ROS.settings.updateProfile) {
-        ROS.settings.updateProfile(payload.profile);
+      // Update settings — page sends 'recruiterProfile' key, guard both names
+      var profileData = payload.profile || payload.recruiterProfile;
+      if (profileData && ROS.settings && ROS.settings.updateProfile) {
+        ROS.settings.updateProfile(profileData);
       }
       if (payload.carriers && ROS.settings && ROS.settings.updateCarriers) {
         ROS.settings.updateCarriers(payload.carriers);
+      }
+      return;
+    }
+
+    // Account settings responses (handled by settings module, not views)
+    if (type === 'accountSettingsSaved') {
+      if (ROS.settings && ROS.settings.onAccountSettingsSaved) {
+        ROS.settings.onAccountSettingsSaved(msg.data || {});
+      }
+      return;
+    }
+
+    if (type === 'accountSettingsError') {
+      if (ROS.settings && ROS.settings.onAccountSettingsError) {
+        ROS.settings.onAccountSettingsError((msg.data || {}).message);
       }
       return;
     }
