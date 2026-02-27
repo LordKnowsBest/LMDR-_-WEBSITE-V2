@@ -339,6 +339,45 @@ async function fetchAirtableByRecordIds(recordIds) {
 }
 
 /**
+ * Fetch top Airtable carriers for a given driver state, sorted by PRIORITY_SCORE.
+ * Always returns up to maxRecords — state-scoped first, then fills from national.
+ * Runs in parallel with the Pinecone query so adds ~0ms to total latency.
+ */
+async function fetchTopAirtableCarriers(state, maxRecords = 5) {
+  const doFetch = async (stateFilter) => {
+    const formula = stateFilter
+      ? `AND({PHY_STATE}='${stateFilter}',{DOT_NUMBER}!='')`
+      : `{DOT_NUMBER}!=''`;
+
+    const params = new URLSearchParams({ filterByFormula: formula, maxRecords: String(maxRecords) });
+    params.append('sort[0][field]',     'PRIORITY_SCORE');
+    params.append('sort[0][direction]', 'desc');
+    AIRTABLE_FIELDS.forEach(f => params.append('fields[]', f));
+
+    const url = `https://api.airtable.com/v0/${AIRTABLE_BASE}/${encodeURIComponent(AIRTABLE_TABLE)}?${params}`;
+    try {
+      const res = await fetch(url, { headers: airtableHeaders(), signal: AbortSignal.timeout(5_000) });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.records || [];
+    } catch {
+      return [];
+    }
+  };
+
+  if (!state) return doFetch(null);
+
+  // State + national in parallel — state carriers first, fill from national
+  const [stateRecords, nationalRecords] = await Promise.all([doFetch(state), doFetch(null)]);
+  const seen   = new Set(stateRecords.map(r => r.id));
+  const merged = [...stateRecords];
+  for (const r of nationalRecords) {
+    if (!seen.has(r.id) && merged.length < maxRecords) merged.push(r);
+  }
+  return merged;
+}
+
+/**
  * Full Option B pipeline — runs in the background after 202 response.
  */
 async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbackUrl, requestId) {
@@ -350,27 +389,88 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
     const queryText   = buildDriverQuery(driverPrefs);
     const queryVector = await withTimeout(embed(queryText), 6_000);
 
-    // 2. Query Pinecone lmdr-carriers top-75
-    const pineconeMatches = await queryVectors('carriers', queryVector, TOP_K_PINECONE, {}, true);
+    // 2. Query Pinecone + direct Airtable in parallel —
+    //    Airtable-direct guarantees platform carriers appear even when sparse
+    //    rec* embeddings lose cosine similarity to dot: vectors.
+    const driverState = driverPrefs.home_state || driverPrefs.homeState || null;
 
-    // 3. Split by vector ID prefix
+    const [pineconeMatches, airtableDirectRecords] = await Promise.all([
+      queryVectors('carriers', queryVector, TOP_K_PINECONE, {}, true),
+      fetchTopAirtableCarriers(driverState, 5),
+    ]);
+
+    // 3. Split Pinecone matches by vector ID prefix
     const recMatches = pineconeMatches.filter(m => m.id.startsWith('rec'));
     const dotMatches = pineconeMatches.filter(m => m.id.startsWith('dot:'));
 
-    console.log(`[search/carriers-async] ${jobId}: ${recMatches.length} Airtable + ${dotMatches.length} FMCSA-only from Pinecone`);
+    console.log(`[search/carriers-async] ${jobId}: ${recMatches.length} Airtable + ${dotMatches.length} FMCSA-only from Pinecone | ${airtableDirectRecords.length} Airtable-direct (state=${driverState || 'any'})`);
 
-    // 4. Enrich Airtable-backed carriers via batch fetch — only top MAX_RESULTS needed
-    const recIds    = recMatches.slice(0, MAX_RESULTS).map(m => m.id);
+    // 4. Enrich Airtable-backed carriers from Pinecone (rec* tier) via batch fetch
+    const recIds      = recMatches.slice(0, MAX_RESULTS).map(m => m.id);
     const airtableMap = await fetchAirtableByRecordIds(recIds);
 
-    // 5. Build unified result set
-    const today = new Date().toISOString().split('T')[0];
-    const results = [];
+    // 5. Build unified result set — Airtable-direct first (guaranteed platform carriers),
+    //    then Pinecone rec*, then dot:. Dedup by DOT number across all tiers.
+    const results  = [];
+    const seenDots = new Set();
 
-    // Airtable-backed carriers (Tier 1 — full data)
+    // Tier 0: Direct Airtable query sorted by PRIORITY_SCORE (state-scoped then national)
+    for (const record of airtableDirectRecords) {
+      const fields = record.fields;
+      const dot    = String(fields.DOT_NUMBER || '');
+      if (!dot || seenDots.has(dot)) continue;
+      seenDots.add(dot);
+
+      const _opCode = fields.CARRIER_OPERATION || null;
+      results.push({
+        carrier: {
+          DOT_NUMBER:        fields.DOT_NUMBER       || '',
+          LEGAL_NAME:        fields.LEGAL_NAME        || 'Unknown Carrier',
+          CARRIER_OPERATION: _opCode,
+          NBR_POWER_UNIT:    fields.NBR_POWER_UNIT    || null,
+          DRIVER_TOTAL:      fields.DRIVER_TOTAL      || null,
+          ACCIDENT_RATE:     fields.ACCIDENT_RATE     || null,
+          PHY_CITY:          fields.PHY_CITY          || null,
+          PHY_STATE:         fields.PHY_STATE         || null,
+          PHY_ZIP:           fields.PHY_ZIP           || null,
+          TELEPHONE:         fields.TELEPHONE         || null,
+          PAY_CPM:           fields.PAY_CPM           || null,
+          TURNOVER_PERCENT:  fields.TURNOVER_PERCENT  || null,
+          AVG_TRUCK_AGE:     fields.AVG_TRUCK_AGE     || null,
+          COMBINED_SCORE:    fields.COMBINED_SCORE    || null,
+          PRIORITY_SCORE:    fields.PRIORITY_SCORE    || null,
+          SAFETY_RATING:     fields.SAFETY_RATING     || null,
+        },
+        fmcsa: {
+          safety_rating:    fields.SAFETY_RATING || null,
+          dot_number:       fields.DOT_NUMBER    || '',
+          is_authorized:    true,
+          operating_status: 'AUTHORIZED',
+          inspections_24mo: {},
+          crashes_24mo:     {},
+          basics:           {},
+        },
+        inferredOpType:  inferOpType(_opCode),
+        overallScore:    fields.PRIORITY_SCORE ? Math.min(100, Math.round(Number(fields.PRIORITY_SCORE))) : 75,
+        semanticScore:   null,
+        scores:          {},
+        enrichment:      null,
+        needsEnrichment: true,
+        fromCache:       false,
+        fmcsaOnly:       false,
+        source:          'airtable',
+        vectorId:        record.id,
+      });
+    }
+
+    // Tier 1: Airtable-backed carriers from Pinecone semantic search (rec* prefix)
     for (const m of recMatches.slice(0, MAX_RESULTS)) {
       const fields = airtableMap[m.id];
-      if (!fields) continue; // record may have been deleted
+      if (!fields) continue;
+
+      const dot = String(fields.DOT_NUMBER || '');
+      if (dot && seenDots.has(dot)) continue;  // already in Tier 0
+      if (dot) seenDots.add(dot);
 
       const _opCode = fields.CARRIER_OPERATION || m.metadata?.operation_type || null;
       results.push({
@@ -416,10 +516,14 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
       });
     }
 
-    // FMCSA-only carriers (Tier 2 — Pinecone metadata only)
+    // Tier 2: FMCSA-only carriers from Pinecone (dot: prefix)
     for (const m of dotMatches.slice(0, MAX_RESULTS)) {
       const meta = m.metadata || {};
       if (!meta.legal_name || meta.source === 'progress-tracker') continue;
+
+      const metaDot = String(meta.dot_number || m.id.replace('dot:', ''));
+      if (metaDot && seenDots.has(metaDot)) continue;  // carrier already in Airtable tiers
+      if (metaDot) seenDots.add(metaDot);
 
       // Build a partial fmcsa object from Pinecone metadata so the safety badge renders immediately.
       // Full inspection/crash/BASIC data is fetched on-demand when driver clicks "Get AI Profile".
