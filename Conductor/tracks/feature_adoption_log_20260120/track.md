@@ -27,7 +27,7 @@ Create a "Feature Adoption Log" in the Admin Dashboard to visualize feature usag
 - `src/public/js/feature-tracker.js` - Client-side tracking library
 - `src/public/admin/ADMIN_DASHBOARD.html` - Feature adoption visualizations
 - `src/public/__tests__/featureAdoptionService.test.js` - Test suite
-- `src/public/__tests__/fixtures/featureAdoptionFixtures.js` - Test fixtures
+- `src/public/__tests__/featureAdoptionService.test.js (inline fixtures)` - Test fixtures
 
 ## Phases
 
@@ -113,12 +113,13 @@ resume with full execution tomorrow.
 - Some usage sites call `logFeatureInteraction` with an outdated signature and/or
   invalid actions, so events likely get rejected:
   - `src/backend/driverMatching.jsw` (action parameter is passed as `recruiter`)
-  - `src/pages/Road Utilities.xzvqe.js` uses non-enum actions: `report`,
+  - `src/pages/ROAD_UTILITIES.xzvqe.js` uses non-enum actions: `report`,
     `link_card`, `tab_switch`
 - Tests exist but are not wired into Jest (Jest roots point to
   `src/public/__tests__`, but tests live under `tests/public`):
-  `jest.config.js`, `tests/public/featureAdoptionService.test.js`
+  `jest.config.js`, `src/public/__tests__/featureAdoptionService.test.js`
 
 ### Practical Completion Level
 - Core code is present, but end-to-end flow (UI -> backend -> storage -> reports)
-  is not wired or validated. Overall status: **partially complete**.
+  is not wired or validated. Overall status: **implemented with follow-up hardening tasks**.
+

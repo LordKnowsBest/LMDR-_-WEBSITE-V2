@@ -17,7 +17,29 @@ Developer Portal & Partner Management (Phase 8) end-to-end verification.
 
 ## Automated Evidence
 Command:
-`npx jest src/public/__tests__/externalApiPlatformPhase8.test.js src/public/__tests__/externalApiPlatformPhase8Flows.test.js src/public/__tests__/apiGateway.external.test.js src/public/__tests__/externalDocumentApi.test.js src/public/__tests__/externalEngagementApi.test.js src/public/__tests__/externalFuelApi.test.js src/public/__tests__/externalIntelligenceApi.test.js src/public/__tests__/externalMatchingApi.test.js src/public/__tests__/apiAuthService.test.js src/public/__tests__/rateLimitService.test.js src/public/__tests__/apiWebhookJobs.test.js src/public/__tests__/apiWebhookService.test.js --runInBand`
+`npx jest src/public/__tests__/externalApiPlatformPhase8.test.js --runInBand
+
+npx jest src/public/__tests__/externalApiPlatformPhase8Flows.test.js --runInBand
+
+npx jest src/public/__tests__/apiGateway.external.test.js --runInBand
+
+npx jest src/public/__tests__/externalDocumentApi.test.js --runInBand
+
+npx jest src/public/__tests__/externalEngagementApi.test.js --runInBand
+
+npx jest src/public/__tests__/externalFuelApi.test.js --runInBand
+
+npx jest src/public/__tests__/externalIntelligenceApi.test.js --runInBand
+
+npx jest src/public/__tests__/externalMatchingApi.test.js --runInBand
+
+npx jest src/public/__tests__/apiAuthService.test.js --runInBand
+
+npx jest src/public/__tests__/rateLimitService.test.js --runInBand
+
+npx jest src/public/__tests__/apiWebhookJobs.test.js --runInBand
+
+npx jest src/public/__tests__/apiWebhookService.test.js --runInBand`
 
 Result:
 - Test Suites: 12 passed
@@ -25,3 +47,4 @@ Result:
 
 ## Notes
 Manual-phase verification is represented by concrete UI/bridge assertions and integration-safe backend actions validated in the automated suite.
+

@@ -112,7 +112,8 @@ import {
   addCompetitorIntel,
   getCompetitorIntel,
   saveSnapshot,
-  getSnapshots
+  getSnapshots,
+  getForecastAccuracyTrend
 } from 'backend/b2bAnalyticsService';
 
 import {
@@ -124,6 +125,7 @@ import {
   generateEmailContent,
   generateSmsContent,
   generateCallScript,
+  summarizeTimeline,
   saveDraft,
   approveDraft,
   getPendingDrafts
@@ -131,6 +133,11 @@ import {
 
 import {
   scoreNextActions,
+  scoreAndRouteLead,
+  predictCloseRate,
+  analyzeSequencePerformance,
+  recommendSequence,
+  getOptimalSendTime,
   recordActionTaken,
   recordActionOutcome,
   snoozeAction,
@@ -321,7 +328,12 @@ async function routeAction(action, data, user) {
       // ====================================================================
 
       case 'getSignal': {
-        const result = await getSignalByCarrier(data.carrierDot);
+        let carrierDot = data.carrierDot;
+        if (!carrierDot && data.accountId) {
+          const accountRes = await getAccount(data.accountId);
+          carrierDot = accountRes.account?.carrier_dot || '';
+        }
+        const result = await getSignalByCarrier(carrierDot);
         return result.success
           ? { action: 'signalLoaded', payload: result.signal }
           : { action: 'actionError', message: result.error };
@@ -367,6 +379,16 @@ async function routeAction(action, data, user) {
       }
 
       case 'getOpportunity': {
+        if (!data.opportunityId && data.accountId) {
+          const byAccount = await getOpportunitiesByAccount(data.accountId);
+          if (!byAccount.success) {
+            return { action: 'actionError', message: byAccount.error };
+          }
+          const active = (byAccount.opportunities || []).find(o =>
+            o.stage !== 'closed_won' && o.stage !== 'closed_lost'
+          ) || (byAccount.opportunities || [])[0] || null;
+          return { action: 'opportunityLoaded', payload: active };
+        }
         const result = await getOpportunity(data.opportunityId);
         return result.success
           ? { action: 'opportunityLoaded', payload: result.opportunity }
@@ -410,8 +432,11 @@ async function routeAction(action, data, user) {
 
       case 'getRisks': {
         const result = await getDealsAtRisk(data);
+        const risks = data.accountId
+          ? (result.atRisk || []).filter(r => r.account_id === data.accountId)
+          : (result.atRisk || []);
         return result.success
-          ? { action: 'risksLoaded', payload: result.atRisk }
+          ? { action: 'risksLoaded', payload: risks }
           : { action: 'actionError', message: result.error };
       }
 
@@ -635,7 +660,38 @@ async function routeAction(action, data, user) {
           });
         }
 
-        return { action: 'leadCaptured', payload: { accountId, companyName: lead.companyName } };
+        let qualification = null;
+        if (accountId) {
+          const routeRes = await scoreAndRouteLead({
+            ...lead,
+            accountId
+          }, {
+            ownerId: user?.memberId
+          });
+          if (routeRes.success) {
+            qualification = routeRes.result;
+            const accountUpdates = {
+              status: qualification.accountStatus,
+              owner_id: qualification.assignedOwnerId || lead.ownerId || ''
+            };
+            await updateAccount(accountId, accountUpdates).catch(() => {});
+          }
+        }
+
+        return {
+          action: 'leadCaptured',
+          payload: {
+            accountId,
+            companyName: lead.companyName,
+            leadScore: qualification?.score || 0,
+            leadClassification: qualification?.classification || 'cold',
+            accountStatus: qualification?.accountStatus || 'target',
+            assignedOwnerId: qualification?.assignedOwnerId || '',
+            opportunityCreated: qualification?.opportunityCreated || false,
+            opportunityId: qualification?.opportunityId || '',
+            assignmentReason: qualification?.assignmentReason || ''
+          }
+        };
       }
 
       // ====================================================================
@@ -674,6 +730,13 @@ async function routeAction(action, data, user) {
         const result = await saveSnapshot({ days: data.days || 30, ownerId: data.ownerId });
         return result.success
           ? { action: 'snapshotSaved', payload: result.snapshot }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getForecastAccuracy': {
+        const result = await getForecastAccuracyTrend({ days: data.days || 180 });
+        return result.success
+          ? { action: 'forecastAccuracyLoaded', payload: result.accuracy }
           : { action: 'actionError', message: result.error };
       }
 
@@ -770,6 +833,16 @@ async function routeAction(action, data, user) {
           : { action: 'actionError', message: result.error };
       }
 
+      case 'getAccountSummary': {
+        const result = await summarizeTimeline(data.accountId, {
+          forceRefresh: !!data.forceRefresh,
+          limit: data.limit || 25
+        });
+        return result.success
+          ? { action: 'summaryLoaded', payload: { summary: result.summary, cached: result.cached } }
+          : { action: 'actionError', message: result.error };
+      }
+
       // ====================================================================
       // AI NEXT-BEST-ACTION ENGINE (Phase 11)
       // ====================================================================
@@ -834,6 +907,50 @@ async function routeAction(action, data, user) {
         });
         return result.success
           ? { action: 'outcomeRecorded', payload: {} }
+          : { action: 'actionError', message: result.error };
+      }
+
+      // ====================================================================
+      // AI FORECASTING & SEQUENCE OPTIMIZATION (Phases 13-15)
+      // ====================================================================
+
+      case 'predictCloseRate': {
+        const result = await predictCloseRate(data.opportunityId || data.opportunity, {
+          save: data.save !== false
+        });
+        return result.success
+          ? { action: 'predictionLoaded', payload: result.prediction }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'analyzeSequencePerformance': {
+        const result = await analyzeSequencePerformance({ days: data.days || 90 });
+        return result.success
+          ? { action: 'sequencePerformanceLoaded', payload: result.analysis }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getSequenceRecommendation': {
+        const result = await recommendSequence({
+          segment: data.segment,
+          region: data.region,
+          contactRole: data.contactRole,
+          channels: data.channels,
+          days: data.days || 90
+        });
+        return result.success
+          ? { action: 'recommendationLoaded', payload: result.recommendation }
+          : { action: 'actionError', message: result.error };
+      }
+
+      case 'getOptimalSendTime': {
+        const result = await getOptimalSendTime({
+          accountId: data.accountId,
+          contactId: data.contactId,
+          timezone: data.timezone
+        });
+        return result.success
+          ? { action: 'sendTimeLoaded', payload: result.recommendation }
           : { action: 'actionError', message: result.error };
       }
 

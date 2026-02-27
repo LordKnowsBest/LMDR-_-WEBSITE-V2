@@ -1,5 +1,6 @@
 import * as dataAccess from 'backend/dataAccess';
 import { logStageChange, logTask } from 'backend/b2bActivityService';
+import { predictCloseRate } from 'backend/b2bAIService';
 
 // Collection keys for dataAccess routing
 const COLLECTIONS = {
@@ -116,13 +117,59 @@ export async function getForecast(options = {}) {
     const res = await getPipelineView(options);
     if (!res.success) throw new Error(res.error);
     const opps = res.stages.flatMap(s => s.opportunities);
-    let commit = 0, best = 0, pipeline = 0;
+    const useAI = options.useAI !== false;
+    const refreshPredictions = options.refreshPredictions === true;
+    let commit = 0;
+    let best = 0;
+    let pipeline = 0;
+    let weighted = 0;
+    const divergenceDeals = [];
+
     opps.forEach(o => {
-      const v = Number(o.value_estimate) || 0; pipeline += v;
-      if (o.stage === 'negotiation') { commit += v; best += v; }
-      else if (o.stage === 'proposal') { best += v; }
+      const v = Number(o.value_estimate) || 0;
+      pipeline += v;
+      const stageProb = Math.round((STAGES[o.stage?.toUpperCase()]?.probability || 0) * 100);
+      const aiProb = Number(o.ai_close_probability || 0);
+      const appliedProb = useAI && aiProb > 0 ? aiProb : stageProb;
+
+      weighted += v * (appliedProb / 100);
+      if (appliedProb >= 70) {
+        commit += v;
+        best += v;
+      } else if (appliedProb >= 40) {
+        best += v;
+      }
+
+      if (useAI && aiProb > 0 && Math.abs(aiProb - stageProb) >= 20) {
+        divergenceDeals.push({
+          opportunity_id: o._id || o.id,
+          account_id: o.account_id,
+          value_estimate: v,
+          stage_probability: stageProb,
+          ai_probability: aiProb,
+          delta: aiProb - stageProb
+        });
+      }
     });
-    return { success: true, forecast: { commit: Math.round(commit), best: Math.round(best), pipeline: Math.round(pipeline), deal_count: opps.length } };
+
+    if (refreshPredictions) {
+      await Promise.all(opps.map(o => predictCloseRate(o, { save: true }).catch(() => null)));
+    }
+
+    return {
+      success: true,
+      forecast: {
+        mode: useAI ? 'ai' : 'stage',
+        ai_enabled: useAI,
+        commit: Math.round(commit),
+        best: Math.round(best),
+        pipeline: Math.round(pipeline),
+        weighted_pipeline: Math.round(weighted),
+        deal_count: opps.length,
+        divergence_deals: divergenceDeals.slice(0, 10),
+        divergence_count: divergenceDeals.length
+      }
+    };
   } catch (error) { return { success: false, error: error.message }; }
 }
 

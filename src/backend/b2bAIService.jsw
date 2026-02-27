@@ -24,7 +24,11 @@ const COLLECTIONS = {
   textMessages: 'b2bTextMessages',
   calls: 'b2bCalls',
   signals: 'b2bMatchSignals',
-  aiActionLog: 'b2bAIActionLog'
+  aiActionLog: 'b2bAIActionLog',
+  automationRules: 'b2bAutomationRules',
+  leadAttribution: 'b2bLeadAttribution',
+  sequences: 'b2bSequences',
+  sequenceSteps: 'b2bSequenceSteps'
 };
 
 // ============================================================================
@@ -414,6 +418,522 @@ function determineChannel(engagement, account) {
 }
 
 // ============================================================================
+// PHASE 12: AI LEAD QUALIFICATION & ROUTING
+// ============================================================================
+
+const LEAD_SOURCE_QUALITY = {
+  referral: 22,
+  event_booth: 18,
+  business_card: 14,
+  qr_code: 12,
+  website: 10,
+  inbound: 16,
+  other: 6
+};
+
+/**
+ * Score inbound lead quality and auto-route ownership.
+ *
+ * @param {Object} leadInput
+ * @param {Object} [context]
+ * @returns {Promise<{success: boolean, result?: Object, error?: string}>}
+ */
+export async function scoreAndRouteLead(leadInput = {}, context = {}) {
+  try {
+    const accountId = leadInput.accountId || '';
+    const dot = leadInput.dotNumber || leadInput.carrier_dot || '';
+    const fleetSize = Number(leadInput.fleetSize || leadInput.fleet_size || 0);
+    const region = String(leadInput.region || '').trim().toLowerCase();
+    const tags = String(leadInput.tags || '').toLowerCase();
+    const source = String(leadInput.captureSource || leadInput.source || 'other').toLowerCase();
+
+    const signal = dot ? await findCurrentSignalByDot(dot) : null;
+
+    let score = 0;
+    const factors = [];
+
+    const signalScore = Math.round(Math.min(Number(signal?.signal_score || 0), 100) * 0.4);
+    if (signalScore > 0) factors.push({ key: 'signal', points: signalScore });
+    score += signalScore;
+
+    const fleetPoints = fleetSize >= 250 ? 20 : fleetSize >= 100 ? 16 : fleetSize >= 50 ? 12 : fleetSize >= 10 ? 8 : 4;
+    factors.push({ key: 'fleet_size', points: fleetPoints });
+    score += fleetPoints;
+
+    const signalRegions = String(signal?.top_regions || '').toLowerCase();
+    const regionPoints = region && signalRegions.includes(region) ? 12 : region ? 6 : 0;
+    if (regionPoints > 0) factors.push({ key: 'region_overlap', points: regionPoints });
+    score += regionPoints;
+
+    const signalEquipment = String(signal?.top_equipment || '').toLowerCase();
+    const equipmentPoints = tags && signalEquipment && tags.includes(signalEquipment) ? 8 : tags ? 4 : 0;
+    if (equipmentPoints > 0) factors.push({ key: 'equipment_fit', points: equipmentPoints });
+    score += equipmentPoints;
+
+    const sourcePoints = LEAD_SOURCE_QUALITY[source] || LEAD_SOURCE_QUALITY.other;
+    factors.push({ key: 'source_quality', points: sourcePoints });
+    score += sourcePoints;
+
+    score = Math.max(0, Math.min(100, Math.round(score)));
+
+    const classification = score >= 80 ? 'hot' : score >= 50 ? 'warm' : 'cold';
+    const accountStatus = classification === 'hot' ? 'prospecting' : 'target';
+
+    const assignment = await assignLeadOwner({
+      region: leadInput.region || '',
+      segment: context.segment || leadInput.segment || '',
+      fleetSize
+    });
+
+    let opportunity = null;
+    if (classification === 'hot' && accountId) {
+      const estimatedValue = estimateLeadValue(leadInput, signal);
+      const createRes = await dataAccess.insertRecord(COLLECTIONS.opportunities, {
+        account_id: accountId,
+        stage: 'prospecting',
+        value_estimate: estimatedValue,
+        owner_id: assignment.ownerId || context.ownerId || '',
+        next_step: 'Initial qualification call',
+        next_step_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        ai_close_probability: 55,
+        ai_predicted_at: new Date().toISOString(),
+        stage_entered_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }, { suppressAuth: true });
+      opportunity = createRes.record || null;
+    }
+
+    if (accountId) {
+      await upsertLeadAttributionScore(accountId, score);
+    }
+
+    return {
+      success: true,
+      result: {
+        score,
+        classification,
+        accountStatus,
+        assignedOwnerId: assignment.ownerId || '',
+        assignmentReason: assignment.reason || 'default_unassigned',
+        opportunityCreated: Boolean(opportunity),
+        opportunityId: opportunity?._id || opportunity?.id || '',
+        notifyRep: classification === 'hot' && Boolean(assignment.ownerId),
+        factors
+      }
+    };
+  } catch (error) {
+    console.error('[b2bAIService] scoreAndRouteLead error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+async function assignLeadOwner({ region, segment, fleetSize }) {
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.automationRules, {
+      filters: { trigger_event: 'lead_routing', is_active: true },
+      limit: 50,
+      suppressAuth: true
+    });
+
+    const rules = result.items || [];
+    for (const rule of rules) {
+      let conditions = {};
+      try {
+        conditions = typeof rule.conditions === 'string' ? JSON.parse(rule.conditions) : (rule.conditions || {});
+      } catch (e) {
+        conditions = {};
+      }
+      if (!matchesRoutingRule(conditions, { region, segment, fleetSize })) {
+        continue;
+      }
+      let actions = {};
+      try {
+        actions = typeof rule.actions === 'string' ? JSON.parse(rule.actions) : (rule.actions || {});
+      } catch (e) {
+        actions = {};
+      }
+      const ownerId = actions.owner_id || actions.ownerId || rule.owner_id || '';
+      if (ownerId) return { ownerId, reason: `rule:${rule.rule_name || rule._id || 'match'}` };
+    }
+  } catch (error) {
+    console.warn('[b2bAIService] assignLeadOwner fallback:', error.message);
+  }
+
+  return { ownerId: '', reason: 'no_rule_match' };
+}
+
+function matchesRoutingRule(conditions, context) {
+  if (!conditions || typeof conditions !== 'object') return false;
+
+  if (conditions.region) {
+    const allowed = Array.isArray(conditions.region) ? conditions.region : [conditions.region];
+    if (!allowed.some(r => String(context.region || '').toLowerCase().includes(String(r).toLowerCase()))) {
+      return false;
+    }
+  }
+
+  if (conditions.segment) {
+    const allowed = Array.isArray(conditions.segment) ? conditions.segment : [conditions.segment];
+    if (!allowed.some(s => String(s).toLowerCase() === String(context.segment || '').toLowerCase())) {
+      return false;
+    }
+  }
+
+  if (conditions.min_fleet_size && Number(context.fleetSize || 0) < Number(conditions.min_fleet_size)) {
+    return false;
+  }
+  if (conditions.max_fleet_size && Number(context.fleetSize || 0) > Number(conditions.max_fleet_size)) {
+    return false;
+  }
+
+  return true;
+}
+
+function estimateLeadValue(lead, signal) {
+  const fleetSize = Number(lead.fleetSize || 0);
+  const base = fleetSize >= 250 ? 75000 : fleetSize >= 100 ? 50000 : fleetSize >= 50 ? 35000 : 20000;
+  const signalBoost = Math.round((Number(signal?.signal_score || 0) / 100) * 15000);
+  return base + signalBoost;
+}
+
+async function upsertLeadAttributionScore(accountId, score) {
+  const existing = await dataAccess.findByField(COLLECTIONS.leadAttribution, 'account_id', accountId, {
+    suppressAuth: true
+  });
+
+  const payload = {
+    account_id: accountId,
+    ai_score: score,
+    ai_score_at: new Date().toISOString()
+  };
+
+  if (existing) {
+    await dataAccess.updateRecord(COLLECTIONS.leadAttribution, { ...existing, ...payload, _id: existing._id }, {
+      suppressAuth: true
+    });
+  } else {
+    await dataAccess.insertRecord(COLLECTIONS.leadAttribution, payload, { suppressAuth: true });
+  }
+}
+
+// ============================================================================
+// PHASE 13: PREDICTIVE FORECASTING
+// ============================================================================
+
+/**
+ * Predict close probability for a given opportunity and persist result.
+ *
+ * @param {string|Object} opportunityInput
+ * @param {Object} [options]
+ * @returns {Promise<{success: boolean, prediction?: Object, error?: string}>}
+ */
+export async function predictCloseRate(opportunityInput, options = {}) {
+  try {
+    const shouldSave = options.save !== false;
+    const opportunity = typeof opportunityInput === 'string'
+      ? await dataAccess.getRecord(COLLECTIONS.opportunities, opportunityInput, { suppressAuth: true })
+      : opportunityInput;
+
+    if (!opportunity) return { success: false, error: 'Opportunity not found' };
+
+    const account = opportunity.account_id
+      ? await dataAccess.getRecord(COLLECTIONS.accounts, opportunity.account_id, { suppressAuth: true })
+      : null;
+
+    const engagementMap = await fetchEngagementBatch(opportunity.account_id ? [opportunity.account_id] : []);
+    const engagement = engagementMap.get(opportunity.account_id) || {};
+    const signal = account?.carrier_dot ? await findCurrentSignalByDot(account.carrier_dot) : null;
+
+    const now = Date.now();
+    const stageEnteredAt = opportunity.stage_entered_at ? new Date(opportunity.stage_entered_at).getTime() : now;
+    const daysInStage = Math.max(0, Math.round((now - stageEnteredAt) / 86400000));
+    const stageSla = STAGE_SLA_DAYS[opportunity.stage] || 14;
+    const stageTimeScore = Math.max(0, 100 - Math.round((daysInStage / Math.max(stageSla, 1)) * 100));
+
+    const lastTouchDays = engagement.lastActivityAt
+      ? Math.max(0, Math.round((now - new Date(engagement.lastActivityAt).getTime()) / 86400000))
+      : 999;
+
+    const velocity = Math.min(100, Math.round((Number(engagement.activityCount || 0) / 7) * 25));
+    const engagementQuality = calculateEngagementScore(engagement, []);
+    const signalStrength = Math.min(100, Math.round(Number(signal?.signal_score || 0)));
+    const segmentBoost = account?.segment === 'enterprise' ? 10 : account?.segment === 'mid_market' ? 6 : 3;
+    const recencyPenalty = lastTouchDays > stageSla ? -18 : lastTouchDays > stageSla * 0.7 ? -10 : 4;
+
+    let probability = 0;
+    probability += velocity * 0.2;
+    probability += engagementQuality * 0.25;
+    probability += signalStrength * 0.2;
+    probability += stageTimeScore * 0.2;
+    probability += segmentBoost;
+    probability += recencyPenalty;
+
+    const stageBaseline = opportunity.stage === 'negotiation' ? 75 : opportunity.stage === 'proposal' ? 50 : opportunity.stage === 'discovery' ? 25 : 10;
+    probability = Math.round(Math.max(2, Math.min(98, probability * 0.6 + stageBaseline * 0.4)));
+
+    const dataCompleteness = [engagement.activityCount, signal?.signal_score, account?.segment].filter(Boolean).length / 3;
+    const confidence = Math.round(55 + dataCompleteness * 35);
+    const margin = Math.max(5, 22 - Math.round(dataCompleteness * 10));
+
+    const riskFactors = [];
+    if (lastTouchDays > stageSla) riskFactors.push('touch_overdue');
+    if (!opportunity.next_step) riskFactors.push('missing_next_step');
+    if (daysInStage > stageSla) riskFactors.push('stage_stale');
+    if (engagementQuality < 25) riskFactors.push('low_engagement');
+
+    const prediction = {
+      opportunityId: opportunity._id || opportunity.id,
+      probability,
+      confidence,
+      confidenceInterval: [Math.max(0, probability - margin), Math.min(100, probability + margin)],
+      riskFactors,
+      features: {
+        velocity,
+        engagementQuality,
+        signalStrength,
+        stageTimeScore,
+        daysInStage,
+        lastTouchDays
+      },
+      predictedAt: new Date().toISOString()
+    };
+
+    if (shouldSave && prediction.opportunityId) {
+      await dataAccess.updateRecord(COLLECTIONS.opportunities, {
+        ...opportunity,
+        _id: prediction.opportunityId,
+        ai_close_probability: probability,
+        ai_confidence: confidence,
+        ai_predicted_at: prediction.predictedAt,
+        ai_risk_factors: JSON.stringify(riskFactors),
+        updated_at: new Date().toISOString()
+      }, { suppressAuth: true });
+    }
+
+    return { success: true, prediction };
+  } catch (error) {
+    console.error('[b2bAIService] predictCloseRate error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============================================================================
+// PHASE 15: ADAPTIVE SEQUENCE OPTIMIZATION
+// ============================================================================
+
+/**
+ * Analyze sequence performance patterns by channel, timing, and segment.
+ */
+export async function analyzeSequencePerformance(options = {}) {
+  try {
+    const days = Number(options.days || 90);
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+
+    const [emailsRes, smsRes, callsRes, accountsRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.emails, { filters: { sent_at: { gte: since } }, limit: 1000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.textMessages, { filters: { sent_at: { gte: since } }, limit: 1000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.calls, { filters: { created_at: { gte: since } }, limit: 1000, suppressAuth: true }),
+      dataAccess.queryRecords(COLLECTIONS.accounts, { limit: 1000, suppressAuth: true })
+    ]);
+
+    const accounts = new Map((accountsRes.items || []).map(a => [a._id, a]));
+    const emails = emailsRes.items || [];
+    const sms = smsRes.items || [];
+    const calls = callsRes.items || [];
+
+    const byChannel = [
+      summarizeChannel('email', emails.length, emails.filter(e => e.status === 'replied').length, emails.filter(e => e.opened).length),
+      summarizeChannel('sms', sms.length, sms.filter(s => s.response_text).length, sms.filter(s => s.status === 'delivered').length),
+      summarizeChannel('call', calls.length, calls.filter(c => c.disposition === 'connected').length, calls.filter(c => c.status === 'completed').length)
+    ];
+
+    const segmentPerf = {};
+    emails.forEach(e => {
+      const seg = accounts.get(e.account_id)?.segment || 'unknown';
+      if (!segmentPerf[seg]) segmentPerf[seg] = { segment: seg, sent: 0, replied: 0 };
+      segmentPerf[seg].sent += 1;
+      if (e.status === 'replied') segmentPerf[seg].replied += 1;
+    });
+
+    const hourly = {};
+    emails.forEach(e => {
+      if (!e.sent_at) return;
+      const hour = new Date(e.sent_at).getUTCHours();
+      if (!hourly[hour]) hourly[hour] = { hour, sent: 0, replied: 0 };
+      hourly[hour].sent += 1;
+      if (e.status === 'replied') hourly[hour].replied += 1;
+    });
+
+    const topHours = Object.values(hourly)
+      .map(h => ({ ...h, replyRate: h.sent ? Math.round((h.replied / h.sent) * 100) : 0 }))
+      .sort((a, b) => b.replyRate - a.replyRate || b.sent - a.sent)
+      .slice(0, 3);
+
+    const insights = [];
+    const topChannel = [...byChannel].sort((a, b) => b.replyRate - a.replyRate)[0];
+    if (topChannel && topChannel.sent >= 5) {
+      insights.push(`${topChannel.channel.toUpperCase()} has best response rate (${topChannel.replyRate}%).`);
+    }
+    if (topHours[0]) {
+      insights.push(`Best send hour appears to be ${topHours[0].hour}:00 UTC (${topHours[0].replyRate}% reply).`);
+    }
+
+    return {
+      success: true,
+      analysis: {
+        periodDays: days,
+        byChannel,
+        bySegment: Object.values(segmentPerf).map(s => ({
+          ...s,
+          replyRate: s.sent ? Math.round((s.replied / s.sent) * 100) : 0
+        })).sort((a, b) => b.replyRate - a.replyRate),
+        topHours,
+        insights
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+function summarizeChannel(channel, sent, replied, delivered) {
+  return {
+    channel,
+    sent,
+    delivered,
+    replied,
+    replyRate: sent ? Math.round((replied / sent) * 100) : 0
+  };
+}
+
+/**
+ * Recommend an outreach sequence based on historical performance and context.
+ */
+export async function recommendSequence(input = {}) {
+  try {
+    const channels = Array.isArray(input.channels) && input.channels.length
+      ? input.channels
+      : ['email', 'call', 'sms'];
+    const segment = input.segment || 'mid_market';
+    const role = input.contactRole || 'decision_maker';
+
+    const analysisRes = await analyzeSequencePerformance({ days: input.days || 90 });
+    const channelRanking = (analysisRes.analysis?.byChannel || [])
+      .filter(c => channels.includes(c.channel))
+      .sort((a, b) => b.replyRate - a.replyRate);
+
+    const orderedChannels = channelRanking.length
+      ? channelRanking.map(c => c.channel)
+      : channels;
+
+    const steps = [];
+    orderedChannels.slice(0, 3).forEach((channel, index) => {
+      steps.push({
+        stepOrder: index + 1,
+        channel,
+        delayHours: index === 0 ? 0 : (index * 24),
+        theme: pickTheme(segment, role, channel)
+      });
+    });
+
+    const topRate = channelRanking[0]?.replyRate || 0;
+    const confidence = Math.max(40, Math.min(95, 50 + topRate));
+
+    return {
+      success: true,
+      recommendation: {
+        segment,
+        role,
+        channels: orderedChannels,
+        steps,
+        confidence,
+        sampleSize: (analysisRes.analysis?.byChannel || []).reduce((sum, c) => sum + (c.sent || 0), 0),
+        supportingData: analysisRes.analysis?.insights || []
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+function pickTheme(segment, role, channel) {
+  if (channel === 'call') return 'qualification + urgency';
+  if (segment === 'enterprise') return 'ROI + reliability proof';
+  if (segment === 'owner_operator') return 'speed to hire + simplicity';
+  if (role.toLowerCase().includes('recruit')) return 'pipeline support + efficiency';
+  return 'driver availability + fit';
+}
+
+/**
+ * Recommend best send windows by account/contact history.
+ */
+export async function getOptimalSendTime(input = {}) {
+  try {
+    const accountId = input.accountId || '';
+    const contactId = input.contactId || '';
+    if (!accountId && !contactId) {
+      return { success: false, error: 'accountId or contactId is required' };
+    }
+
+    const [emailsRes, smsRes] = await Promise.all([
+      dataAccess.queryRecords(COLLECTIONS.emails, {
+        filters: {
+          ...(accountId ? { account_id: accountId } : {}),
+          ...(contactId ? { contact_id: contactId } : {})
+        },
+        limit: 300,
+        suppressAuth: true
+      }),
+      dataAccess.queryRecords(COLLECTIONS.textMessages, {
+        filters: {
+          ...(accountId ? { account_id: accountId } : {}),
+          ...(contactId ? { contact_id: contactId } : {})
+        },
+        limit: 300,
+        suppressAuth: true
+      })
+    ]);
+
+    const buckets = {};
+    (emailsRes.items || []).forEach(e => applyTimingBucket(buckets, e.sent_at, e.status === 'replied' || e.clicked));
+    (smsRes.items || []).forEach(s => applyTimingBucket(buckets, s.sent_at, Boolean(s.response_text)));
+
+    const ranked = Object.values(buckets)
+      .map(b => ({ ...b, score: b.sent ? Math.round((b.positive / b.sent) * 100) : 0 }))
+      .sort((a, b) => b.score - a.score || b.sent - a.sent)
+      .slice(0, 3);
+
+    const recommended = ranked[0] || { window: '13:00-15:00 UTC', score: 0 };
+    return {
+      success: true,
+      recommendation: {
+        bestWindow: recommended.window,
+        score: recommended.score,
+        alternatives: ranked.slice(1).map(r => ({ window: r.window, score: r.score })),
+        timezone: input.timezone || 'UTC'
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
+function applyTimingBucket(buckets, isoString, positive) {
+  if (!isoString) return;
+  const dt = new Date(isoString);
+  const day = dt.getUTCDay();
+  const hour = dt.getUTCHours();
+  const dayLabel = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][day];
+  const start = Math.floor(hour / 2) * 2;
+  const end = start + 2;
+  const key = `${dayLabel} ${String(start).padStart(2, '0')}:00-${String(end).padStart(2, '0')}:00 UTC`;
+  if (!buckets[key]) buckets[key] = { window: key, sent: 0, positive: 0 };
+  buckets[key].sent += 1;
+  if (positive) buckets[key].positive += 1;
+}
+
+// ============================================================================
 // DATA FETCHING HELPERS
 // ============================================================================
 
@@ -557,6 +1077,22 @@ async function fetchSignalBatch(carrierDots) {
   }
 
   return signalMap;
+}
+
+async function findCurrentSignalByDot(carrierDot) {
+  if (!carrierDot) return null;
+  try {
+    const result = await dataAccess.queryRecords(COLLECTIONS.signals, {
+      filters: { carrier_dot: carrierDot },
+      sort: [{ field: 'created_at', direction: 'desc' }],
+      limit: 1,
+      suppressAuth: true
+    });
+    return (result.items || [])[0] || null;
+  } catch (error) {
+    console.warn('[b2bAIService] findCurrentSignalByDot error:', error.message);
+    return null;
+  }
 }
 
 // ============================================================================

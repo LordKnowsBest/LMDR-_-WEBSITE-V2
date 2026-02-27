@@ -1094,7 +1094,7 @@ $w('#searchResults').onClick((event) => {
 
 ### 7.2 Instrumenting Application Form
 
-**File:** `src/public/driver/DRIVER_APPLICATION.html` (or page code)
+**File:** `src/public/driver/DRIVER_DOCUMENT_UPLOAD.html` (or page code)
 
 ```javascript
 // Track form start
@@ -1289,3 +1289,4 @@ For optimal query performance, create these indexes:
 
 **FeatureFunnels:**
 - `funnelId` (unique)
+

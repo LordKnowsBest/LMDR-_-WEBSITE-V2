@@ -198,3 +198,63 @@ export async function getSnapshots(options = {}) {
     return { success: true, snapshots: res.items || [] };
   } catch (error) { return { success: false, error: error.message }; }
 }
+
+export async function getForecastAccuracyTrend(options = {}) {
+  try {
+    const days = Number(options.days || 180);
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const res = await dataAccess.queryRecords(COLLECTIONS.opportunities, {
+      filters: { stage: { hasSome: ['closed_won', 'closed_lost'] }, updated_at: { gte: since } },
+      limit: 1000,
+      suppressAuth: true
+    });
+
+    const closed = (res.items || []).filter(o => Number(o.ai_close_probability || 0) > 0);
+    if (!closed.length) {
+      return {
+        success: true,
+        accuracy: { period_days: days, sample_size: 0, brier_score: null, calibration_error: null, trend: [] }
+      };
+    }
+
+    let brierSum = 0;
+    let calErrorSum = 0;
+    const byMonth = {};
+    closed.forEach(o => {
+      const p = Math.max(0, Math.min(1, Number(o.ai_close_probability || 0) / 100));
+      const y = o.stage === 'closed_won' ? 1 : 0;
+      const brier = Math.pow(p - y, 2);
+      brierSum += brier;
+      calErrorSum += Math.abs((p * 100) - (y * 100));
+
+      const keyDate = new Date(o.updated_at || o.created_at || Date.now());
+      const key = `${keyDate.getUTCFullYear()}-${String(keyDate.getUTCMonth() + 1).padStart(2, '0')}`;
+      if (!byMonth[key]) byMonth[key] = { month: key, total: 0, correct: 0, brier_sum: 0 };
+      byMonth[key].total += 1;
+      byMonth[key].correct += (p >= 0.5) === (y === 1) ? 1 : 0;
+      byMonth[key].brier_sum += brier;
+    });
+
+    const trend = Object.values(byMonth)
+      .map(m => ({
+        month: m.month,
+        sample_size: m.total,
+        directional_accuracy: Math.round((m.correct / m.total) * 100),
+        brier_score: Number((m.brier_sum / m.total).toFixed(4))
+      }))
+      .sort((a, b) => a.month.localeCompare(b.month));
+
+    return {
+      success: true,
+      accuracy: {
+        period_days: days,
+        sample_size: closed.length,
+        brier_score: Number((brierSum / closed.length).toFixed(4)),
+        calibration_error: Number((calErrorSum / closed.length).toFixed(2)),
+        trend
+      }
+    };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}

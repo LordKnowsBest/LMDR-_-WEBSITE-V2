@@ -7,10 +7,10 @@
 ## Phase 1: Data Model & Test Infrastructure
 
 ### 1.1 Test Fixtures & Utilities
-- [ ] Task: Create `src/test/fixtures/drivers.js` with mock driver profiles (searchable, hidden, various qualifications) (File missing)
-- [ ] Task: Create `src/test/fixtures/preferences.js` with mock carrier hiring preferences (File missing)
-- [ ] Task: Create `src/test/fixtures/subscriptions.js` with mock subscription tiers (free, pro, enterprise, exhausted) (File missing)
-- [ ] Task: Extend `src/test/utils.js` with `createMockQueryWithFilters()` for advanced query simulation (File missing)
+- [ ] Task: Create `src/public/__tests__/reverseMatching.integration.test.js (inline driver fixtures)` with mock driver profiles (searchable, hidden, various qualifications) (File missing)
+- [ ] Task: Create `src/public/__tests__/reverseMatching.integration.test.js (inline preferences fixtures)` with mock carrier hiring preferences (File missing)
+- [ ] Task: Create `src/public/__tests__/reverseMatching.integration.test.js (inline subscription fixtures)` with mock subscription tiers (free, pro, enterprise, exhausted) (File missing)
+- [ ] Task: Extend `src/public/__tests__/setup.js` with `createMockQueryWithFilters()` for advanced query simulation (File missing)
 
 ### 1.2 Database Collections
 - [x] Task: Create `CarrierHiringPreferences` collection in Wix with schema from spec
@@ -165,7 +165,7 @@
 ## Phase 7: Integration Tests
 
 ### 7.1 End-to-End Flow Tests
-- [ ] Task: Write `reverseMatching.integration.test.js`
+- [x] Task: Write `src/public/__tests__/reverseMatching.integration.test.js`
 - [ ] Task: Write E2E test: Pro subscriber search → view → contact flow
 - [ ] Task: Write E2E test: Free user sees interest count, blocked from search
 - [ ] Task: Write E2E test: Quota exhaustion blocks further views
@@ -310,3 +310,4 @@ Before marking any phase complete:
 - [ ] JSDoc documentation complete
 - [ ] Security review passed
 - [ ] Manual verification completed
+

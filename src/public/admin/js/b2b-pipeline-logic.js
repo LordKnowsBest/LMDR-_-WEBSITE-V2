@@ -21,8 +21,9 @@ var PipelineLogic = (function () {
 
   function refreshPipeline() {
     var ownerId = document.getElementById('ownerFilter').value;
+    var useAI = document.getElementById('aiForecastToggle').checked;
     PipelineBridge.sendToVelo({ action: 'getPipeline', ownerId: ownerId });
-    PipelineBridge.sendToVelo({ action: 'getForecast', ownerId: ownerId });
+    PipelineBridge.sendToVelo({ action: 'getForecast', ownerId: ownerId, useAI: useAI });
   }
 
   function applyFilters() { refreshPipeline(); }
@@ -50,7 +51,8 @@ var PipelineLogic = (function () {
     }
     var stageColors = { prospecting: 'border-slate-500', discovery: 'border-blue-500', proposal: 'border-amber-500', negotiation: 'border-purple-500' };
     container.innerHTML = stages.map(function (stage) {
-      return '<div class="stage-column flex-shrink-0 flex flex-col"><div class="flex items-center justify-between mb-3"><div class="flex items-center gap-2"><div class="w-2.5 h-2.5 rounded-full ' + (stageColors[stage.stage_id] || 'border-slate-500') + ' bg-current opacity-60"></div><h3 class="text-sm font-bold text-slate-200">' + esc(stage.name) + '</h3></div><div class="text-right"><span class="text-xs font-semibold text-slate-300">' + stage.opportunity_count + '</span><span class="text-xs text-slate-500 ml-1">' + formatCurrency(stage.value_sum) + '</span></div></div><div class="flex-1 space-y-2 bg-slate-900/30 rounded-xl p-2 min-h-[200px]">' + (stage.opportunities || []).map(function (opp) { return renderDealCard(opp, stage.stage_id); }).join('') + (stage.opportunities.length === 0 ? '<p class="text-xs text-slate-600 text-center py-8">No deals</p>' : '') + '</div></div>';
+      var count = stage.opportunity_count || (stage.opportunities || []).length;
+      return '<div class="stage-column flex-shrink-0 flex flex-col"><div class="flex items-center justify-between mb-3"><div class="flex items-center gap-2"><div class="w-2.5 h-2.5 rounded-full ' + (stageColors[stage.stage_id] || 'border-slate-500') + ' bg-current opacity-60"></div><h3 class="text-sm font-bold text-slate-200">' + esc(stage.name) + '</h3></div><div class="text-right"><span class="text-xs font-semibold text-slate-300">' + count + '</span><span class="text-xs text-slate-500 ml-1">' + formatCurrency(stage.value_sum) + '</span></div></div><div class="flex-1 space-y-2 bg-slate-900/30 rounded-xl p-2 min-h-[200px]">' + (stage.opportunities || []).map(function (opp) { return renderDealCard(opp, stage.stage_id); }).join('') + (stage.opportunities.length === 0 ? '<p class="text-xs text-slate-600 text-center py-8">No deals</p>' : '') + '</div></div>';
     }).join('');
   }
 
@@ -84,6 +86,19 @@ var PipelineLogic = (function () {
     setText('fcPipeline', formatCurrency(fc.pipeline || 0));
     setText('fcDeals', String(fc.deal_count || 0));
     setText('fcCoverage', pipelineData.summary && pipelineData.summary.pipeline_coverage ? pipelineData.summary.pipeline_coverage + 'x' : '\u2014');
+    renderDivergence(fc.divergence_deals || []);
+  }
+
+  function renderDivergence(deals) {
+    var bar = document.getElementById('divergenceBar');
+    if (!bar) return;
+    if (!deals || deals.length === 0) {
+      bar.classList.add('hidden');
+      bar.textContent = '';
+      return;
+    }
+    bar.classList.remove('hidden');
+    bar.textContent = deals.length + ' deal(s) have significant AI vs stage forecast divergence.';
   }
 
   function viewDeal(oppId, accountId) {

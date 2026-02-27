@@ -28,14 +28,14 @@ Optimize the carrier onboarding experience by transitioning from a lead capture 
 - [x] **Task:** Implement `src/pages/Checkout.kbyzk.js`.
     - [x] Retrieve `leadId` from URL parameters.
     - [x] Fetch lead details to personalize the checkout (e.g., "Ready to find your 5 Class A drivers, [Company Name]?").
-- [x] **Task:** Create `src/public/STRIPE_PAYMENT_ELEMENT.html` (Missing).
+- [x] **Task:** Create `src/public/utility/STRIPE_PAYMENT_ELEMENT.html` (Missing).
     - [x] Host Stripe Elements or redirect to Stripe Hosted Checkout.
     - [x] Frame the payment as a "Refundable Activation Deposit".
 
 ## Phase 4: Post-Payment Fulfillment
 - [x] **Task:** Update `carrierLeadsService.jsw` status to `activated_paid` when webhook confirms payment.
 - [x] **Task:** Implement `src/backend/emailService.jsw` trigger for "Payment Received" email.
-- [x] **Task:** Create a Success Page (`src/public/Payment_Success.html`) (Missing) with:
+- [x] **Task:** Create a Success Page (`src/public/utility/Payment_Success.html`) (Missing) with:
     - [x] Confirmation of search activation.
     - [x] Calendly embed for onboarding.
 
@@ -57,6 +57,7 @@ Optimize the carrier onboarding experience by transitioning from a lead capture 
 
 ### New Files
 - `src/backend/stripeService.jsw`
-- `src/public/STRIPE_PAYMENT_ELEMENT.html`
-- `src/public/Payment_Success.html`
-- `src/pages/Payment_Success.xxxxx.js`
+- `src/public/utility/STRIPE_PAYMENT_ELEMENT.html`
+- `src/public/utility/Payment_Success.html`
+- `src/pages/SUBSCRIPTION SUCCESS.o76p8.js`
+

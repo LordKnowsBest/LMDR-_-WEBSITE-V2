@@ -51,7 +51,8 @@ const LLM_CONFIG = {
   maxTokens: {
     email: 800,
     sms: 100,
-    callScript: 1200
+    callScript: 1200,
+    summary: 300
   }
 };
 
@@ -1062,4 +1063,177 @@ export async function clearExpiredCache() {
     console.error('Error clearing expired cache:', error);
     return { success: false, error: error.message };
   }
+}
+
+/**
+ * Summarize an account timeline into concise rep handoff context.
+ *
+ * @param {string} accountId
+ * @param {Object} [options]
+ * @returns {Promise<{success: boolean, summary?: Object, cached?: boolean, error?: string}>}
+ */
+export async function summarizeTimeline(accountId, options = {}) {
+  const trace = await startTrace('b2b-content-summary', {
+    accountId,
+    tags: ['b2b', 'content-ai', 'timeline-summary']
+  }).catch(() => ({ traceId: null }));
+  const traceId = trace.traceId;
+  const startTime = Date.now();
+
+  try {
+    if (!accountId) {
+      await endTrace(traceId, 'failed', { reason: 'missing_account_id' }).catch(() => {});
+      return { success: false, error: 'Account ID is required' };
+    }
+
+    const timelineResult = await getAccountTimeline(accountId, { limit: options.limit || 25 }).catch(() => ({ success: false, activities: [] }));
+    const activities = timelineResult.success ? (timelineResult.activities || []) : [];
+    const latestActivityAt = activities[0]?.created_at || '';
+
+    if (!options.forceRefresh) {
+      const cached = await getCachedSummary(accountId);
+      if (cached && (!latestActivityAt || new Date(cached.created_at) >= new Date(latestActivityAt))) {
+        await endTrace(traceId, 'completed', { fromCache: true, elapsed: Date.now() - startTime }).catch(() => {});
+        return { success: true, summary: cached.summary, cached: true };
+      }
+    }
+
+    const context = await assembleContext(accountId, '', { summaryMode: true });
+    const signalText = context.signal
+      ? `Signal ${context.signal.score}; ${context.signal.driverCount} high-match drivers.`
+      : 'No current match signal.';
+
+    const timelineText = activities.slice(0, 10).map(a =>
+      `${a.created_at || ''} | ${a.type || 'activity'} | ${a.subject || a.notes || a.outcome || ''}`
+    ).join('\n');
+
+    const systemPrompt = `${BRAND_VOICE.core}
+You summarize sales timelines in 3-5 concise sentences.
+Output ONLY valid JSON with keys: summary, relationshipStatus, lastInteraction, risks, nextStep.`;
+    const userPrompt = `Account: ${context.account.name}
+Segment: ${context.account.segment}
+Region: ${context.account.region || 'N/A'}
+Fleet: ${context.account.fleetSize || 0}
+${signalText}
+
+Recent timeline:
+${timelineText || 'No recent activity'}
+`;
+
+    const llm = await callClaudeLLM(systemPrompt, userPrompt, LLM_CONFIG.maxTokens.summary, traceId);
+    const summaryPayload = llm.success
+      ? parseSummaryResponse(llm.text, context, activities)
+      : buildFallbackSummary(context, activities);
+
+    const summaryRecord = {
+      ...summaryPayload,
+      updatedAt: new Date().toISOString()
+    };
+
+    await cacheSummary(accountId, summaryRecord);
+    await endTrace(traceId, 'completed', { fromCache: false, fallback: !llm.success, elapsed: Date.now() - startTime }).catch(() => {});
+    return { success: true, summary: summaryRecord, cached: false };
+  } catch (error) {
+    await endTrace(traceId, 'failed', { error: error.message, elapsed: Date.now() - startTime }).catch(() => {});
+    return { success: false, error: error.message || 'Failed to summarize timeline' };
+  }
+}
+
+async function getCachedSummary(accountId) {
+  try {
+    const cacheKey = `summary:${accountId}`;
+    const records = await findByField(COLLECTIONS.contentCache, 'cache_key', cacheKey);
+    if (!records || !records.length) return null;
+    const row = records[0];
+    const createdAt = new Date(row.created_at || 0);
+    if ((Date.now() - createdAt.getTime()) > CACHE_TTL_HOURS * 60 * 60 * 1000) {
+      return null;
+    }
+    return {
+      created_at: row.created_at,
+      summary: JSON.parse(row.content || '{}')
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+async function cacheSummary(accountId, summary) {
+  const cacheKey = `summary:${accountId}`;
+  const existing = await findByField(COLLECTIONS.contentCache, 'cache_key', cacheKey);
+  const record = {
+    cache_key: cacheKey,
+    account_id: accountId,
+    contact_id: '',
+    channel: 'summary',
+    sequence_step_id: '',
+    content: JSON.stringify(summary),
+    created_at: new Date().toISOString()
+  };
+  if (existing && existing.length > 0) {
+    await updateData(COLLECTIONS.contentCache, existing[0]._id || existing[0].id, record);
+  } else {
+    await insertData(COLLECTIONS.contentCache, record);
+  }
+}
+
+function parseSummaryResponse(text, context, activities) {
+  try {
+    const cleaned = text.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('No JSON found');
+    const parsed = JSON.parse(match[0]);
+    return {
+      summary: parsed.summary || '',
+      relationshipStatus: parsed.relationshipStatus || inferRelationshipStatus(activities),
+      lastInteraction: parsed.lastInteraction || summarizeLastInteraction(activities),
+      risks: Array.isArray(parsed.risks) ? parsed.risks : inferRiskHints(activities),
+      nextStep: parsed.nextStep || inferNextStep(activities, context)
+    };
+  } catch (error) {
+    return buildFallbackSummary(context, activities);
+  }
+}
+
+function buildFallbackSummary(context, activities) {
+  return {
+    summary: `${context.account.name} (${context.account.segment}) has ${activities.length} recent timeline events. ${summarizeLastInteraction(activities)}.`,
+    relationshipStatus: inferRelationshipStatus(activities),
+    lastInteraction: summarizeLastInteraction(activities),
+    risks: inferRiskHints(activities),
+    nextStep: inferNextStep(activities, context)
+  };
+}
+
+function inferRelationshipStatus(activities) {
+  if (!activities || !activities.length) return 'new';
+  const hasReply = activities.some(a => String(a.outcome || '').toLowerCase().includes('replied'));
+  if (hasReply) return 'engaged';
+  const last = new Date(activities[0].created_at || 0).getTime();
+  if (!last) return 'active';
+  const days = Math.round((Date.now() - last) / 86400000);
+  return days > 14 ? 'stale' : 'active';
+}
+
+function summarizeLastInteraction(activities) {
+  if (!activities || !activities.length) return 'No recorded interaction yet';
+  const last = activities[0];
+  const when = last.created_at ? new Date(last.created_at).toLocaleDateString() : 'recently';
+  return `Last interaction was ${last.type || 'activity'} on ${when}`;
+}
+
+function inferRiskHints(activities) {
+  if (!activities || !activities.length) return ['no_recent_touchpoints'];
+  const lastTs = new Date(activities[0].created_at || 0).getTime();
+  const daysSince = lastTs ? Math.round((Date.now() - lastTs) / 86400000) : 999;
+  const risks = [];
+  if (daysSince > 10) risks.push('touch_overdue');
+  if (!activities.some(a => String(a.type || '').toLowerCase() === 'meeting')) risks.push('no_meeting_logged');
+  return risks.length ? risks : ['no_immediate_risk'];
+}
+
+function inferNextStep(activities, context) {
+  const task = (activities || []).find(a => String(a.type || '').toLowerCase() === 'task' && a.subject);
+  if (task) return task.subject;
+  return `Send ${context.account.segment === 'enterprise' ? 'ROI' : 'availability'} follow-up and schedule call`;
 }

@@ -495,7 +495,7 @@ export const mockSubscriptions = {
 
 ### Extended createMockQuery
 
-Add to `src/test/utils.js`:
+Add to `src/public/__tests__/setup.js`:
 
 ```javascript
 /**
@@ -606,7 +606,7 @@ CI=true npm test -- --coverage --coverageReporters=html
 CI=true npm test -- --testPathPattern='driver|subscription|carrierPreferences|Outreach'
 
 # Run specific test file
-CI=true npm test -- src/backend/driverScoring.test.js
+CI=true npm test -- src/public/__tests__/reverseMatching.integration.test.js
 
 # Run in watch mode (development)
 npm test -- --watch --testPathPattern='driverScoring'
@@ -658,3 +658,4 @@ Before marking any phase complete:
 - [ ] Error cases covered (auth failures, validation errors)
 - [ ] Mock data is realistic and comprehensive
 - [ ] No flaky tests (run 3x to verify)
+

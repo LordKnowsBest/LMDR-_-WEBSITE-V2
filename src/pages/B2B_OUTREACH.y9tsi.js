@@ -18,7 +18,8 @@ const MESSAGE_REGISTRY = {
     'getSequences', 'getSequence', 'saveSequence', 'addStep',
     'getThrottleStatus',
     'generateEmailContent', 'generateSmsContent', 'generateCallScript',
-    'saveDraft', 'approveDraft', 'getPendingDrafts'
+    'saveDraft', 'approveDraft', 'getPendingDrafts',
+    'getSequenceRecommendation', 'getOptimalSendTime'
   ],
   // Outbound to HTML
   outbound: [
@@ -26,6 +27,7 @@ const MESSAGE_REGISTRY = {
     'throttleStatus', 'throttleLoaded',
     'emailContentGenerated', 'smsContentGenerated', 'callScriptGenerated',
     'draftSaved', 'draftApproved', 'draftsLoaded',
+    'recommendationLoaded', 'sendTimeLoaded',
     'actionSuccess', 'actionError'
   ]
 };

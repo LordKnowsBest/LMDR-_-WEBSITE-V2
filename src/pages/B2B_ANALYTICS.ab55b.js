@@ -14,7 +14,8 @@ import {
     getCostPerAcquisition,
     getCompetitorIntel,
     addCompetitorIntel,
-    saveSnapshot
+    saveSnapshot,
+    getForecastAccuracyTrend
 } from 'backend/b2bAnalyticsService';
 
 import { getStageConversions } from 'backend/b2bPipelineService';
@@ -76,6 +77,9 @@ async function routeMessage(component, msg) {
         case 'getCompetitorIntel':
             await handleGetIntel(component);
             break;
+        case 'getForecastAccuracy':
+            await handleGetForecastAccuracy(component, msg);
+            break;
         case 'saveSnapshot':
             await handleSaveSnapshot(component, msg);
             break;
@@ -134,6 +138,16 @@ async function handleGetIntel(component) {
     } catch (error) {
         console.error('B2B_ANALYTICS: getCompetitorIntel error:', error);
         safeSend(component, { action: 'actionError', message: 'Failed to load competitor intel.' });
+    }
+}
+
+async function handleGetForecastAccuracy(component, msg) {
+    try {
+        const accuracy = await getForecastAccuracyTrend({ days: msg.days || 180 });
+        safeSend(component, { action: 'forecastAccuracyLoaded', payload: accuracy.accuracy || null });
+    } catch (error) {
+        console.error('B2B_ANALYTICS: getForecastAccuracy error:', error);
+        safeSend(component, { action: 'actionError', message: 'Failed to load forecast accuracy.' });
     }
 }
 

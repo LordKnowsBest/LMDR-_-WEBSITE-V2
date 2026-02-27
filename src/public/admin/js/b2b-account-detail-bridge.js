@@ -5,7 +5,7 @@
 var AccountDetailBridge = (function () {
   'use strict';
 
-  var VALID_ACTIONS = ['init', 'accountLoaded', 'signalLoaded', 'opportunityLoaded', 'contactsLoaded', 'timelineLoaded', 'risksLoaded', 'actionSuccess', 'actionError'];
+  var VALID_ACTIONS = ['init', 'accountLoaded', 'signalLoaded', 'opportunityLoaded', 'contactsLoaded', 'timelineLoaded', 'risksLoaded', 'summaryLoaded', 'actionSuccess', 'actionError'];
 
   function isValidMessage(d) {
     return d && typeof d === 'object' && typeof d.action === 'string' && VALID_ACTIONS.indexOf(d.action) !== -1;

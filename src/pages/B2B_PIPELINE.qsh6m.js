@@ -81,8 +81,9 @@ async function handleGetForecast(component, msg) {
     try {
         const options = {};
         if (msg.ownerId) options.owner_id = msg.ownerId;
+        if (typeof msg.useAI === 'boolean') options.useAI = msg.useAI;
         const forecast = await getForecast(options);
-        safeSend(component, { action: 'forecastLoaded', payload: forecast });
+        safeSend(component, { action: 'forecastLoaded', payload: forecast.forecast || forecast });
     } catch (error) {
         console.error('B2B_PIPELINE: getForecast error:', error);
         safeSend(component, { action: 'actionError', message: 'Failed to load forecast.' });

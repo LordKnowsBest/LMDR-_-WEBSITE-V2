@@ -15,7 +15,11 @@ Expected behavior:
 ## Automated Validation Evidence
 Executed:
 ```bash
-npx jest src/public/__tests__/apiAuthService.test.js src/public/__tests__/rateLimitService.test.js src/public/__tests__/apiGateway.external.test.js --runInBand
+npx jest src/public/__tests__/apiAuthService.test.js --runInBand
+
+npx jest src/public/__tests__/rateLimitService.test.js --runInBand
+
+npx jest src/public/__tests__/apiGateway.external.test.js --runInBand
 ```
 
 Validated:
@@ -25,3 +29,4 @@ Validated:
 
 ## Conductor Verification
 Phase 1 gateway infrastructure verification is complete and mapped to tests + index plan artifact.
+

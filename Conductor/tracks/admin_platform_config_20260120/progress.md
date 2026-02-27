@@ -7,10 +7,10 @@
   - `src/backend/notificationRulesService.jsw`
   - `src/backend/notificationDispatcher.jsw`
   - `src/backend/experimentService.jsw`
-- Missing admin pages added:
-  - `src/pages/ADMIN_NOTIFICATION_RULES.js`
+- Admin UI modules added:
+  - `src/public/admin/js/admin-notification-rules-logic.js`
   - `src/public/admin/ADMIN_NOTIFICATION_RULES.html`
-  - `src/pages/ADMIN_AB_TESTS.js`
+  - `src/public/admin/js/admin-ab-tests-logic.js`
   - `src/public/admin/ADMIN_AB_TESTS.html`
 - Frontend SDK/bridge additions:
   - `src/public/js/lmdr-experiment.js`
@@ -52,3 +52,4 @@
   - Phase 2 (Email Templates): complete
   - Phase 3 (Notification Rules): complete
   - Phase 4 (A/B Tests): complete
+

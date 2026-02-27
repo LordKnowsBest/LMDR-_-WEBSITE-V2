@@ -11,6 +11,7 @@ import {
     createContact,
     trackLeadSource
 } from 'backend/b2bAccountService';
+import { scoreAndRouteLead } from 'backend/b2bAIService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
@@ -101,9 +102,19 @@ async function handleCaptureLead(component, msg) {
             await trackLeadSource(accountId, lead.captureSource, '', lead.eventName || '');
         }
 
+        const routeResult = await scoreAndRouteLead({ ...lead, accountId }).catch(() => ({ success: false }));
+        const qualification = routeResult.success ? routeResult.result : null;
+
         safeSend(component, {
             action: 'leadCaptured',
-            payload: { accountId, companyName: lead.companyName }
+            payload: {
+                accountId,
+                companyName: lead.companyName,
+                leadScore: qualification?.score || 0,
+                leadClassification: qualification?.classification || 'cold',
+                assignedOwnerId: qualification?.assignedOwnerId || '',
+                opportunityCreated: qualification?.opportunityCreated || false
+            }
         });
     } catch (error) {
         console.error('B2B_LEAD_CAPTURE: captureLead error:', error);

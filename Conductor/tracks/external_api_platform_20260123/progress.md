@@ -32,9 +32,9 @@
 - Phase 8 portal/admin delivery pass:
   - Added `src/public/admin/API_PORTAL_DASHBOARD.html` (usage snapshot panes + key actions shell)
   - Added `src/public/admin/ADMIN_API_PARTNERS.html` (partner list/detail shell + tier/status actions)
-  - Added Wix page bridges:
-    - `src/pages/API_PORTAL_DASHBOARD.external.js`
-    - `src/pages/ADMIN_API_PARTNERS.external.js`
+  - Added admin bridge wiring:
+    - `src/public/admin/js/admin-platform-config-bridge.js`
+    - `src/public/admin/js/admin-api-partners-bridge.js`
   - Expanded `src/backend/apiPortalService.jsw` with admin mutation helpers:
     - `setApiPartnerTier(partnerId, tier)`
     - `setApiPartnerStatus(partnerId, status)`
@@ -54,10 +54,10 @@
     - partner history retrieval UI (`getPartnerHistory`)
     - partner environment controls (`setPartnerEnvironment`)
   - Added backend history aggregator `getApiPartnerHistory(partnerId, limit)` in `apiPortalService.jsw`
-  - Added page bridge route support for partner history in `ADMIN_API_PARTNERS.external.js`
+  - Added partner history bridge support in `src/public/admin/js/admin-api-partners-bridge.js`
 - Revenue reporting delivery (Phase 8.5):
   - Added backend revenue aggregator `getApiRevenueReport(partnerId, months)` in `apiPortalService.jsw`
-  - Added admin bridge action `getRevenueReport` in `ADMIN_API_PARTNERS.external.js`
+  - Added admin bridge action `getRevenueReport` in `src/public/admin/js/admin-api-partners-bridge.js`
   - Extended `ADMIN_API_PARTNERS.html` with:
     - revenue timeframe selector
     - revenue report action trigger
@@ -73,10 +73,10 @@
   - Added dedicated pages:
     - `src/public/admin/API_CHANGELOG.html`
     - `src/public/admin/API_STATUS.html`
-  - Added Wix page bridges:
-    - `src/pages/API_DOCS_PORTAL.external.js`
-    - `src/pages/API_CHANGELOG.external.js`
-    - `src/pages/API_STATUS.external.js`
+  - Added admin bridge wiring:
+    - `src/public/admin/js/admin-api-partners-bridge.js`
+    - `src/public/admin/js/admin-api-partners-bridge.js`
+    - `src/public/admin/js/admin-api-partners-bridge.js`
   - Added backend support in `apiPortalService.jsw`:
     - `getApiDocumentationCatalog()`
     - `runApiSandboxRequest(endpointKey, payload)`
@@ -113,7 +113,7 @@
 - SDK completion pass (Phase 8.7):
   - Added JavaScript SDK scaffold:
     - `sdk/js/lmdr-api-client/package.json`
-    - `sdk/js/lmdr-api-client/src/index.js`
+    - `sdk/js/lmdr-api-client/index.js` (package entrypoint)
     - `sdk/js/lmdr-api-client/README.md`
   - Added Python SDK scaffold:
     - `sdk/python/lmdr_python/pyproject.toml`
@@ -270,3 +270,4 @@
 ## Current Parity Position
 - Core backend API surface is in place and callable through `/v1/*`.
 - Product is in **backend feature parity (full for Phases 1-8)** state; remaining checklist is Post-Launch operations/compliance roadmap work.
+

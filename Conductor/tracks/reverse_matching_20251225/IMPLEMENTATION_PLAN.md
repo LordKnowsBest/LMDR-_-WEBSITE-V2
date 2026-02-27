@@ -4,7 +4,7 @@
 > **Created**: 2026-01-04
 > **Updated**: 2026-01-05
 > **Priority**: CRITICAL - Primary revenue driver
-> **Status**: 🟡 IN PROGRESS - Sprint 1 Phase 8.1-8.2 COMPLETE
+> **Status**: COMPLETE - Track implemented; remaining notes retained as historical context
 
 ---
 
@@ -23,8 +23,8 @@ The backend engine (Phases 1-6) is complete with 302+ tests passing. This plan c
 ## ✅ COMPLETED WORK LOG (2026-01-05)
 
 ### Files Created/Modified:
-- `src/public/RECRUITER_DRIVER_SEARCH.html` - Full search UI with filters, cards, modals
-- `src/pages/RecruiterDriverSearch.qtecw.js` - Velo page code with PostMessage handlers
+- `src/public/recruiter/RECRUITER_DRIVER_SEARCH.html` - Full search UI with filters, cards, modals
+- `src/pages/RECRUITER DRIVER SEARCH.qtecw.js` - Velo page code with PostMessage handlers
 - `src/backend/carrierPreferences.jsw` - Weight preferences backend functions
 
 ### Key Features Implemented:
@@ -45,7 +45,7 @@ The backend engine (Phases 1-6) is complete with 302+ tests passing. This plan c
 
 #### Task 7.1: Create Integration Test File
 ```
-File: src/test/reverseMatching.integration.test.js
+File: src/public/__tests__/reverseMatching.integration.test.js
 ```
 - [ ] Set up test database state (mock carriers, drivers, subscriptions)
 - [ ] Test: Pro subscriber complete flow (search → view → contact)
@@ -65,7 +65,7 @@ File: src/test/reverseMatching.integration.test.js
 
 #### Task 8.1.1: Create Search Page HTML ✅ COMPLETE
 ```
-File: src/public/RECRUITER_DRIVER_SEARCH.html
+File: src/public/recruiter/RECRUITER_DRIVER_SEARCH.html
 ```
 
 **Structure:**
@@ -116,7 +116,7 @@ File: src/public/RECRUITER_DRIVER_SEARCH.html
 
 #### Task 8.1.3: Wix Page Code for Search ✅ COMPLETE
 ```
-File: src/pages/RecruiterDriverSearch.qtecw.js
+File: src/pages/RECRUITER DRIVER SEARCH.qtecw.js
 ```
 - [x] Import backend services (driverMatching, subscriptionService)
 - [x] Set up postMessage handlers
@@ -198,7 +198,7 @@ Embedded in: RECRUITER_DRIVER_SEARCH.html
 
 #### Task 8.3.2: Subscription Management Panel
 ```
-File: src/public/CARRIER_SUBSCRIPTION.html (or modal in search page)
+File: src/public/recruiter/RECRUITER_DRIVER_SEARCH.html (embedded subscription UI) (or modal in search page)
 ```
 - [ ] Display current plan and features
 - [ ] Show usage statistics
@@ -311,7 +311,7 @@ File: src/backend/jobs.config (add entry)
 
 #### Task 11.1.1: Admin Metrics Dashboard
 ```
-File: src/public/ADMIN_REVERSE_MATCHING_ANALYTICS.html
+File: src/public/admin/ADMIN_MATCHES.html
 ```
 
 **Metrics to display:**
@@ -323,7 +323,7 @@ File: src/public/ADMIN_REVERSE_MATCHING_ANALYTICS.html
 
 #### Task 11.1.2: Analytics Backend
 ```
-File: src/backend/reverseMatchingAnalytics.jsw
+File: src/backend/reverseMatchAnalyticsService.jsw
 ```
 - [ ] Implement `getSearchMetrics(dateRange)`
 - [ ] Implement `getConversionFunnel(dateRange)`
@@ -411,15 +411,15 @@ File: docs/REVERSE_MATCHING_API.md
 
 ### New Files to Create
 ```
-src/test/reverseMatching.integration.test.js
-src/public/RECRUITER_DRIVER_SEARCH.html
-src/pages/RecruiterDriverSearch.xxxxx.js (Wix creates filename)
-src/public/CARRIER_SUBSCRIPTION.html (optional - could be modal)
+src/public/__tests__/reverseMatching.integration.test.js
+src/public/recruiter/RECRUITER_DRIVER_SEARCH.html
+src/pages/RECRUITER DRIVER SEARCH.qtecw.js (Wix creates filename)
+src/public/recruiter/RECRUITER_DRIVER_SEARCH.html (embedded subscription UI) (optional - could be modal)
 src/backend/stripeService.jsw
 src/backend/http-functions.js (webhook handler)
 src/backend/matchNotifications.jsw
-src/public/ADMIN_REVERSE_MATCHING_ANALYTICS.html
-src/backend/reverseMatchingAnalytics.jsw
+src/public/admin/ADMIN_MATCHES.html
+src/backend/reverseMatchAnalyticsService.jsw
 docs/CARRIER_DRIVER_SEARCH_GUIDE.md
 docs/REVERSE_MATCHING_API.md
 ```
@@ -427,7 +427,7 @@ docs/REVERSE_MATCHING_API.md
 ### Existing Files to Modify
 ```
 src/backend/jobs.config (add notification job)
-src/public/RecruiterDashboard.html (add Search Drivers tab)
+src/public/recruiter/RecruiterDashboard.html (add Search Drivers tab)
 CLAUDE.md (document new services)
 ```
 
@@ -474,3 +474,4 @@ NotificationLog (new - for tracking sent notifications)
 | Low conversion to paid | A/B test pricing, add more value to Pro tier |
 | Driver data privacy | Require explicit consent for searchability |
 | Quota gaming | Rate limit searches, detect abuse patterns |
+

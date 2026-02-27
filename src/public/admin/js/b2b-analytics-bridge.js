@@ -5,7 +5,7 @@
 var AnalyticsBridge = (function () {
   'use strict';
 
-  var VALID_ACTIONS = ['init', 'kpisLoaded', 'conversionsLoaded', 'sourcesLoaded', 'cpaLoaded', 'intelLoaded', 'snapshotSaved', 'actionError'];
+  var VALID_ACTIONS = ['init', 'kpisLoaded', 'conversionsLoaded', 'sourcesLoaded', 'cpaLoaded', 'intelLoaded', 'snapshotSaved', 'forecastAccuracyLoaded', 'actionError'];
 
   function isValidMessage(d) {
     return d && typeof d === 'object' && typeof d.action === 'string' && VALID_ACTIONS.indexOf(d.action) !== -1;

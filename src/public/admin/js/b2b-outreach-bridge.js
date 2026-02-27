@@ -5,7 +5,7 @@
 var OutreachBridge = (function () {
   'use strict';
 
-  var VALID_ACTIONS = ['init','sequencesLoaded','sequenceLoaded','throttleStatus','sequenceSaved','stepSaved','actionSuccess','actionError','emailContentGenerated','smsContentGenerated','callScriptGenerated','draftSaved','draftApproved','draftsLoaded'];
+  var VALID_ACTIONS = ['init','sequencesLoaded','sequenceLoaded','throttleStatus','sequenceSaved','stepSaved','actionSuccess','actionError','emailContentGenerated','smsContentGenerated','callScriptGenerated','draftSaved','draftApproved','draftsLoaded','recommendationLoaded','sendTimeLoaded'];
 
   function isValidMessage(d) {
     return d && typeof d === 'object' && typeof d.action === 'string' && VALID_ACTIONS.includes(d.action);

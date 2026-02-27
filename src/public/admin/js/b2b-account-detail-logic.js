@@ -16,6 +16,7 @@ var AccountDetailLogic = (function () {
       contactsLoaded: function (d) { renderContacts(d.payload); },
       timelineLoaded: function (d) { renderTimeline(d.payload); },
       risksLoaded: function (d) { renderRisks(d.payload); },
+      summaryLoaded: function (d) { renderSummary(d.payload); },
       actionSuccess: function (d) { showToast(d.message || 'Done', 'success'); },
       actionError: function (d) { showToast(d.message || 'Error', 'error'); }
     });
@@ -28,6 +29,7 @@ var AccountDetailLogic = (function () {
     AccountDetailBridge.sendToVelo({ action: 'getContacts', accountId: accountId });
     AccountDetailBridge.sendToVelo({ action: 'getTimeline', accountId: accountId, limit: 30 });
     AccountDetailBridge.sendToVelo({ action: 'getRisks', accountId: accountId });
+    AccountDetailBridge.sendToVelo({ action: 'getAccountSummary', accountId: accountId });
   }
 
   function renderAccount(account) {
@@ -87,11 +89,23 @@ var AccountDetailLogic = (function () {
     }).join('');
   }
 
+  function renderSummary(payload) {
+    var summary = payload && payload.summary;
+    if (!summary) return;
+    setText('aiSummaryText', summary.summary || 'No summary available.');
+    setText('aiSummaryMeta', 'Status: ' + (summary.relationshipStatus || 'unknown') + ' • Updated: ' + (summary.updatedAt ? new Date(summary.updatedAt).toLocaleString() : 'now'));
+  }
+
   function action(type) {
     AccountDetailBridge.sendToVelo({ action: 'accountAction', type: type, accountId: currentAccountId });
   }
 
   function goBack() { AccountDetailBridge.sendToVelo({ action: 'navigate', target: 'dashboard' }); }
+
+  function refreshSummary() {
+    if (!currentAccountId) return;
+    AccountDetailBridge.sendToVelo({ action: 'getAccountSummary', accountId: currentAccountId, forceRefresh: true });
+  }
 
   function setText(id, t) { var el = document.getElementById(id); if (el) el.textContent = t; }
   function esc(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
@@ -101,6 +115,7 @@ var AccountDetailLogic = (function () {
   function exposeGlobals() {
     window.action = action;
     window.goBack = goBack;
+    window.refreshSummary = refreshSummary;
   }
 
   return { init: init, exposeGlobals: exposeGlobals };

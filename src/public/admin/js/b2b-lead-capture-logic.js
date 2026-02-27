@@ -10,7 +10,7 @@ var LeadCaptureLogic = (function () {
   function init() {
     LeadCaptureBridge.listen({
       init: function () {},
-      leadCaptured: function (d) { handleCaptured(d.payload); },
+      leadCaptured: function (d) { handleCaptured(d.payload || {}); },
       actionSuccess: function (d) { showToast(d.message || 'Done', 'success'); },
       actionError: function (d) { showToast(d.message || 'Error', 'error'); setSubmitEnabled(true); }
     });
@@ -41,12 +41,23 @@ var LeadCaptureLogic = (function () {
     LeadCaptureBridge.sendToVelo({ action: 'captureLead', lead: lead });
   }
 
-  function handleCaptured() {
+  function handleCaptured(payload) {
     setSubmitEnabled(true);
     showToast('Lead captured!', 'success');
+    renderQualification(payload);
     recentLeads.unshift({ name: document.getElementById('companyName').value, contact: document.getElementById('contactName').value, time: new Date().toLocaleTimeString() });
     renderRecent();
     clearLeadFields();
+  }
+
+  function renderQualification(payload) {
+    var card = document.getElementById('leadScoreCard');
+    if (!card) return;
+    card.classList.remove('hidden');
+    setText('leadScoreValue', String(payload.leadScore || 0));
+    setText('leadClassValue', payload.leadClassification || 'cold');
+    setText('leadOwnerValue', payload.assignedOwnerId || 'Unassigned');
+    setText('leadOppValue', payload.opportunityCreated ? 'Yes' : 'No');
   }
 
   function clearLeadFields() {
@@ -74,6 +85,11 @@ var LeadCaptureLogic = (function () {
     var btn = document.getElementById('submitBtn');
     btn.disabled = !enabled;
     btn.classList.toggle('opacity-50', !enabled);
+  }
+
+  function setText(id, value) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = value;
   }
 
   function esc(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }

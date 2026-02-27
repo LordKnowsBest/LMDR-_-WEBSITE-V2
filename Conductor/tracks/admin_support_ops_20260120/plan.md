@@ -348,5 +348,6 @@ This plan implements a comprehensive customer support system for LMDR administra
 | Chat Console | `src/public/admin/ADMIN_CHAT.html` |
 | NPS Dashboard | `src/public/admin/ADMIN_NPS.html` |
 | Chat Widget | `src/public/utility/CHAT_WIDGET.html` |
-| Public KB Home | `src/public/landing/KB_HOME.html` |
-| Public KB Article | `src/public/landing/KB_ARTICLE.html` |
+| Public KB Home | `src/public/utility/CHAT_WIDGET.html (KB home state)` |
+| Public KB Article | `src/public/utility/CHAT_WIDGET.html (KB article state)` |
+

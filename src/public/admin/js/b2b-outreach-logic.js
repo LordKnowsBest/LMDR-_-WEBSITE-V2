@@ -25,6 +25,8 @@ var OutreachLogic = (function () {
       draftSaved: function () { showToast('Draft saved for review', 'success'); },
       draftApproved: function () { showToast('Draft approved', 'success'); },
       draftsLoaded: function (d) { console.log('Pending drafts:', d.payload); },
+      recommendationLoaded: function (d) { renderRecommendation(d.payload); },
+      sendTimeLoaded: function (d) { renderSendTime(d.payload); },
       actionSuccess: function (d) { showToast(d.message || 'Done', 'success'); },
       actionError: function (d) { showToast(d.message || 'Error', 'error'); }
     });
@@ -146,6 +148,41 @@ var OutreachLogic = (function () {
     OutreachBridge.sendToVelo({ action: 'saveSequence', sequenceId: editingSequenceId, name: name, channels: channels, steps: steps });
   }
 
+  function loadSequenceRecommendation() {
+    var channels = [];
+    if (document.getElementById('chEmail').checked) channels.push('email');
+    if (document.getElementById('chSms').checked) channels.push('sms');
+    if (document.getElementById('chCall').checked) channels.push('call');
+    OutreachBridge.sendToVelo({
+      action: 'getSequenceRecommendation',
+      segment: 'mid_market',
+      contactRole: 'decision_maker',
+      channels: channels.length ? channels : ['email', 'call']
+    });
+    if (currentAccountId || currentContactId) {
+      OutreachBridge.sendToVelo({
+        action: 'getOptimalSendTime',
+        accountId: currentAccountId,
+        contactId: currentContactId
+      });
+    }
+  }
+
+  function renderRecommendation(data) {
+    var el = document.getElementById('sequenceRecommendationText');
+    if (!el || !data) return;
+    var stepsText = (data.steps || []).map(function (s) {
+      return s.stepOrder + '. ' + s.channel.toUpperCase() + ' (' + s.delayHours + 'h) - ' + s.theme;
+    }).join(' | ');
+    el.textContent = stepsText || 'No recommendation available.';
+  }
+
+  function renderSendTime(data) {
+    var el = document.getElementById('sendTimeText');
+    if (!el || !data) return;
+    el.textContent = 'Optimal send window: ' + (data.bestWindow || '--') + ' (score ' + (data.score || 0) + ')';
+  }
+
   function setText(id, t) { var el = document.getElementById(id); if (el) el.textContent = t; }
   function esc(s) { if (!s) return ''; var d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
   function showToast(m, t) { t = t || 'info'; var c = document.getElementById('toastContainer'); var cl = { success: 'bg-emerald-600', error: 'bg-red-600', info: 'bg-blue-600' }; var el = document.createElement('div'); el.className = 'toast ' + (cl[t] || cl.info) + ' text-white text-sm px-4 py-3 rounded-lg shadow-lg'; el.textContent = m; c.appendChild(el); setTimeout(function () { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(function () { el.remove(); }, 300); }, 3000); }
@@ -159,6 +196,7 @@ var OutreachLogic = (function () {
     window.refreshOutreach = refreshOutreach;
     window.generateAIContent = generateAIContent;
     window.toggleAIGenerated = toggleAIGenerated;
+    window.loadSequenceRecommendation = loadSequenceRecommendation;
   }
 
   return {

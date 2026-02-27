@@ -4,6 +4,7 @@ import { getSignalByCarrier } from 'backend/b2bMatchSignalService';
 import { getOpportunitiesByAccount, getDealsAtRisk } from 'backend/b2bPipelineService';
 import { getAccountTimeline, logActivity, logCall, logEmail, logSms, logTask } from 'backend/b2bActivityService';
 import { generateBrief } from 'backend/b2bResearchAgentService';
+import { summarizeTimeline } from 'backend/b2bContentAIService';
 
 const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
@@ -75,6 +76,9 @@ async function routeMessage(component, accountId, message) {
       break;
     case 'getRisks':
       await handleGetRisks(component, message.accountId || accountId);
+      break;
+    case 'getAccountSummary':
+      await handleGetAccountSummary(component, message.accountId || accountId, message.forceRefresh);
       break;
     case 'accountAction':
       await handleAccountAction(component, message.accountId || accountId, message.type);
@@ -230,6 +234,19 @@ async function handleGetRisksFallback(component, accountId) {
     component.postMessage({ action: 'risksLoaded', payload: risks });
   } catch (error) {
     component.postMessage({ action: 'risksLoaded', payload: [] });
+  }
+}
+
+async function handleGetAccountSummary(component, accountId, forceRefresh) {
+  try {
+    const result = await summarizeTimeline(accountId, { forceRefresh: !!forceRefresh });
+    if (result.success) {
+      component.postMessage({ action: 'summaryLoaded', payload: { summary: result.summary, cached: result.cached } });
+    } else {
+      component.postMessage({ action: 'summaryLoaded', payload: null });
+    }
+  } catch (error) {
+    component.postMessage({ action: 'summaryLoaded', payload: null });
   }
 }
 

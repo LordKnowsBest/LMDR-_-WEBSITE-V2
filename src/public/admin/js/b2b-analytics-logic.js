@@ -15,6 +15,7 @@ var AnalyticsLogic = (function () {
       sourcesLoaded: function (d) { renderSources(d.payload); },
       cpaLoaded: function (d) { renderCPA(d.payload); },
       intelLoaded: function (d) { renderIntel(d.payload); },
+      forecastAccuracyLoaded: function (d) { renderForecastAccuracy(d.payload); },
       snapshotSaved: function () { showToast('Snapshot saved', 'success'); },
       actionError: function (d) { showToast(d.message || 'Error', 'error'); }
     });
@@ -27,6 +28,7 @@ var AnalyticsLogic = (function () {
     AnalyticsBridge.sendToVelo({ action: 'getSourcePerformance' });
     AnalyticsBridge.sendToVelo({ action: 'getCPA', days: days });
     AnalyticsBridge.sendToVelo({ action: 'getCompetitorIntel' });
+    AnalyticsBridge.sendToVelo({ action: 'getForecastAccuracy', days: Math.max(days, 90) });
   }
 
   function renderKPIs(k) {
@@ -76,6 +78,17 @@ var AnalyticsLogic = (function () {
     c.innerHTML = intel.map(function (i) {
       return '<div class="px-4 py-3"><div class="flex items-center justify-between"><p class="text-sm text-slate-200 font-medium">' + esc(i.competitor_name) + '</p><span class="text-xs text-slate-500">' + (i.captured_at ? new Date(i.captured_at).toLocaleDateString() : '') + '</span></div>' + (i.region ? '<p class="text-xs text-slate-400 mt-0.5">Region: ' + esc(i.region) + '</p>' : '') + (i.offerings ? '<p class="text-xs text-slate-500 mt-0.5">' + esc(i.offerings) + '</p>' : '') + '</div>';
     }).join('');
+  }
+
+  function renderForecastAccuracy(accuracy) {
+    if (!accuracy) return;
+    var sample = accuracy.sample_size || 0;
+    var brier = accuracy.brier_score;
+    var cal = accuracy.calibration_error;
+    var text = sample === 0
+      ? 'No closed deals with AI predictions yet.'
+      : 'Sample ' + sample + ' • Brier ' + brier + ' • Calibration error ' + cal + '%';
+    setText('forecastAccuracyMeta', text);
   }
 
   function takeSnapshot() { AnalyticsBridge.sendToVelo({ action: 'saveSnapshot', days: parseInt(document.getElementById('dateRange').value) || 30 }); }

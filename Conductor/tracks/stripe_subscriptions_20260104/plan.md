@@ -143,7 +143,7 @@
 
 ## Phase 5: Frontend - Subscription UI ✅
 
-> **File**: `src/pages/CDL Driver Recruitment Pricing.o5c9o.js`
+> **File**: `src/pages/CARRIERS.o5c9o.js`
 
 ### 5.1 Pricing Page Integration
 - [x] Task: Pricing page with tier display (Free, Pro $249, Enterprise $749)
@@ -298,7 +298,7 @@ window.open(STRIPE_PAYMENT_URL, '_blank');
 | Stripe Service | `stripeService.jsw` | 691 | ✅ Complete |
 | Subscription Service | `subscriptionService.jsw` | 512 | ✅ Complete |
 | Webhook Handlers | `http-functions.js` | 404 | ✅ Complete |
-| Pricing Page | `CDL Driver Recruitment Pricing.o5c9o.js` | - | ✅ Integrated |
+| Pricing Page | `CARRIERS.o5c9o.js` | - | ✅ Integrated |
 
 ### Features Implemented
 - ✅ 3-tier subscriptions (Free/Pro $249/Enterprise $749)
@@ -316,3 +316,4 @@ window.open(STRIPE_PAYMENT_URL, '_blank');
 - 🔄 Quota indicator UI component
 - 🔄 Recruiter Console billing tab
 - 🔄 Documentation updates
+

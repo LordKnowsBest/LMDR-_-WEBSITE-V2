@@ -32,7 +32,11 @@ curl -X POST "https://www.lastmiledr.app/_functions/api_gateway/v1/safety/alerts
 ## Automated Validation Evidence
 Executed:
 ```bash
-npx jest src/public/__tests__/externalSafetyApis.test.js src/public/__tests__/apiGateway.external.test.js src/public/__tests__/apiWebhookJobs.test.js --runInBand
+npx jest src/public/__tests__/externalSafetyApis.test.js --runInBand
+
+npx jest src/public/__tests__/apiGateway.external.test.js --runInBand
+
+npx jest src/public/__tests__/apiWebhookJobs.test.js --runInBand
 ```
 
 Validated:
@@ -42,3 +46,4 @@ Validated:
 
 ## Conductor Verification
 Phase 2 manual verification completed and linked to test evidence.
+
