@@ -341,6 +341,74 @@ When building components used across multiple surfaces, place them in `src/publi
 **All test files MUST be placed in `src/public/__tests__/`**
 - Naming convention: `*.test.js` or `*.spec.js`
 
+## Design System: Solarized Neumorphic (All Non-Driver Surfaces)
+
+**MANDATORY:** All non-driver surfaces (admin, recruiter, carrier, B2B — VelocityMatch-branded) MUST use the **Solarized Neumorphic Design System**. Driver surfaces keep LMDR styling and are exempt.
+
+> Full reference: `.claude/docs/neumorphic-design-system.md`
+> RecruiterOS skill: `.agents/skills/recruiter-os-design-system/SKILL.md`
+
+### The Lighting Principle
+All neumorphic elements simulate **45° top-left illumination**:
+- Raised elements: light shadow top-left (`-x, -y`), dark shadow bottom-right (`+x, +y`)
+- Pressed/inset elements: inverted (dark top-left, light bottom-right)
+- Shadows are ALWAYS paired — one dark + one light. Never a single shadow.
+
+### Elevation Token Vocabulary (NEVER use arbitrary `box-shadow` values)
+
+| Class | Shadow | Use For |
+|-------|--------|---------|
+| `neu-x` | `2px 2px 5px` | Tool orbs, tiny buttons, filter pills |
+| `neu-s` | `3px 3px 6px` | Small cards, drawer sections, rail items |
+| `neu` | `6px 6px 12px` | Main cards, panels, command bar |
+| `neu-lg` | `12px 12px 24px` | Modals, floating panels, spotlight |
+| `neu-ins` | `inset 2px 2px 4px` | Subtle wells, XP bars |
+| `neu-in` | `inset 4px 4px 8px` | Text inputs, search bars |
+| `neu-ind` | `inset 8px 8px 16px` | Deep content wells, activity feeds |
+
+Shadow values reference CSS vars: dark side = `var(--ros-shadow-d)`, light side = `var(--ros-shadow-l)`.
+
+### Color Palette
+
+#### Light Mode (Solarized Beige)
+| Role | Hex | Tailwind / CSS Var |
+|------|-----|-------------------|
+| Background | `#F5F5DC` | `bg-beige` / `--ros-surface` |
+| Shadow dark | `#C8B896` | `text-tan` / `--ros-shadow-d` |
+| Shadow light | `#FFFFF5` | `text-ivory` / `--ros-shadow-l` |
+| Deep surface | `#E8D5B7` | `bg-beige-d` / `--ros-bg-d` |
+| Primary text | `#0f172a` | `text-lmdr-dark` / `--ros-text` |
+| Muted text | `rgba(15,23,42,.55)` | `text-tan` / `--ros-text-muted` |
+| Primary blue | `#2563eb` | `text-lmdr-blue` / `--ros-accent` |
+| Success green | `#859900` | `text-sg` |
+
+#### Dark / Midnight Mode (`html.dark` or `data-rds-theme='midnight'`)
+| Role | Solarized Name | Hex |
+|------|---------------|-----|
+| Background | Base03 | `#002B36` |
+| Shadow dark | Deep | `#05232c` |
+| Shadow light | Base01 (30%) | `rgba(88,110,117,.3)` |
+| Surface secondary | Base02 | `#073642` |
+| Primary text | Base0 | `#839496` |
+| Accent | Solar Blue | `#268BD2` |
+
+### Key Design Rules
+1. **Never** use `background: white` or `background: #fff` — use `bg-beige` / `var(--ros-surface)`
+2. **Never** use `color: #333` or `text-gray-*` — use `text-lmdr-dark` or `text-tan`
+3. **Never** use `border: 1px solid #ccc` — use `border border-tan/20`
+4. **Never** use Font Awesome icons — use **Material Symbols Outlined** exclusively
+5. All inputs use `neu-in` or `neu-ins` (pressed/inset look)
+6. All buttons use `neu-x` or `neu-s` (raised look), except gradient primary buttons
+7. CSS lives in the external CSS module — never add `<style>` blocks to view JS files
+
+### Shared CSS Files
+| File | Purpose | CDN Key |
+|------|---------|---------|
+| `src/public/recruiter/os/css/recruiter-os.css` | ROS tokens + all `neu-*` classes | `recruiter/os/css/recruiter-os.css` |
+| `src/public/recruiter/recruiter-design-system.css` | Cross-page RDS tokens (`--rds-*`) | `recruiter/recruiter-design-system.css` |
+
+> When building new non-driver surfaces, import `recruiter-design-system.css` via CDN and follow the `rds-*` component class conventions defined there.
+
 ## Wix MCP Configuration
 
 **IMPORTANT: When using any Wix MCP tools in this project, ALWAYS use this site:**
@@ -444,6 +512,7 @@ Supplementary docs are auto-injected by hooks when editing relevant files. They 
 | `carrier-staffing-forms.md` | Editing carrier/staffing HTML | Form template, PostMessage bridge |
 | `wix-record-linking.md` | Editing record-linking services | Type mismatch gotcha, linking pattern |
 | `gamification-integration.md` | Editing gamification services | Integration hooks table, lazy-load pattern |
+| `neumorphic-design-system.md` | Building non-driver HTML surfaces | Full token reference, component patterns, compliance checklist |
 
 ## New Services (2026-02-01)
 

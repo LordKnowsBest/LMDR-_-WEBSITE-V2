@@ -59,6 +59,12 @@ if ($normalizedPath -match "src/backend/(carrierLeads|application|driverProfiles
     $docsToInject += "wix-record-linking"
 }
 
+# Rule 6: Non-driver HTML/JS surfaces -> neumorphic-design-system.md
+# Covers admin/, recruiter/, carrier/, landing/ — anything that is NOT src/public/driver/
+if ($normalizedPath -match "src/public/(admin|recruiter|carrier)/.*\.(html|HTML|js|css)$") {
+    $docsToInject += "neumorphic-design-system"
+}
+
 if ($docsToInject.Count -eq 0) {
     exit 0
 }
