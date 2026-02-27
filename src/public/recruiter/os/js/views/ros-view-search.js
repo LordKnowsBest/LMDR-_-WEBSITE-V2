@@ -7,6 +7,116 @@
   'use strict';
 
   const VIEW_ID = 'search';
+
+  // ── Area Code → Location lookup (used when driver has no city/state/zip) ──
+  const AREA_CODE_MAP = {
+    // Texas
+    '214':'Dallas, TX','817':'Fort Worth, TX','972':'Dallas, TX','469':'Dallas, TX',
+    '915':'El Paso, TX','713':'Houston, TX','281':'Houston, TX','832':'Houston, TX',
+    '512':'Austin, TX','737':'Austin, TX','210':'San Antonio, TX','726':'San Antonio, TX',
+    '361':'Corpus Christi, TX','806':'Lubbock, TX','903':'East Texas, TX',
+    '936':'Huntsville, TX','956':'Laredo, TX','254':'Waco, TX',
+    // California
+    '213':'Los Angeles, CA','323':'Los Angeles, CA','310':'Los Angeles, CA','818':'Los Angeles, CA',
+    '626':'Pasadena, CA','909':'Inland Empire, CA','951':'Riverside, CA',
+    '619':'San Diego, CA','858':'San Diego, CA','760':'San Diego, CA',
+    '415':'San Francisco, CA','510':'Oakland, CA','408':'San Jose, CA',
+    '559':'Fresno, CA','661':'Bakersfield, CA','916':'Sacramento, CA','530':'Northern CA',
+    // Florida
+    '305':'Miami, FL','786':'Miami, FL','954':'Fort Lauderdale, FL','561':'West Palm Beach, FL',
+    '407':'Orlando, FL','321':'Orlando, FL','813':'Tampa, FL','727':'St. Petersburg, FL',
+    '941':'Sarasota, FL','904':'Jacksonville, FL','850':'Tallahassee, FL','386':'Daytona, FL',
+    // New York
+    '212':'New York, NY','646':'New York, NY','917':'New York, NY',
+    '718':'New York, NY','929':'New York, NY','516':'Long Island, NY','631':'Long Island, NY',
+    '845':'Hudson Valley, NY','914':'Westchester, NY','315':'Syracuse, NY','518':'Albany, NY',
+    '716':'Buffalo, NY','585':'Rochester, NY',
+    // Illinois
+    '312':'Chicago, IL','773':'Chicago, IL','872':'Chicago, IL','630':'Chicago, IL',
+    '847':'Chicago, IL','708':'Chicago, IL','217':'Springfield, IL','309':'Peoria, IL','618':'Southern IL',
+    // Ohio
+    '216':'Cleveland, OH','440':'Cleveland, OH','614':'Columbus, OH','740':'Columbus, OH',
+    '419':'Toledo, OH','937':'Dayton, OH','513':'Cincinnati, OH','330':'Akron, OH',
+    // Pennsylvania
+    '215':'Philadelphia, PA','267':'Philadelphia, PA','412':'Pittsburgh, PA','814':'State College, PA',
+    '717':'Harrisburg, PA','570':'Scranton, PA','724':'Pittsburgh, PA',
+    // Georgia
+    '404':'Atlanta, GA','678':'Atlanta, GA','770':'Atlanta, GA','762':'Columbus, GA','706':'Augusta, GA','912':'Savannah, GA',
+    // Tennessee
+    '615':'Nashville, TN','931':'Nashville, TN','901':'Memphis, TN','865':'Knoxville, TN','423':'Chattanooga, TN',
+    // Arizona
+    '602':'Phoenix, AZ','480':'Phoenix, AZ','623':'Phoenix, AZ','928':'Northern AZ','520':'Tucson, AZ',
+    // Nevada
+    '702':'Las Vegas, NV','725':'Las Vegas, NV','775':'Reno, NV',
+    // Colorado
+    '303':'Denver, CO','720':'Denver, CO','719':'Colorado Springs, CO','970':'Western CO',
+    // Oregon
+    '503':'Portland, OR','971':'Portland, OR','541':'Eugene, OR',
+    // Washington
+    '206':'Seattle, WA','564':'Seattle, WA','253':'Tacoma, WA','425':'Bellevue, WA','360':'Western WA','509':'Eastern WA',
+    // Michigan
+    '313':'Detroit, MI','248':'Detroit, MI','586':'Detroit, MI','734':'Ann Arbor, MI',
+    '517':'Lansing, MI','269':'Kalamazoo, MI','616':'Grand Rapids, MI','906':'Northern MI',
+    // North Carolina
+    '704':'Charlotte, NC','980':'Charlotte, NC','919':'Raleigh, NC','984':'Raleigh, NC',
+    '336':'Greensboro, NC','910':'Wilmington, NC',
+    // Virginia
+    '804':'Richmond, VA','703':'Northern VA','571':'Northern VA','757':'Norfolk, VA',
+    '540':'Western VA','434':'Charlottesville, VA',
+    // Missouri
+    '314':'St. Louis, MO','636':'St. Louis, MO','816':'Kansas City, MO','417':'Springfield, MO','573':'Columbia, MO',
+    // Indiana
+    '317':'Indianapolis, IN','765':'Lafayette, IN','812':'Evansville, IN','219':'Gary, IN',
+    // Wisconsin
+    '414':'Milwaukee, WI','608':'Madison, WI','715':'Wausau, WI','920':'Green Bay, WI',
+    // Minnesota
+    '612':'Minneapolis, MN','952':'Minneapolis, MN','651':'St. Paul, MN','763':'Minneapolis, MN','218':'Duluth, MN',
+    // Louisiana
+    '504':'New Orleans, LA','985':'New Orleans, LA','225':'Baton Rouge, LA','318':'Shreveport, LA','337':'Lafayette, LA',
+    // Kentucky
+    '502':'Louisville, KY','859':'Lexington, KY','606':'Eastern KY','270':'Western KY',
+    // Alabama
+    '205':'Birmingham, AL','659':'Birmingham, AL','251':'Mobile, AL','334':'Montgomery, AL','256':'Huntsville, AL',
+    // Mississippi
+    '601':'Jackson, MS','769':'Jackson, MS','228':'Gulfport, MS','662':'Northern MS',
+    // South Carolina
+    '803':'Columbia, SC','864':'Greenville, SC','843':'Charleston, SC',
+    // Arkansas
+    '501':'Little Rock, AR','479':'Fort Smith, AR','870':'Eastern AR',
+    // Oklahoma
+    '405':'Oklahoma City, OK','918':'Tulsa, OK','580':'Southern OK',
+    // Kansas
+    '316':'Wichita, KS','785':'Topeka, KS','913':'Kansas City, KS',
+    // Nebraska
+    '402':'Omaha, NE','531':'Omaha, NE','308':'Western NE',
+    // Iowa
+    '515':'Des Moines, IA','319':'Cedar Rapids, IA','563':'Davenport, IA','712':'Council Bluffs, IA',
+    // Utah
+    '801':'Salt Lake City, UT','385':'Salt Lake City, UT','435':'Southern UT',
+    // New Mexico
+    '505':'Albuquerque, NM','575':'Southern NM',
+    // Single-code states
+    '208':'Idaho','406':'Montana','307':'Wyoming','701':'North Dakota','605':'South Dakota',
+    // New Jersey
+    '201':'Jersey City, NJ','551':'Jersey City, NJ','973':'Newark, NJ','908':'Elizabeth, NJ',
+    '732':'Central NJ','609':'Trenton, NJ','856':'South Jersey, NJ',
+    // New England
+    '203':'Bridgeport, CT','475':'Bridgeport, CT','860':'Hartford, CT','959':'Hartford, CT',
+    '617':'Boston, MA','857':'Boston, MA','508':'Worcester, MA','781':'Boston, MA','978':'Lowell, MA','413':'Springfield, MA',
+    '410':'Baltimore, MD','443':'Baltimore, MD','301':'Maryland','240':'Maryland',
+    '304':'West Virginia','681':'West Virginia','302':'Delaware',
+    '401':'Rhode Island','603':'New Hampshire','802':'Vermont','207':'Maine',
+    '808':'Hawaii','907':'Alaska'
+  };
+
+  function getLocationFromPhone(phone) {
+    if (!phone) return null;
+    const digits = String(phone).replace(/\D/g, '');
+    const cleaned = digits.startsWith('1') && digits.length === 11 ? digits.slice(1) : digits;
+    if (cleaned.length < 10) return null;
+    return AREA_CODE_MAP[cleaned.slice(0, 3)] || null;
+  }
+
   const MESSAGES = [
     'searchDriversResult', 'viewDriverProfileResult', 'saveDriverResult',
     'contactDriverResult', 'getQuotaStatusResult', 'getWeightPreferencesResult',
@@ -563,7 +673,9 @@
     const cdl = driver.cdl_type || driver.cdlType || driver.cdlClass || '';
     const rawEndorsements = driver.endorsements || '';
     const endorseStr = Array.isArray(rawEndorsements) ? rawEndorsements.join(', ') : rawEndorsements;
-    const location = driver.city ? `${driver.city}, ${driver.state}` : (driver.location || '');
+    const location = driver.city
+      ? `${driver.city}, ${driver.state}`
+      : (driver.location || getLocationFromPhone(driver.phone) || '');
     const expYears = driver.years_experience || driver.experienceYears || 0;
     const exp = expYears ? `${expYears}yr exp` : '';
     const details = [cdl ? `CDL-${cdl}` : '', endorseStr, location, exp].filter(Boolean).join(' \u00b7 ');
@@ -690,7 +802,18 @@
     const cdl = driver.cdl_type || driver.cdlType || driver.cdlClass || '';
     const rawEndorsements = driver.endorsements || [];
     const endorsements = Array.isArray(rawEndorsements) ? rawEndorsements : (typeof rawEndorsements === 'string' && rawEndorsements ? rawEndorsements.split(',').map(e => e.trim()) : []);
-    const location = driver.city ? `${driver.city}, ${driver.state}` : (driver.location || 'Unknown');
+    const phone = driver.phone || driver.phone_number || '';
+    const phoneAreaLocation = getLocationFromPhone(phone);
+    const location = driver.city
+      ? `${driver.city}, ${driver.state}`
+      : (driver.location || phoneAreaLocation || 'Unknown');
+    const locationIsInferred = !driver.city && !driver.location && !!phoneAreaLocation;
+    const phoneDigits = phone ? String(phone).replace(/\D/g, '') : '';
+    const phoneDisplay = phoneDigits.length === 10
+      ? `(${phoneDigits.slice(0,3)}) ${phoneDigits.slice(3,6)}-${phoneDigits.slice(6)}`
+      : phoneDigits.length === 11 && phoneDigits.startsWith('1')
+        ? `(${phoneDigits.slice(1,4)}) ${phoneDigits.slice(4,7)}-${phoneDigits.slice(7)}`
+        : phone;
     const expYears = driver.years_experience || driver.experienceYears || 0;
     const scoreColor = getScoreColor(matchScore);
     const availability = driver.availability || 'Unknown';
@@ -716,7 +839,12 @@
           <div class="flex-1 min-w-0">
             <h3 class="text-[16px] font-bold text-lmdr-dark">${escapeHtml(name)}</h3>
             <div class="text-[12px] text-tan mt-0.5">${cdl ? `CDL-${escapeHtml(cdl)}` : ''} ${endorsements.length ? '\u00b7 ' + escapeHtml(endorsements.join(', ')) : ''}</div>
-            <div class="text-[11px] text-tan">${escapeHtml(location)} ${expYears ? `\u00b7 ${expYears}yr exp` : ''}</div>
+            <div class="text-[11px] text-tan flex items-center gap-1">
+              <span class="material-symbols-outlined text-[12px]">${locationIsInferred ? 'cell_tower' : 'location_on'}</span>
+              <span>${escapeHtml(location)}${locationIsInferred ? ' \u00b7 area code' : ''}</span>
+              ${expYears ? `<span>\u00b7 ${expYears}yr exp</span>` : ''}
+            </div>
+            ${phone ? `<div class="text-[11px] text-lmdr-blue mt-0.5 flex items-center gap-1"><span class="material-symbols-outlined text-[12px]">call</span><span class="font-medium" data-phone="${escapeHtml(phoneDigits)}" onclick="if(this.dataset.phone)window.location.href='tel:+1'+this.dataset.phone" style="cursor:pointer">${escapeHtml(phoneDisplay)}</span></div>` : ''}
           </div>
           <div class="text-center shrink-0">
             <div class="text-3xl font-black ${scoreColor}">${matchScore}%</div>
@@ -791,6 +919,7 @@
           <button onclick="ROS.views._search.openMessageModal('text')" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan hover:text-lmdr-blue transition-colors flex items-center gap-2">
             <span class="material-symbols-outlined text-[16px]">sms</span>Text
           </button>
+          ${phoneDigits ? `<button onclick="if('${escapeHtml(phoneDigits)}')window.location.href='tel:+1'+'${escapeHtml(phoneDigits.startsWith('1')?phoneDigits.slice(1):phoneDigits)}'" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-emerald-600 hover:text-emerald-700 transition-colors flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">call</span>Call</button>` : ''}
         </div>
       </div>`;
 
