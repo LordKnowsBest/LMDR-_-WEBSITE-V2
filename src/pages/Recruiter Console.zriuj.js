@@ -1149,8 +1149,9 @@ async function handleSearchDrivers(data, component) {
 
     sendToHtml(component, 'searchDriversResult', {
       success: result.success,
-      drivers: result.success ? result.drivers : [],
-      total: result.success ? result.total : 0,
+      drivers: result.success ? (result.matches || []) : [],
+      total: result.success ? (result.pagination?.totalCount || 0) : 0,
+      pagination: result.pagination,
       quotaStatus: quotaStatus,
       error: result.error
     });
