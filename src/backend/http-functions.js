@@ -40,7 +40,6 @@ import {
 } from 'backend/smsCampaignService';
 import { processJobBoardWebhook } from 'backend/jobBoardService';
 import { connectSocialAccount } from 'backend/socialPostingService';
-import { runNightlySemanticBackfill } from 'backend/semanticBackfillJob';
 
 // ============================================================================
 // STRIPE WEBHOOK ENDPOINT
