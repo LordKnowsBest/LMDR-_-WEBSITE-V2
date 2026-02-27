@@ -474,63 +474,67 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
     // 6. Fire callback immediately with raw results so Wix renders cards fast.
     //    All carriers get needsEnrichment=true — the Wix aiEnrichment.jsw handles
     //    lazy per-card enrichment after the results view is visible.
-    // Fill in FMCSA data for Pinecone-only carriers (city, fleet size, etc. missing from metadata).
+    // Hydrate both tiers with live FMCSA data IN PARALLEL — previously sequential,
+    // each batch up to ~4s wall-clock, so running together saves 3-5s.
     const fmcsaOnlyResults = finalResults.filter(r => r.fmcsaOnly);
-    if (fmcsaOnlyResults.length > 0) {
-      const dots = fmcsaOnlyResults.map(r => String(r.carrier.DOT_NUMBER)).filter(Boolean);
-      try {
-        const fmcsaMap = await fetchFmcsaBatch(dots);
-        for (const r of fmcsaOnlyResults) {
-          const dot = String(r.carrier.DOT_NUMBER);
-          const f   = fmcsaMap[dot];
-          if (!f) continue;
+    const airtableResults  = finalResults.filter(r => !r.fmcsaOnly && r.carrier.DOT_NUMBER);
 
-          r.carrier.LEGAL_NAME        = f.legalName        || f.legal_name        || r.carrier.LEGAL_NAME;
-          r.carrier.PHY_CITY          = f.phyCity          || f.phy_city          || r.carrier.PHY_CITY;
-          r.carrier.PHY_STATE         = f.phyState         || f.phy_state         || r.carrier.PHY_STATE;
-          r.carrier.PHY_STREET        = f.phyStreet        || f.phy_street        || r.carrier.PHY_STREET;
-          r.carrier.PHY_ZIP           = f.phyZip           || f.phy_zip           || r.carrier.PHY_ZIP;
-          r.carrier.TELEPHONE         = f.telephone        || f.TELEPHONE         || r.carrier.TELEPHONE;
-          r.carrier.NBR_POWER_UNIT    = f.nbrPowerUnit     ?? f.nbr_power_unit    ?? r.carrier.NBR_POWER_UNIT;
-          r.carrier.TOTAL_DRIVERS     = f.totalDrivers     ?? f.total_drivers     ?? r.carrier.TOTAL_DRIVERS;
-          r.carrier.CARRIER_OPERATION = f.carrierOperation || f.carrier_operation || r.carrier.CARRIER_OPERATION;
-          r.carrier.SAFETY_RATING     = f.safetyRating     || f.safety_rating     || r.carrier.SAFETY_RATING;
-          // Update the fmcsa object too so the FMCSA safety section renders correctly
-          if (r.fmcsa) {
-            r.fmcsa.safety_rating   = r.carrier.SAFETY_RATING || r.fmcsa.safety_rating;
-            r.fmcsa.dot_number      = r.carrier.DOT_NUMBER;
-            // Full FMCSA stats hydration for Pinecone-only carriers
-            r.fmcsa.is_authorized   = f.allowedToOperate === 'Y' || f.operatingStatus === 'AUTHORIZED' || r.fmcsa.is_authorized;
-            r.fmcsa.operating_status = f.operatingStatus || f.operating_status || 'AUTHORIZED';
-            r.fmcsa.inspections_24mo = {
-              total:                f.inspTotal          ?? f.totalInspections  ?? 0,
-              driver_oos_rate:      f.driverOosRate      ?? f.driverOOSRate     ?? null,
-              vehicle_oos_rate:     f.vehicleOosRate     ?? f.vehicleOOSRate    ?? null,
-              national_avg_driver_oos:  5.51,
-              national_avg_vehicle_oos: 20.72,
-            };
-            r.fmcsa.crashes_24mo = {
-              total: f.crashTotal ?? f.totalCrashes ?? 0,
-              fatal: f.fatalCrash ?? f.fatalCrashes ?? 0,
-            };
-            r.fmcsa.basics = {}; // BASIC data requires separate SAFER endpoint
-          }
-          // Refresh inferredOpType with live FMCSA carrier operation (overrides stale Pinecone metadata)
-          const liveOp = f.carrierOperation || f.carrier_operation || r.carrier.CARRIER_OPERATION;
-          if (liveOp) r.inferredOpType = inferOpType(liveOp);
+    const [fmcsaOnlyMap, airtableFmcsaMap] = await Promise.all([
+      fmcsaOnlyResults.length > 0
+        ? fetchFmcsaBatch(fmcsaOnlyResults.map(r => String(r.carrier.DOT_NUMBER)).filter(Boolean))
+            .catch(err => { console.warn(`[search/carriers-async] ${jobId}: FMCSA batch (FMCSA-only) failed:`, err.message); return {}; })
+        : Promise.resolve({}),
+      airtableResults.length > 0
+        ? fetchFmcsaBatch(airtableResults.map(r => String(r.carrier.DOT_NUMBER)).filter(Boolean))
+            .catch(err => { console.warn(`[search/carriers-async] ${jobId}: FMCSA batch (Airtable) failed:`, err.message); return {}; })
+        : Promise.resolve({}),
+    ]);
+
+    // Apply FMCSA data to FMCSA-only carriers
+    if (fmcsaOnlyResults.length > 0) {
+      for (const r of fmcsaOnlyResults) {
+        const dot = String(r.carrier.DOT_NUMBER);
+        const f   = fmcsaOnlyMap[dot];
+        if (!f) continue;
+
+        r.carrier.LEGAL_NAME        = f.legalName        || f.legal_name        || r.carrier.LEGAL_NAME;
+        r.carrier.PHY_CITY          = f.phyCity          || f.phy_city          || r.carrier.PHY_CITY;
+        r.carrier.PHY_STATE         = f.phyState         || f.phy_state         || r.carrier.PHY_STATE;
+        r.carrier.PHY_STREET        = f.phyStreet        || f.phy_street        || r.carrier.PHY_STREET;
+        r.carrier.PHY_ZIP           = f.phyZip           || f.phy_zip           || r.carrier.PHY_ZIP;
+        r.carrier.TELEPHONE         = f.telephone        || f.TELEPHONE         || r.carrier.TELEPHONE;
+        r.carrier.NBR_POWER_UNIT    = f.nbrPowerUnit     ?? f.nbr_power_unit    ?? r.carrier.NBR_POWER_UNIT;
+        r.carrier.TOTAL_DRIVERS     = f.totalDrivers     ?? f.total_drivers     ?? r.carrier.TOTAL_DRIVERS;
+        r.carrier.CARRIER_OPERATION = f.carrierOperation || f.carrier_operation || r.carrier.CARRIER_OPERATION;
+        r.carrier.SAFETY_RATING     = f.safetyRating     || f.safety_rating     || r.carrier.SAFETY_RATING;
+        if (r.fmcsa) {
+          r.fmcsa.safety_rating    = r.carrier.SAFETY_RATING || r.fmcsa.safety_rating;
+          r.fmcsa.dot_number       = r.carrier.DOT_NUMBER;
+          r.fmcsa.is_authorized    = f.allowedToOperate === 'Y' || f.operatingStatus === 'AUTHORIZED' || r.fmcsa.is_authorized;
+          r.fmcsa.operating_status = f.operatingStatus || f.operating_status || 'AUTHORIZED';
+          r.fmcsa.inspections_24mo = {
+            total:                   f.inspTotal          ?? f.totalInspections  ?? 0,
+            driver_oos_rate:         f.driverOosRate      ?? f.driverOOSRate     ?? null,
+            vehicle_oos_rate:        f.vehicleOosRate     ?? f.vehicleOOSRate    ?? null,
+            national_avg_driver_oos:  5.51,
+            national_avg_vehicle_oos: 20.72,
+          };
+          r.fmcsa.crashes_24mo = {
+            total: f.crashTotal ?? f.totalCrashes ?? 0,
+            fatal: f.fatalCrash ?? f.fatalCrashes ?? 0,
+          };
+          r.fmcsa.basics = {};
         }
-        console.log(`[search/carriers-async] ${jobId}: FMCSA hydrated ${fmcsaOnlyResults.length} Pinecone-only carriers`);
-      } catch (fmcsaErr) {
-        console.warn(`[search/carriers-async] ${jobId}: FMCSA batch hydration failed (non-blocking):`, fmcsaErr.message);
+        const liveOp = f.carrierOperation || f.carrier_operation || r.carrier.CARRIER_OPERATION;
+        if (liveOp) r.inferredOpType = inferOpType(liveOp);
       }
+      console.log(`[search/carriers-async] ${jobId}: FMCSA hydrated ${fmcsaOnlyResults.length} Pinecone-only carriers`);
     }
 
-    // Hydrate Airtable-backed carriers with live FMCSA data for OOS rates, crash counts, etc.
-    const airtableResults = finalResults.filter(r => !r.fmcsaOnly && r.carrier.DOT_NUMBER);
+    // Apply FMCSA data to Airtable-backed carriers
     if (airtableResults.length > 0) {
-      const dots = airtableResults.map(r => String(r.carrier.DOT_NUMBER)).filter(Boolean);
+      const fmcsaMap = airtableFmcsaMap;
       try {
-        const fmcsaMap = await fetchFmcsaBatch(dots);
         for (const r of airtableResults) {
           const dot = String(r.carrier.DOT_NUMBER);
           const f   = fmcsaMap[dot];
@@ -580,7 +584,7 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
     // Non-blocking — failure falls through to needsEnrichment=true (on-demand fallback).
     const carriersToEnrich = finalResults
       .filter(r => r.carrier.LEGAL_NAME && r.carrier.LEGAL_NAME !== 'Unknown Carrier')
-      .slice(0, 5)
+      .slice(0, 3)  // top 3 only — 5 was 14-20s wall-clock, 3 is identical parallelism but caps API pressure
       .map(r => ({
         name:      r.carrier.LEGAL_NAME,
         dotNumber: String(r.carrier.DOT_NUMBER),
@@ -643,6 +647,8 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
 }
 
 async function _postCallback(callbackUrl, payload) {
+  // 15s timeout — Wix HTTP functions have a 30s limit but we want Railway to
+  // move on quickly if Wix is slow so the job isn't left dangling.
   const res = await fetch(callbackUrl, {
     method:  'POST',
     headers: {
@@ -650,7 +656,8 @@ async function _postCallback(callbackUrl, payload) {
       'x-lmdr-internal-key': process.env.LMDR_INTERNAL_KEY,
       'x-lmdr-timestamp':    String(Date.now()),
     },
-    body: JSON.stringify(payload),
+    body:   JSON.stringify(payload),
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!res.ok) {

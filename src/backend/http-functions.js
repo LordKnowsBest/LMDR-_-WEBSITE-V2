@@ -1054,11 +1054,59 @@ export async function post_completeSearch(request) {
       return ok({ received: true, jobId, warning: 'Job record not found' });
     }
 
+    // Slim the results payload before storing in Airtable.
+    // Full carrier objects (fmcsa.basics, enrichment prose) can push 100-200KB — large
+    // enough to trigger Wix's 90s outbound-fetch timeout on the PATCH.
+    // Strip non-essential fields; the renderer only needs these keys.
+    const slimResults = results
+      ? results.map(r => ({
+          carrier: {
+            DOT_NUMBER:       r.carrier?.DOT_NUMBER,
+            LEGAL_NAME:       r.carrier?.LEGAL_NAME,
+            CARRIER_OPERATION:r.carrier?.CARRIER_OPERATION,
+            NBR_POWER_UNIT:   r.carrier?.NBR_POWER_UNIT,
+            DRIVER_TOTAL:     r.carrier?.DRIVER_TOTAL,
+            TOTAL_DRIVERS:    r.carrier?.TOTAL_DRIVERS,
+            PAY_CPM:          r.carrier?.PAY_CPM,
+            TURNOVER_PERCENT: r.carrier?.TURNOVER_PERCENT,
+            AVG_TRUCK_AGE:    r.carrier?.AVG_TRUCK_AGE,
+            COMBINED_SCORE:   r.carrier?.COMBINED_SCORE,
+            PRIORITY_SCORE:   r.carrier?.PRIORITY_SCORE,
+            SAFETY_RATING:    r.carrier?.SAFETY_RATING,
+            PHY_CITY:         r.carrier?.PHY_CITY,
+            PHY_STATE:        r.carrier?.PHY_STATE,
+            PHY_ZIP:          r.carrier?.PHY_ZIP,
+            TELEPHONE:        r.carrier?.TELEPHONE,
+            ACCIDENT_RATE:    r.carrier?.ACCIDENT_RATE,
+          },
+          fmcsa: r.fmcsa
+            ? {
+                safety_rating:    r.fmcsa.safety_rating,
+                dot_number:       r.fmcsa.dot_number,
+                is_authorized:    r.fmcsa.is_authorized,
+                operating_status: r.fmcsa.operating_status,
+                inspections_24mo: r.fmcsa.inspections_24mo,
+                crashes_24mo:     r.fmcsa.crashes_24mo,
+                // strip fmcsa.basics — large object, fetched live by the card
+              }
+            : null,
+          enrichment:      r.enrichment,
+          inferredOpType:  r.inferredOpType,
+          overallScore:    r.overallScore,
+          semanticScore:   r.semanticScore,
+          scores:          r.scores,
+          needsEnrichment: r.needsEnrichment,
+          fmcsaOnly:       r.fmcsaOnly,
+          source:          r.source,
+          vectorId:        r.vectorId,
+        }))
+      : null;
+
     // Update the record with results
     await dataAccess.updateRecord('searchJobs', {
       _id:          record._id,
       status:       status,
-      results:      results ? JSON.stringify(results) : null,
+      results:      slimResults ? JSON.stringify(slimResults) : null,
       error:        jobError || null,
       completed_at: new Date().toISOString().slice(0, 10),
       total_found:  totalFound  || 0,

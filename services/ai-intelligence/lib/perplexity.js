@@ -13,7 +13,7 @@
 
 const PERPLEXITY_ENDPOINT = 'https://api.perplexity.ai/chat/completions';
 const MODEL       = 'sonar-pro';
-const TIMEOUT_MS  = 14_000; // generous — Railway is async
+const TIMEOUT_MS  = 10_000; // 10s — faster fallback on slow Perplexity days; still async so no Wix limit
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
