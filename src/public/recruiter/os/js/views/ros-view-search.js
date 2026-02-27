@@ -844,7 +844,12 @@
               <span>${escapeHtml(location)}${locationIsInferred ? ' \u00b7 area code' : ''}</span>
               ${expYears ? `<span>\u00b7 ${expYears}yr exp</span>` : ''}
             </div>
-            ${phone ? `<div class="text-[11px] text-lmdr-blue mt-0.5 flex items-center gap-1"><span class="material-symbols-outlined text-[12px]">call</span><span class="font-medium" data-phone="${escapeHtml(phoneDigits)}" onclick="if(this.dataset.phone)window.location.href='tel:+1'+this.dataset.phone" style="cursor:pointer">${escapeHtml(phoneDisplay)}</span></div>` : ''}
+            <div class="text-[11px] mt-0.5 flex items-center gap-1 ${phone ? 'text-lmdr-blue' : 'text-tan/50'}">
+              <span class="material-symbols-outlined text-[12px]">call</span>
+              ${phone
+                ? `<span class="font-medium" data-phone="${escapeHtml(phoneDigits)}" onclick="if(this.dataset.phone)window.location.href='tel:+1'+this.dataset.phone" style="cursor:pointer">${escapeHtml(phoneDisplay)}</span>`
+                : `<span class="italic">No phone on file</span>`}
+            </div>
           </div>
           <div class="text-center shrink-0">
             <div class="text-3xl font-black ${scoreColor}">${matchScore}%</div>
@@ -919,7 +924,9 @@
           <button onclick="ROS.views._search.openMessageModal('text')" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan hover:text-lmdr-blue transition-colors flex items-center gap-2">
             <span class="material-symbols-outlined text-[16px]">sms</span>Text
           </button>
-          ${phoneDigits ? `<button onclick="if('${escapeHtml(phoneDigits)}')window.location.href='tel:+1'+'${escapeHtml(phoneDigits.startsWith('1')?phoneDigits.slice(1):phoneDigits)}'" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-emerald-600 hover:text-emerald-700 transition-colors flex items-center gap-2"><span class="material-symbols-outlined text-[16px]">call</span>Call</button>` : ''}
+          ${phoneDigits
+            ? `<button onclick="window.location.href='tel:+1${escapeHtml(phoneDigits.startsWith('1')?phoneDigits.slice(1):phoneDigits)}'" class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-emerald-600 hover:text-emerald-700 transition-colors flex items-center gap-2" title="${escapeHtml(phoneDisplay)}"><span class="material-symbols-outlined text-[16px]">call</span>Call</button>`
+            : `<button disabled class="px-4 py-2.5 rounded-xl neu-x text-[12px] font-bold text-tan/40 flex items-center gap-2 cursor-not-allowed" title="No phone number on file"><span class="material-symbols-outlined text-[16px]">call</span>Call</button>`}
         </div>
       </div>`;
 
