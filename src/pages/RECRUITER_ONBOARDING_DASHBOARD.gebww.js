@@ -217,14 +217,7 @@ async function routeMessage(component, message) {
 // ============================================================================
 
 async function handleDashboardReady(component) {
-  console.log('Onboarding Dashboard ready, checking auth...');
-
-  // Check authentication
-  if (!wixUsers || !wixUsers.currentUser.loggedIn) {
-    console.log('User not logged in, redirecting...');
-    wixLocation.to('/login');
-    return;
-  }
+  console.log('Onboarding Dashboard ready, initializing...');
 
   // Get recruiter profile
   const profileResult = await getOrCreateRecruiterProfile();

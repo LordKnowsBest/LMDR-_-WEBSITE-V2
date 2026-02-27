@@ -1101,14 +1101,7 @@ async function handleHtmlMessage(msg, component) {
 // ============================================================================
 
 async function handleDashboardReady(component) {
-  console.log('Dashboard ready, checking auth...');
-
-  // Check if user is logged in
-  if (!wixUsers || !wixUsers.currentUser.loggedIn) {
-    console.log('User not logged in, redirecting...');
-    wixLocation.to('/login');
-    return;
-  }
+  console.log('Dashboard ready, initializing...');
 
   // Get recruiter profile and carriers
   const result = await getOrCreateRecruiterProfile();
@@ -2131,11 +2124,6 @@ async function handleGetAutomationLog(component) {
 
 async function handleRecruiterOSReady(component) {
   console.log('Recruiter OS ready, initializing...');
-
-  if (!wixUsers || !wixUsers.currentUser.loggedIn) {
-    wixLocation.to('/login');
-    return;
-  }
 
   // Reuse existing profile/carrier init
   const result = await getOrCreateRecruiterProfile();
