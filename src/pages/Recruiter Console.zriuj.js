@@ -86,6 +86,7 @@ import {
   getBottleneckAnalysis,
   calculateCostPerHire,
   getCompetitorComparison,
+  addCompetitorIntel,
   generateHiringForecast,
   getTurnoverRiskAnalysis,
   getPayBenchmarks
@@ -225,7 +226,8 @@ const MESSAGE_REGISTRY = {
     'createPaidMediaReportJob',
     'getPaidMediaReportStatus',
     'downloadPaidMediaReport',
-    'getPaidMediaOptimizationSuggestions'
+    'getPaidMediaOptimizationSuggestions',
+    'saveIntel'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -613,6 +615,9 @@ async function handleHtmlMessage(msg, component) {
         break;
       case 'getCompetitorData':
         await handleGetCompetitorData(msg.data, component);
+        break;
+      case 'saveIntel':
+        await handleSaveIntel(msg.data, component);
         break;
       case 'getPredictionsData':
         await handleGetPredictionsData(msg.data, component);
@@ -1779,6 +1784,15 @@ async function handleGetCompetitorData(data, component) {
     sendToHtml(component, 'competitorDataLoaded', result);
   } catch (error) {
     sendToHtml(component, 'competitorDataLoaded', { error: error.message });
+  }
+}
+
+async function handleSaveIntel(data, component) {
+  try {
+    const result = await addCompetitorIntel({ ...data, carrier_dot: currentCarrierDOT });
+    sendToHtml(component, 'intelSaved', { success: result.success, error: result.error });
+  } catch (error) {
+    sendToHtml(component, 'intelSaved', { success: false, error: error.message });
   }
 }
 
