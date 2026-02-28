@@ -15,6 +15,29 @@ function generateId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
+function summarizeExecutionMetadata(steps) {
+  const executionModes = {};
+  const sideEffectClasses = {};
+  const branchIds = new Set();
+  const nodeIds = new Set();
+
+  for (const step of steps) {
+    const executionMode = step.execution_mode || 'unspecified';
+    const sideEffectClass = step.side_effect_class || 'unspecified';
+    executionModes[executionMode] = (executionModes[executionMode] || 0) + 1;
+    sideEffectClasses[sideEffectClass] = (sideEffectClasses[sideEffectClass] || 0) + 1;
+    if (step.branch_id) branchIds.add(step.branch_id);
+    if (step.node_id) nodeIds.add(step.node_id);
+  }
+
+  return {
+    execution_modes: executionModes,
+    side_effect_classes: sideEffectClasses,
+    branch_count: branchIds.size,
+    node_count: nodeIds.size
+  };
+}
+
 /**
  * Evaluate a completed agent run — heuristic scoring v1
  * Called automatically after every completed agent turn
@@ -115,14 +138,18 @@ function summarizeDeltas(steps, gates) {
   const errors = steps.filter(s => s.status === 'error').length;
   const approvals = gates.filter(g => g.decision === 'approved').length;
   const rejections = gates.filter(g => g.decision === 'rejected').length;
+  const degraded = steps.filter(s => s.status === 'skipped' || s.status === 'degraded').length;
+  const executionSummary = summarizeExecutionMetadata(steps);
 
   return JSON.stringify({
     tools_called: toolsUsed,
     total_steps: steps.length,
     errors,
+    degraded,
     approval_gates: gates.length,
     approvals,
-    rejections
+    rejections,
+    execution: executionSummary
   });
 }
 
@@ -131,6 +158,7 @@ function summarizeDeltas(steps, gates) {
  */
 function generateFollowUps(run, steps, score) {
   const suggestions = [];
+  const executionSummary = summarizeExecutionMetadata(steps);
 
   if (score < 30) {
     suggestions.push('Run failed — consider retrying with different parameters or escalating to human operator');
@@ -142,6 +170,12 @@ function generateFollowUps(run, steps, score) {
   const errorTools = steps.filter(s => s.status === 'error').map(s => s.tool_name);
   if (errorTools.length > 0) {
     suggestions.push(`Tool errors in: ${errorTools.join(', ')} — check service availability`);
+  }
+
+  const degradedBranches = executionSummary.branch_count > 0 &&
+    steps.some(s => s.status === 'skipped' || s.status === 'degraded');
+  if (degradedBranches) {
+    suggestions.push('Degraded branch outcome detected — review partial results before expanding automation scope');
   }
 
   if (run.status === 'max_iterations') {

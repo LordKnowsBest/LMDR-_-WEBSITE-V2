@@ -21,6 +21,29 @@ function generateId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
+function buildExecutionBreakdown(steps) {
+  const byMode = {};
+  const bySideEffect = {};
+  const branchIds = new Set();
+  const nodeIds = new Set();
+
+  for (const step of steps) {
+    const mode = step.execution_mode || 'unspecified';
+    const sideEffect = step.side_effect_class || 'unspecified';
+    byMode[mode] = (byMode[mode] || 0) + 1;
+    bySideEffect[sideEffect] = (bySideEffect[sideEffect] || 0) + 1;
+    if (step.branch_id) branchIds.add(step.branch_id);
+    if (step.node_id) nodeIds.add(step.node_id);
+  }
+
+  return {
+    by_mode: byMode,
+    by_side_effect: bySideEffect,
+    branch_count: branchIds.size,
+    node_count: nodeIds.size
+  };
+}
+
 // =============================================================================
 // 1. computeWeeklyScorecard(role, days=7)
 // =============================================================================
@@ -112,6 +135,7 @@ export async function computeWeeklyScorecard(role, days = 7) {
 
     // Approval gate stats
     const gateStats = await computeGateStats(currentRunIds);
+    const execution = await computeExecutionStats(currentRunIds);
 
     return {
       role,
@@ -121,7 +145,8 @@ export async function computeWeeklyScorecard(role, days = 7) {
       volume: { total_runs: runs.length, total_outcomes: outcomes.length },
       cost: { total_tokens: totalTokens, total_usd: Math.round(totalCost * 10000) / 10000, avg_tokens_per_run: avgTokensPerRun },
       tools: toolStats,
-      gates: gateStats
+      gates: gateStats,
+      execution
     };
   } catch (err) {
     console.error(`${PREFIX} Error:`, err.message);
@@ -144,10 +169,22 @@ async function computeToolEffectiveness(runIds) {
     const byTool = {};
     for (const step of steps) {
       const tool = step.tool_name || 'unknown';
-      if (!byTool[tool]) byTool[tool] = { total: 0, success: 0, totalLatency: 0 };
+      if (!byTool[tool]) {
+        byTool[tool] = {
+          total: 0,
+          success: 0,
+          totalLatency: 0,
+          execution_modes: {},
+          side_effect_classes: {}
+        };
+      }
       byTool[tool].total++;
       if (step.status === 'completed') byTool[tool].success++;
       byTool[tool].totalLatency += step.latency_ms || 0;
+      const executionMode = step.execution_mode || 'unspecified';
+      const sideEffectClass = step.side_effect_class || 'unspecified';
+      byTool[tool].execution_modes[executionMode] = (byTool[tool].execution_modes[executionMode] || 0) + 1;
+      byTool[tool].side_effect_classes[sideEffectClass] = (byTool[tool].side_effect_classes[sideEffectClass] || 0) + 1;
     }
 
     return Object.entries(byTool)
@@ -155,11 +192,47 @@ async function computeToolEffectiveness(runIds) {
         tool,
         total: stats.total,
         success_rate: Math.round(stats.success / stats.total * 100),
-        avg_latency_ms: Math.round(stats.totalLatency / stats.total)
+        avg_latency_ms: Math.round(stats.totalLatency / stats.total),
+        execution_modes: stats.execution_modes,
+        side_effect_classes: stats.side_effect_classes
       }))
       .sort((a, b) => b.total - a.total);
   } catch (err) {
     return [];
+  }
+}
+
+async function computeExecutionStats(runIds) {
+  if (!runIds || runIds.length === 0) {
+    return {
+      by_mode: {},
+      by_side_effect: {},
+      branch_count: 0,
+      node_count: 0,
+      degraded_steps: 0
+    };
+  }
+
+  try {
+    const stepsResult = await dataAccess.queryRecords(COLLECTIONS.steps, {
+      filters: { run_id: { in: runIds } },
+      limit: 2000,
+      suppressAuth: true
+    });
+    const steps = stepsResult?.items || [];
+    const breakdown = buildExecutionBreakdown(steps);
+    return {
+      ...breakdown,
+      degraded_steps: steps.filter(s => s.status === 'skipped' || s.status === 'degraded').length
+    };
+  } catch (err) {
+    return {
+      by_mode: {},
+      by_side_effect: {},
+      branch_count: 0,
+      node_count: 0,
+      degraded_steps: 0
+    };
   }
 }
 
@@ -173,6 +246,7 @@ async function computeGateStats(runIds) {
       suppressAuth: true
     });
     const gates = gatesResult?.items || [];
+    const byExecutionMode = {};
 
     const total = gates.length;
     if (total === 0) return { total: 0, rejection_rate: 0, timeout_rate: 0, most_rejected: [] };
@@ -186,6 +260,10 @@ async function computeGateStats(runIds) {
       const tool = g.tool_name || 'unknown';
       rejByTool[tool] = (rejByTool[tool] || 0) + 1;
     }
+    for (const gate of gates) {
+      const mode = gate.execution_mode || 'unspecified';
+      byExecutionMode[mode] = (byExecutionMode[mode] || 0) + 1;
+    }
     const mostRejected = Object.entries(rejByTool)
       .map(([tool, count]) => ({ tool, rejections: count }))
       .sort((a, b) => b.rejections - a.rejections)
@@ -195,10 +273,11 @@ async function computeGateStats(runIds) {
       total,
       rejection_rate: Math.round(rejected / total * 100),
       timeout_rate: Math.round(timedOut / total * 100),
-      most_rejected: mostRejected
+      most_rejected: mostRejected,
+      by_execution_mode: byExecutionMode
     };
   } catch (err) {
-    return { total: 0, rejection_rate: 0, timeout_rate: 0, most_rejected: [] };
+    return { total: 0, rejection_rate: 0, timeout_rate: 0, most_rejected: [], by_execution_mode: {} };
   }
 }
 
@@ -273,16 +352,19 @@ function computeToolRates(steps) {
   const byTool = {};
   for (const step of steps) {
     const tool = step.tool_name || 'unknown';
-    if (!byTool[tool]) byTool[tool] = { total: 0, success: 0 };
+    if (!byTool[tool]) byTool[tool] = { total: 0, success: 0, execution_modes: {} };
     byTool[tool].total++;
     if (step.status === 'completed') byTool[tool].success++;
+    const mode = step.execution_mode || 'unspecified';
+    byTool[tool].execution_modes[mode] = (byTool[tool].execution_modes[mode] || 0) + 1;
   }
 
   const rates = {};
   for (const [tool, stats] of Object.entries(byTool)) {
     rates[tool] = {
       total: stats.total,
-      rate: Math.round(stats.success / stats.total * 100)
+      rate: Math.round(stats.success / stats.total * 100),
+      execution_modes: stats.execution_modes
     };
   }
   return rates;

@@ -509,6 +509,14 @@ export const FEATURE_FLAGS = {
   intentClassificationEnabled: false,
   /** Enable per-user conversation memory in lmdr-memory index */
   conversationMemoryEnabled: false,
+  /** Phase 2: Build a structured execution plan before tool execution */
+  dagPlanningEnabled: false,
+  /** Phase 3: Allow bounded parallel execution for planner-approved read branches */
+  parallelReadBranchesEnabled: false,
+  /** Phase 4: Allow branch-aware approval resume semantics */
+  branchAwareApprovalsEnabled: false,
+  /** Phase 4: Run verifier stage before final synthesis on flagged workflows */
+  agentVerifierEnabled: false,
 };
 
 // =============================================================================

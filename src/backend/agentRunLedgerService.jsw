@@ -16,11 +16,40 @@ function generateId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
+function normalizeRunMetadata(metadata = {}) {
+  return {
+    plan_id: metadata.plan_id || '',
+    execution_model: metadata.execution_model || 'sequential',
+    planned_nodes: Number(metadata.planned_nodes || 0),
+    parallel_nodes: Number(metadata.parallel_nodes || 0),
+  };
+}
+
+function normalizeStepMetadata(metadata = {}) {
+  return {
+    execution_mode: metadata.execution_mode || '',
+    side_effect_class: metadata.side_effect_class || '',
+    node_id: metadata.node_id || '',
+    branch_id: metadata.branch_id || '',
+    join_key: metadata.join_key || '',
+    timeout_ms: Number(metadata.timeout_ms || 0),
+  };
+}
+
+function normalizeGateMetadata(metadata = {}) {
+  return {
+    node_id: metadata.node_id || '',
+    branch_id: metadata.branch_id || '',
+    execution_mode: metadata.execution_mode || '',
+  };
+}
+
 /**
  * Start a new agent run — creates the immutable run record
  */
-export async function startRun(conversationId, role, userId, goalText) {
+export async function startRun(conversationId, role, userId, goalText, metadata = {}) {
   const runId = generateId('run');
+  const runMetadata = normalizeRunMetadata(metadata);
   await dataAccess.insertRecord(COLLECTIONS.runs, {
     run_id: runId,
     conversation_id: conversationId || '',
@@ -33,7 +62,11 @@ export async function startRun(conversationId, role, userId, goalText) {
     steps_count: 0,
     started_at: new Date().toISOString(),
     completed_at: '',
-    sla_ms: 0
+    sla_ms: 0,
+    plan_id: runMetadata.plan_id,
+    execution_model: runMetadata.execution_model,
+    planned_nodes: runMetadata.planned_nodes,
+    parallel_nodes: runMetadata.parallel_nodes
   }, { suppressAuth: true });
   return { runId };
 }
@@ -41,8 +74,9 @@ export async function startRun(conversationId, role, userId, goalText) {
 /**
  * Log a single tool execution step within a run
  */
-export async function logStep(runId, toolName, riskLevel, args, result, latencyMs, status) {
+export async function logStep(runId, toolName, riskLevel, args, result, latencyMs, status, metadata = {}) {
   const stepId = generateId('step');
+  const stepMetadata = normalizeStepMetadata(metadata);
   // Hash args for storage (avoid storing full PII)
   const argsHash = typeof args === 'object' ? JSON.stringify(Object.keys(args || {})) : '';
   // Summarize result (first 200 chars)
@@ -65,7 +99,14 @@ export async function logStep(runId, toolName, riskLevel, args, result, latencyM
     retries: 0,
     status: status || 'executed',
     approval_gate_id: '',
-    created_at: new Date().toISOString()
+    created_at: new Date().toISOString(),
+    executed_at: new Date().toISOString(),
+    execution_mode: stepMetadata.execution_mode,
+    side_effect_class: stepMetadata.side_effect_class,
+    node_id: stepMetadata.node_id,
+    branch_id: stepMetadata.branch_id,
+    join_key: stepMetadata.join_key,
+    timeout_ms: stepMetadata.timeout_ms
   }, { suppressAuth: true });
   return { stepId };
 }
@@ -73,8 +114,9 @@ export async function logStep(runId, toolName, riskLevel, args, result, latencyM
 /**
  * Create an approval gate — pauses execution until resolved
  */
-export async function createGate(runId, stepId, toolName, reason, riskLevel) {
+export async function createGate(runId, stepId, toolName, reason, riskLevel, metadata = {}) {
   const gateId = generateId('gate');
+  const gateMetadata = normalizeGateMetadata(metadata);
   await dataAccess.insertRecord(COLLECTIONS.gates, {
     gate_id: gateId,
     run_id: runId || '',
@@ -85,7 +127,10 @@ export async function createGate(runId, stepId, toolName, reason, riskLevel) {
     presented_at: new Date().toISOString(),
     decision: 'pending',
     decided_by: '',
-    decided_at: ''
+    decided_at: '',
+    node_id: gateMetadata.node_id,
+    branch_id: gateMetadata.branch_id,
+    execution_mode: gateMetadata.execution_mode
   }, { suppressAuth: true });
   return { gateId };
 }
@@ -135,6 +180,26 @@ export async function completeRun(runId, status, totalTokens, totalCost) {
     completed_at: new Date().toISOString(),
     sla_ms: Date.now() - startedAt
   }, { suppressAuth: true });
+}
+
+/**
+ * Update planning metadata for a run after a plan is built.
+ * Backward-compatible helper for Phase 2 planner scaffolding.
+ */
+export async function updateRunPlanningMetadata(runId, metadata = {}) {
+  const runs = await dataAccess.queryRecords(COLLECTIONS.runs, {
+    filters: { run_id: runId },
+    limit: 1,
+    suppressAuth: true
+  });
+  if (!runs || !runs.items || runs.items.length === 0) {
+    throw new Error(`Run not found: ${runId}`);
+  }
+  const run = runs.items[0];
+  const recordId = run._id || run.id;
+  const runMetadata = normalizeRunMetadata(metadata);
+  await dataAccess.updateRecord(COLLECTIONS.runs, recordId, runMetadata, { suppressAuth: true });
+  return { runId, ...runMetadata };
 }
 
 /**
@@ -213,8 +278,27 @@ export async function getRecentRuns(filters = {}) {
  * Wraps logStep with sensible defaults for action-style logging
  */
 export async function logAgentAction(runId, actionName, details = {}) {
-  const { riskLevel = 'execute_low', args = {}, result = {}, latencyMs = 0, status = 'executed' } = details;
-  return logStep(runId, actionName, riskLevel, args, result, latencyMs, status);
+  const {
+    riskLevel = 'execute_low',
+    args = {},
+    result = {},
+    latencyMs = 0,
+    status = 'executed',
+    execution_mode = '',
+    side_effect_class = '',
+    node_id = '',
+    branch_id = '',
+    join_key = '',
+    timeout_ms = 0
+  } = details;
+  return logStep(runId, actionName, riskLevel, args, result, latencyMs, status, {
+    execution_mode,
+    side_effect_class,
+    node_id,
+    branch_id,
+    join_key,
+    timeout_ms
+  });
 }
 
 /**

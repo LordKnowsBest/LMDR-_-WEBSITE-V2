@@ -48,7 +48,7 @@ jest.mock('backend/b2bAccountService', () => ({ getAccount: jest.fn() }));
 jest.mock('backend/b2bMatchSignalService', () => ({ getSignals: jest.fn() }));
 jest.mock('backend/b2bPipelineService', () => ({ getOpportunities: jest.fn() }));
 
-const { getToolPolicy, validateToolExecution, getAvailableTools } = require('backend/agentService');
+const { getToolPolicy, getToolExecutionMetadata, validateToolExecution, getAvailableTools } = require('backend/agentService');
 
 describe('AgentService', () => {
   describe('Tool Resolution', () => {
@@ -136,14 +136,17 @@ describe('AgentService', () => {
   describe('Policy Tags', () => {
     it('getToolPolicy returns correct policy for find_matches', () => {
       const policy = getToolPolicy('find_matches');
-      expect(policy).toEqual({
+      expect(policy).toEqual(expect.objectContaining({
         risk_level: 'read',
         requires_approval: false,
         rate_limit: 30,
         success_metric: 'matches_returned > 0',
         rollback_strategy: null,
-        audit_fields: ['zip', 'maxDistance']
-      });
+        audit_fields: ['zip', 'maxDistance'],
+        execution_mode: 'parallel_safe',
+        side_effect_class: 'read',
+        idempotency: 'not_applicable'
+      }));
     });
 
     it('getToolPolicy returns requires_approval: true for send_message', () => {
@@ -172,7 +175,34 @@ describe('AgentService', () => {
         requiredFields.forEach(field => {
           expect(policy).toHaveProperty(field);
         });
+        expect(policy).toHaveProperty('execution_mode');
+        expect(policy).toHaveProperty('side_effect_class');
+        expect(policy).toHaveProperty('idempotency');
+        expect(policy).toHaveProperty('timeout_ms');
+        expect(policy).toHaveProperty('join_key');
+        expect(policy).toHaveProperty('max_concurrency');
       });
+    });
+
+    it('getToolExecutionMetadata resolves router action policy', () => {
+      const metadata = getToolExecutionMetadata('observability_ops', { action: 'get_tool_performance' });
+      expect(metadata).toEqual(expect.objectContaining({
+        kind: 'router',
+        toolName: 'observability_ops',
+        actionName: 'get_tool_performance',
+        actionKey: 'observability_ops.get_tool_performance'
+      }));
+      expect(metadata.policy).toEqual(expect.objectContaining({
+        execution_mode: 'parallel_safe',
+        side_effect_class: 'read'
+      }));
+    });
+
+    it('approval-required router actions remain sequential_only', () => {
+      const metadata = getToolExecutionMetadata('external_api', { action: 'configure_api_key' });
+      expect(metadata.policy.requires_approval).toBe(true);
+      expect(metadata.policy.execution_mode).toBe('sequential_only');
+      expect(metadata.policy.idempotency).toBe('required');
     });
 
     it('validateToolExecution allows within rate limit', () => {

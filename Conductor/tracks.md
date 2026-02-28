@@ -287,6 +287,12 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Status: In Progress*
 *Completion: 20% (Phase 1 Complete)*
 
+## [ ] Track: Agentic Workflow Architecture Upgrade
+*Link: [./tracks/agentic_workflow_architecture_20260228/](./tracks/agentic_workflow_architecture_20260228/)*
+*Priority: High*
+*Status: Planned*
+*Completion: 0% (Track Created)*
+
 ## [/] Track: AI Intelligence Layer
 *Link: [./tracks/ai_intelligence_layer_20260219/](./tracks/ai_intelligence_layer_20260219/)*
 *Priority: High*

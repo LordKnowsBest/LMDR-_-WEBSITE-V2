@@ -7,10 +7,12 @@
 import { routeAIRequest } from 'backend/aiRouterService';
 import { createConversation, addTurn, getRecentContext } from 'backend/agentConversationService';
 import * as dataAccess from 'backend/dataAccess';
-import { startRun, logStep, createGate, completeRun } from 'backend/agentRunLedgerService';
+import { startRun, logStep, createGate, completeRun, updateRunPlanningMetadata } from 'backend/agentRunLedgerService';
 import { isRuntimeAvailable, callRuntimeStep } from 'backend/agentRuntimeService';
 import { classifyUserIntent, buildRagConfig } from 'backend/intentService';
 import { ingestTurnMemory } from 'backend/ragIngestionService';
+import { FEATURE_FLAGS } from 'backend/configData';
+import { buildExecutionPlan } from 'backend/agentPlanService';
 
 // ── Cost Control Configuration ──
 const COST_CONTROLS = {
@@ -1943,15 +1945,207 @@ const ROUTER_DEFINITIONS = {
   },
 };
 
+const EXECUTION_MODE = {
+  SEQUENTIAL_ONLY: 'sequential_only',
+  PARALLEL_SAFE: 'parallel_safe',
+  PARALLEL_CHUNKED: 'parallel_chunked',
+};
+
+const SIDE_EFFECT_CLASS = {
+  READ: 'read',
+  SUGGEST: 'suggest',
+  WRITE_REVERSIBLE: 'write_reversible',
+  WRITE_IRREVERSIBLE: 'write_irreversible',
+};
+
+const IDEMPOTENCY = {
+  REQUIRED: 'required',
+  OPTIONAL: 'optional',
+  NOT_APPLICABLE: 'not_applicable',
+};
+
+const PARALLEL_SAFE_ROUTERS = new Set([
+  'driver_road',
+  'driver_utility',
+  'recruiter_analytics',
+  'observability_ops',
+  'cross_role_utility',
+]);
+
+const PARALLEL_SAFE_READ_PREFIXES = [
+  'get_',
+  'find_',
+  'search_',
+  'check_',
+  'calculate_',
+  'compare_',
+  'query_',
+  'list_',
+  'suggest_',
+  'preview_',
+  'explain_',
+];
+
+const CHUNKABLE_WRITE_PREFIXES = ['bulk_', 'backfill_'];
+const IDEMPOTENCY_REQUIRED_PREFIXES = [
+  'create_',
+  'send_',
+  'process_',
+  'initiate_',
+  'upload_',
+  'configure_',
+  'refresh_',
+  'approve_',
+  'rebind_',
+  'quarantine_',
+  'disable_',
+];
+
+function _startsWithAny(value, prefixes) {
+  return prefixes.some(prefix => value.startsWith(prefix));
+}
+
+function _inferSideEffectClass(riskLevel) {
+  if (riskLevel === 'read') return SIDE_EFFECT_CLASS.READ;
+  if (riskLevel === 'suggest') return SIDE_EFFECT_CLASS.SUGGEST;
+  if (riskLevel === 'execute_high') return SIDE_EFFECT_CLASS.WRITE_IRREVERSIBLE;
+  return SIDE_EFFECT_CLASS.WRITE_REVERSIBLE;
+}
+
+function _inferExecutionMode(context, sideEffectClass, requiresApproval) {
+  const actionKey = context.actionName || context.toolName || '';
+  if (requiresApproval) return EXECUTION_MODE.SEQUENTIAL_ONLY;
+  if (_startsWithAny(actionKey, CHUNKABLE_WRITE_PREFIXES)) return EXECUTION_MODE.PARALLEL_CHUNKED;
+  if (sideEffectClass === SIDE_EFFECT_CLASS.READ || sideEffectClass === SIDE_EFFECT_CLASS.SUGGEST) {
+    if (context.routerName && PARALLEL_SAFE_ROUTERS.has(context.routerName)) {
+      return EXECUTION_MODE.PARALLEL_SAFE;
+    }
+    if (_startsWithAny(actionKey, PARALLEL_SAFE_READ_PREFIXES)) {
+      return EXECUTION_MODE.PARALLEL_SAFE;
+    }
+  }
+  return EXECUTION_MODE.SEQUENTIAL_ONLY;
+}
+
+function _inferIdempotency(context, sideEffectClass) {
+  const actionKey = context.actionName || context.toolName || '';
+  if (sideEffectClass === SIDE_EFFECT_CLASS.READ || sideEffectClass === SIDE_EFFECT_CLASS.SUGGEST) {
+    return IDEMPOTENCY.NOT_APPLICABLE;
+  }
+  if (_startsWithAny(actionKey, IDEMPOTENCY_REQUIRED_PREFIXES)) {
+    return IDEMPOTENCY.REQUIRED;
+  }
+  if (sideEffectClass === SIDE_EFFECT_CLASS.WRITE_IRREVERSIBLE) {
+    return IDEMPOTENCY.REQUIRED;
+  }
+  return IDEMPOTENCY.OPTIONAL;
+}
+
+function _inferTimeoutMs(context, sideEffectClass) {
+  if (context.policy?.timeout_ms) return context.policy.timeout_ms;
+  if (context.routerName === 'external_api') return 10000;
+  if (context.routerName === 'observability_ops') return 6000;
+  if (sideEffectClass === SIDE_EFFECT_CLASS.READ) return 5000;
+  if (sideEffectClass === SIDE_EFFECT_CLASS.SUGGEST) return 7000;
+  if (sideEffectClass === SIDE_EFFECT_CLASS.WRITE_IRREVERSIBLE) return 12000;
+  return 8000;
+}
+
+function _inferMaxConcurrency(context, executionMode) {
+  if (context.policy?.max_concurrency) return context.policy.max_concurrency;
+  if (executionMode === EXECUTION_MODE.PARALLEL_SAFE) return 3;
+  if (executionMode === EXECUTION_MODE.PARALLEL_CHUNKED) return 5;
+  return 1;
+}
+
+function _normalizeExecutionPolicy(policy = {}, context = {}) {
+  const normalizedPolicy = { ...policy };
+  const sideEffectClass = normalizedPolicy.side_effect_class ||
+    _inferSideEffectClass(normalizedPolicy.risk_level || 'read');
+  const executionMode = normalizedPolicy.execution_mode ||
+    _inferExecutionMode({ ...context, policy: normalizedPolicy }, sideEffectClass, !!normalizedPolicy.requires_approval);
+
+  normalizedPolicy.side_effect_class = sideEffectClass;
+  normalizedPolicy.execution_mode = executionMode;
+  normalizedPolicy.idempotency = normalizedPolicy.idempotency ||
+    _inferIdempotency(context, sideEffectClass);
+  normalizedPolicy.timeout_ms = _inferTimeoutMs({ ...context, policy: normalizedPolicy }, sideEffectClass);
+  normalizedPolicy.join_key = normalizedPolicy.join_key || '';
+  normalizedPolicy.max_concurrency = _inferMaxConcurrency({ ...context, policy: normalizedPolicy }, executionMode);
+
+  return normalizedPolicy;
+}
+
+function _applyExecutionMetadata() {
+  for (const [toolName, toolDef] of Object.entries(TOOL_DEFINITIONS)) {
+    toolDef.policy = _normalizeExecutionPolicy(toolDef.policy, {
+      kind: 'flat',
+      toolName,
+    });
+  }
+
+  for (const [routerName, actions] of Object.entries(ACTION_REGISTRY)) {
+    for (const [actionName, actionDef] of Object.entries(actions)) {
+      actionDef.policy = _normalizeExecutionPolicy(actionDef.policy, {
+        kind: 'router',
+        routerName,
+        actionName,
+      });
+    }
+  }
+}
+
+_applyExecutionMetadata();
+
+function _buildLedgerMetadata(policy, context = {}) {
+  return {
+    execution_mode: policy?.execution_mode || '',
+    side_effect_class: policy?.side_effect_class || '',
+    node_id: context.node_id || '',
+    branch_id: context.branch_id || '',
+    join_key: policy?.join_key || '',
+    timeout_ms: policy?.timeout_ms || 0,
+  };
+}
+
 // Export for tests
 export { ACTION_REGISTRY, ROUTER_DEFINITIONS };
+
+export function getToolExecutionMetadata(toolName, toolInput = null) {
+  if (toolInput?.action && ACTION_REGISTRY[toolName]) {
+    const actionDef = ACTION_REGISTRY[toolName][toolInput.action];
+    if (!actionDef) return null;
+    return {
+      kind: 'router',
+      toolName,
+      routerName: toolName,
+      actionName: toolInput.action,
+      actionKey: `${toolName}.${toolInput.action}`,
+      policy: actionDef.policy,
+      serviceModule: actionDef.serviceModule,
+      serviceFunction: actionDef.serviceFunction,
+    };
+  }
+
+  const toolDef = TOOL_DEFINITIONS[toolName];
+  if (!toolDef) return null;
+  return {
+    kind: 'flat',
+    toolName,
+    actionName: null,
+    actionKey: toolName,
+    policy: toolDef.policy,
+    serviceModule: toolDef.serviceModule,
+    serviceFunction: toolDef.serviceFunction,
+  };
+}
 
 /**
  * Get policy metadata for a tool
  */
-export function getToolPolicy(toolName) {
-  const tool = TOOL_DEFINITIONS[toolName];
-  return tool ? tool.policy : null;
+export function getToolPolicy(toolName, toolInput = null) {
+  const metadata = getToolExecutionMetadata(toolName, toolInput);
+  return metadata ? metadata.policy : null;
 }
 
 /**
@@ -2047,6 +2241,9 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
       return { error: `Unknown action '${toolInput.action}' in router '${toolName}'` };
     }
 
+    const actionMeta = getToolExecutionMetadata(toolName, toolInput);
+    const actionPolicy = actionMeta?.policy || actionDef.policy;
+
     const { runId, userId } = runContext;
 
     // Rate limit check for router actions
@@ -2055,8 +2252,8 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
       const key = `${userId}:${actionKey}`;
       const now = Date.now();
       const entry = _rateLimitMap.get(key);
-      if (entry && now <= entry.resetAt && entry.count >= actionDef.policy.rate_limit) {
-        return { error: `Rate limit exceeded: ${actionDef.policy.rate_limit}/min for ${actionKey}`, type: 'rate_limited' };
+      if (entry && now <= entry.resetAt && entry.count >= actionPolicy.rate_limit) {
+        return { error: `Rate limit exceeded: ${actionPolicy.rate_limit}/min for ${actionKey}`, type: 'rate_limited' };
       }
       if (!entry || now > entry.resetAt) {
         _rateLimitMap.set(key, { count: 1, resetAt: now + 60000 });
@@ -2066,10 +2263,11 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
     }
 
     // Approval gate check for router actions
-    if (actionDef.policy.requires_approval && !runContext.approvedGateId) {
+    if (actionPolicy.requires_approval && !runContext.approvedGateId) {
       const actionKey = `${toolName}.${toolInput.action}`;
-      const stepId = runId ? (await logStep(runId, actionKey, actionDef.policy.risk_level, toolInput.params || {}, null, 0, 'pending_approval')).stepId : '';
-      const gate = runId ? await createGate(runId, stepId, actionKey, `Action "${actionKey}" requires approval (risk: ${actionDef.policy.risk_level})`, actionDef.policy.risk_level) : { gateId: '' };
+      const ledgerMetadata = _buildLedgerMetadata(actionPolicy);
+      const stepId = runId ? (await logStep(runId, actionKey, actionPolicy.risk_level, toolInput.params || {}, null, 0, 'pending_approval', ledgerMetadata)).stepId : '';
+      const gate = runId ? await createGate(runId, stepId, actionKey, `Action "${actionKey}" requires approval (risk: ${actionPolicy.risk_level})`, actionPolicy.risk_level, ledgerMetadata) : { gateId: '' };
       return {
         type: 'approval_required',
         gateId: gate.gateId,
@@ -2077,7 +2275,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
         toolName: actionKey,
         toolDescription: `${toolName} → ${toolInput.action}`,
         args: toolInput.params || {},
-        riskLevel: actionDef.policy.risk_level,
+        riskLevel: actionPolicy.risk_level,
         auditFields: Object.keys(toolInput.params || {})
       };
     }
@@ -2108,7 +2306,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
 
       // Log to run ledger (best-effort)
       if (runId) {
-        logStep(runId, `${toolName}.${toolInput.action}`, actionDef.policy.risk_level, toolInput.params || {}, result, latencyMs, 'executed')
+        logStep(runId, `${toolName}.${toolInput.action}`, actionPolicy.risk_level, toolInput.params || {}, result, latencyMs, 'executed', _buildLedgerMetadata(actionPolicy))
           .catch(err => console.error('Step logging failed:', err));
       }
 
@@ -2116,7 +2314,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
     } catch (error) {
       const latencyMs = Date.now() - startTime;
       if (runId) {
-        logStep(runId, `${toolName}.${toolInput.action}`, actionDef.policy.risk_level, toolInput.params || {}, { error: error.message }, latencyMs, 'error')
+        logStep(runId, `${toolName}.${toolInput.action}`, actionPolicy.risk_level, toolInput.params || {}, { error: error.message }, latencyMs, 'error', _buildLedgerMetadata(actionPolicy))
           .catch(err => console.error('Step logging failed:', err));
       }
       console.error(`Router action error [${toolName}.${toolInput.action}]:`, error);
@@ -2129,6 +2327,8 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
   if (!toolDef) {
     return { error: `Unknown tool: ${toolName}` };
   }
+  const toolMeta = getToolExecutionMetadata(toolName, toolInput);
+  const toolPolicy = toolMeta?.policy || toolDef.policy || {};
 
   const { runId, userId } = runContext;
 
@@ -2141,9 +2341,10 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
   }
 
   // Approval gate check
-  if (toolDef.policy && toolDef.policy.requires_approval && !runContext.approvedGateId) {
-    const stepId = runId ? (await logStep(runId, toolName, toolDef.policy.risk_level, toolInput, null, 0, 'pending_approval')).stepId : '';
-    const gate = runId ? await createGate(runId, stepId, toolName, `Tool "${toolName}" requires approval (risk: ${toolDef.policy.risk_level})`, toolDef.policy.risk_level) : { gateId: '' };
+  if (toolPolicy.requires_approval && !runContext.approvedGateId) {
+    const ledgerMetadata = _buildLedgerMetadata(toolPolicy);
+    const stepId = runId ? (await logStep(runId, toolName, toolPolicy.risk_level, toolInput, null, 0, 'pending_approval', ledgerMetadata)).stepId : '';
+    const gate = runId ? await createGate(runId, stepId, toolName, `Tool "${toolName}" requires approval (risk: ${toolPolicy.risk_level})`, toolPolicy.risk_level, ledgerMetadata) : { gateId: '' };
     return {
       type: 'approval_required',
       gateId: gate.gateId,
@@ -2151,8 +2352,8 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
       toolName,
       toolDescription: toolDef.description,
       args: toolInput,
-      riskLevel: toolDef.policy.risk_level,
-      auditFields: toolDef.policy.audit_fields
+      riskLevel: toolPolicy.risk_level,
+      auditFields: toolPolicy.audit_fields
     };
   }
 
@@ -2221,7 +2422,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
 
     const latencyMs = Date.now() - startTime;
     if (runId) {
-      logStep(runId, toolName, toolDef.policy?.risk_level || 'unknown', toolInput, result, latencyMs, 'executed')
+      logStep(runId, toolName, toolPolicy.risk_level || 'unknown', toolInput, result, latencyMs, 'executed', _buildLedgerMetadata(toolPolicy))
         .catch(err => console.error('Step logging failed:', err));
     }
 
@@ -2229,7 +2430,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
   } catch (error) {
     const latencyMs = Date.now() - startTime;
     if (runId) {
-      logStep(runId, toolName, toolDef.policy?.risk_level || 'unknown', toolInput, { error: error.message }, latencyMs, 'error')
+      logStep(runId, toolName, toolPolicy.risk_level || 'unknown', toolInput, { error: error.message }, latencyMs, 'error', _buildLedgerMetadata(toolPolicy))
         .catch(err => console.error('Step logging failed:', err));
     }
     console.error(`Tool execution error [${toolName}]:`, error);
@@ -2256,7 +2457,9 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
   // Start run ledger
   let runId = null;
   try {
-    const run = await startRun(conversationId, role, userId, message.substring(0, 200));
+    const run = await startRun(conversationId, role, userId, message.substring(0, 200), {
+      execution_model: 'sequential',
+    });
     runId = run.runId;
   } catch (err) {
     console.error('Run ledger start failed (non-blocking):', err);
@@ -2325,6 +2528,31 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
     _reorderToolsByPriority(tools, intentResult.toolPriorityHints);
   }
 
+  // Phase 2 planner scaffold — records a structured plan summary but does not
+  // change the current sequential execution path unless a later executor uses it.
+  let executionPlan = null;
+  if (FEATURE_FLAGS.dagPlanningEnabled) {
+    try {
+      executionPlan = await buildExecutionPlan(role, message, {
+        tools,
+        intentResult,
+        conversationId,
+        userId,
+      });
+      if (runId && executionPlan?.summary) {
+        updateRunPlanningMetadata(runId, {
+          plan_id: executionPlan.plan_id,
+          execution_model: executionPlan.execution_model,
+          planned_nodes: executionPlan.summary.planned_nodes,
+          parallel_nodes: executionPlan.summary.parallel_nodes,
+        }).catch(err => console.error('Run planning metadata update failed:', err));
+      }
+    } catch (planErr) {
+      console.warn('[agentService] Plan build failed (non-blocking):', planErr.message);
+      executionPlan = null;
+    }
+  }
+
   // Agent loop - keep calling AI until we get a text response (not tool_use)
   let currentMessages = [...messages];
   const maxIterations = 5;
@@ -2342,7 +2570,7 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
           .then(() => _evaluateCompletedRun(runId))
           .catch(err => console.error('Run completion failed:', err));
       }
-      return { conversationId, runId, response: capText, toolsUsed: true, role };
+      return { conversationId, runId, planId: executionPlan?.plan_id || null, response: capText, toolsUsed: true, role };
     }
 
     // Time cap check
@@ -2354,7 +2582,7 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
           .then(() => _evaluateCompletedRun(runId))
           .catch(err => console.error('Run completion failed:', err));
       }
-      return { conversationId, runId, response: timeText, toolsUsed: true, role };
+      return { conversationId, runId, planId: executionPlan?.plan_id || null, response: timeText, toolsUsed: true, role };
     }
     // Route AI step: external runtime (Phase 1) or legacy routeAIRequest
     let aiResponse;
@@ -2416,6 +2644,7 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
             type: 'approval_required',
             conversationId,
             runId,
+            planId: executionPlan?.plan_id || null,
             gateId: result.gateId,
             stepId: result.stepId,
             toolName: result.toolName,
@@ -2457,12 +2686,13 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
       ingestTurnMemory(userId, role, conversationId, message, responseText)
         .catch(err => console.warn('[agentService] Turn memory ingestion failed (non-blocking):', err.message));
 
-      return {
-        conversationId,
-        runId,
-        response: responseText,
-        toolsUsed: currentMessages.length > messages.length + 1,
-        intentClass: intentResult?.intentClass || null,
+    return {
+      conversationId,
+      runId,
+      planId: executionPlan?.plan_id || null,
+      response: responseText,
+      toolsUsed: currentMessages.length > messages.length + 1,
+      intentClass: intentResult?.intentClass || null,
         ragUsed: !!ragConfig,
         role
       };
@@ -2477,7 +2707,7 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
       .then(() => _evaluateCompletedRun(runId))
       .catch(err => console.error('Run completion failed:', err));
   }
-  return { conversationId, runId, response: finalText, toolsUsed: true, role };
+  return { conversationId, runId, planId: executionPlan?.plan_id || null, response: finalText, toolsUsed: true, role };
 }
 
 /**
