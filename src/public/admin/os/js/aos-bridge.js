@@ -1,85 +1,155 @@
 // ============================================================================
-// AOS-BRIDGE — PostMessage Bridge (HTML ↔ Wix Velo)
+// AOS-BRIDGE — Pure Wix Velo PostMessage Bridge
+// Ensures ZERO MOCK DATA and strong Promise-based communication
 // ============================================================================
 
 (function () {
     'use strict';
 
     let initialized = false;
+    let isReady = false;
+    let nextMsgId = 1;
+
+    // Callbacks waiting for velocityReady from Velo
+    const readyCallbacks = [];
+
+    // Pending requests keyed by correlationId
+    const pendingRequests = new Map();
+
+    // Default timeout for bridge requests (15s)
+    const REQUEST_TIMEOUT = 15000;
 
     window.AOS = window.AOS || {};
-    AOS.bridge = { init, sendToVelo, onReady };
 
-    // Callbacks queued before init
-    const readyCallbacks = [];
-    let isReady = false;
+    // Expose the new Promise-based API
+    AOS.bridge = {
+        init,
+        send,          // THE ONLY WAY to request data now (returns Promise)
+        onReady,
+        get status() { return isReady ? 'CONNECTED' : 'WAITING'; }
+    };
 
     /**
-     * Initialize the bridge — listen for messages from Velo
+     * Initializes the bridge listener (called by App Shell on DOMContentLoaded)
      */
     function init() {
         if (initialized) return;
         initialized = true;
 
-        window.addEventListener('message', handleInbound);
+        window.addEventListener('message', handleInboundMessage);
 
-        // Tell Velo we're ready
-        sendToVelo('adminOSReady', { version: '1.0.0' });
-        console.log('[AOS Bridge] Initialized, sent adminOSReady');
+        // Announce presence immediately
+        _postMessageToParent({ action: 'aosInit', payload: { version: '2.0.0', mode: 'strict' } });
+        console.log('[AOS Bridge] Initialized. Awaiting vReady signal.');
     }
 
     /**
-     * Send a message to Wix Velo page code
-     * @param {string} action - Message action (matches older 'action' protocol)
-     * @param {object} payload - Payload
+     * Helper to actually dispatch the message securely to the parent frame
      */
-    function sendToVelo(action, payload) {
-        // We send both action and payload to support various Velo listeners
-        const msg = { action: action, type: action, payload: payload || {}, data: payload || {}, timestamp: Date.now() };
+    function _postMessageToParent(msg) {
         try {
             window.parent.postMessage(msg, '*');
         } catch (e) {
-            console.warn('[AOS Bridge] postMessage failed:', e);
+            console.error('[AOS Bridge] Critical postMessage failure:', e);
         }
     }
 
     /**
-     * Handle inbound messages from Velo
+     * The core asynchronous request method.
+     * All views MUST use this to get data. No mocked fallback allowed.
+     * 
+     * @param {string} action The action verb mapped in Velo (e.g., 'getDashboardData')
+     * @param {Object} payload Optional parameters for the Velo function
+     * @param {number} timeoutOverride Optional custom timeout in ms
+     * @returns {Promise<any>} Resolves with payload from Velo, or rejects on error/timeout
      */
-    function handleInbound(event) {
+    function send(action, payload = {}, timeoutOverride = null) {
+        return new Promise((resolve, reject) => {
+            if (!action || typeof action !== 'string') {
+                return reject(new Error('AOS Bridge: Invalid action string.'));
+            }
+
+            // ZERO MOCK GUARD: Prevent known bad patterns
+            if (action.toLowerCase().includes('mock') || payload.mock === true) {
+                console.error(`[AOS Bridge] ⛔ ZERO MOCK VIOLATION: Blocked attempt to send mock request for ${action}`);
+                return reject(new Error('MOCK_DATA_PROHIBITED'));
+            }
+
+            const correlationId = `aos-${Date.now()}-${nextMsgId++}`;
+            const timeoutMs = timeoutOverride || REQUEST_TIMEOUT;
+
+            // Setup timeout
+            const timeoutTimer = setTimeout(() => {
+                if (pendingRequests.has(correlationId)) {
+                    pendingRequests.delete(correlationId);
+                    console.error(`[AOS Bridge] ⏱️ Timeout (${timeoutMs}ms) waiting for Velo response: ${action}`);
+                    reject(new Error('BRIDGE_TIMEOUT'));
+                }
+            }, timeoutMs);
+
+            // Register request
+            pendingRequests.set(correlationId, { resolve, reject, timeoutTimer, action });
+
+            // Dispatch
+            _postMessageToParent({
+                action: action,
+                payload: payload,
+                correlationId: correlationId,
+                timestamp: Date.now()
+            });
+        });
+    }
+
+    /**
+     * Inbound message handler for postMessage events from Velo
+     */
+    function handleInboundMessage(event) {
         const msg = event.data;
         if (!msg || typeof msg !== 'object') return;
 
-        const action = msg.action || msg.type;
-        const payload = msg.payload || msg.data;
-        if (!action) return;
-
-        // Handle init/ready signals from Velo
-        if (action === 'adminOSInit' || action === 'adminReady') {
+        // Velo Lifecycle Event: Page is ready and security verified
+        if (msg.action === 'vReady') {
             isReady = true;
-            console.log('[AOS Bridge] Received', action, payload);
+            console.log(`[AOS Bridge] 🟢 Velo Link Established. Security Context: ${msg.payload?.role || 'Unknown'}`);
 
-            // Fire queued ready callbacks
-            readyCallbacks.forEach(cb => {
-                try { cb(payload); } catch (e) { console.warn('[AOS Bridge] ready callback error:', e); }
-            });
-            readyCallbacks.length = 0;
+            // Flush queued ready callbacks
+            while (readyCallbacks.length > 0) {
+                const cb = readyCallbacks.shift();
+                try { cb(msg.payload); } catch (e) { console.error('AOS Bridge OnReady callback error:', e); }
+            }
             return;
         }
 
-        // Route to view system
-        const handled = AOS.views && AOS.views.routeMessage(action, payload);
+        // Bridge Response matched by correlationId
+        if (msg.correlationId && pendingRequests.has(msg.correlationId)) {
+            const req = pendingRequests.get(msg.correlationId);
+            clearTimeout(req.timeoutTimer);
+            pendingRequests.delete(msg.correlationId);
 
-        // If no view handled it, log for debugging
-        if (!handled && action !== 'actionSuccess') {
-            console.log('[AOS Bridge] Unhandled message:', action);
+            if (msg.error) {
+                console.error(`[AOS Bridge] ❌ Velo returned error for ${req.action}:`, msg.error);
+                req.reject(new Error(msg.error.message || msg.error || 'VELO_ERROR'));
+            } else {
+                req.resolve(msg.payload);
+            }
+            return;
+        }
+
+        // Push Event: Unsolicited data from Velo (e.g., realtime notifications, stream updates)
+        if (msg.action && !msg.correlationId) {
+            // First try AOS.views router for global events
+            const handled = AOS.views && AOS.views.routeMessage(msg.action, msg.payload);
+            if (!handled) {
+                console.log(`[AOS Bridge] 📩 Unsolicited push event received: ${msg.action}`);
+            }
         }
     }
 
     /**
-     * Register a callback for when Velo connection is ready
+     * Subscribe to the Velo Ready event
      */
     function onReady(callback) {
+        if (typeof callback !== 'function') return;
         if (isReady) {
             callback();
         } else {
