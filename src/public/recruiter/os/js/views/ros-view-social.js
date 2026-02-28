@@ -7,7 +7,33 @@
     'use strict';
 
     const VIEW_ID = 'social';
-    const MESSAGES = ['socialPostsLoaded', 'socialPostPublished', 'socialAccountConnected'];
+    const MESSAGES = ['socialPostsLoaded', 'socialPostPublished', 'socialAccountConnected', 'socialCopyGenerated', 'socialImageGenerated'];
+
+    // ── Platform Format Catalog ──
+    const SOCIAL_FORMATS = {
+        facebook: [
+            { label: 'Feed Square',   ratio: '1:1',    px: '1080×1080', apiRatio: '1:1'  },
+            { label: 'Feed Portrait', ratio: '4:5',    px: '1080×1350', apiRatio: '4:5'  },
+            { label: 'Story / Reel',  ratio: '9:16',   px: '1080×1920', apiRatio: '9:16' },
+            { label: 'Ad / Link',     ratio: '1.91:1', px: '1200×628',  apiRatio: '16:9' }
+        ],
+        instagram: [
+            { label: 'Feed Square',   ratio: '1:1',    px: '1080×1080', apiRatio: '1:1'  },
+            { label: 'Feed Portrait', ratio: '4:5',    px: '1080×1350', apiRatio: '4:5'  },
+            { label: 'Story / Reel',  ratio: '9:16',   px: '1080×1920', apiRatio: '9:16' }
+        ],
+        linkedin: [
+            { label: 'Feed Post',     ratio: '1:1',    px: '1200×1200', apiRatio: '1:1'  },
+            { label: 'Link Preview',  ratio: '1.91:1', px: '1200×627',  apiRatio: '16:9' }
+        ]
+    };
+
+    const STYLE_OPTIONS = [
+        { id: 'professional photo', label: 'Professional Photo', icon: 'photo_camera' },
+        { id: 'bold graphic',       label: 'Bold Graphic',       icon: 'palette' },
+        { id: 'illustrated',        label: 'Illustrated',        icon: 'brush' },
+        { id: 'minimal',            label: 'Minimal',            icon: 'crop_square' }
+    ];
 
     // ── State ──
     let posts = [];
@@ -15,6 +41,54 @@
     let stats = { published: 0, impressions: 0, engagement: 0, accounts: 0 };
     let activeTab = 'posts';
     let showComposer = false;
+    let composerTab = 'copy'; // 'copy' | 'image'
+    let imageState = {
+        selectedFormat: null,  // apiRatio string e.g. '1:1'
+        prompt: '',
+        style: 'professional photo',
+        generating: false,
+        base64: null,
+        mimeType: null,
+        mediaUrl: null
+    };
+
+    // ── Helpers ──
+    function getSelectedPlatforms() {
+        const platforms = [];
+        if (document.getElementById('social-fb')?.checked) platforms.push('facebook');
+        if (document.getElementById('social-li')?.checked) platforms.push('linkedin');
+        if (document.getElementById('social-ig')?.checked) platforms.push('instagram');
+        return platforms.length ? platforms : ['facebook'];
+    }
+
+    function getFormatIntersection(platforms) {
+        if (!platforms.length) return SOCIAL_FORMATS.facebook;
+        const sets = platforms.map(p => new Set((SOCIAL_FORMATS[p] || []).map(f => f.apiRatio)));
+        const common = (SOCIAL_FORMATS[platforms[0]] || []).filter(f =>
+            sets.every(s => s.has(f.apiRatio))
+        );
+        // Deduplicate by apiRatio
+        const seen = new Set();
+        return common.filter(f => { if (seen.has(f.apiRatio)) return false; seen.add(f.apiRatio); return true; });
+    }
+
+    function escapeHtml(s) {
+        if (!s) return '';
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function showToast(msg, isError = false) {
+        const t = document.createElement('div');
+        t.className = 'fixed top-16 right-4 z-[9999] px-4 py-2.5 rounded-xl neu-s text-[12px] font-bold text-lmdr-dark flex items-center gap-2';
+        t.style.animation = 'fadeUp .3s ease';
+        const icon = isError ? 'error' : 'check_circle';
+        const color = isError ? 'text-red-500' : 'text-emerald-500';
+        t.innerHTML = `<span class="material-symbols-outlined ${color} text-[16px]">${icon}</span>${msg}`;
+        document.body.appendChild(t);
+        setTimeout(() => t.remove(), 3000);
+    }
 
     // ── Render ──
     function render() {
@@ -111,6 +185,7 @@
     function renderComposer() {
         return `
       <div class="mt-4 neu rounded-2xl p-5">
+        <!-- Composer Header -->
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-[14px] font-bold text-lmdr-dark flex items-center gap-2">
             <span class="material-symbols-outlined text-purple-400 text-[16px]">share</span>Create Social Post
@@ -119,57 +194,189 @@
             <span class="material-symbols-outlined text-[16px]">close</span>
           </button>
         </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-3">
-            <div>
-              <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-1 block">Platforms</label>
-              <div class="flex gap-2">
-                <label class="flex items-center gap-1.5 neu-x rounded-lg px-3 py-1.5 cursor-pointer">
-                  <input type="checkbox" id="social-fb" checked class="rounded">
-                  <span class="material-symbols-outlined text-blue-500 text-[14px]">public</span>
-                  <span class="text-[10px] font-bold text-lmdr-dark">FB</span>
-                </label>
-                <label class="flex items-center gap-1.5 neu-x rounded-lg px-3 py-1.5 cursor-pointer">
-                  <input type="checkbox" id="social-li" class="rounded">
-                  <span class="material-symbols-outlined text-sky-500 text-[14px]">business_center</span>
-                  <span class="text-[10px] font-bold text-lmdr-dark">LI</span>
-                </label>
-                <label class="flex items-center gap-1.5 neu-x rounded-lg px-3 py-1.5 cursor-pointer">
-                  <input type="checkbox" id="social-ig" class="rounded">
-                  <span class="material-symbols-outlined text-pink-400 text-[14px]">photo_camera</span>
-                  <span class="text-[10px] font-bold text-lmdr-dark">IG</span>
-                </label>
-              </div>
-            </div>
-            <textarea id="social-content" rows="4" placeholder="What do you want to share with CDL drivers?"
-              class="w-full px-3 py-2.5 rounded-xl neu-in bg-transparent border-none text-[12px] text-lmdr-dark placeholder-tan/50 focus:ring-0 outline-none resize-none"></textarea>
-            <button onclick="ROS.views._social.generateAI()" class="w-full px-3 py-2 rounded-xl border border-purple-500/30 text-purple-400 text-[11px] font-bold hover:bg-purple-500/5 transition-all">
-              <span class="material-symbols-outlined text-[13px] align-middle mr-1">auto_awesome</span>Generate AI Content
-            </button>
-            <div class="flex gap-2">
-              <button onclick="ROS.views._social.publishPost()" class="flex-1 px-3 py-2 rounded-xl bg-gradient-to-r from-purple-500 to-fuchsia-600 text-white text-[11px] font-bold">
-                <span class="material-symbols-outlined text-[13px] align-middle mr-1">send</span>Publish Now
-              </button>
-              <button onclick="ROS.views._social.toggleComposer()" class="px-3 py-2 rounded-xl neu-x text-[11px] font-bold text-tan">Cancel</button>
-            </div>
-          </div>
-          <!-- Preview -->
-          <div>
-            <p class="text-[10px] font-bold text-tan uppercase tracking-wider mb-2">Preview</p>
-            <div class="neu-in rounded-xl p-4">
-              <div class="flex items-center gap-2 mb-3">
-                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-lmdr-blue to-lmdr-deep flex items-center justify-center">
-                  <span class="text-[10px] font-bold text-white">VM</span>
-                </div>
-                <div>
-                  <p class="text-[11px] font-bold text-lmdr-dark">VelocityMatch Recruiting</p>
-                  <p class="text-[9px] text-tan">Just now · Public</p>
-                </div>
-              </div>
-              <div id="social-preview-text" class="text-[11px] text-lmdr-dark">Your post content will appear here...</div>
-            </div>
+
+        <!-- Platform Checkboxes (shared between tabs) -->
+        <div class="mb-3">
+          <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-1.5 block">Platforms</label>
+          <div class="flex gap-2">
+            <label class="flex items-center gap-1.5 neu-x rounded-lg px-3 py-1.5 cursor-pointer">
+              <input type="checkbox" id="social-fb" checked class="rounded" onchange="ROS.views._social.onPlatformChange()">
+              <span class="material-symbols-outlined text-blue-500 text-[14px]">public</span>
+              <span class="text-[10px] font-bold text-lmdr-dark">FB</span>
+            </label>
+            <label class="flex items-center gap-1.5 neu-x rounded-lg px-3 py-1.5 cursor-pointer">
+              <input type="checkbox" id="social-li" class="rounded" onchange="ROS.views._social.onPlatformChange()">
+              <span class="material-symbols-outlined text-sky-500 text-[14px]">business_center</span>
+              <span class="text-[10px] font-bold text-lmdr-dark">LI</span>
+            </label>
+            <label class="flex items-center gap-1.5 neu-x rounded-lg px-3 py-1.5 cursor-pointer">
+              <input type="checkbox" id="social-ig" class="rounded" onchange="ROS.views._social.onPlatformChange()">
+              <span class="material-symbols-outlined text-pink-400 text-[14px]">photo_camera</span>
+              <span class="text-[10px] font-bold text-lmdr-dark">IG</span>
+            </label>
           </div>
         </div>
+
+        <!-- Composer Tab Strip -->
+        <div class="flex gap-1 mb-4 p-1 neu-ins rounded-xl">
+          <button onclick="ROS.views._social.switchComposerTab('copy')"
+            class="flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1.5
+              ${composerTab === 'copy' ? 'neu-x text-lmdr-dark' : 'text-tan'}">
+            <span class="material-symbols-outlined text-[13px]">text_fields</span>Copy
+          </button>
+          <button onclick="ROS.views._social.switchComposerTab('image')"
+            class="flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-all flex items-center justify-center gap-1.5
+              ${composerTab === 'image' ? 'neu-x text-lmdr-dark' : 'text-tan'}">
+            <span class="material-symbols-outlined text-[13px]">image</span>Image
+          </button>
+        </div>
+
+        ${composerTab === 'copy' ? renderCopyTab() : renderImageTab()}
+      </div>`;
+    }
+
+    function renderCopyTab() {
+        return `
+      <div class="grid grid-cols-2 gap-4">
+        <div class="space-y-3">
+          <textarea id="social-content" rows="5" placeholder="What do you want to share with CDL drivers?"
+            class="w-full px-3 py-2.5 rounded-xl neu-in bg-transparent border-none text-[12px] text-lmdr-dark placeholder-tan/50 focus:ring-0 outline-none resize-none"></textarea>
+          <button id="social-gen-btn" onclick="ROS.views._social.generateAI()" class="w-full px-3 py-2 rounded-xl border border-purple-500/30 text-purple-400 text-[11px] font-bold hover:bg-purple-500/5 transition-all">
+            <span class="material-symbols-outlined text-[13px] align-middle mr-1">auto_awesome</span>Generate AI Content
+          </button>
+          <div class="flex gap-2">
+            <button onclick="ROS.views._social.publishPost()" class="flex-1 px-3 py-2 rounded-xl bg-gradient-to-r from-purple-500 to-fuchsia-600 text-white text-[11px] font-bold">
+              <span class="material-symbols-outlined text-[13px] align-middle mr-1">send</span>Publish Now
+            </button>
+            <button onclick="ROS.views._social.toggleComposer()" class="px-3 py-2 rounded-xl neu-x text-[11px] font-bold text-tan">Cancel</button>
+          </div>
+        </div>
+        <!-- Preview -->
+        <div>
+          <p class="text-[10px] font-bold text-tan uppercase tracking-wider mb-2">Preview</p>
+          <div class="neu-in rounded-xl p-4">
+            <div class="flex items-center gap-2 mb-3">
+              <div class="w-8 h-8 rounded-full bg-gradient-to-br from-lmdr-blue to-lmdr-deep flex items-center justify-center">
+                <span class="text-[10px] font-bold text-white">VM</span>
+              </div>
+              <div>
+                <p class="text-[11px] font-bold text-lmdr-dark">VelocityMatch Recruiting</p>
+                <p class="text-[9px] text-tan">Just now · Public</p>
+              </div>
+            </div>
+            <div id="social-preview-text" class="text-[11px] text-lmdr-dark leading-relaxed">Your post content will appear here...</div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function renderImageTab() {
+        const platforms = getSelectedPlatforms();
+        const formats = getFormatIntersection(platforms);
+        const hasImage = !!imageState.base64;
+
+        return `
+      <div class="grid grid-cols-2 gap-4">
+        <!-- Left: Controls -->
+        <div class="space-y-4">
+
+          <!-- Format Picker -->
+          <div>
+            <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-2 block">Format</label>
+            <div class="grid grid-cols-2 gap-2">
+              ${formats.map(f => {
+                  const active = imageState.selectedFormat === f.apiRatio;
+                  return `
+                <button onclick="ROS.views._social.selectFormat('${f.apiRatio}')"
+                  class="p-2.5 rounded-xl text-left transition-all ${active ? 'neu-ins border border-purple-400/40' : 'neu-x hover:border-purple-400/20 border border-transparent'}">
+                  <div class="flex items-center gap-1.5 mb-1">
+                    ${renderRatioThumb(f.apiRatio, active)}
+                    <span class="text-[10px] font-bold ${active ? 'text-purple-500' : 'text-lmdr-dark'}">${f.label}</span>
+                  </div>
+                  <p class="text-[9px] text-tan">${f.px} · ${f.ratio}</p>
+                </button>`;
+              }).join('')}
+            </div>
+          </div>
+
+          <!-- Prompt -->
+          <div>
+            <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-1.5 block">Describe the Image</label>
+            <textarea id="image-prompt" rows="3" placeholder="e.g. A professional CDL truck driver with a big rig at sunrise, American highway, cinematic lighting"
+              class="w-full px-3 py-2.5 rounded-xl neu-in bg-transparent border-none text-[12px] text-lmdr-dark placeholder-tan/50 focus:ring-0 outline-none resize-none"
+              oninput="ROS.views._social.onPromptInput(this.value)">${escapeHtml(imageState.prompt)}</textarea>
+          </div>
+
+          <!-- Style Selector -->
+          <div>
+            <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-1.5 block">Style</label>
+            <div class="grid grid-cols-2 gap-1.5">
+              ${STYLE_OPTIONS.map(s => {
+                  const active = imageState.style === s.id;
+                  return `
+                <button onclick="ROS.views._social.selectStyle('${s.id}')"
+                  class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-all ${active ? 'neu-ins text-purple-500 border border-purple-400/40' : 'neu-x text-tan border border-transparent'}">
+                  <span class="material-symbols-outlined text-[13px]">${s.icon}</span>${s.label}
+                </button>`;
+              }).join('')}
+            </div>
+          </div>
+
+          <!-- Generate Button -->
+          <button id="image-gen-btn" onclick="ROS.views._social.generateImage()"
+            class="w-full px-4 py-2.5 rounded-xl bg-gradient-to-r from-purple-500 to-fuchsia-600 text-white text-[12px] font-bold flex items-center justify-center gap-2 ${imageState.generating ? 'opacity-70 cursor-not-allowed' : ''}">
+            ${imageState.generating
+                ? `<span class="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>Generating...`
+                : `<span class="material-symbols-outlined text-[14px]">image</span>Generate Image`
+            }
+          </button>
+        </div>
+
+        <!-- Right: Preview -->
+        <div>
+          <p class="text-[10px] font-bold text-tan uppercase tracking-wider mb-2">Preview</p>
+          <div class="neu-in rounded-xl p-3 min-h-[200px] flex flex-col items-center justify-center">
+            ${hasImage ? renderImagePreview() : renderImagePlaceholder()}
+          </div>
+          ${hasImage ? `
+          <div class="flex gap-2 mt-2">
+            <button onclick="ROS.views._social.downloadImage()" class="flex-1 px-3 py-2 rounded-xl neu-x text-[11px] font-bold text-lmdr-dark flex items-center justify-center gap-1">
+              <span class="material-symbols-outlined text-[13px]">download</span>Download PNG
+            </button>
+            <button onclick="ROS.views._social.generateImage()" class="px-3 py-2 rounded-xl border border-purple-400/30 text-purple-400 text-[11px] font-bold flex items-center gap-1">
+              <span class="material-symbols-outlined text-[13px]">refresh</span>Retry
+            </button>
+          </div>` : ''}
+        </div>
+      </div>`;
+    }
+
+    function renderRatioThumb(apiRatio, active) {
+        // Small visual ratio indicator
+        const dims = {
+            '1:1':  'w-[14px] h-[14px]',
+            '4:5':  'w-[11px] h-[14px]',
+            '9:16': 'w-[8px]  h-[14px]',
+            '16:9': 'w-[14px] h-[8px]'
+        };
+        const cls = dims[apiRatio] || 'w-[14px] h-[14px]';
+        const bg = active ? 'bg-purple-400/60' : 'bg-tan/40';
+        return `<div class="rounded-sm border ${active ? 'border-purple-400' : 'border-tan/50'} ${cls} ${bg} flex-shrink-0"></div>`;
+    }
+
+    function renderImagePreview() {
+        const src = imageState.mediaUrl
+            ? imageState.mediaUrl
+            : `data:${imageState.mimeType};base64,${imageState.base64}`;
+        return `<img id="social-gen-image" src="${src}" alt="Generated" class="max-w-full max-h-[260px] rounded-xl object-contain" style="max-height:260px"/>`;
+    }
+
+    function renderImagePlaceholder() {
+        return `
+      <div class="text-center">
+        <span class="material-symbols-outlined text-tan/30 text-[40px]">image</span>
+        <p class="text-[11px] text-tan mt-2">Your generated image will appear here</p>
+        <p class="text-[9px] text-tan/60 mt-1">Select a format, describe the image, then click Generate</p>
       </div>`;
     }
 
@@ -248,6 +455,8 @@
     function onUnmount() {
         posts = [];
         showComposer = false;
+        composerTab = 'copy';
+        imageState = { selectedFormat: null, prompt: '', style: 'professional photo', generating: false, base64: null, mimeType: null, mediaUrl: null };
     }
 
     function onMessage(type, payload) {
@@ -268,26 +477,33 @@
                 showToast(payload.platform + ' connected!');
                 refreshContent();
                 break;
-            case 'socialCopyGenerated':
+            case 'socialCopyGenerated': {
                 if (payload.success) {
                     const ta = document.getElementById('social-content');
                     if (ta) ta.value = payload.copy || '';
                     const preview = document.getElementById('social-preview-text');
                     if (preview) preview.textContent = payload.copy || '';
                 } else {
-                    showToast('Copy generation failed: ' + (payload.error || 'Unknown error'));
+                    showToast('Copy generation failed: ' + (payload.error || 'Unknown error'), true);
                 }
-                // Restore button
-                const genBtn = document.querySelector('[onclick*="generateAI"]');
-                if (genBtn) genBtn.textContent = 'Generate AI Content';
+                const genBtn = document.getElementById('social-gen-btn');
+                if (genBtn) genBtn.innerHTML = '<span class="material-symbols-outlined text-[13px] align-middle mr-1">auto_awesome</span>Generate AI Content';
                 break;
-            case 'socialImageGenerated':
+            }
+            case 'socialImageGenerated': {
+                imageState.generating = false;
                 if (payload.success) {
+                    imageState.base64 = payload.base64 || null;
+                    imageState.mimeType = payload.mimeType || 'image/png';
+                    imageState.mediaUrl = payload.mediaUrl || null;
+                    refreshContent();
                     showToast('Image generated!');
                 } else {
-                    showToast('Image generation failed: ' + (payload.error || 'Unknown error'));
+                    refreshContent();
+                    showToast('Image generation failed: ' + (payload.error || 'Unknown error'), true);
                 }
                 break;
+            }
         }
     }
 
@@ -296,47 +512,46 @@
         if (stage) stage.innerHTML = render();
     }
 
-    function escapeHtml(s) {
-        if (!s) return '';
-        const d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
-    }
-
-    function showToast(msg) {
-        const t = document.createElement('div');
-        t.className = 'fixed top-16 right-4 z-[9999] px-4 py-2.5 rounded-xl neu-s text-[12px] font-bold text-lmdr-dark flex items-center gap-2';
-        t.style.animation = 'fadeUp .3s ease';
-        t.innerHTML = `<span class="material-symbols-outlined text-emerald-500 text-[16px]">check_circle</span>${msg}`;
-        document.body.appendChild(t);
-        setTimeout(() => t.remove(), 3000);
-    }
-
     // ── Public API ──
     ROS.views._social = {
         switchTab(tab) { activeTab = tab; refreshContent(); },
-        toggleComposer() { showComposer = !showComposer; refreshContent(); },
+
+        toggleComposer() {
+            showComposer = !showComposer;
+            if (!showComposer) {
+                composerTab = 'copy';
+                imageState = { selectedFormat: null, prompt: '', style: 'professional photo', generating: false, base64: null, mimeType: null, mediaUrl: null };
+            }
+            refreshContent();
+        },
+
+        switchComposerTab(tab) {
+            composerTab = tab;
+            refreshContent();
+        },
+
+        onPlatformChange() {
+            // Re-render image tab format picker when platforms change
+            if (composerTab === 'image') refreshContent();
+        },
+
         connectAccount(platform) { ROS.bridge.sendToVelo('connectSocialAccount', { platform }); },
         openSettings(platform) { ROS.views.showView('social-settings'); },
+
         publishPost() {
             const content = document.getElementById('social-content')?.value;
             if (!content) { showToast('Please write post content.'); return; }
-            const platforms = [];
-            if (document.getElementById('social-fb')?.checked) platforms.push('facebook');
-            if (document.getElementById('social-li')?.checked) platforms.push('linkedin');
-            if (document.getElementById('social-ig')?.checked) platforms.push('instagram');
+            const platforms = getSelectedPlatforms();
             ROS.bridge.sendToVelo('publishSocialPost', { content, platforms });
         },
+
         generateAI() {
             const content = document.getElementById('social-content')?.value || '';
-            const platforms = [];
-            if (document.getElementById('social-fb')?.checked) platforms.push('facebook');
-            if (document.getElementById('social-li')?.checked) platforms.push('linkedin');
-            if (document.getElementById('social-ig')?.checked) platforms.push('instagram');
+            const platforms = getSelectedPlatforms();
             const platform = platforms[0] || 'facebook';
             const profile = ROS.config?.profile || {};
-            const btn = document.querySelector('[onclick*="generateAI"]');
-            if (btn) btn.textContent = 'Generating...';
+            const btn = document.getElementById('social-gen-btn');
+            if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-[13px] align-middle mr-1 animate-spin">progress_activity</span>Generating...';
             ROS.bridge.sendToVelo('generateSocialCopy', {
                 brief: content,
                 platform,
@@ -344,6 +559,51 @@
                 jobTitle: 'CDL-A Driver'
             });
         },
+
+        selectFormat(apiRatio) {
+            imageState.selectedFormat = apiRatio;
+            refreshContent();
+        },
+
+        selectStyle(styleId) {
+            imageState.style = styleId;
+            refreshContent();
+        },
+
+        onPromptInput(value) {
+            imageState.prompt = value;
+        },
+
+        generateImage() {
+            const promptEl = document.getElementById('image-prompt');
+            const prompt = promptEl?.value || imageState.prompt;
+            if (!prompt.trim()) { showToast('Please describe the image you want to generate.'); return; }
+            if (!imageState.selectedFormat) { showToast('Please select a format first.'); return; }
+            imageState.prompt = prompt;
+            imageState.generating = true;
+            imageState.base64 = null;
+            imageState.mediaUrl = null;
+            refreshContent();
+            const platforms = getSelectedPlatforms();
+            ROS.bridge.sendToVelo('generateSocialImage', {
+                prompt,
+                platform: platforms[0] || 'facebook',
+                aspectRatio: imageState.selectedFormat,
+                style: imageState.style
+            });
+        },
+
+        downloadImage() {
+            if (!imageState.base64 && !imageState.mediaUrl) return;
+            const a = document.createElement('a');
+            if (imageState.mediaUrl) {
+                a.href = imageState.mediaUrl;
+            } else {
+                a.href = `data:${imageState.mimeType || 'image/png'};base64,${imageState.base64}`;
+            }
+            a.download = `social-image-${imageState.selectedFormat?.replace(':', 'x') || '1x1'}.png`;
+            a.click();
+        }
     };
 
     // ── Register ──
