@@ -14,6 +14,8 @@ import { ingestTurnMemory } from 'backend/ragIngestionService';
 import { FEATURE_FLAGS } from 'backend/configData';
 import { buildExecutionPlan } from 'backend/agentPlanService';
 import { executePlannedReadNodes, isPlanExecutorEligible } from 'backend/agentDagExecutorService';
+import { verifyPlannedResponse } from 'backend/agentVerifierService';
+import { buildApprovalContext, getApprovalExecutionContext } from 'backend/agentApprovalCoordinator';
 
 // ── Cost Control Configuration ──
 const COST_CONTROLS = {
@@ -2666,19 +2668,24 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
 
           return {
             type: 'approval_required',
-            conversationId,
-            runId,
-            planId: executionPlan?.plan_id || null,
-            gateId: result.gateId,
-            stepId: result.stepId,
-            toolName: result.toolName,
-            toolDescription: result.toolDescription,
-            args: result.args,
-            riskLevel: result.riskLevel,
-            auditFields: result.auditFields,
-            pendingToolBlock: toolBlock,
-            pendingMessages: currentMessages,
-            role
+            ...buildApprovalContext({
+              conversationId,
+              runId,
+              planId: executionPlan?.plan_id || null,
+              gateId: result.gateId,
+              stepId: result.stepId,
+              toolName: result.toolName,
+              toolDescription: result.toolDescription,
+              args: result.args,
+              riskLevel: result.riskLevel,
+              auditFields: result.auditFields,
+              pendingToolBlock: toolBlock,
+              pendingMessages: currentMessages,
+              role
+            }, {
+              execution_mode: result.executionMode || '',
+              plan_id: executionPlan?.plan_id || null
+            })
           };
         }
 
@@ -2696,7 +2703,22 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
       await addTurn(conversationId, 'assistant', JSON.stringify(toolUseBlocks), toolUseBlocks);
     } else {
       // Text response - we're done
-      const responseText = aiResponse.content || textBlocks.map(b => b.text).join('\n');
+      let responseText = aiResponse.content || textBlocks.map(b => b.text).join('\n');
+      if (FEATURE_FLAGS.agentVerifierEnabled && executionPlan) {
+        try {
+          const verification = await verifyPlannedResponse(role, executionPlan, {
+            responseText,
+            prefetchedSummary: prefetchedPlanContext
+          });
+          if (verification.status === 'blocked') {
+            responseText = 'I need to be more careful before answering that. Please try again with a bit more detail.';
+          } else if (verification.status === 'degraded_but_acceptable') {
+            responseText = `${responseText}\n\nNote: This response was delivered with partial verification and should be reviewed if it drives a sensitive action.`;
+          }
+        } catch (verifyErr) {
+          console.warn('[agentService] Verification failed (non-blocking):', verifyErr.message);
+        }
+      }
       await addTurn(conversationId, 'assistant', responseText);
 
       // Complete run and evaluate outcome
@@ -2753,6 +2775,7 @@ export function getCostControls() {
  */
 export async function resumeAfterApproval(approvalContext, decision, decidedBy) {
   const { conversationId, runId, gateId, pendingToolBlock, pendingMessages, role } = approvalContext;
+  const executionContext = getApprovalExecutionContext(approvalContext);
 
   // Resolve the gate
   const { resolveGate } = await import('backend/agentRunLedgerService');
@@ -2781,11 +2804,17 @@ export async function resumeAfterApproval(approvalContext, decision, decidedBy) 
       cr(runId, 'completed_with_rejection', aiResponse.tokensUsed || 0, 0).catch(() => {});
     }
 
-    return { conversationId, runId, response: responseText, role };
+    return { conversationId, runId, planId: executionContext.plan_id || approvalContext.planId || null, response: responseText, role };
   }
 
   // Approved — execute the tool and continue the loop
-  const result = await executeTool(pendingToolBlock.name, pendingToolBlock.input, { runId, userId: decidedBy, approvedGateId: gateId });
+  const result = await executeTool(pendingToolBlock.name, pendingToolBlock.input, {
+    runId,
+    userId: decidedBy,
+    approvedGateId: gateId,
+    node_id: executionContext.node_id || '',
+    branch_id: executionContext.branch_id || ''
+  });
 
   const toolResults = [{
     type: 'tool_result',
@@ -2809,7 +2838,7 @@ export async function resumeAfterApproval(approvalContext, decision, decidedBy) 
     cr(runId, 'completed', aiResponse.tokensUsed || 0, 0).catch(() => {});
   }
 
-  return { conversationId, runId, response: responseText, role };
+  return { conversationId, runId, planId: executionContext.plan_id || approvalContext.planId || null, response: responseText, role };
 }
 
 // ── Outcome Evaluation Hook ──
