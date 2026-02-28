@@ -1,121 +1,164 @@
 // ============================================================================
-// ROS-VIEW-LIFECYCLE — Lifecycle Monitor (Coming Soon)
+// ROS-VIEW-LIFECYCLE — Driver Lifecycle Monitor
+// Per-driver timeline: application → hire → milestones → termination
 // ============================================================================
 
 (function () {
-  'use strict';
+    'use strict';
 
-  const VIEW_ID = 'lifecycle';
+    const VIEW_ID = 'lifecycle';
+    const MESSAGES = ['timelineLoaded', 'lifecycleEventLogged', 'driverTerminated'];
 
-  const MOCK_TIMELINE = [
-    { type: 'APPLICATION_SUBMITTED', title: 'Application Submitted', desc: 'Applied for Regional OTR position. Match Score: 92%', date: '45d ago', icon: 'file_signature', color: 'lmdr-blue' },
-    { type: 'INTERVIEW_COMPLETED', title: 'Interview Completed', desc: 'Phone interview with Sarah Miller. "Strong candidate, verify MVR."', date: '42d ago', icon: 'phone', color: 'purple-500' },
-    { type: 'HIRED_ACTIVE', title: 'Hired & Active', desc: 'Offer accepted. Start date confirmed.', date: '40d ago', icon: 'handshake', color: 'emerald-500' },
-    { type: 'DAY_7_SURVEY', title: 'Pulse Survey Response', desc: 'Score: 3/5. "Pay was lower than expected for first week."', date: '32d ago', icon: 'chat', color: 'amber-500', alert: true },
-    { type: '30_DAY_MILESTONE', title: '30 Day Milestone', desc: 'Retention bonus accrued ($500).', date: '5d ago', icon: 'military_tech', color: 'yellow-500' }
-  ];
+    // ── State ──
+    let timeline = [];
+    let driverCtx = null; // { driverId, driverName, status, tenureDays }
+    let logModalOpen = false;
+    let termModalOpen = false;
+    let saving = false;
 
-  function render() {
-    return `
-      <div class="h-full flex flex-col overflow-hidden" style="animation:fadeIn 0.6s ease">
-        
-        <!-- Header -->
-        <header class="flex-none px-6 py-4 border-b border-black/5 flex justify-between items-center z-20">
+    // ── Helpers ──
+    function escapeHtml(s) {
+        if (!s) return '';
+        const d = document.createElement('div');
+        d.textContent = String(s);
+        return d.innerHTML;
+    }
+
+    function showToast(msg, isError) {
+        const t = document.createElement('div');
+        t.className = 'fixed top-16 right-4 z-[9999] px-4 py-2.5 rounded-xl neu-s text-[12px] font-bold text-lmdr-dark flex items-center gap-2';
+        t.style.animation = 'fadeUp .3s ease';
+        const span = document.createElement('span');
+        span.className = 'material-symbols-outlined text-[16px] ' + (isError ? 'text-red-500' : 'text-emerald-500');
+        span.textContent = isError ? 'error' : 'check_circle';
+        const text = document.createTextNode(msg);
+        t.appendChild(span);
+        t.appendChild(text);
+        document.body.appendChild(t);
+        setTimeout(() => t.remove(), 3000);
+    }
+
+    function refreshContent() {
+        const stage = document.getElementById('ros-stage');
+        if (stage) stage.innerHTML = render(); // All user-supplied strings sanitized via escapeHtml before interpolation
+    }
+
+    // ── Render ──
+    function render() {
+        const driver = driverCtx || {};
+        const name = driver.driverName || 'No Driver Selected';
+        const status = driver.status || 'Unknown';
+        const tenureDays = driver.tenureDays || 0;
+
+        return `
+      <!-- Header -->
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <button onclick="ROS.views.showView('home')" class="w-8 h-8 neu-s rounded-lg flex items-center justify-center">
+            <span class="material-symbols-outlined text-tan text-[16px]">arrow_back</span>
+          </button>
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center">
+            <span class="material-symbols-outlined text-white text-[16px]">timeline</span>
+          </div>
           <div>
-            <h1 class="font-bold text-lmdr-dark text-[22px] leading-tight flex items-center gap-3">
-              Driver Lifecycle Monitor
-            </h1>
-            <p class="text-[12px] font-bold text-emerald-600 uppercase tracking-wider mt-1 flex items-center gap-1.5">
-              <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              John Doe (Active)
+            <h2 class="text-lg font-bold text-lmdr-dark leading-tight">Driver Lifecycle</h2>
+            <p class="text-[10px] font-bold text-emerald-600 uppercase tracking-wider flex items-center gap-1">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block"></span>
+              ${escapeHtml(name)} &middot; ${escapeHtml(status)}
             </p>
           </div>
-          <div class="flex items-center gap-3">
-            <button onclick="ROS.views.lifecycle.openLogModal()" class="neu-btn px-4 py-2 text-[12px] font-bold text-lmdr-blue flex items-center gap-2">
-              <span class="material-symbols-outlined text-[16px]">draw</span> Log Event
-            </button>
-            <button onclick="ROS.views.lifecycle.openTermModal()" class="neu-btn-red px-4 py-2 text-[12px] font-bold text-red-500 flex items-center gap-2">
-              <span class="material-symbols-outlined text-[16px]">person_cancel</span> Terminate
-            </button>
-          </div>
-        </header>
-
-        <!-- Main Layout -->
-        <div class="flex-1 flex overflow-hidden">
-          
-          <!-- Timeline Area -->
-          <div class="flex-1 overflow-y-auto thin-scroll p-6 relative">
-            
-            <!-- Risk Alert -->
-            <div class="neu-s rounded-2xl p-5 mb-8 flex gap-4 relative overflow-hidden group border border-amber-500/20">
-              <div class="absolute -right-4 -top-4 w-24 h-24 bg-amber-500/10 rounded-full ring-4 ring-amber-500/5 transition-transform group-hover:scale-110"></div>
-              <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center flex-none shadow-lg shadow-amber-500/20">
-                <span class="material-symbols-outlined text-white">warning</span>
-              </div>
-              <div class="relative z-10 w-full">
-                <h3 class="font-bold text-lmdr-dark text-[14px]">Retention Risk Detected</h3>
-                <p class="text-[12px] text-tan mt-1">Driver reported "Low Pay" in Day 7 survey. Immediate follow-up recommended.</p>
-                <div class="mt-3">
-                  <button class="text-[11px] font-bold text-amber-600 hover:text-amber-700 underline">View Survey Response</button>
-                </div>
-              </div>
-            </div>
-
-            <!-- Timeline -->
-            <div class="space-y-4 pl-4 relative" id="lifecycle-timeline">
-              <div class="absolute left-9 top-4 bottom-8 w-[2px] bg-black/5 dark:bg-white/5 timeline-line"></div>
-              ${MOCK_TIMELINE.map(renderTimelineItem).join('')}
-            </div>
-            
-          </div>
-
-          <!-- Right Sidebar -->
-          <aside class="w-[320px] border-l border-black/5 flex-none p-6 overflow-y-auto thin-scroll">
-            <div class="mb-8">
-              <h3 class="text-[11px] font-bold text-tan uppercase tracking-widest mb-4">Driver Stats</h3>
-              <div class="space-y-4">
-                <div class="neu-x rounded-xl p-4 text-center">
-                  <div class="text-[28px] font-black text-lmdr-dark line-height-none">45</div>
-                  <div class="text-[11px] font-bold text-tan uppercase tracking-wide mt-1">Days Tenure</div>
-                </div>
-                <div class="neu-x rounded-xl p-4 text-center">
-                  <div class="text-[28px] font-black text-emerald-600 line-height-none">92%</div>
-                  <div class="text-[11px] font-bold text-tan uppercase tracking-wide mt-1">Satisfaction Score</div>
-                </div>
-                <div class="neu-x rounded-xl p-4 text-center">
-                  <div class="text-[28px] font-black text-lmdr-blue line-height-none">3</div>
-                  <div class="text-[11px] font-bold text-tan uppercase tracking-wide mt-1">Positive Events</div>
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <h3 class="text-[11px] font-bold text-tan uppercase tracking-widest mb-4">Disposition</h3>
-              <div class="neu-x rounded-xl p-4 text-center">
-                <p class="text-[11px] font-medium text-tan italic">No previous terminations.</p>
-              </div>
-            </div>
-          </aside>
-
         </div>
-
-        <!-- Modals will be appended to document.body on mount for proper z-index if needed, or kept inline -->
-
+        <div class="flex items-center gap-2">
+          <button onclick="ROS.views._lifecycle.openLogModal()" class="px-3 py-2 rounded-xl neu-x text-[11px] font-bold text-lmdr-blue flex items-center gap-1.5">
+            <span class="material-symbols-outlined text-[13px]">draw</span>Log Event
+          </button>
+          <button onclick="ROS.views._lifecycle.openTermModal()" class="px-3 py-2 rounded-xl neu-x text-[11px] font-bold text-red-500 flex items-center gap-1.5">
+            <span class="material-symbols-outlined text-[13px]">person_cancel</span>Terminate
+          </button>
+        </div>
       </div>
 
-      <!-- Log Event Modal -->
-      <div id="lifecycle-log-modal" class="fixed inset-0 bg-black/50 z-[100] hidden flex items-center justify-center backdrop-blur-sm opacity-0 transition-opacity">
-        <div class="neu rounded-2xl w-full max-w-md overflow-hidden transform scale-95 transition-transform" id="lifecycle-log-content">
-          <div class="p-5 border-b border-black/5 flex items-center justify-between">
-            <h3 class="font-bold text-[16px] text-lmdr-dark">Log Lifecycle Event</h3>
-            <button onclick="ROS.views.lifecycle.closeLogModal()" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-black/5 text-tan transition">
-              <span class="material-symbols-outlined text-[18px]">close</span>
+      <div class="flex gap-4 mt-4">
+
+        <!-- Timeline -->
+        <div class="flex-1 min-w-0">
+          ${timeline.length ? renderTimeline() : renderEmptyTimeline()}
+        </div>
+
+        <!-- Driver Stats Sidebar -->
+        <div class="w-40 flex-none space-y-3">
+          <div class="neu-s rounded-xl p-3 text-center">
+            <h3 class="text-[22px] font-black text-lmdr-dark">${tenureDays}</h3>
+            <p class="text-[9px] font-bold uppercase tracking-widest text-tan">Days Tenure</p>
+          </div>
+          <div class="neu-s rounded-xl p-3 text-center">
+            <h3 class="text-[22px] font-black text-sg">${driver.satisfactionScore ? escapeHtml(String(driver.satisfactionScore)) + '%' : '--'}</h3>
+            <p class="text-[9px] font-bold uppercase tracking-widest text-tan">Satisfaction</p>
+          </div>
+          <div class="neu-s rounded-xl p-3 text-center">
+            <h3 class="text-[22px] font-black text-lmdr-blue">${timeline.filter(e => e.positive).length}</h3>
+            <p class="text-[9px] font-bold uppercase tracking-widest text-tan">Positive Events</p>
+          </div>
+        </div>
+      </div>
+
+      ${logModalOpen ? renderLogModal() : ''}
+      ${termModalOpen ? renderTermModal() : ''}`;
+    }
+
+    function renderTimeline() {
+        return `
+      <div class="space-y-3 relative pl-4">
+        <div class="absolute left-9 top-4 bottom-4 w-[2px] bg-tan/10 rounded-full"></div>
+        ${timeline.map(renderTimelineItem).join('')}
+      </div>`;
+    }
+
+    function renderEmptyTimeline() {
+        return `
+      <div class="neu-in rounded-xl p-10 text-center">
+        <span class="material-symbols-outlined text-tan/30 text-[36px]">timeline</span>
+        <p class="text-[12px] text-tan mt-2">No lifecycle events yet.</p>
+        <p class="text-[10px] text-tan/60 mt-1">Events appear here as the driver progresses.</p>
+      </div>`;
+    }
+
+    function renderTimelineItem(item) {
+        const isAlert = item.alert || item.risk_flag;
+        const iconColor = item.color ? 'text-' + item.color : 'text-lmdr-blue';
+        const alertBadge = isAlert
+            ? '<div class="mt-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 text-[9px] font-bold uppercase tracking-wide"><span class="material-symbols-outlined text-[11px]">warning</span>Risk Flag</div>'
+            : '';
+        return `
+      <div class="relative pl-10 pb-4 group">
+        <div class="absolute left-0 top-0 w-9 h-9 rounded-xl neu-s flex items-center justify-center z-10 group-hover:scale-110 transition-transform">
+          <span class="material-symbols-outlined ${iconColor} text-[16px]">${escapeHtml(item.icon || 'circle')}</span>
+        </div>
+        <div class="neu-x rounded-xl p-4 ml-3 ${isAlert ? 'border border-amber-400/30' : ''}">
+          <div class="flex items-start justify-between gap-2">
+            <h4 class="text-[13px] font-bold text-lmdr-dark leading-tight">${escapeHtml(item.title || '')}</h4>
+            <span class="text-[9px] font-bold text-tan uppercase tracking-wide flex-none">${escapeHtml(item.date || '')}</span>
+          </div>
+          <p class="text-[11px] text-tan mt-1 leading-relaxed">${escapeHtml(item.desc || item.description || '')}</p>
+          ${alertBadge}
+        </div>
+      </div>`;
+    }
+
+    function renderLogModal() {
+        return `
+      <div class="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center backdrop-blur-sm" onclick="if(event.target===this)ROS.views._lifecycle.closeLogModal()">
+        <div class="neu rounded-2xl w-full max-w-md mx-4 overflow-hidden">
+          <div class="p-5 border-b border-tan/15 flex items-center justify-between">
+            <h3 class="font-bold text-[15px] text-lmdr-dark">Log Lifecycle Event</h3>
+            <button onclick="ROS.views._lifecycle.closeLogModal()" class="w-8 h-8 neu-x rounded-lg flex items-center justify-center text-tan">
+              <span class="material-symbols-outlined text-[16px]">close</span>
             </button>
           </div>
-          <div class="p-6 space-y-5">
+          <div class="p-5 space-y-4">
             <div>
-              <label class="block text-[11px] font-bold text-tan uppercase tracking-wider mb-2">Event Type</label>
-              <select class="w-full neu-inset rounded-xl px-4 py-3 text-[13px] font-medium text-lmdr-dark focus:outline-none focus:ring-2 focus:ring-lmdr-blue/50">
+              <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-1.5 block">Event Type</label>
+              <select id="lc-event-type" class="w-full neu-in rounded-xl px-3 py-2.5 text-[12px] font-medium text-lmdr-dark bg-transparent border-none focus:ring-0 outline-none">
                 <option value="INCIDENT">Incident / Issue</option>
                 <option value="RECOGNITION">Recognition / Award</option>
                 <option value="TRAINING">Training Completed</option>
@@ -123,153 +166,155 @@
               </select>
             </div>
             <div>
-              <label class="block text-[11px] font-bold text-tan uppercase tracking-wider mb-2">Description</label>
-              <textarea rows="4" class="w-full neu-inset rounded-xl px-4 py-3 text-[13px] font-medium text-lmdr-dark focus:outline-none focus:ring-2 focus:ring-lmdr-blue/50 resize-none" placeholder="Enter details..."></textarea>
+              <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-1.5 block">Description</label>
+              <textarea id="lc-event-desc" rows="4" class="w-full neu-in rounded-xl px-3 py-2.5 text-[12px] text-lmdr-dark bg-transparent border-none placeholder-tan/50 focus:ring-0 outline-none resize-none" placeholder="Enter details..."></textarea>
             </div>
           </div>
-          <div class="p-5 border-t border-black/5 flex justify-end gap-3">
-            <button onclick="ROS.views.lifecycle.closeLogModal()" class="px-5 py-2.5 text-[12px] font-bold text-tan hover:text-lmdr-dark transition">Cancel</button>
-            <button onclick="ROS.views.lifecycle.closeLogModal()" class="bg-gradient-to-r from-lmdr-blue to-lmdr-deep text-white px-6 py-2.5 rounded-xl text-[12px] font-bold shadow-lg shadow-blue-500/20 hover:scale-105 transition-transform">Save Log</button>
+          <div class="p-4 border-t border-tan/15 flex justify-end gap-2">
+            <button onclick="ROS.views._lifecycle.closeLogModal()" class="px-4 py-2 text-[11px] font-bold text-tan neu-x rounded-xl">Cancel</button>
+            <button onclick="ROS.views._lifecycle.saveLogEvent()" ${saving ? 'disabled' : ''}
+              class="px-4 py-2 rounded-xl bg-gradient-to-r from-lmdr-blue to-lmdr-deep text-white text-[11px] font-bold ${saving ? 'opacity-60' : ''}">
+              ${saving ? 'Saving\u2026' : 'Save Log'}
+            </button>
           </div>
         </div>
-      </div>
+      </div>`;
+    }
 
-      <!-- Terminate Modal -->
-      <div id="lifecycle-term-modal" class="fixed inset-0 bg-black/60 z-[100] hidden flex items-center justify-center backdrop-blur-sm opacity-0 transition-opacity">
-        <div class="neu rounded-2xl w-full max-w-lg overflow-hidden transform scale-95 transition-transform border border-red-500/20" id="lifecycle-term-content">
-          <div class="p-6 border-b border-black/5 bg-red-500/5 relative overflow-hidden">
-            <div class="absolute -right-4 -top-4 w-24 h-24 bg-red-500/10 rounded-full"></div>
-            <h3 class="font-bold text-[18px] text-red-600 flex items-center gap-2 relative z-10">
-              <span class="material-symbols-outlined">warning</span> Terminate Driver
+    function renderTermModal() {
+        const reasons = ['Operations', 'Compensation', 'Personal', 'Compliance'];
+        const reasonCards = reasons.map(r => `
+          <label class="neu-x rounded-xl p-3 flex items-center gap-2 cursor-pointer">
+            <input type="radio" name="term-reason" value="${r}" class="text-red-500 focus:ring-red-500">
+            <p class="text-[12px] font-bold text-lmdr-dark">${r}</p>
+          </label>`).join('');
+
+        return `
+      <div class="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center backdrop-blur-sm" onclick="if(event.target===this)ROS.views._lifecycle.closeTermModal()">
+        <div class="neu rounded-2xl w-full max-w-lg mx-4 overflow-hidden border border-red-500/20">
+          <div class="p-5 border-b border-tan/15 bg-red-500/5">
+            <h3 class="font-bold text-[16px] text-red-600 flex items-center gap-2">
+              <span class="material-symbols-outlined text-[18px]">warning</span>Terminate Driver
             </h3>
-            <p class="text-[12px] font-medium text-red-600/70 mt-1 relative z-10">This action ends the driver's employment record.</p>
+            <p class="text-[11px] text-red-500/70 mt-1">This ends the driver's active employment record.</p>
           </div>
-          <div class="p-6 space-y-5">
+          <div class="p-5 space-y-4">
             <div>
-              <label class="block text-[11px] font-bold text-tan uppercase tracking-wider mb-2">Primary Reason</label>
-              <div class="grid grid-cols-2 gap-3">
-                <button class="neu-inset rounded-xl p-4 text-left border border-transparent hover:border-lmdr-blue/30 focus:border-lmdr-blue focus:ring-1 focus:ring-lmdr-blue transition group">
-                  <div class="text-[13px] font-bold text-lmdr-dark group-hover:text-lmdr-blue">Operations</div>
-                  <div class="text-[10px] text-tan mt-1">No freight, equipment</div>
-                </button>
-                <button class="neu-inset rounded-xl p-4 text-left border border-transparent hover:border-lmdr-blue/30 focus:border-lmdr-blue focus:ring-1 focus:ring-lmdr-blue transition group">
-                  <div class="text-[13px] font-bold text-lmdr-dark group-hover:text-lmdr-blue">Compensation</div>
-                  <div class="text-[10px] text-tan mt-1">Pay rate, miles</div>
-                </button>
-                <button class="neu-inset rounded-xl p-4 text-left border border-transparent hover:border-lmdr-blue/30 focus:border-lmdr-blue focus:ring-1 focus:ring-lmdr-blue transition group">
-                  <div class="text-[13px] font-bold text-lmdr-dark group-hover:text-lmdr-blue">Personal</div>
-                  <div class="text-[10px] text-tan mt-1">Home time, health</div>
-                </button>
-                <button class="neu-inset rounded-xl p-4 text-left border border-transparent hover:border-red-500/30 focus:border-red-500 focus:ring-1 focus:ring-red-500 transition group">
-                  <div class="text-[13px] font-bold text-lmdr-dark group-focus:text-red-500">Compliance</div>
-                  <div class="text-[10px] text-tan mt-1">Safety, violations</div>
-                </button>
-              </div>
+              <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-2 block">Primary Reason</label>
+              <div class="grid grid-cols-2 gap-2">${reasonCards}</div>
             </div>
             <div>
-              <label class="block text-[11px] font-bold text-tan uppercase tracking-wider mb-2">Recruiter Notes</label>
-              <textarea rows="2" class="w-full neu-inset rounded-xl px-4 py-3 text-[13px] font-medium text-lmdr-dark focus:outline-none focus:ring-2 focus:ring-lmdr-blue/50 resize-none" placeholder="Required for compliance..."></textarea>
+              <label class="text-[10px] font-bold text-tan uppercase tracking-wider mb-1.5 block">Recruiter Notes (required)</label>
+              <textarea id="lc-term-notes" rows="2" class="w-full neu-in rounded-xl px-3 py-2.5 text-[12px] text-lmdr-dark bg-transparent border-none placeholder-tan/50 focus:ring-0 outline-none resize-none" placeholder="Required for compliance..."></textarea>
             </div>
-            <div class="flex items-center gap-3">
-              <input type="checkbox" id="term-rehire" class="w-4 h-4 rounded text-lmdr-blue focus:ring-lmdr-blue bg-black/5 border-transparent">
-              <label for="term-rehire" class="text-[13px] font-bold text-lmdr-dark">Eligible for Rehire?</label>
-            </div>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" id="lc-term-rehire" class="w-4 h-4 rounded text-lmdr-blue focus:ring-lmdr-blue">
+              <span class="text-[12px] font-bold text-lmdr-dark">Eligible for Rehire?</span>
+            </label>
           </div>
-          <div class="p-5 border-t border-black/5 flex justify-end gap-3">
-            <button onclick="ROS.views.lifecycle.closeTermModal()" class="px-5 py-2.5 text-[12px] font-bold text-tan hover:text-lmdr-dark transition">Cancel</button>
-            <button onclick="ROS.views.lifecycle.closeTermModal()" class="bg-red-500 text-white px-6 py-2.5 rounded-xl text-[12px] font-bold shadow-lg shadow-red-500/20 hover:bg-red-600 transition">Confirm Termination</button>
+          <div class="p-4 border-t border-tan/15 flex justify-end gap-2">
+            <button onclick="ROS.views._lifecycle.closeTermModal()" class="px-4 py-2 text-[11px] font-bold text-tan neu-x rounded-xl">Cancel</button>
+            <button onclick="ROS.views._lifecycle.confirmTermination()" ${saving ? 'disabled' : ''}
+              class="px-4 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-[11px] font-bold ${saving ? 'opacity-60' : ''}">
+              ${saving ? 'Processing\u2026' : 'Confirm Termination'}
+            </button>
           </div>
         </div>
-      </div>
-    `;
-  }
+      </div>`;
+    }
 
-  function renderTimelineItem(item) {
-    const isAlert = item.alert ? 'border border-amber-500/30' : '';
-    const alertLabel = item.alert ? '<div class="mt-3 inline-block px-2 py-1 rounded bg-amber-500/10 text-amber-600 text-[10px] font-bold uppercase tracking-wider"><span class="material-symbols-outlined text-[12px] align-middle mr-1">warning</span>Risk Flag</div>' : '';
+    // ── Lifecycle Hooks ──
+    function onMount() {
+        const ctx = (ROS.state && ROS.state.lifecycleContext) || null;
+        driverCtx = ctx;
+        ROS.bridge.sendToVelo('getTimelineEvents', { driverId: ctx ? ctx.driverId : null });
+    }
 
-    return `
-      <div class="relative pl-10 pb-6 group">
-        <div class="absolute left-0 top-0 w-10 h-10 rounded-xl bg-white dark:bg-slate-800 shadow-neu flex items-center justify-center z-10 transition-transform group-hover:scale-110">
-          <span class="material-symbols-outlined text-[18px] text-${item.color}">${item.icon}</span>
-        </div>
-        <div class="neu-x rounded-xl p-5 ml-4 ${isAlert} hover:shadow-neu transition-shadow">
-          <div class="flex justify-between items-start mb-2">
-            <h4 class="font-bold text-[14px] text-lmdr-dark">${item.title}</h4>
-            <span class="text-[10px] font-bold text-tan uppercase tracking-wide">${item.date}</span>
-          </div>
-          <p class="text-[12px] text-tan leading-relaxed">${item.desc}</p>
-          ${alertLabel}
-        </div>
-      </div>
-    `;
-  }
+    function onUnmount() {
+        timeline = [];
+        driverCtx = null;
+        logModalOpen = false;
+        termModalOpen = false;
+        saving = false;
+    }
 
-  function openLogModal() {
-    const modal = document.getElementById('lifecycle-log-modal');
-    const content = document.getElementById('lifecycle-log-content');
-    if (!modal) return;
-    modal.classList.remove('hidden');
-    // flush layout
-    void modal.offsetWidth;
-    modal.classList.remove('opacity-0');
-    content.classList.remove('scale-95');
-  }
+    function onMessage(type, data) {
+        switch (type) {
+            case 'timelineLoaded':
+                timeline = (data && data.events) || [];
+                refreshContent();
+                break;
+            case 'lifecycleEventLogged':
+                saving = false;
+                logModalOpen = false;
+                if (data && data.success) {
+                    showToast('Event logged successfully!');
+                    ROS.bridge.sendToVelo('getTimelineEvents', { driverId: driverCtx ? driverCtx.driverId : null });
+                } else {
+                    showToast('Failed to save event', true);
+                    refreshContent();
+                }
+                break;
+            case 'driverTerminated':
+                saving = false;
+                termModalOpen = false;
+                if (data && data.success) {
+                    showToast('Driver terminated. Record updated.');
+                    if (driverCtx) driverCtx.status = 'Terminated';
+                    ROS.bridge.sendToVelo('getTimelineEvents', { driverId: driverCtx ? driverCtx.driverId : null });
+                } else {
+                    showToast('Termination failed: ' + ((data && data.error) || 'Unknown error'), true);
+                    refreshContent();
+                }
+                break;
+        }
+    }
 
-  function closeLogModal() {
-    const modal = document.getElementById('lifecycle-log-modal');
-    const content = document.getElementById('lifecycle-log-content');
-    if (!modal) return;
-    modal.classList.add('opacity-0');
-    content.classList.add('scale-95');
-    setTimeout(() => modal.classList.add('hidden'), 300);
-  }
+    // ── Public API ──
+    ROS.views._lifecycle = {
+        openLogModal:  function() { logModalOpen = true;  saving = false; refreshContent(); },
+        closeLogModal: function() { logModalOpen = false; refreshContent(); },
+        openTermModal:  function() { termModalOpen = true;  saving = false; refreshContent(); },
+        closeTermModal: function() { termModalOpen = false; refreshContent(); },
 
-  function openTermModal() {
-    const modal = document.getElementById('lifecycle-term-modal');
-    const content = document.getElementById('lifecycle-term-content');
-    if (!modal) return;
-    modal.classList.remove('hidden');
-    void modal.offsetWidth;
-    modal.classList.remove('opacity-0');
-    content.classList.remove('scale-95');
-  }
+        saveLogEvent: function() {
+            const typeEl = document.getElementById('lc-event-type');
+            const descEl = document.getElementById('lc-event-desc');
+            const desc = descEl ? descEl.value.trim() : '';
+            if (!desc) { showToast('Please enter a description.'); return; }
+            saving = true;
+            refreshContent();
+            ROS.bridge.sendToVelo('logLifecycleEvent', {
+                driverId:    driverCtx ? driverCtx.driverId : null,
+                eventType:   typeEl ? typeEl.value : 'NOTE',
+                description: desc
+            });
+        },
 
-  function closeTermModal() {
-    const modal = document.getElementById('lifecycle-term-modal');
-    const content = document.getElementById('lifecycle-term-content');
-    if (!modal) return;
-    modal.classList.add('opacity-0');
-    content.classList.add('scale-95');
-    setTimeout(() => modal.classList.add('hidden'), 300);
-  }
+        confirmTermination: function() {
+            const reasonEl = document.querySelector('input[name="term-reason"]:checked');
+            const notesEl  = document.getElementById('lc-term-notes');
+            const rehireEl = document.getElementById('lc-term-rehire');
+            const reason = reasonEl ? reasonEl.value : null;
+            const notes  = notesEl  ? notesEl.value.trim() : '';
+            const rehire = rehireEl ? rehireEl.checked : false;
+            if (!reason) { showToast('Please select a reason.'); return; }
+            if (!notes)  { showToast('Recruiter notes are required.'); return; }
+            saving = true;
+            refreshContent();
+            ROS.bridge.sendToVelo('terminateDriver', {
+                driverId:       driverCtx ? driverCtx.driverId : null,
+                driverName:     driverCtx ? driverCtx.driverName : '',
+                reason,
+                notes,
+                eligibleRehire: rehire
+            });
+        }
+    };
 
-  function onMount() {
-    ROS.bridge.sendToVelo('getTimelineEvents', { driverId: 'mock-123' });
-  }
+    // Alias so existing onclick="ROS.views.lifecycle.*" still works
+    ROS.views.lifecycle = ROS.views._lifecycle;
 
-  function onUnmount() {
-    // Clean up modals if they were moved
-  }
-
-  function onMessage(type, data) {
-    // Process backend messages when available
-  }
-
-  const lifecycleHandlers = {
-    openLogModal,
-    closeLogModal,
-    openTermModal,
-    closeTermModal
-  };
-
-  ROS.views.lifecycle = lifecycleHandlers;
-
-  ROS.views.registerView(VIEW_ID, {
-    render,
-    onMount,
-    onUnmount,
-    onMessage,
-    messages: ['timelineLoaded']
-  });
+    // ── Register ──
+    ROS.views.registerView(VIEW_ID, { render, onMount, onUnmount, onMessage, messages: MESSAGES });
 })();

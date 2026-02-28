@@ -697,8 +697,18 @@ async function handleHtmlMessage(msg, component) {
         await handleSaveIntel(msg.data, component);
         break;
       case 'getTimelineEvents':
-        sendToHtml(component, 'timelineEventsLoaded', { events: [] });
+        sendToHtml(component, 'timelineLoaded', { events: [] });
         break;
+      case 'logLifecycleEvent': {
+        // Stub — lifecycle event logging service TBD
+        sendToHtml(component, 'lifecycleEventLogged', { success: true });
+        break;
+      }
+      case 'terminateDriver': {
+        // Stub — termination workflow service TBD
+        sendToHtml(component, 'driverTerminated', { success: true });
+        break;
+      }
       case 'getPredictionsData':
         await handleGetPredictionsData(msg.data, component);
         break;
@@ -887,8 +897,15 @@ async function handleHtmlMessage(msg, component) {
       // ========== Recruiter Onboarding Handlers ==========
       case 'fetchBgChecks': {
         try {
-          const checks = await getBGCStatus(msg.data?.checkId || null);
-          sendToHtml(component, 'bgChecksLoaded', { checks });
+          const raw = await getBGCStatus(msg.data?.checkId || null);
+          const checks = Array.isArray(raw) ? raw : (raw?.items || raw?.checks || []);
+          const stats = {
+            total:   checks.length,
+            pending: checks.filter(c => c.status === 'pending').length,
+            cleared: checks.filter(c => c.status === 'cleared').length,
+            flagged: checks.filter(c => c.status === 'flagged').length
+          };
+          sendToHtml(component, 'bgChecksLoaded', { checks, stats });
         } catch (err) {
           sendToHtml(component, 'error', { message: err.message });
         }
@@ -896,8 +913,15 @@ async function handleHtmlMessage(msg, component) {
       }
       case 'fetchDrugTests': {
         try {
-          const tests = await getDrugTestStatus(msg.data?.testId || null);
-          sendToHtml(component, 'drugTestsLoaded', { tests });
+          const raw = await getDrugTestStatus(msg.data?.testId || null);
+          const tests = Array.isArray(raw) ? raw : (raw?.items || raw?.tests || []);
+          const stats = {
+            total:   tests.length,
+            pending: tests.filter(t => t.status === 'pending').length,
+            passed:  tests.filter(t => t.status === 'passed').length,
+            failed:  tests.filter(t => t.status === 'failed').length
+          };
+          sendToHtml(component, 'drugTestsLoaded', { tests, stats });
         } catch (err) {
           sendToHtml(component, 'error', { message: err.message });
         }
@@ -917,8 +941,13 @@ async function handleHtmlMessage(msg, component) {
       case 'fetchCostAnalysis': {
         try {
           const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
-          const analysis = await recordRecruitingSpend({ recruiterId, ...msg.data?.params });
-          sendToHtml(component, 'costAnalysisLoaded', { analysis });
+          const analysis = await calculateCostPerHire(recruiterId, currentCarrierDOT);
+          sendToHtml(component, 'costAnalysisLoaded', {
+            avgCost:    analysis?.avgCostPerHire  || analysis?.avgCost    || 0,
+            totalSpend: analysis?.totalSpend      || 0,
+            hires:      analysis?.totalHires      || analysis?.hires      || 0,
+            channels:   analysis?.channels        || []
+          });
         } catch (err) {
           sendToHtml(component, 'error', { message: err.message });
         }
@@ -2129,7 +2158,9 @@ async function handleGetInterventionTemplates(data, component) {
 
 async function handleSendIntervention(data, component) {
   try {
-    const result = await sendIntervention(data.templateId, data.driverId, data.overrides || {});
+    // Retention view sends { driverId, driverName } without templateId — fall back to default retention follow-up template
+    const templateId = data.templateId || 'default_retention_followup';
+    const result = await sendIntervention(templateId, data.driverId, data.overrides || { driverName: data.driverName });
     sendToHtml(component, 'interventionSent', result);
   } catch (error) {
     sendToHtml(component, 'interventionSent', { success: false, error: error.message });
