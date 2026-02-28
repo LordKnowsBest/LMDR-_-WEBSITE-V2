@@ -13,6 +13,7 @@ import { classifyUserIntent, buildRagConfig } from 'backend/intentService';
 import { ingestTurnMemory } from 'backend/ragIngestionService';
 import { FEATURE_FLAGS } from 'backend/configData';
 import { buildExecutionPlan } from 'backend/agentPlanService';
+import { executePlannedReadNodes, isPlanExecutorEligible } from 'backend/agentDagExecutorService';
 
 // ── Cost Control Configuration ──
 const COST_CONTROLS = {
@@ -2553,8 +2554,31 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
     }
   }
 
+  let prefetchedPlanContext = '';
+  if (FEATURE_FLAGS.parallelReadBranchesEnabled && executionPlan && isPlanExecutorEligible(executionPlan)) {
+    try {
+      const prefetchResult = await executePlannedReadNodes(
+        executionPlan,
+        { runId, userId, maxConcurrency: 3 },
+        async (node, executionContext) => executeTool(
+          node.tool,
+          { action: node.action, params: node.params || {} },
+          executionContext
+        )
+      );
+      if (prefetchResult.summary_text) {
+        prefetchedPlanContext = `Pre-fetched workflow context:\n${prefetchResult.summary_text}`;
+      }
+    } catch (prefetchErr) {
+      console.warn('[agentService] Planned read prefetch failed (non-blocking):', prefetchErr.message);
+    }
+  }
+
   // Agent loop - keep calling AI until we get a text response (not tool_use)
   let currentMessages = [...messages];
+  if (prefetchedPlanContext) {
+    currentMessages.push({ role: 'assistant', content: prefetchedPlanContext });
+  }
   const maxIterations = 5;
   let totalTokens = 0;
   const runStartTime = Date.now();
