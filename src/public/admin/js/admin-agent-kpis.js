@@ -42,6 +42,7 @@
 
     const successColor = stats.success_rate >= 70 ? '#859900' : stats.success_rate >= 40 ? '#f59e0b' : '#ef4444';
     const qualityColor = stats.avg_quality_score >= 60 ? '#859900' : stats.avg_quality_score >= 30 ? '#f59e0b' : '#ef4444';
+    const parallelColor = stats.parallel_run_rate >= 40 ? '#10b981' : stats.parallel_run_rate >= 15 ? '#f59e0b' : '#94a3b8';
 
     section.innerHTML = `
       <div style="background: linear-gradient(135deg, #0f172a, #1e293b); border-radius: 16px; padding: 20px; color: white; font-family: 'Inter', sans-serif;">
@@ -85,6 +86,30 @@
             <div style="font-size: 24px; font-weight: 700; color: #ef4444;">${stats.failure_rate || 0}%</div>
             <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 4px;">Failure Rate</div>
           </div>
+
+          <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 14px; text-align: center;">
+            <div style="font-size: 24px; font-weight: 700; color: ${parallelColor};">${stats.parallel_run_rate || 0}%</div>
+            <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 4px;">Parallelized</div>
+          </div>
+
+          <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 14px; text-align: center;">
+            <div style="font-size: 24px; font-weight: 700; color: #60a5fa;">${stats.avg_branch_count || 0}</div>
+            <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 4px;">Avg Branches</div>
+          </div>
+
+          <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 14px; text-align: center;">
+            <div style="font-size: 24px; font-weight: 700; color: #f97316;">${stats.degraded_run_rate || 0}%</div>
+            <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 4px;">Degraded Runs</div>
+          </div>
+
+          <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 14px; text-align: center;">
+            <div style="font-size: 24px; font-weight: 700; color: #c084fc;">${stats.avg_approval_wait || '-'}</div>
+            <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 4px;">Avg Gate Wait</div>
+          </div>
+        </div>
+
+        <div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px;">
+          ${renderExecutionMix(stats.execution_model_mix || {})}
         </div>
 
         <div style="margin-top: 12px; font-size: 10px; color: rgba(255,255,255,0.3); text-align: right;">
@@ -92,6 +117,16 @@
         </div>
       </div>
     `;
+  }
+
+  function renderExecutionMix(mix) {
+    const keys = Object.keys(mix || {});
+    if (keys.length === 0) return '';
+    return keys.map((key) => {
+      return `<div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 9999px; padding: 6px 10px; font-size: 11px; color: rgba(255,255,255,0.75);">
+        ${key}: <span style="color: white; font-weight: 600;">${mix[key]}</span>
+      </div>`;
+    }).join('');
   }
 
 })();

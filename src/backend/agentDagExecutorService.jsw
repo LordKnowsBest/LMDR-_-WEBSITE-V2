@@ -1,0 +1,96 @@
+// ============================================================================
+// AGENT DAG EXECUTOR SERVICE - Phase 3 bounded parallel read executor
+// Executes planner-approved read-only root nodes while preserving the
+// sequential agent loop as the default orchestration path.
+// ============================================================================
+
+import { chunkArray } from 'backend/utils/arrayUtils';
+
+function isExecutableReadNode(node) {
+  return !!node &&
+    node.kind === 'tool_action' &&
+    !!node.tool &&
+    !!node.action &&
+    (!node.depends_on || node.depends_on.length === 0) &&
+    node.execution_mode === 'parallel_safe' &&
+    node.approval_required !== true;
+}
+
+function summarizeResult(result) {
+  if (result == null) return 'null';
+  try {
+    const raw = typeof result === 'string' ? result : JSON.stringify(result);
+    return raw.substring(0, 400);
+  } catch (err) {
+    return 'unserializable_result';
+  }
+}
+
+export function isPlanExecutorEligible(plan) {
+  if (!plan || !Array.isArray(plan.nodes)) return false;
+  return plan.workflow_type === 'admin_diagnostics';
+}
+
+export async function executePlannedReadNodes(plan, runContext = {}, executeNodeFn) {
+  if (!isPlanExecutorEligible(plan) || typeof executeNodeFn !== 'function') {
+    return {
+      executed_nodes: [],
+      skipped_nodes: Array.isArray(plan?.nodes) ? plan.nodes.map(n => n.node_id) : [],
+      results: [],
+      summary_text: ''
+    };
+  }
+
+  const executableNodes = plan.nodes.filter(isExecutableReadNode);
+  if (executableNodes.length === 0) {
+    return { executed_nodes: [], skipped_nodes: plan.nodes.map(n => n.node_id), results: [], summary_text: '' };
+  }
+
+  const maxConcurrency = Math.max(1, Number(runContext.maxConcurrency || 3));
+  const chunks = chunkArray(executableNodes, maxConcurrency);
+  const results = [];
+  const executedNodes = [];
+
+  for (const chunk of chunks) {
+    const chunkResults = await Promise.all(
+      chunk.map(async (node) => {
+        try {
+          const result = await executeNodeFn(node, runContext);
+          executedNodes.push(node.node_id);
+          return {
+            node_id: node.node_id,
+            tool: node.tool,
+            action: node.action,
+            success: !result?.error,
+            result
+          };
+        } catch (error) {
+          executedNodes.push(node.node_id);
+          return {
+            node_id: node.node_id,
+            tool: node.tool,
+            action: node.action,
+            success: false,
+            result: { error: error.message }
+          };
+        }
+      })
+    );
+    results.push(...chunkResults);
+  }
+
+  const skippedNodes = plan.nodes
+    .filter(node => !executedNodes.includes(node.node_id))
+    .map(node => node.node_id);
+
+  const summaryLines = results.map(item =>
+    `- ${item.tool}.${item.action}: ${item.success ? 'ok' : 'error'} :: ${summarizeResult(item.result)}`
+  );
+
+  return {
+    executed_nodes: executedNodes,
+    skipped_nodes: skippedNodes,
+    results,
+    summary_text: summaryLines.join('\n')
+  };
+}

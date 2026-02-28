@@ -44,6 +44,168 @@ function normalizeGateMetadata(metadata = {}) {
   };
 }
 
+function toTimestamp(value) {
+  const ts = value ? new Date(value).getTime() : NaN;
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function buildExecutionBreakdown(steps = [], gates = []) {
+  const executionModes = {};
+  const sideEffectClasses = {};
+  const branchMap = new Map();
+  const timeline = [];
+
+  const sortedSteps = [...steps].sort((a, b) => {
+    return toTimestamp(a.executed_at || a.created_at) - toTimestamp(b.executed_at || b.created_at);
+  });
+
+  for (const step of sortedSteps) {
+    const branchId = step.branch_id || 'sequential';
+    const executionMode = step.execution_mode || 'unspecified';
+    const sideEffectClass = step.side_effect_class || 'unspecified';
+    executionModes[executionMode] = (executionModes[executionMode] || 0) + 1;
+    sideEffectClasses[sideEffectClass] = (sideEffectClasses[sideEffectClass] || 0) + 1;
+
+    if (!branchMap.has(branchId)) {
+      branchMap.set(branchId, {
+        branch_id: branchId,
+        node_ids: new Set(),
+        join_keys: new Set(),
+        execution_modes: {},
+        side_effect_classes: {},
+        step_count: 0,
+        gate_count: 0,
+        degraded_steps: 0,
+        failed_steps: 0,
+        total_latency_ms: 0,
+        started_at: step.executed_at || step.created_at || '',
+        ended_at: step.executed_at || step.created_at || ''
+      });
+    }
+
+    const branch = branchMap.get(branchId);
+    branch.step_count += 1;
+    branch.total_latency_ms += Number(step.latency_ms || 0);
+    branch.execution_modes[executionMode] = (branch.execution_modes[executionMode] || 0) + 1;
+    branch.side_effect_classes[sideEffectClass] = (branch.side_effect_classes[sideEffectClass] || 0) + 1;
+    if (step.node_id) branch.node_ids.add(step.node_id);
+    if (step.join_key) branch.join_keys.add(step.join_key);
+    if (step.status === 'skipped' || step.status === 'degraded') branch.degraded_steps += 1;
+    if (step.status === 'failed' || step.status === 'error') branch.failed_steps += 1;
+    if (!branch.started_at || toTimestamp(step.executed_at || step.created_at) < toTimestamp(branch.started_at)) {
+      branch.started_at = step.executed_at || step.created_at || branch.started_at;
+    }
+    if (!branch.ended_at || toTimestamp(step.executed_at || step.created_at) > toTimestamp(branch.ended_at)) {
+      branch.ended_at = step.executed_at || step.created_at || branch.ended_at;
+    }
+
+    timeline.push({
+      type: 'step',
+      id: step.step_id || '',
+      run_id: step.run_id || '',
+      branch_id: branchId,
+      node_id: step.node_id || '',
+      label: step.tool_name || 'unknown',
+      status: step.status || 'unknown',
+      execution_mode: executionMode,
+      timestamp: step.executed_at || step.created_at || '',
+      latency_ms: Number(step.latency_ms || 0)
+    });
+  }
+
+  for (const gate of gates) {
+    const branchId = gate.branch_id || 'sequential';
+    if (!branchMap.has(branchId)) {
+      branchMap.set(branchId, {
+        branch_id: branchId,
+        node_ids: new Set(),
+        join_keys: new Set(),
+        execution_modes: {},
+        side_effect_classes: {},
+        step_count: 0,
+        gate_count: 0,
+        degraded_steps: 0,
+        failed_steps: 0,
+        total_latency_ms: 0,
+        started_at: gate.presented_at || '',
+        ended_at: gate.decided_at || gate.presented_at || ''
+      });
+    }
+    const branch = branchMap.get(branchId);
+    branch.gate_count += 1;
+
+    timeline.push({
+      type: 'gate',
+      id: gate.gate_id || '',
+      run_id: gate.run_id || '',
+      branch_id: branchId,
+      node_id: gate.node_id || '',
+      label: gate.tool_name || 'approval_gate',
+      status: gate.decision || 'pending',
+      execution_mode: gate.execution_mode || 'unspecified',
+      timestamp: gate.decided_at || gate.presented_at || '',
+      latency_ms: 0
+    });
+  }
+
+  const branches = Array.from(branchMap.values()).map(branch => ({
+    branch_id: branch.branch_id,
+    node_ids: Array.from(branch.node_ids),
+    join_keys: Array.from(branch.join_keys),
+    execution_modes: branch.execution_modes,
+    side_effect_classes: branch.side_effect_classes,
+    step_count: branch.step_count,
+    gate_count: branch.gate_count,
+    degraded_steps: branch.degraded_steps,
+    failed_steps: branch.failed_steps,
+    total_latency_ms: branch.total_latency_ms,
+    started_at: branch.started_at,
+    ended_at: branch.ended_at
+  })).sort((a, b) => b.total_latency_ms - a.total_latency_ms);
+
+  timeline.sort((a, b) => toTimestamp(a.timestamp) - toTimestamp(b.timestamp));
+
+  return {
+    execution_modes: executionModes,
+    side_effect_classes: sideEffectClasses,
+    branch_count: branches.length,
+    node_count: new Set(sortedSteps.map(step => step.node_id).filter(Boolean)).size,
+    degraded_steps: sortedSteps.filter(step => step.status === 'skipped' || step.status === 'degraded').length,
+    branches,
+    timeline
+  };
+}
+
+function buildRunExecutionTrace(run, steps = [], gates = []) {
+  const breakdown = buildExecutionBreakdown(steps, gates);
+  const criticalPathMs = breakdown.branches.length > 0
+    ? Math.max(...breakdown.branches.map(branch => branch.total_latency_ms || 0))
+    : steps.reduce((sum, step) => sum + Number(step.latency_ms || 0), 0);
+
+  return {
+    run,
+    steps,
+    gates,
+    plan: {
+      plan_id: run.plan_id || '',
+      execution_model: run.execution_model || 'sequential',
+      planned_nodes: Number(run.planned_nodes || 0),
+      parallel_nodes: Number(run.parallel_nodes || 0)
+    },
+    execution: {
+      execution_modes: breakdown.execution_modes,
+      side_effect_classes: breakdown.side_effect_classes,
+      branch_count: breakdown.branch_count,
+      node_count: breakdown.node_count,
+      degraded_steps: breakdown.degraded_steps,
+      critical_path_ms: criticalPathMs,
+      degraded_path: breakdown.degraded_steps > 0 || breakdown.branches.some(branch => branch.failed_steps > 0)
+    },
+    branches: breakdown.branches,
+    timeline: breakdown.timeline
+  };
+}
+
 /**
  * Start a new agent run — creates the immutable run record
  */
@@ -215,6 +377,20 @@ export async function getRun(runId) {
 }
 
 /**
+ * Get a run plus derived execution trace data for replay/monitoring.
+ */
+export async function getRunExecutionTrace(runId) {
+  const [run, steps, gates] = await Promise.all([
+    getRun(runId),
+    getSteps(runId),
+    getGatesForRun(runId)
+  ]);
+
+  if (!run) return null;
+  return buildRunExecutionTrace(run, steps, gates);
+}
+
+/**
  * Get all steps for a run
  */
 export async function getSteps(runId) {
@@ -270,6 +446,34 @@ export async function getRecentRuns(filters = {}) {
   return {
     items: (result && result.items) || [],
     totalCount: (result && result.totalCount) || 0
+  };
+}
+
+/**
+ * Get recent runs enriched with lightweight execution summaries for admin views.
+ */
+export async function getRecentRunsWithExecution(filters = {}) {
+  const recent = await getRecentRuns(filters);
+  const runs = recent.items || [];
+
+  const items = await Promise.all(runs.map(async (run) => {
+    const trace = await getRunExecutionTrace(run.run_id);
+    if (!trace) return run;
+
+    return {
+      ...run,
+      branch_count: trace.execution.branch_count,
+      node_count: trace.execution.node_count,
+      degraded_steps: trace.execution.degraded_steps,
+      critical_path_ms: trace.execution.critical_path_ms,
+      gate_count: trace.gates.length,
+      execution_modes: trace.execution.execution_modes
+    };
+  }));
+
+  return {
+    items,
+    totalCount: recent.totalCount
   };
 }
 

@@ -1,0 +1,119 @@
+// ============================================================================
+// AGENT PLAN SERVICE - Phase 2 planner scaffolding
+// Builds lightweight execution plans without changing current sequential runtime
+// ============================================================================
+
+function generateId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+function createNode(nodeId, tool, action, objective, dependsOn = [], executionMode = 'sequential_only', params = {}) {
+  return {
+    node_id: nodeId,
+    kind: action ? 'tool_action' : 'tool_family',
+    tool,
+    action: action || '',
+    params,
+    objective: objective || '',
+    depends_on: dependsOn,
+    execution_mode: executionMode,
+    approval_required: false,
+    status: 'planned'
+  };
+}
+
+function inferWorkflowType(role, message = '', intentResult = null) {
+  const lower = (message || '').toLowerCase();
+  const intentClass = intentResult?.intentClass || '';
+
+  if (role === 'admin' && /(health|diagnostic|trace|latency|error|incident|performance)/.test(lower)) {
+    return 'admin_diagnostics';
+  }
+  if (role === 'driver' && /(carrier|company|match|compare|safe|pay)/.test(lower)) {
+    return 'driver_carrier_intelligence';
+  }
+  if (role === 'recruiter' && /(candidate|driver|market|assess|evaluate|compare|pipeline)/.test(lower)) {
+    return 'recruiter_candidate_assessment';
+  }
+  if (role === 'carrier' && /(benchmark|compare|compliance|fleet|operations)/.test(lower)) {
+    return 'carrier_operational_benchmark';
+  }
+  if (intentClass) {
+    return `${role}_${intentClass}`;
+  }
+  return `${role}_general`;
+}
+
+function buildWorkflowNodes(role, workflowType, tools = []) {
+  const toolNames = new Set((tools || []).map(t => t.name));
+
+  if (workflowType === 'admin_diagnostics') {
+    return [
+      createNode('n1', 'observability_ops', 'get_tracing_dashboard', 'Gather tracing dashboard', [], 'parallel_safe', {}),
+      createNode('n2', 'observability_ops', 'get_tool_performance', 'Gather tool performance metrics', [], 'parallel_safe', {}),
+      createNode('n3', 'external_api', 'get_api_health', 'Check external API health', [], 'parallel_safe', {}),
+      createNode('n4', 'cross_role_utility', 'get_platform_benchmarks', 'Retrieve platform benchmarks', [], 'parallel_safe', {}),
+      createNode('n5', 'assistant_synthesis', '', 'Synthesize diagnostic findings', ['n1', 'n2', 'n3', 'n4'], 'sequential_only')
+    ].filter(node => node.tool === 'assistant_synthesis' || toolNames.has(node.tool));
+  }
+
+  if (workflowType === 'driver_carrier_intelligence') {
+    return [
+      createNode('n1', 'get_carrier_details', '', 'Load carrier enrichment details', [], 'parallel_safe', {}),
+      createNode('n2', 'get_fmcsa_data', '', 'Load safety data', [], 'parallel_safe', {}),
+      createNode('n3', 'driver_utility', 'get_market_insights', 'Load driver market insights', [], 'parallel_safe', {}),
+      createNode('n4', 'cross_role_utility', 'get_driver_market_value', 'Estimate driver market value', [], 'parallel_safe', {}),
+      createNode('n5', 'assistant_synthesis', '', 'Synthesize carrier assessment', ['n1', 'n2', 'n3', 'n4'], 'sequential_only')
+    ].filter(node => node.tool === 'assistant_synthesis' || toolNames.has(node.tool));
+  }
+
+  if (workflowType === 'recruiter_candidate_assessment') {
+    return [
+      createNode('n1', 'recruiter_analytics', '', 'Gather recruiter analytics inputs', [], 'parallel_safe', {}),
+      createNode('n2', 'recruiter_retention', '', 'Gather retention risk context', [], 'parallel_safe', {}),
+      createNode('n3', 'cross_role_utility', 'get_recruiter_health', 'Load recruiter health and benchmarks', [], 'parallel_safe', {}),
+      createNode('n4', 'external_api', 'query_matching_api', 'Query matching API context', [], 'parallel_safe', {}),
+      createNode('n5', 'assistant_synthesis', '', 'Synthesize candidate assessment', ['n1', 'n2', 'n3', 'n4'], 'sequential_only')
+    ].filter(node => node.tool === 'assistant_synthesis' || toolNames.has(node.tool));
+  }
+
+  if (workflowType === 'carrier_operational_benchmark') {
+    return [
+      createNode('n1', 'carrier_fleet', '', 'Gather fleet snapshot', [], 'parallel_safe', {}),
+      createNode('n2', 'carrier_compliance', '', 'Gather compliance snapshot', [], 'parallel_safe', {}),
+      createNode('n3', 'cross_role_utility', 'compare_carriers', 'Load peer carrier comparison', [], 'parallel_safe', {}),
+      createNode('n4', 'external_api', 'query_ops_api', 'Load external operations benchmarks', [], 'parallel_safe', {}),
+      createNode('n5', 'assistant_synthesis', '', 'Synthesize operational benchmark', ['n1', 'n2', 'n3', 'n4'], 'sequential_only')
+    ].filter(node => node.tool === 'assistant_synthesis' || toolNames.has(node.tool));
+  }
+
+  const topTools = (tools || []).slice(0, Math.min(3, tools.length));
+  const nodes = topTools.map((tool, index) =>
+    createNode(`n${index + 1}`, tool.name, '', `Investigate ${tool.name}`, [], 'sequential_only')
+  );
+  if (nodes.length > 0) {
+    nodes.push(createNode(`n${nodes.length + 1}`, 'assistant_synthesis', '', 'Summarize gathered context', nodes.map(n => n.node_id), 'sequential_only'));
+  }
+  return nodes;
+}
+
+export async function buildExecutionPlan(role, message, context = {}) {
+  const tools = context.tools || [];
+  const intentResult = context.intentResult || null;
+  const workflowType = inferWorkflowType(role, message, intentResult);
+  const nodes = buildWorkflowNodes(role, workflowType, tools);
+  const parallelNodes = nodes.filter(n => n.execution_mode === 'parallel_safe' || n.execution_mode === 'parallel_chunked').length;
+  return {
+    plan_id: generateId('plan'),
+    role,
+    goal: (message || '').substring(0, 200),
+    workflow_type: workflowType,
+    execution_model: parallelNodes > 0 ? 'planned_sequential' : 'sequential',
+    nodes,
+    summary: {
+      planned_nodes: nodes.length,
+      parallel_nodes: parallelNodes,
+      join_nodes: nodes.filter(n => n.depends_on.length > 0).length
+    }
+  };
+}

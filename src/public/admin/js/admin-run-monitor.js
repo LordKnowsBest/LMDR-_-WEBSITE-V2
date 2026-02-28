@@ -229,6 +229,7 @@
     html += '<th style="padding:8px 6px;text-align:left;color:rgba(255,255,255,0.5);font-weight:500;">Role</th>';
     html += '<th style="padding:8px 6px;text-align:left;color:rgba(255,255,255,0.5);font-weight:500;">Goal</th>';
     html += '<th style="padding:8px 6px;text-align:left;color:rgba(255,255,255,0.5);font-weight:500;">Status</th>';
+    html += '<th style="padding:8px 6px;text-align:left;color:rgba(255,255,255,0.5);font-weight:500;">Execution</th>';
     if (isCompleted) {
       html += '<th style="padding:8px 6px;text-align:left;color:rgba(255,255,255,0.5);font-weight:500;">Quality</th>';
       html += '<th style="padding:8px 6px;text-align:left;color:rgba(255,255,255,0.5);font-weight:500;">Objective</th>';
@@ -246,6 +247,7 @@
       html += '<td style="padding:8px 6px;">' + roleBadge(r.role) + '</td>';
       html += '<td style="padding:8px 6px;color:rgba(255,255,255,0.8);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(truncate(r.goal_text, 40)) + '</td>';
       html += '<td style="padding:8px 6px;">' + statusBadge(r.status) + '</td>';
+      html += '<td style="padding:8px 6px;color:rgba(255,255,255,0.65);font-size:11px;">' + renderExecutionCell(r) + '</td>';
       if (isCompleted) {
         html += '<td style="padding:8px 6px;min-width:80px;">' + qualityBar(r.quality_score || 0) + '</td>';
         html += '<td style="padding:8px 6px;">' + statusBadge(r.objective_met || 'unknown') + '</td>';
@@ -322,6 +324,10 @@
     var run = payload.run || {};
     var steps = payload.steps || [];
     var gates = payload.gates || [];
+    var plan = payload.plan || {};
+    var execution = payload.execution || {};
+    var branches = payload.branches || [];
+    var timeline = payload.timeline || [];
     var outcome = payload.outcome || {};
 
     var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
@@ -342,10 +348,41 @@
     html += infoCard('Duration', run.sla_ms ? (run.sla_ms / 1000).toFixed(1) + 's' : '-');
     html += '</div>';
 
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:16px;">';
+    html += infoCard('Plan ID', truncate(plan.plan_id || '-', 20), 'monospace');
+    html += infoCard('Execution Model', plan.execution_model || 'sequential');
+    html += infoCard('Planned Nodes', plan.planned_nodes || 0);
+    html += infoCard('Parallel Nodes', plan.parallel_nodes || 0);
+    html += infoCard('Branches', execution.branch_count || 0);
+    html += infoCard('Critical Path', execution.critical_path_ms ? (execution.critical_path_ms / 1000).toFixed(1) + 's' : '-');
+    html += infoCard('Degraded Path', execution.degraded_path ? 'yes' : 'no');
+    html += '</div>';
+
     // Goal
     html += '<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:10px;margin-bottom:16px;">' +
       '<div style="font-size:11px;color:rgba(255,255,255,0.4);margin-bottom:4px;">Goal</div>' +
       '<div style="font-size:12px;color:rgba(255,255,255,0.8);">' + esc(run.goal_text || 'No goal specified') + '</div></div>';
+
+    if (branches.length > 0) {
+      html += '<div style="font-size:12px;font-weight:600;color:rgba(255,255,255,0.7);margin-bottom:8px;">Branch Timeline</div>';
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:16px;">';
+      for (var b = 0; b < branches.length; b++) {
+        var branch = branches[b];
+        html += '<div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px;">';
+        html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">';
+        html += '<span style="font-size:11px;font-family:monospace;color:#93c5fd;">' + esc(branch.branch_id || 'sequential') + '</span>';
+        html += '<span style="font-size:11px;color:rgba(255,255,255,0.5);">' + (branch.total_latency_ms || 0) + 'ms</span>';
+        html += '</div>';
+        html += '<div style="font-size:11px;color:rgba(255,255,255,0.7);margin-bottom:4px;">Steps: ' + (branch.step_count || 0) + ' | Gates: ' + (branch.gate_count || 0) + '</div>';
+        html += '<div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:4px;">Nodes: ' + esc((branch.node_ids || []).join(', ') || '-') + '</div>';
+        html += '<div style="font-size:11px;color:rgba(255,255,255,0.5);">Modes: ' + esc(formatMapInline(branch.execution_modes || {})) + '</div>';
+        if (branch.degraded_steps || branch.failed_steps) {
+          html += '<div style="font-size:11px;color:#f59e0b;margin-top:4px;">Degraded: ' + (branch.degraded_steps || 0) + ' | Failed: ' + (branch.failed_steps || 0) + '</div>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    }
 
     // Steps table
     if (steps.length > 0) {
@@ -368,6 +405,23 @@
         html += '</tr>';
       }
       html += '</tbody></table></div>';
+    }
+
+    if (timeline.length > 0) {
+      html += '<div style="font-size:12px;font-weight:600;color:rgba(255,255,255,0.7);margin-bottom:8px;">Execution Timeline</div>';
+      html += '<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:10px;margin-bottom:16px;">';
+      for (var t = 0; t < timeline.length; t++) {
+        var item = timeline[t];
+        html += '<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:' + (t < timeline.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none') + ';">';
+        html += '<span style="font-size:10px;color:rgba(255,255,255,0.35);min-width:56px;">' + esc(relTime(item.timestamp)) + '</span>';
+        html += '<span style="font-size:10px;color:#93c5fd;text-transform:uppercase;min-width:34px;">' + esc(item.type || '-') + '</span>';
+        html += '<span style="font-size:11px;color:rgba(255,255,255,0.75);min-width:120px;">' + esc(item.label || '-') + '</span>';
+        html += '<span style="font-size:10px;color:rgba(255,255,255,0.45);min-width:90px;">' + esc(item.branch_id || 'sequential') + '</span>';
+        html += '<span style="font-size:10px;color:rgba(255,255,255,0.45);flex:1;">' + esc(item.node_id || '-') + '</span>';
+        html += '<span>' + statusBadge(item.status) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
     }
 
     // Gates
@@ -415,6 +469,20 @@
     return '<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:8px;text-align:center;">' +
       '<div style="' + fontStyle + 'font-weight:600;color:white;">' + esc(String(value)) + '</div>' +
       '<div style="font-size:10px;color:rgba(255,255,255,0.4);margin-top:2px;">' + esc(label) + '</div></div>';
+  }
+
+  function renderExecutionCell(run) {
+    var model = run.execution_model || 'sequential';
+    var plannedNodes = run.planned_nodes || 0;
+    var branchCount = run.branch_count || 0;
+    return esc(model) + '<br><span style="color:rgba(255,255,255,0.4);">' +
+      'plan ' + plannedNodes + ' | branches ' + branchCount + '</span>';
+  }
+
+  function formatMapInline(map) {
+    var keys = Object.keys(map || {});
+    if (keys.length === 0) return '-';
+    return keys.map(function (key) { return key + ':' + map[key]; }).join(', ');
   }
 
   // ===================== APPROVAL AUDIT =====================

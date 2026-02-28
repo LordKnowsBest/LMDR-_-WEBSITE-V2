@@ -6,6 +6,17 @@
  */
 import * as dataAccess from 'backend/dataAccess';
 
+function toTimestamp(value) {
+  const ts = value ? new Date(value).getTime() : NaN;
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function formatDuration(ms) {
+  if (!ms || ms <= 0) return '-';
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+  return `${Math.round(ms / 60000)}m`;
+}
+
 export async function getTracingDashboard(userId, params = {}) {
   try {
     const period = params.period || '24h';
@@ -34,9 +45,8 @@ export async function getToolPerformance(userId, params = {}) {
     // Gather steps from each run
     const runItems = runs?.items || runs || [];
     for (const run of runItems) {
-      if (!run._id) continue;
       try {
-        const steps = await svc.getSteps(run._id);
+        const steps = await svc.getSteps(run.run_id);
         const stepItems = steps?.items || steps || [];
         allSteps.push(...stepItems);
       } catch (_) {
@@ -135,28 +145,93 @@ export async function getAgentReplay(userId, params = {}) {
     if (!runId) return { error: 'runId is required' };
 
     const svc = await import('backend/agentRunLedgerService');
+    const trace = await svc.getRunExecutionTrace(runId);
+    if (!trace) return { error: 'Run not found' };
 
-    const [run, steps, gates] = await Promise.all([
-      svc.getRun(runId),
-      svc.getSteps(runId),
-      svc.getGatesForRun(runId)
+    return {
+      ...trace,
+      totalSteps: trace.steps.length,
+      totalDuration: trace.steps.reduce((sum, step) => sum + Number(step.latency_ms || step.latencyMs || 0), 0)
+    };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+export async function getAgentKpis(userId, params = {}) {
+  try {
+    const days = params.days || 7;
+    const cutoffTime = Date.now() - (days * 86400000);
+    const [outcomeSvc, ledgerSvc] = await Promise.all([
+      import('backend/agentOutcomeService'),
+      import('backend/agentRunLedgerService')
     ]);
 
-    if (!run) return { error: 'Run not found' };
+    const baseStats = await outcomeSvc.getOutcomeStats('all', days);
+    const recentRuns = await ledgerSvc.getRecentRunsWithExecution({ limit: 100 });
+    const runs = (recentRuns.items || []).filter(run => toTimestamp(run.started_at) >= cutoffTime);
+    const gates = await ledgerSvc.getApprovalGatesByDateRange(days);
 
-    const stepItems = steps?.items || steps || [];
-    let totalDuration = 0;
-    for (const step of stepItems) {
-      totalDuration += Number(step.latency_ms || step.latencyMs || 0);
+    const parallelRuns = runs.filter(run => Number(run.parallel_nodes || 0) > 0 || run.execution_model === 'planned_sequential');
+    const degradedRuns = runs.filter(run => Number(run.degraded_steps || 0) > 0);
+    const totalBranches = runs.reduce((sum, run) => sum + Number(run.branch_count || 0), 0);
+    const totalCriticalPathMs = runs.reduce((sum, run) => sum + Number(run.critical_path_ms || 0), 0);
+    const executionModelMix = runs.reduce((acc, run) => {
+      const key = run.execution_model || 'sequential';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    let totalDecisionMs = 0;
+    let decidedCount = 0;
+    for (const gate of gates) {
+      const presentedAt = toTimestamp(gate.presented_at);
+      const decidedAt = toTimestamp(gate.decided_at);
+      if (presentedAt > 0 && decidedAt > presentedAt) {
+        totalDecisionMs += (decidedAt - presentedAt);
+        decidedCount += 1;
+      }
     }
 
     return {
-      run,
-      steps: stepItems,
-      gates: gates?.items || gates || [],
-      totalSteps: stepItems.length,
-      totalDuration
+      ...baseStats,
+      parallel_runs: parallelRuns.length,
+      parallel_run_rate: runs.length > 0 ? Math.round((parallelRuns.length / runs.length) * 100) : 0,
+      avg_branch_count: runs.length > 0 ? Math.round((totalBranches / runs.length) * 10) / 10 : 0,
+      degraded_run_rate: runs.length > 0 ? Math.round((degradedRuns.length / runs.length) * 100) : 0,
+      avg_critical_path_ms: runs.length > 0 ? Math.round(totalCriticalPathMs / runs.length) : 0,
+      avg_approval_wait: formatDuration(decidedCount > 0 ? Math.round(totalDecisionMs / decidedCount) : 0),
+      execution_model_mix: executionModelMix
     };
+  } catch (error) {
+    return {
+      total_runs: 0,
+      success_rate: 0,
+      avg_quality_score: 0,
+      partial_rate: 0,
+      failure_rate: 0,
+      period_days: params.days || 7,
+      role: 'all',
+      parallel_runs: 0,
+      parallel_run_rate: 0,
+      avg_branch_count: 0,
+      degraded_run_rate: 0,
+      avg_critical_path_ms: 0,
+      avg_approval_wait: '-',
+      execution_model_mix: {},
+      error: error.message
+    };
+  }
+}
+
+export async function getRunMonitorRuns(userId, params = {}) {
+  try {
+    const svc = await import('backend/agentRunLedgerService');
+    return await svc.getRecentRunsWithExecution({
+      status: params.status || undefined,
+      limit: params.limit || 20,
+      offset: params.offset || 0
+    });
   } catch (error) {
     return { error: error.message };
   }

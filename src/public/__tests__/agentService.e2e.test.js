@@ -222,7 +222,7 @@ describe('AgentService E2E', () => {
 
     await handleAgentTurn('admin', 'admin-1', 'Check system health', {});
 
-    expect(startRun).toHaveBeenCalledWith('conv-e2e-1', 'admin', 'admin-1', 'Check system health');
+    expect(startRun).toHaveBeenCalledWith('conv-e2e-1', 'admin', 'admin-1', 'Check system health', { execution_model: 'sequential' });
     expect(completeRun).toHaveBeenCalled();
   });
 
@@ -324,10 +324,29 @@ describe('AgentService E2E', () => {
     // Flush fire-and-forget logStep promise
     await flushPromises();
 
-    expect(startRun).toHaveBeenCalledWith('conv-e2e-1', 'driver', 'driver-42', expect.any(String));
+    expect(startRun).toHaveBeenCalledWith(
+      'conv-e2e-1',
+      'driver',
+      'driver-42',
+      expect.any(String),
+      { execution_model: 'sequential' }
+    );
     expect(logStep).toHaveBeenCalledWith(
-      'run-test-1', 'find_matches', 'read',
-      expect.any(Object), expect.anything(), expect.any(Number), 'executed'
+      'run-test-1',
+      'find_matches',
+      'read',
+      expect.any(Object),
+      expect.anything(),
+      expect.any(Number),
+      'executed',
+      {
+        branch_id: '',
+        execution_mode: 'parallel_safe',
+        join_key: '',
+        node_id: '',
+        side_effect_class: 'read',
+        timeout_ms: 5000
+      }
     );
     expect(completeRun).toHaveBeenCalled();
     expect(result.runId).toBe('run-test-1');
@@ -394,7 +413,13 @@ describe('AgentService E2E', () => {
 
     expect(getMetrics).toHaveBeenCalled();
     expect(createGate).not.toHaveBeenCalled();
-    expect(startRun).toHaveBeenCalledWith('conv-e2e-1', 'admin', 'admin-1', expect.any(String));
+    expect(startRun).toHaveBeenCalledWith(
+      'conv-e2e-1',
+      'admin',
+      'admin-1',
+      expect.any(String),
+      { execution_model: 'sequential' }
+    );
     expect(completeRun).toHaveBeenCalled();
     expect(result.runId).toBe('run-test-1');
     expect(result.response).toContain('operational');

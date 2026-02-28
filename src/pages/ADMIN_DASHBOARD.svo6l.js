@@ -454,9 +454,8 @@ async function handleGetVoiceConfig(component) {
 
 async function handleGetAgentKpis(component, message) {
     try {
-        const { getOutcomeStats } = await import('backend/agentOutcomeService');
-        const days = message.days || 7;
-        const stats = await getOutcomeStats('all', days);
+        const { getAgentKpis } = await import('backend/adminObservabilityAgentService');
+        const stats = await getAgentKpis(null, { days: message.days || 7 });
         safeSend(component, { action: 'agentKpisLoaded', payload: stats });
     } catch (err) {
         safeSend(component, { action: 'agentKpisLoaded', payload: { total_runs: 0, success_rate: 0, avg_quality_score: 0, partial_rate: 0, failure_rate: 0, period_days: 7, role: 'all', error: err.message } });
@@ -469,8 +468,8 @@ async function handleGetAgentKpis(component, message) {
 
 async function handleGetAgentRuns(component, message) {
     try {
-        const { getRecentRuns } = await import('backend/agentRunLedgerService');
-        const result = await getRecentRuns({
+        const { getRunMonitorRuns } = await import('backend/adminObservabilityAgentService');
+        const result = await getRunMonitorRuns(null, {
             status: message.status || undefined,
             limit: message.limit || 20,
             offset: message.offset || 0
@@ -507,22 +506,32 @@ async function handleGetAgentRuns(component, message) {
 
 async function handleGetRunDetail(component, message) {
     try {
-        const { getRun, getSteps, getGatesForRun } = await import('backend/agentRunLedgerService');
+        const { getAgentReplay } = await import('backend/adminObservabilityAgentService');
         const { getRunOutcome } = await import('backend/agentOutcomeService');
         const runId = message.runId;
         if (!runId) {
             safeSend(component, { action: 'actionError', message: 'Missing runId' });
             return;
         }
-        const [run, steps, gates, outcome] = await Promise.all([
-            getRun(runId),
-            getSteps(runId),
-            getGatesForRun(runId),
+        const [replay, outcome] = await Promise.all([
+            getAgentReplay(null, { runId }),
             getRunOutcome(runId)
         ]);
-        safeSend(component, { action: 'runDetailLoaded', payload: { run: run || {}, steps: steps || [], gates: gates || [], outcome: outcome || {} } });
+        safeSend(component, {
+            action: 'runDetailLoaded',
+            payload: {
+                run: replay?.run || {},
+                steps: replay?.steps || [],
+                gates: replay?.gates || [],
+                plan: replay?.plan || {},
+                execution: replay?.execution || {},
+                branches: replay?.branches || [],
+                timeline: replay?.timeline || [],
+                outcome: outcome || {}
+            }
+        });
     } catch (err) {
-        safeSend(component, { action: 'runDetailLoaded', payload: { run: {}, steps: [], gates: [], outcome: {}, error: err.message } });
+        safeSend(component, { action: 'runDetailLoaded', payload: { run: {}, steps: [], gates: [], plan: {}, execution: {}, branches: [], timeline: [], outcome: {}, error: err.message } });
     }
 }
 
