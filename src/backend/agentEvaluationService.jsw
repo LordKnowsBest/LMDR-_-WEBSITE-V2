@@ -6,6 +6,7 @@
 // =============================================================================
 
 import * as dataAccess from 'backend/dataAccess';
+import { FEATURE_FLAGS } from 'backend/configData';
 
 const ROLES = ['driver', 'recruiter', 'admin', 'carrier'];
 const COLLECTIONS = {
@@ -136,6 +137,8 @@ export async function computeWeeklyScorecard(role, days = 7) {
     // Approval gate stats
     const gateStats = await computeGateStats(currentRunIds);
     const execution = await computeExecutionStats(currentRunIds);
+    const verifier = await computeVerifierStats(currentRunIds);
+    const rollout = buildRolloutScope();
 
     return {
       role,
@@ -146,7 +149,9 @@ export async function computeWeeklyScorecard(role, days = 7) {
       cost: { total_tokens: totalTokens, total_usd: Math.round(totalCost * 10000) / 10000, avg_tokens_per_run: avgTokensPerRun },
       tools: toolStats,
       gates: gateStats,
-      execution
+      execution,
+      verifier,
+      rollout
     };
   } catch (err) {
     console.error(`${PREFIX} Error:`, err.message);
@@ -232,6 +237,70 @@ async function computeExecutionStats(runIds) {
       branch_count: 0,
       node_count: 0,
       degraded_steps: 0
+    };
+  }
+}
+
+function buildRolloutScope() {
+  return {
+    dag_planning_roles: FEATURE_FLAGS.dagPlanningEnabled ? (FEATURE_FLAGS.dagPlanningEnabledRoles || []) : [],
+    parallel_read_roles: FEATURE_FLAGS.parallelReadBranchesEnabled ? (FEATURE_FLAGS.parallelReadBranchesEnabledRoles || []) : [],
+    verifier_roles: FEATURE_FLAGS.agentVerifierEnabled ? (FEATURE_FLAGS.agentVerifierEnabledRoles || []) : []
+  };
+}
+
+async function computeVerifierStats(runIds) {
+  if (!runIds || runIds.length === 0) {
+    return {
+      verified_runs: 0,
+      degraded_runs: 0,
+      blocked_runs: 0,
+      degraded_rate: 0,
+      blocked_rate: 0,
+      by_type: {}
+    };
+  }
+
+  try {
+    const runsResult = await dataAccess.queryRecords(COLLECTIONS.runs, {
+      filters: { run_id: { in: runIds } },
+      limit: 500,
+      suppressAuth: true
+    });
+    const runs = runsResult?.items || [];
+    const byType = {};
+    let verifiedRuns = 0;
+    let degradedRuns = 0;
+    let blockedRuns = 0;
+
+    for (const run of runs) {
+      const verifierStatus = run.verifier_status || '';
+      const verifierType = run.verifier_type || 'unspecified';
+      if (verifierStatus === 'verified') verifiedRuns += 1;
+      if (verifierStatus === 'degraded_but_acceptable') degradedRuns += 1;
+      if (verifierStatus === 'blocked') blockedRuns += 1;
+      if (verifierStatus) {
+        byType[verifierType] = (byType[verifierType] || 0) + 1;
+      }
+    }
+
+    const totalVerifierRuns = verifiedRuns + degradedRuns + blockedRuns;
+    return {
+      verified_runs: verifiedRuns,
+      degraded_runs: degradedRuns,
+      blocked_runs: blockedRuns,
+      degraded_rate: totalVerifierRuns > 0 ? Math.round((degradedRuns / totalVerifierRuns) * 100) : 0,
+      blocked_rate: totalVerifierRuns > 0 ? Math.round((blockedRuns / totalVerifierRuns) * 100) : 0,
+      by_type: byType
+    };
+  } catch (err) {
+    return {
+      verified_runs: 0,
+      degraded_runs: 0,
+      blocked_runs: 0,
+      degraded_rate: 0,
+      blocked_rate: 0,
+      by_type: {}
     };
   }
 }

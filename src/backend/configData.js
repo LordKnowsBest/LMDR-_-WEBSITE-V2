@@ -510,13 +510,19 @@ export const FEATURE_FLAGS = {
   /** Enable per-user conversation memory in lmdr-memory index */
   conversationMemoryEnabled: false,
   /** Phase 2: Build a structured execution plan before tool execution */
-  dagPlanningEnabled: false,
+  dagPlanningEnabled: true,
+  /** Narrow rollout: roles allowed onto DAG planning while master flag is enabled */
+  dagPlanningEnabledRoles: ['admin', 'recruiter'],
   /** Phase 3: Allow bounded parallel execution for planner-approved read branches */
-  parallelReadBranchesEnabled: false,
+  parallelReadBranchesEnabled: true,
+  /** Narrow rollout: roles allowed onto bounded parallel read branches */
+  parallelReadBranchesEnabledRoles: ['admin', 'recruiter'],
   /** Phase 4: Allow branch-aware approval resume semantics */
   branchAwareApprovalsEnabled: false,
   /** Phase 4: Run verifier stage before final synthesis on flagged workflows */
-  agentVerifierEnabled: false,
+  agentVerifierEnabled: true,
+  /** Narrow rollout: roles allowed onto verifier stage while master flag is enabled */
+  agentVerifierEnabledRoles: ['admin', 'recruiter'],
 };
 
 // =============================================================================

@@ -252,6 +252,30 @@ A join point must:
 - merge outputs into a structured bundle
 - expose missing or failed branch results explicitly
 
+### 5.5 Rollout semantics
+
+Workflow orchestration features now follow a two-layer rollout contract:
+
+- master flag enables the capability globally in code
+- role allowlist decides which roles may actually use it in production
+
+Current rollout shape in `src/backend/configData.js`:
+
+- `dagPlanningEnabled`
+- `dagPlanningEnabledRoles`
+- `parallelReadBranchesEnabled`
+- `parallelReadBranchesEnabledRoles`
+- `agentVerifierEnabled`
+- `agentVerifierEnabledRoles`
+
+Current recommended production posture:
+
+1. `admin` and `recruiter` for planning, bounded parallel reads, and verifier
+2. expand to `carrier` after recruiter replay/degraded-path review
+3. expand to `driver` last after latency and degraded-path rates remain acceptable
+
+Branch-aware approvals may remain separately gated until multi-gate audit behavior is reviewed in production.
+
 ---
 
 ## 6. Approval Model

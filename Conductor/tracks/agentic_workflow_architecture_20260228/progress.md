@@ -159,7 +159,7 @@
 - [x] Extend `src/public/admin/js/admin-run-monitor.js` for plan and branch views
 - [ ] Extend `src/backend/agentEvaluationService.jsw` with branch and verifier metrics
 - [x] Add staged feature flags
-- [ ] Define production rollout order
+- [x] Define production rollout order
 
 ### New observability targets
 
@@ -172,7 +172,7 @@
 ### Exit criteria
 
 - [x] Admin run monitor can replay plan -> branch -> gate -> verifier -> response
-- [ ] rollout flags documented and validated
+- [x] rollout flags documented and validated
 
 ---
 
@@ -193,3 +193,7 @@
 | 2026-02-28 | 3 | Expanded DAG eligibility from admin-only to driver, recruiter, and carrier workflow classes using router-safe parallel read nodes | Codex |
 | 2026-02-28 | 4 | Added queued approval context handling so safe tool branches complete before pause and multiple gated branches resume deterministically | Codex |
 | 2026-02-28 | 4 | Persisted verifier status/type/issues onto run records and surfaced verifier telemetry in admin replay views | Codex |
+| 2026-02-28 | 5 | Switched rollout controls to master-flag plus role-allowlist gating and enabled planning/parallel/verifier for `admin` only | Codex |
+| 2026-02-28 | 5 | Added feature-flag-on acceptance coverage for admin rollout and explicit recruiter/carrier DAG workflow enablement scenarios | Codex |
+| 2026-02-28 | 5 | Added rollout-scope visibility to admin KPI surfaces and extended scorecards with verifier degradation and rollout metrics | Codex |
+| 2026-02-28 | 5 | Advanced the default rollout allowlists to wave two: `admin` + `recruiter` | Codex |

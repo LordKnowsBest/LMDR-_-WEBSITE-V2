@@ -13,6 +13,11 @@ jest.mock('backend/agentConversationService', () => ({
   getRecentContext: jest.fn()
 }));
 
+jest.mock('backend/agentRuntimeService', () => ({
+  isRuntimeAvailable: jest.fn().mockReturnValue(false),
+  callRuntimeStep: jest.fn()
+}));
+
 jest.mock('backend/carrierMatching', () => ({
   findMatchingCarriers: jest.fn()
 }));
@@ -24,7 +29,8 @@ jest.mock('backend/agentRunLedgerService', () => ({
   logStep: jest.fn(),
   createGate: jest.fn(),
   resolveGate: jest.fn(),
-  completeRun: jest.fn()
+  completeRun: jest.fn(),
+  updateRunPlanningMetadata: jest.fn()
 }));
 
 jest.mock('backend/agentOutcomeService', () => ({
@@ -73,8 +79,30 @@ jest.mock('backend/callOutcomeService', () => ({
 jest.mock('backend/recruiterAnalyticsService', () => ({
   getFunnelMetrics: jest.fn()
 }));
+jest.mock('backend/recruiterPipelineService', () => ({
+  getStaleCandidates: jest.fn().mockResolvedValue({ candidates: [], totalCount: 0 })
+}));
+jest.mock('backend/recruiterRetentionService', () => ({
+  getWatchlist: jest.fn().mockResolvedValue({ result: { entries: [], totalCount: 0 } })
+}));
 jest.mock('backend/observabilityService', () => ({
   getMetrics: jest.fn()
+}));
+jest.mock('backend/adminObservabilityAgentService', () => ({
+  getTracingDashboard: jest.fn().mockResolvedValue({ health: 'ok' }),
+  getToolPerformance: jest.fn().mockResolvedValue({ tools: [] })
+}));
+jest.mock('backend/externalApiAgentService', () => ({
+  getApiHealth: jest.fn().mockResolvedValue({ apis: [] }),
+  queryMatchingApi: jest.fn().mockResolvedValue({ matches: [] }),
+  queryOpsApi: jest.fn().mockResolvedValue({ benchmarks: [] })
+}));
+jest.mock('backend/crossRoleUtilityAgentService', () => ({
+  getPlatformBenchmarks: jest.fn().mockResolvedValue({ benchmarks: [] }),
+  getRecruiterHealth: jest.fn().mockResolvedValue({ health: 'ok' }),
+  getDriverMarketValue: jest.fn().mockResolvedValue({ value: 1 }),
+  getIndustryTrends: jest.fn().mockResolvedValue({ trends: [] }),
+  getRegionalAnalysis: jest.fn().mockResolvedValue({ regions: [] })
 }));
 jest.mock('backend/admin_service', () => ({
   getDrivers: jest.fn()
@@ -99,7 +127,14 @@ const {
   getRecentContext
 } = require('backend/agentConversationService');
 const { findMatchingCarriers } = require('backend/carrierMatching');
-const { startRun, logStep, createGate, resolveGate, completeRun } = require('backend/agentRunLedgerService');
+const {
+  startRun,
+  logStep,
+  createGate,
+  resolveGate,
+  completeRun,
+  updateRunPlanningMetadata
+} = require('backend/agentRunLedgerService');
 const { evaluateRun } = require('backend/agentOutcomeService');
 const { getSignals } = require('backend/b2bMatchSignalService');
 
@@ -120,6 +155,7 @@ describe('AgentService E2E', () => {
     createGate.mockResolvedValue({ gateId: 'gate-test-1' });
     resolveGate.mockResolvedValue({ gateId: 'gate-test-1', decision: 'approved' });
     completeRun.mockResolvedValue(undefined);
+    updateRunPlanningMetadata.mockResolvedValue({});
     evaluateRun.mockResolvedValue({ quality_score: 75, objective_met: 'yes' });
   });
 

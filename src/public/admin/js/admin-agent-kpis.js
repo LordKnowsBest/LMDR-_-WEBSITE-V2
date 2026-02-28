@@ -117,6 +117,10 @@
           ${renderExecutionMix(stats.execution_model_mix || {})}
         </div>
 
+        <div style="margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px;">
+          ${renderRolloutScope(stats.rollout_scope || {})}
+        </div>
+
         <div style="margin-top: 12px; font-size: 10px; color: rgba(255,255,255,0.3); text-align: right;">
           Powered by VelocityMatch Agent Orchestration
         </div>
@@ -130,6 +134,21 @@
     return keys.map((key) => {
       return `<div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 9999px; padding: 6px 10px; font-size: 11px; color: rgba(255,255,255,0.75);">
         ${key}: <span style="color: white; font-weight: 600;">${mix[key]}</span>
+      </div>`;
+    }).join('');
+  }
+
+  function renderRolloutScope(scope) {
+    const groups = [
+      ['Planning', scope.dag_planning_roles || []],
+      ['Parallel', scope.parallel_read_roles || []],
+      ['Verifier', scope.verifier_roles || []]
+    ];
+    return groups.map(([label, roles]) => {
+      const roleText = roles.length > 0 ? roles.join(', ') : 'none';
+      return `<div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 10px;">
+        <div style="font-size: 10px; color: rgba(255,255,255,0.45); text-transform: uppercase; margin-bottom: 4px;">${label} Roles</div>
+        <div style="font-size: 12px; color: white; font-weight: 600;">${roleText}</div>
       </div>`;
     }).join('');
   }

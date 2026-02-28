@@ -21,6 +21,17 @@ jest.mock('backend/observabilityService', () => ({
   log: jest.fn().mockResolvedValue(undefined)
 }));
 
+jest.mock('backend/configData', () => ({
+  FEATURE_FLAGS: {
+    dagPlanningEnabled: true,
+    dagPlanningEnabledRoles: ['admin', 'recruiter'],
+    parallelReadBranchesEnabled: true,
+    parallelReadBranchesEnabledRoles: ['admin', 'recruiter'],
+    agentVerifierEnabled: true,
+    agentVerifierEnabledRoles: ['admin', 'recruiter']
+  }
+}));
+
 const {
   computeWeeklyScorecard,
   detectToolRegressions,
@@ -111,7 +122,8 @@ describe('computeWeeklyScorecard', () => {
       .mockResolvedValueOnce({ items: [] })          // prior runs
       .mockResolvedValueOnce({ items: outcomes })    // current outcomes
       .mockResolvedValueOnce({ items: [] })          // steps (tool effectiveness)
-      .mockResolvedValueOnce({ items: [] });         // gates
+      .mockResolvedValueOnce({ items: [] })          // gates
+      .mockResolvedValueOnce({ items: runs });       // verifier runs
 
     const result = await computeWeeklyScorecard('driver', 7);
 
@@ -120,6 +132,11 @@ describe('computeWeeklyScorecard', () => {
     expect(result.rates.success).toBeCloseTo(33.3, 0);
     expect(result.rates.partial).toBeCloseTo(33.3, 0);
     expect(result.rates.failure).toBeCloseTo(33.3, 0);
+    expect(result.rollout).toEqual({
+      dag_planning_roles: ['admin', 'recruiter'],
+      parallel_read_roles: ['admin', 'recruiter'],
+      verifier_roles: ['admin', 'recruiter']
+    });
   });
 
   it('should detect improving trend when current > prior', async () => {
@@ -134,7 +151,8 @@ describe('computeWeeklyScorecard', () => {
       .mockResolvedValueOnce({ items: outcomes })        // current outcomes
       .mockResolvedValueOnce({ items: priorOutcomes })   // prior outcomes
       .mockResolvedValueOnce({ items: [] })              // steps
-      .mockResolvedValueOnce({ items: [] });             // gates
+      .mockResolvedValueOnce({ items: [] })              // gates
+      .mockResolvedValueOnce({ items: runs });           // verifier runs
 
     const result = await computeWeeklyScorecard('admin', 7);
 
@@ -153,13 +171,50 @@ describe('computeWeeklyScorecard', () => {
       .mockResolvedValueOnce({ items: [] })
       .mockResolvedValueOnce({ items: [] })
       .mockResolvedValueOnce({ items: [] })
-      .mockResolvedValueOnce({ items: [] });
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValueOnce({ items: runs });
 
     const result = await computeWeeklyScorecard('driver', 7);
 
     expect(result.cost.total_tokens).toBe(8000);
     expect(result.cost.total_usd).toBe(0.2);
     expect(result.cost.avg_tokens_per_run).toBe(4000);
+  });
+
+  it('should compute verifier degradation metrics from run records', async () => {
+    const currentRuns = [
+      makeRun({ run_id: 'r1' }),
+      makeRun({ run_id: 'r2' }),
+      makeRun({ run_id: 'r3' })
+    ];
+    const verifierRuns = [
+      makeRun({ run_id: 'r1', verifier_status: 'verified', verifier_type: 'consistency_verifier' }),
+      makeRun({ run_id: 'r2', verifier_status: 'degraded_but_acceptable', verifier_type: 'policy_verifier' }),
+      makeRun({ run_id: 'r3', verifier_status: 'blocked', verifier_type: 'policy_verifier' })
+    ];
+
+    mockQueryRecords
+      .mockResolvedValueOnce({ items: currentRuns })
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValueOnce({ items: verifierRuns });
+
+    const result = await computeWeeklyScorecard('admin', 7);
+
+    expect(result.verifier).toEqual(expect.objectContaining({
+      verified_runs: 1,
+      degraded_runs: 1,
+      blocked_runs: 1,
+      degraded_rate: 33,
+      blocked_rate: 33
+    }));
+    expect(result.verifier.by_type).toEqual(expect.objectContaining({
+      consistency_verifier: 1,
+      policy_verifier: 2
+    }));
   });
 });
 

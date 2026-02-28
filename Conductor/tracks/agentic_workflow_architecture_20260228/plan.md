@@ -420,6 +420,16 @@ User Message
 3. Recruiter market analysis
 4. Recruiter or carrier write workflows
 
+### Implemented rollout control shape
+
+- master flags remain the top-level kill switches
+- role allowlists gate actual production use per capability
+- current code-level posture is:
+  - `dagPlanningEnabled: true` with `dagPlanningEnabledRoles: ['admin', 'recruiter']`
+  - `parallelReadBranchesEnabled: true` with `parallelReadBranchesEnabledRoles: ['admin', 'recruiter']`
+  - `agentVerifierEnabled: true` with `agentVerifierEnabledRoles: ['admin', 'recruiter']`
+- this keeps admin and recruiter on the upgraded path while carrier and driver remain on the legacy sequential path until explicitly added to the allowlists
+
 ### Exit Criteria
 
 - [ ] All new architecture pieces are individually flaggable.
