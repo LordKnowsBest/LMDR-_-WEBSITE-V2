@@ -1,0 +1,207 @@
+// ============================================================================
+// GROQ MEDIA SERVICE - Speech-to-Text (Whisper) + Text-to-Speech (Orpheus)
+//
+// STT: whisper-large-v3-turbo  | 20 RPM | 7.2K req/day
+// TTS: canopylabs/orpheus-v1-english | 10 RPM | 100 req/day — CACHE OUTPUTS
+//
+// Audio transport: base64 strings (Velo cross-module boundary is JSON-only)
+// ============================================================================
+
+import { getSecret } from 'wix-secrets-backend';
+import { fetch } from 'wix-fetch';
+import { log } from 'backend/observabilityService';
+
+const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
+
+const STT_MODELS = {
+    default: 'whisper-large-v3-turbo',
+    highAccuracy: 'whisper-large-v3'
+};
+
+const TTS_MODELS = {
+    default: 'canopylabs/orpheus-v1-english'
+};
+
+// Valid Orpheus voices
+const VALID_VOICES = ['tara', 'zara', 'leo', 'mia', 'dan', 'zac', 'jess'];
+
+// ============================================================================
+// INTERNAL HELPER
+// ============================================================================
+
+async function getGroqKey() {
+    const key = await getSecret('GROQ_API_KEY');
+    if (!key) throw new Error('GROQ_API_KEY not configured in Wix Secrets');
+    return key;
+}
+
+// ============================================================================
+// STT — Speech to Text
+// ============================================================================
+
+/**
+ * Transcribe audio using Groq Whisper
+ *
+ * @param {string} audioBase64 - Base64-encoded audio data
+ * @param {string} mimeType    - MIME type, e.g. 'audio/webm', 'audio/wav', 'audio/mp4'
+ * @param {Object} options     - { model, language, prompt }
+ * @returns {{ success, text, language, duration, model, error }}
+ */
+export async function transcribeAudio(audioBase64, mimeType, options = {}) {
+    try {
+        await log({ level: 'INFO', source: 'groq-media', message: 'STT request received', details: { mimeType, model: options.model || STT_MODELS.default } });
+
+        if (!audioBase64) {
+            return { success: false, error: 'audioBase64 is required' };
+        }
+
+        const apiKey = await getGroqKey();
+        const model = options.model || STT_MODELS.default;
+
+        // Decode base64 → Uint8Array for the form boundary
+        const binaryStr = atob(audioBase64);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+        }
+
+        // Build multipart/form-data boundary manually
+        // (wix-fetch does not natively expose FormData with binary blobs)
+        const boundary = '----GroqWixBoundary' + Date.now();
+        const ext = mimeType.split('/')[1] || 'webm';
+        const filename = `audio.${ext}`;
+
+        const textEncoder = new TextEncoder();
+        const preamble = textEncoder.encode(
+            `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+            `Content-Type: ${mimeType}\r\n\r\n`
+        );
+        const modelPart = textEncoder.encode(
+            `\r\n--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="model"\r\n\r\n` +
+            `${model}` +
+            `\r\n--${boundary}--\r\n`
+        );
+
+        // Concatenate all parts
+        const body = new Uint8Array(preamble.length + bytes.length + modelPart.length);
+        body.set(preamble, 0);
+        body.set(bytes, preamble.length);
+        body.set(modelPart, preamble.length + bytes.length);
+
+        const response = await fetch(`${GROQ_BASE_URL}/audio/transcriptions`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': `multipart/form-data; boundary=${boundary}`
+            },
+            body: body.buffer
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            await log({ level: 'ERROR', source: 'groq-media', message: `STT failed: ${response.status}`, details: { error: errorText } });
+            return { success: false, error: `Groq STT error ${response.status}: ${errorText}` };
+        }
+
+        const data = await response.json();
+
+        await log({ level: 'INFO', source: 'groq-media', message: 'STT succeeded', details: { model, language: data.language, duration: data.duration } });
+
+        return {
+            success: true,
+            text: data.text || '',
+            language: data.language || 'en',
+            duration: data.duration || 0,
+            model
+        };
+
+    } catch (error) {
+        await log({ level: 'ERROR', source: 'groq-media', message: `STT exception: ${error.message}` });
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// TTS — Text to Speech
+// ============================================================================
+
+/**
+ * Synthesize speech using Groq Orpheus
+ *
+ * NOTE: Rate limit is 100 requests/day. Cache TTS output for repeated phrases.
+ *
+ * @param {string} text        - Text to synthesize (max ~500 tokens recommended)
+ * @param {Object} options     - { voice: 'tara'|'zara'|'leo'|'mia'|'dan'|'zac'|'jess', speed: 1.0 }
+ * @returns {{ success, audioBase64, mimeType, model, error }}
+ */
+export async function synthesizeSpeech(text, options = {}) {
+    try {
+        await log({ level: 'INFO', source: 'groq-media', message: 'TTS request received', details: { textLength: text?.length, voice: options.voice } });
+
+        if (!text || text.trim().length === 0) {
+            return { success: false, error: 'text is required' };
+        }
+
+        const apiKey = await getGroqKey();
+        const model = TTS_MODELS.default;
+        const voice = VALID_VOICES.includes(options.voice) ? options.voice : 'tara';
+        const speed = options.speed || 1.0;
+
+        const response = await fetch(`${GROQ_BASE_URL}/audio/speech`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ model, input: text, voice, speed })
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            await log({ level: 'ERROR', source: 'groq-media', message: `TTS failed: ${response.status}`, details: { error: errorText } });
+            return { success: false, error: `Groq TTS error ${response.status}: ${errorText}` };
+        }
+
+        // Response is binary audio — read as ArrayBuffer then base64-encode
+        const arrayBuffer = await response.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+        let binary = '';
+        for (let i = 0; i < uint8Array.length; i++) {
+            binary += String.fromCharCode(uint8Array[i]);
+        }
+        const audioBase64 = btoa(binary);
+
+        await log({ level: 'INFO', source: 'groq-media', message: 'TTS succeeded', details: { model, voice, audioLength: audioBase64.length } });
+
+        return {
+            success: true,
+            audioBase64,
+            mimeType: 'audio/wav',
+            model,
+            voice
+        };
+
+    } catch (error) {
+        await log({ level: 'ERROR', source: 'groq-media', message: `TTS exception: ${error.message}` });
+        return { success: false, error: error.message };
+    }
+}
+
+// ============================================================================
+// HEALTH CHECK
+// ============================================================================
+
+/**
+ * Quick connectivity check — sends a minimal TTS request to verify key + endpoint
+ */
+export async function testGroqMedia() {
+    const ttsResult = await synthesizeSpeech('OK', { voice: 'tara' });
+    return {
+        tts: ttsResult.success
+            ? { status: 'healthy', model: TTS_MODELS.default }
+            : { status: 'error', message: ttsResult.error },
+        stt: { status: 'not_tested', note: 'STT requires audio input — test manually via transcribeAudio()' }
+    };
+}
