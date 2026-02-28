@@ -112,6 +112,10 @@ import {
   downloadReport, suggestBudgetReallocation, suggestCreativeRotation,
   suggestAudienceNarrowing, getFrequencyFatigueAlerts, getPlacementPerformance
 } from 'backend/metaInsightsService';
+import { generatePlatformCopy } from 'backend/socialCopyService';
+import { generateSocialImage } from 'backend/imagenService';
+import { saveCredentials, getCredentialStatus } from 'backend/socialSecretService';
+import { validateToken } from 'backend/socialTokenService';
 
 // Recruiter OS — Onboarding imports
 import {
@@ -271,7 +275,12 @@ const MESSAGE_REGISTRY = {
     'sendSmsCampaign',
     'fetchSocialPosts',
     'connectSocialAccount',
-    'publishSocialPost'
+    'publishSocialPost',
+    'generateSocialCopy',
+    'generateSocialImage',
+    'saveSocialCredentials',
+    'testSocialConnection',
+    'getSocialCredentialStatus'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -379,7 +388,12 @@ const MESSAGE_REGISTRY = {
     'smsCampaignSent',
     'socialPostsLoaded',
     'socialAccountConnected',
-    'socialPostPublished'
+    'socialPostPublished',
+    'socialCopyGenerated',
+    'socialImageGenerated',
+    'socialCredentialsSaved',
+    'socialConnectionTested',
+    'socialCredentialStatusLoaded'
   ]
 };
 
@@ -1035,6 +1049,85 @@ async function handleHtmlMessage(msg, component) {
           sendToHtml(component, 'socialPostPublished', { success: publishResult.success, error: publishResult.error });
         } catch (err) {
           sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'generateSocialCopy': {
+        try {
+          const profile = currentRecruiterProfile || {};
+          const result = await generatePlatformCopy({
+            brief: msg.data?.brief || '',
+            platform: msg.data?.platform || 'facebook',
+            companyName: profile.company_name || profile.agency_name || '',
+            jobTitle: msg.data?.jobTitle || 'CDL-A Driver',
+            highlights: msg.data?.highlights || '',
+            carrierDot: currentCarrierDOT
+          });
+          sendToHtml(component, 'socialCopyGenerated', result);
+        } catch (err) {
+          sendToHtml(component, 'socialCopyGenerated', { success: false, error: err.message });
+        }
+        break;
+      }
+      case 'generateSocialImage': {
+        try {
+          const result = await generateSocialImage({
+            prompt: msg.data?.prompt || '',
+            aspectRatio: msg.data?.aspectRatio || '1:1',
+            style: msg.data?.style || 'professional photo',
+            platform: msg.data?.platform || 'facebook',
+            carrierDot: currentCarrierDOT
+          });
+          sendToHtml(component, 'socialImageGenerated', result);
+        } catch (err) {
+          sendToHtml(component, 'socialImageGenerated', { success: false, error: err.message });
+        }
+        break;
+      }
+      case 'saveSocialCredentials': {
+        try {
+          const result = await saveCredentials(msg.data?.platform, msg.data?.credentials || {});
+          sendToHtml(component, 'socialCredentialsSaved', {
+            platform: msg.data?.platform,
+            success: result.success,
+            error: result.error
+          });
+        } catch (err) {
+          sendToHtml(component, 'socialCredentialsSaved', { platform: msg.data?.platform, success: false, error: err.message });
+        }
+        break;
+      }
+      case 'testSocialConnection': {
+        try {
+          const platform = msg.data?.platform;
+          const result = await validateToken(platform, '');
+          sendToHtml(component, 'socialConnectionTested', {
+            platform,
+            success: result.success || result.valid,
+            error: result.error
+          });
+        } catch (err) {
+          sendToHtml(component, 'socialConnectionTested', { platform: msg.data?.platform, success: false, error: err.message });
+        }
+        break;
+      }
+      case 'getSocialCredentialStatus': {
+        try {
+          const [fbStatus, liStatus] = await Promise.all([
+            getCredentialStatus('facebook'),
+            getCredentialStatus('linkedin')
+          ]);
+          sendToHtml(component, 'socialCredentialStatusLoaded', {
+            status: {
+              facebook: fbStatus.status || 'unconfigured',
+              instagram: fbStatus.status || 'unconfigured',
+              linkedin: liStatus.status || 'unconfigured'
+            }
+          });
+        } catch (err) {
+          sendToHtml(component, 'socialCredentialStatusLoaded', {
+            status: { facebook: 'unconfigured', instagram: 'unconfigured', linkedin: 'unconfigured' }
+          });
         }
         break;
       }

@@ -102,7 +102,7 @@
             <p class="text-[9px] text-tan">${connected ? 'Connected' : 'Not connected'}</p>
           </div>
         </div>
-        <button onclick="ROS.views._social.connectAccount('${id}')" class="px-2 py-1 rounded-lg text-[10px] font-bold ${connected ? 'neu-ins text-emerald-500' : 'neu-x text-purple-400'}">
+        <button onclick="ROS.views._social.openSettings('${id}')" class="px-2 py-1 rounded-lg text-[10px] font-bold ${connected ? 'neu-ins text-emerald-500' : 'neu-x text-purple-400'}">
           ${connected ? '✓ Active' : 'Connect'}
         </button>
       </div>`;
@@ -268,6 +268,26 @@
                 showToast(payload.platform + ' connected!');
                 refreshContent();
                 break;
+            case 'socialCopyGenerated':
+                if (payload.success) {
+                    const ta = document.getElementById('social-content');
+                    if (ta) ta.value = payload.copy || '';
+                    const preview = document.getElementById('social-preview-text');
+                    if (preview) preview.textContent = payload.copy || '';
+                } else {
+                    showToast('Copy generation failed: ' + (payload.error || 'Unknown error'));
+                }
+                // Restore button
+                const genBtn = document.querySelector('[onclick*="generateAI"]');
+                if (genBtn) genBtn.textContent = 'Generate AI Content';
+                break;
+            case 'socialImageGenerated':
+                if (payload.success) {
+                    showToast('Image generated!');
+                } else {
+                    showToast('Image generation failed: ' + (payload.error || 'Unknown error'));
+                }
+                break;
         }
     }
 
@@ -297,6 +317,7 @@
         switchTab(tab) { activeTab = tab; refreshContent(); },
         toggleComposer() { showComposer = !showComposer; refreshContent(); },
         connectAccount(platform) { ROS.bridge.sendToVelo('connectSocialAccount', { platform }); },
+        openSettings(platform) { ROS.views.showView('social-settings'); },
         publishPost() {
             const content = document.getElementById('social-content')?.value;
             if (!content) { showToast('Please write post content.'); return; }
@@ -306,7 +327,23 @@
             if (document.getElementById('social-ig')?.checked) platforms.push('instagram');
             ROS.bridge.sendToVelo('publishSocialPost', { content, platforms });
         },
-        generateAI() { /* AI generation — bridge wiring in progress */ }
+        generateAI() {
+            const content = document.getElementById('social-content')?.value || '';
+            const platforms = [];
+            if (document.getElementById('social-fb')?.checked) platforms.push('facebook');
+            if (document.getElementById('social-li')?.checked) platforms.push('linkedin');
+            if (document.getElementById('social-ig')?.checked) platforms.push('instagram');
+            const platform = platforms[0] || 'facebook';
+            const profile = ROS.config?.profile || {};
+            const btn = document.querySelector('[onclick*="generateAI"]');
+            if (btn) btn.textContent = 'Generating...';
+            ROS.bridge.sendToVelo('generateSocialCopy', {
+                brief: content,
+                platform,
+                companyName: profile.company_name || profile.agency_name || '',
+                jobTitle: 'CDL-A Driver'
+            });
+        },
     };
 
     // ── Register ──

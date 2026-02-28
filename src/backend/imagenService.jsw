@@ -1,0 +1,141 @@
+/**
+ * Imagen Service
+ *
+ * Generates social media images via Gemini image generation API,
+ * uploads to Wix Media, and returns permanent URLs.
+ *
+ * Model: gemini-2.0-flash-preview-image-generation
+ * Secret: GEMINI_API_KEY (already in Wix Secrets)
+ */
+
+import { getSecret } from 'wix-secrets-backend';
+import { mediaManager } from 'wix-media-backend';
+
+const IMAGE_MODEL = 'gemini-2.0-flash-preview-image-generation';
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+// Standard social formats mapped to Gemini-supported aspect ratios
+const FORMAT_MAP = {
+  '1:1':    { apiRatio: '1:1',  label: 'Square',         widthPx: 1080, heightPx: 1080 },
+  '4:5':    { apiRatio: '4:5',  label: 'Portrait',        widthPx: 1080, heightPx: 1350 },
+  '9:16':   { apiRatio: '9:16', label: 'Story / Reel',    widthPx: 1080, heightPx: 1920 },
+  '16:9':   { apiRatio: '16:9', label: 'Landscape / Ad',  widthPx: 1200, heightPx: 628  }
+};
+
+const STYLE_PROMPTS = {
+  'professional photo': 'photorealistic, professional photography, clean background, high resolution',
+  'bold graphic':       'bold graphic design, flat design, strong typography, vibrant colors',
+  'illustrated':        'digital illustration, modern art style, clean lines',
+  'minimal':            'minimalist design, white space, simple shapes, clean aesthetic'
+};
+
+/**
+ * Generate a social media image
+ * @param {Object} params
+ * @param {string} params.prompt - User description of the image
+ * @param {string} params.aspectRatio - '1:1' | '4:5' | '9:16' | '16:9'
+ * @param {string} params.style - 'professional photo' | 'bold graphic' | 'illustrated' | 'minimal'
+ * @param {string} params.platform - 'facebook' | 'instagram' | 'linkedin'
+ * @param {string} params.carrierDot - For Wix Media folder organization
+ */
+export async function generateSocialImage({ prompt, aspectRatio = '1:1', style = 'professional photo', platform = 'facebook', carrierDot = '' }) {
+  try {
+    const apiKey = await getSecret('GEMINI_API_KEY');
+    const format = FORMAT_MAP[aspectRatio] || FORMAT_MAP['1:1'];
+    const styleModifier = STYLE_PROMPTS[style] || STYLE_PROMPTS['professional photo'];
+
+    const fullPrompt = buildImagePrompt(prompt, platform, styleModifier, format.label);
+
+    const url = `${GEMINI_BASE}/${IMAGE_MODEL}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: fullPrompt }] }],
+        generationConfig: {
+          response_mime_type: 'image/png',
+          candidate_count: 1
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('[imagenService] Gemini API error:', response.status, errText);
+      return { success: false, error: `Image generation failed: ${response.status}` };
+    }
+
+    const data = await response.json();
+    const imagePart = data?.candidates?.[0]?.content?.parts?.find(p => p.inline_data);
+
+    if (!imagePart) {
+      console.error('[imagenService] No image in response:', JSON.stringify(data));
+      return { success: false, error: 'No image returned from Gemini' };
+    }
+
+    const base64 = imagePart.inline_data.data;
+    const mimeType = imagePart.inline_data.mime_type || 'image/png';
+
+    // Upload to Wix Media
+    const uploadResult = await uploadToWixMedia(base64, mimeType, carrierDot, platform, aspectRatio);
+
+    return {
+      success: true,
+      base64,
+      mimeType,
+      mediaUrl: uploadResult.mediaUrl || null,
+      fileId: uploadResult.fileId || null,
+      aspectRatio,
+      widthPx: format.widthPx,
+      heightPx: format.heightPx,
+      label: format.label,
+      platform,
+      prompt: fullPrompt
+    };
+  } catch (error) {
+    console.error('[imagenService] generateSocialImage error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Upload base64 image to Wix Media Manager
+ */
+async function uploadToWixMedia(base64, mimeType, carrierDot, platform, aspectRatio) {
+  try {
+    const buffer = Buffer.from(base64, 'base64');
+    const filename = `social_${platform}_${aspectRatio.replace(':', 'x')}_${Date.now()}.png`;
+    const folderPath = `/social-generated/${carrierDot || 'default'}`;
+
+    const uploadedFile = await mediaManager.upload(
+      folderPath,
+      buffer,
+      filename,
+      { mediaOptions: { mimeType } }
+    );
+
+    return {
+      mediaUrl: uploadedFile.fileUrl || uploadedFile.url || null,
+      fileId: uploadedFile.fileId || uploadedFile._id || null
+    };
+  } catch (err) {
+    console.error('[imagenService] Wix Media upload error:', err);
+    return { mediaUrl: null, fileId: null };
+  }
+}
+
+/**
+ * Build a platform-aware image prompt
+ */
+function buildImagePrompt(userPrompt, platform, styleModifier, formatLabel) {
+  const platformContext = {
+    facebook:  'suitable for Facebook social media, engaging and community-oriented',
+    instagram: 'suitable for Instagram, visually striking and scroll-stopping',
+    linkedin:  'suitable for LinkedIn, professional and business-appropriate'
+  };
+
+  const context = platformContext[platform] || platformContext.facebook;
+
+  return `${userPrompt}. Style: ${styleModifier}. ${context}. Format: ${formatLabel}. No text overlays. High quality.`;
+}

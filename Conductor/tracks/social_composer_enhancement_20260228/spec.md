@@ -375,8 +375,8 @@ Each platform has a hard character limit. The composer's live counter turns ambe
 
 ---
 
-## 6. Open Questions
+## 6. Decisions (Resolved 2026-02-28)
 
-1. Should the settings panel be a separate ROS view (navigated to via `ROS.views.showView('social-settings')`) or a modal overlay within the social view?
-2. Should generated images be stored anywhere (Wix Media, Airtable) or just returned inline for the recruiter to download and upload manually to the platform?
-3. For copy generation: should we pre-fill the "company name" and "job title" from the recruiter profile automatically, or always ask the recruiter to provide context?
+1. **Settings panel** → Sub-view, navigated via `ROS.views.showView('social-settings')`. Consistent with other ROS views, not a modal.
+2. **Generated images** → **Store them.** Flow: base64 → `wix-media-backend` `mediaManager.upload()` → get permanent Wix Media URL → store URL in Airtable `socialPosts` record (new field: `generated_image_url`). View also shows inline preview + "Download" button.
+3. **Auto-fill** → **Yes.** `companyName` and recruiter's `display_name` are read from `ROS.config.profile` (already in bridge state) and passed automatically in the `generateSocialCopy` payload. Recruiter can override via a visible "Context" field in the composer.
