@@ -392,6 +392,7 @@ export const DATA_SOURCE = {
   socialAccounts: 'airtable',
   socialPostQueue: 'airtable',
   socialAuditLog: 'airtable',
+  socialCredentials: 'airtable',
 
   // -------------------------------------------------------------------------
   // Agent Evaluations
@@ -1256,6 +1257,7 @@ export const AIRTABLE_TABLE_NAMES = {
   socialAccounts: 'v2_Social Accounts',
   socialPostQueue: 'v2_Social Post Queue',
   socialAuditLog: 'v2_Social Audit Log',
+  socialCredentials: 'v2_Social Credentials',
 
   // Pipeline Execution Agent
   pipelineEvents: 'v2_Pipeline Events',
