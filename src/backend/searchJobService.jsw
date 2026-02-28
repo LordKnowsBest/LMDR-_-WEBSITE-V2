@@ -1,0 +1,199 @@
+/**
+ * searchJobService.jsw
+ *
+ * CRUD service for async search job records. Each search job tracks the
+ * lifecycle of an async semantic search request:
+ *   processing → complete | error | expired
+ *
+ * Uses the dual-source dataAccess layer (routes to Airtable via configData).
+ */
+
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTION = 'searchJobs';
+
+/** Default TTL for a search job before it's considered expired (5 min) */
+const JOB_TTL_MS = 5 * 60 * 1000;
+
+/** Records older than this are eligible for cleanup (10 min) */
+const CLEANUP_AGE_MS = 10 * 60 * 1000;
+
+// ── Create ──────────────────────────────────────────────────────────────────
+
+/**
+ * Insert a new search job record with status `processing`.
+ * @param {string} jobId - Unique job identifier (UUID)
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {string} recruiterId - Recruiter who initiated the search
+ * @param {object} searchParams - Original search filters (stored for debugging)
+ * @returns {{ success: boolean, jobId: string }}
+ */
+export async function createSearchJob(jobId, carrierDot, recruiterId, searchParams) {
+  const now = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + JOB_TTL_MS).toISOString();
+
+  const result = await dataAccess.insertRecord(COLLECTION, {
+    job_id: jobId,
+    carrier_dot: carrierDot,
+    recruiter_id: recruiterId,
+    status: 'processing',
+    search_params: JSON.stringify(searchParams || {}),
+    created_at: now,
+    expires_at: expiresAt,
+    results: '',
+    error_message: ''
+  }, { suppressAuth: true });
+
+  return { success: result.success, jobId };
+}
+
+// ── Read ────────────────────────────────────────────────────────────────────
+
+/**
+ * Look up a search job by jobId. If the job's TTL has elapsed and it's still
+ * `processing`, mark it as `expired` and return that status.
+ * @param {string} jobId
+ * @returns {{ status: string, results: any|null, error: string|null }}
+ */
+export async function getSearchJobStatus(jobId) {
+  const result = await dataAccess.queryRecords(COLLECTION, {
+    filters: { job_id: jobId },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  if (!result.success || !result.items || result.items.length === 0) {
+    return { status: 'not_found', results: null, error: 'Job not found' };
+  }
+
+  const job = result.items[0];
+
+  // Check TTL expiration for processing jobs
+  if (job.status === 'processing' && job.expires_at) {
+    const expiresAt = new Date(job.expires_at).getTime();
+    if (Date.now() > expiresAt) {
+      // Mark expired
+      await dataAccess.updateRecord(COLLECTION, job._id, {
+        status: 'expired'
+      }, { suppressAuth: true });
+      return { status: 'expired', results: null, error: 'Search timed out' };
+    }
+  }
+
+  let parsedResults = null;
+  if (job.status === 'complete' && job.results) {
+    try {
+      parsedResults = typeof job.results === 'string'
+        ? JSON.parse(job.results)
+        : job.results;
+    } catch (e) {
+      parsedResults = job.results;
+    }
+  }
+
+  return {
+    status: job.status,
+    results: parsedResults,
+    error: job.error_message || null
+  };
+}
+
+// ── Update ──────────────────────────────────────────────────────────────────
+
+/**
+ * Mark a search job as complete with result data.
+ * Idempotent: rejects if status is not `processing`.
+ * @param {string} jobId
+ * @param {object} resultData - Search results payload
+ * @returns {{ success: boolean }}
+ */
+export async function completeSearchJob(jobId, resultData) {
+  const lookup = await dataAccess.queryRecords(COLLECTION, {
+    filters: { job_id: jobId },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  if (!lookup.success || !lookup.items || lookup.items.length === 0) {
+    return { success: false, error: 'Job not found' };
+  }
+
+  const job = lookup.items[0];
+  if (job.status !== 'processing') {
+    return { success: false, error: `Job status is ${job.status}, not processing` };
+  }
+
+  const result = await dataAccess.updateRecord(COLLECTION, job._id, {
+    status: 'complete',
+    results: JSON.stringify(resultData),
+    completed_at: new Date().toISOString()
+  }, { suppressAuth: true });
+
+  return { success: result.success };
+}
+
+/**
+ * Mark a search job as failed with an error message.
+ * @param {string} jobId
+ * @param {string} errorMessage
+ * @returns {{ success: boolean }}
+ */
+export async function failSearchJob(jobId, errorMessage) {
+  const lookup = await dataAccess.queryRecords(COLLECTION, {
+    filters: { job_id: jobId },
+    limit: 1,
+    suppressAuth: true
+  });
+
+  if (!lookup.success || !lookup.items || lookup.items.length === 0) {
+    return { success: false, error: 'Job not found' };
+  }
+
+  const job = lookup.items[0];
+  if (job.status !== 'processing') {
+    return { success: false, error: `Job status is ${job.status}, not processing` };
+  }
+
+  const result = await dataAccess.updateRecord(COLLECTION, job._id, {
+    status: 'error',
+    error_message: errorMessage,
+    completed_at: new Date().toISOString()
+  }, { suppressAuth: true });
+
+  return { success: result.success };
+}
+
+// ── Cleanup ─────────────────────────────────────────────────────────────────
+
+/**
+ * Delete search job records older than 10 minutes.
+ * Intended to be called from a scheduled job or admin action.
+ * @returns {{ deleted: number }}
+ */
+export async function cleanupExpiredJobs() {
+  const cutoff = new Date(Date.now() - CLEANUP_AGE_MS).toISOString();
+
+  const result = await dataAccess.queryRecords(COLLECTION, {
+    filters: {
+      created_at: { lt: cutoff }
+    },
+    limit: 100,
+    suppressAuth: true
+  });
+
+  if (!result.success || !result.items || result.items.length === 0) {
+    return { deleted: 0 };
+  }
+
+  let deleted = 0;
+  for (const job of result.items) {
+    try {
+      await dataAccess.deleteRecord(COLLECTION, job._id, { suppressAuth: true });
+      deleted++;
+    } catch (e) {
+      console.warn('[searchJobService] cleanup delete failed:', e.message);
+    }
+  }
+
+  return { deleted };
+}

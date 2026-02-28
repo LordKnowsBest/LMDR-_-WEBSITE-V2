@@ -977,6 +977,47 @@ export async function get_oauth_linkedin_callback(request) {
 }
 
 // ============================================================================
+// ASYNC SEARCH CALLBACK — Railway → Wix
+// POST https://www.lastmiledr.app/_functions/completeSearch
+// Header: x-lmdr-internal-key: <secret>
+// Receives search results from Railway and updates the search job record.
+// ============================================================================
+
+export async function post_completeSearch(request) {
+  try {
+    const internalKey = await getSecret('LMDR_INTERNAL_KEY');
+    if (request.headers['x-lmdr-internal-key'] !== internalKey) {
+      return { status: 401, body: JSON.stringify({ error: 'Unauthorized' }) };
+    }
+
+    const body = await request.body.json();
+    const { jobId, status, results, error } = body;
+
+    if (!jobId) {
+      return badRequest({ error: 'Missing jobId' });
+    }
+
+    // Lazy import to avoid circular dependencies
+    const searchJobService = await import('backend/searchJobService');
+
+    if (status === 'complete' && results) {
+      const result = await searchJobService.completeSearchJob(jobId, results);
+      console.log(`[completeSearch] Job ${jobId} marked complete, success=${result.success}`);
+      return ok({ received: true, success: result.success });
+    } else if (status === 'error') {
+      const result = await searchJobService.failSearchJob(jobId, error || 'Unknown error');
+      console.log(`[completeSearch] Job ${jobId} marked error, success=${result.success}`);
+      return ok({ received: true, success: result.success });
+    } else {
+      return badRequest({ error: 'Invalid status — expected "complete" or "error"' });
+    }
+  } catch (err) {
+    console.error('[completeSearch] Error:', err);
+    return serverError({ error: err.message });
+  }
+}
+
+// ============================================================================
 // ADMIN — SEMANTIC BACKFILL TRIGGER
 // POST https://www.lastmiledr.app/_functions/admin_semantic_backfill
 // Header: x-lmdr-internal-key: <secret>

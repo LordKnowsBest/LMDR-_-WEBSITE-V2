@@ -123,7 +123,9 @@
     'saveWeightPreferencesResult', 'recruiterProfile', 'driverSearchInit',
     'saveSearchResult', 'savedSearchesLoaded', 'savedSearchExecuted',
     'savedSearchDeleted', 'savedSearchUpdated', 'generateAIDraftResult',
-    'noCarrierAssigned', 'carrierPreferencesLoaded'
+    'noCarrierAssigned', 'carrierPreferencesLoaded',
+    // Async polling messages
+    'searchJobStarted', 'searchStatusUpdate'
   ];
 
   // ── State ──
@@ -142,6 +144,16 @@
   let sortField = 'matchScore';
   let isSearching = false;
   let hasCarrier = true; // assume true until told otherwise
+
+  // ── Async Polling State ──
+  let activeJobId = null;
+  let pollTimer = null;
+  let pollCount = 0;
+  let pollStartTime = 0;
+  const POLL_INITIAL_MS = 2000;
+  const POLL_MAX_MS = 8000;
+  const POLL_TIMEOUT_MS = 60000;
+
   let weights = {
     qualifications: 25, experience: 20, location: 20,
     availability: 15, salary_fit: 10, engagement: 10
@@ -457,6 +469,7 @@
   }
 
   function onUnmount() {
+    stopSearchPolling();
     allDrivers = [];
     drivers = [];
     totalCount = 0;
@@ -510,6 +523,39 @@
             renderError(err);
           }
         }
+        break;
+
+      // ── Async Polling Handlers ──
+      case 'searchJobStarted':
+        if (data && data.jobId) {
+          activeJobId = data.jobId;
+          pollCount = 0;
+          pollStartTime = Date.now();
+          isSearching = true;
+          renderAsyncLoadingAnimation();
+          startSearchPolling(data.jobId);
+        }
+        break;
+
+      case 'searchStatusUpdate':
+        if (data && data.status === 'complete') {
+          stopSearchPolling();
+          isSearching = false;
+          const searchResults = data.results || {};
+          allDrivers = searchResults.results || [];
+          totalCount = allDrivers.length;
+          if (data.quotaStatus) {
+            quotaStatus = data.quotaStatus;
+            renderQuotaBar();
+          }
+          currentPage = 0;
+          applySortAndPaginate();
+        } else if (data && (data.status === 'error' || data.status === 'expired')) {
+          stopSearchPolling();
+          isSearching = false;
+          renderAsyncError(data.error || 'Search timed out');
+        }
+        // If still 'processing', do nothing — next poll will fire
         break;
 
       case 'viewDriverProfileResult':
@@ -628,6 +674,97 @@
     drivers = sorted.slice(start, start + PAGE_SIZE);
     renderResults();
     renderPagination();
+  }
+
+  // ── Async Polling Functions ──
+  const LOADING_STAGES = [
+    { text: 'Analyzing search criteria...', icon: 'psychology', delay: 0 },
+    { text: 'Scanning driver database...', icon: 'travel_explore', delay: 3000 },
+    { text: 'Ranking matches...', icon: 'leaderboard', delay: 8000 },
+    { text: 'Finalizing results...', icon: 'verified', delay: 15000 },
+  ];
+
+  function startSearchPolling(jobId) {
+    stopSearchPolling();
+    pollCount = 0;
+    pollStartTime = Date.now();
+    schedulePoll(jobId);
+  }
+
+  function schedulePoll(jobId) {
+    // Exponential backoff: 2s, 4s, 8s, 8s, 8s...
+    const delay = Math.min(POLL_INITIAL_MS * Math.pow(2, pollCount), POLL_MAX_MS);
+
+    pollTimer = setTimeout(function () {
+      // Race protection: if a new search was started, abort
+      if (activeJobId !== jobId) return;
+
+      // Timeout protection: 60s total
+      if (Date.now() - pollStartTime > POLL_TIMEOUT_MS) {
+        stopSearchPolling();
+        isSearching = false;
+        renderAsyncError('Search timed out. Please try again.');
+        return;
+      }
+
+      pollCount++;
+      ROS.bridge.sendToVelo('checkSearchStatus', { jobId: jobId });
+
+      // Schedule next poll (will be cancelled if results arrive)
+      schedulePoll(jobId);
+    }, delay);
+  }
+
+  function stopSearchPolling() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    activeJobId = null;
+  }
+
+  function renderAsyncLoadingAnimation() {
+    const container = document.getElementById('search-results');
+    if (!container) return;
+
+    container.innerHTML = `
+      <div id="async-loading" class="flex flex-col items-center justify-center py-12 gap-4">
+        <div class="relative w-16 h-16">
+          <div class="absolute inset-0 rounded-full border-4 border-beige-d"></div>
+          <div class="absolute inset-0 rounded-full border-4 border-t-lmdr-blue animate-spin"></div>
+        </div>
+        <div id="loading-stage" class="flex items-center gap-2 text-sm text-tan transition-all duration-300">
+          <span class="material-symbols-outlined text-lmdr-blue text-[20px]">${LOADING_STAGES[0].icon}</span>
+          <span>${LOADING_STAGES[0].text}</span>
+        </div>
+        <div class="text-xs text-tan/60 mt-2">This may take a few seconds for complex searches</div>
+      </div>
+    `;
+
+    // Progress through stages
+    LOADING_STAGES.forEach(function (stage, i) {
+      if (i === 0) return; // Already shown
+      setTimeout(function () {
+        if (!isSearching) return;
+        var stageEl = document.getElementById('loading-stage');
+        if (stageEl) {
+          stageEl.innerHTML = '<span class="material-symbols-outlined text-lmdr-blue text-[20px]">' + stage.icon + '</span><span>' + stage.text + '</span>';
+        }
+      }, stage.delay);
+    });
+  }
+
+  function renderAsyncError(message) {
+    var container = document.getElementById('search-results');
+    if (!container) return;
+
+    container.innerHTML = '<div class="flex flex-col items-center justify-center py-12 gap-4">' +
+      '<span class="material-symbols-outlined text-red-400 text-[40px]">error_outline</span>' +
+      '<p class="text-sm text-tan">' + (message || 'Search failed') + '</p>' +
+      '<button onclick="ROS.views.search.actions.doSearch()" ' +
+        'class="px-4 py-2 bg-lmdr-blue text-white rounded-lg text-sm hover:bg-lmdr-deep transition-colors">' +
+        'Retry Search</button>' +
+    '</div>';
   }
 
   // ── Render Results ──

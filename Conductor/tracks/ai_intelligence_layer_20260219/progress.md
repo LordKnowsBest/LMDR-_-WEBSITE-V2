@@ -29,7 +29,7 @@
 |------|-------|--------|
 | `runtimeEnabled` | `true` | Phase 1 runtime active |
 | `semanticToolEnabled` | `true` | Embedding + search active |
-| `semanticSearchBlendEnabled` | `false` | Flip after backfill completes tonight |
+| `semanticSearchBlendEnabled` | `true` | Flipped to true following backfill |
 
 ## Log
 
@@ -90,5 +90,5 @@
 ## Pending
 
 - Add `FMCSA_WEB_KEY` to Railway env vars to unlock live FMCSA carrier data in Phase 4 research
-- Flip `semanticSearchBlendEnabled: true` after tonight's nightly backfill populates Pinecone indexes
+- [x] Flip `semanticSearchBlendEnabled: true` after tonight's nightly backfill populates Pinecone indexes
 - Rotate `LMDR_INTERNAL_KEY` + `ANTHROPIC_API_KEY` (user committed to rotating by EOD 2026-02-20)

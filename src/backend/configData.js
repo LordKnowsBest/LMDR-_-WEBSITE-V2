@@ -472,6 +472,9 @@ export const DATA_SOURCE = {
   ragRetrievalLog: 'airtable',
   ragAnalytics: 'airtable',
   intentClassificationLog: 'airtable',
+
+  // ── Async Polling ──
+  searchJobs: 'airtable'
 };
 
 // =============================================================================
@@ -523,6 +526,8 @@ export const FEATURE_FLAGS = {
   agentVerifierEnabled: true,
   /** Narrow rollout: roles allowed onto verifier stage while master flag is enabled */
   agentVerifierEnabledRoles: ['admin', 'recruiter'],
+  /** Phase 3: Enable async polling for semantic driver search (decouples search from 14s Wix timeout) */
+  asyncPollingEnabled: false,
 };
 
 // =============================================================================
@@ -1341,6 +1346,9 @@ export const AIRTABLE_TABLE_NAMES = {
   ragRetrievalLog: 'v2_RAG Retrieval Log',
   ragAnalytics: 'v2_RAG Analytics',
   intentClassificationLog: 'v2_Intent Classification Log',
+
+  // ── Async Polling ──
+  searchJobs: 'v2_Search Jobs'
 };
 
 // =============================================================================

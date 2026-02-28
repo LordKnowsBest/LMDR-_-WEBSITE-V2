@@ -28,7 +28,8 @@ import { logFeatureInteraction } from 'backend/featureAdoptionService';
 import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
 
 // Driver Search imports
-import { findMatchingDrivers, getDriverProfile } from 'backend/driverMatching.jsw';
+import { findMatchingDrivers, getDriverProfile, initiateAsyncDriverSearch, checkAsyncSearchStatus } from 'backend/driverMatching.jsw';
+import { FEATURE_FLAGS } from 'backend/configData';
 import {
   saveToRecruiterPipeline,
   sendMessageToDriver,
@@ -280,7 +281,10 @@ const MESSAGE_REGISTRY = {
     'generateSocialImage',
     'saveSocialCredentials',
     'testSocialConnection',
-    'getSocialCredentialStatus'
+    'getSocialCredentialStatus',
+    // Async Search Polling
+    'searchDriversAsync',
+    'checkSearchStatus'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -393,7 +397,10 @@ const MESSAGE_REGISTRY = {
     'socialImageGenerated',
     'socialCredentialsSaved',
     'socialConnectionTested',
-    'socialCredentialStatusLoaded'
+    'socialCredentialStatusLoaded',
+    // Async Search Polling
+    'searchJobStarted',
+    'searchStatusUpdate'
   ]
 };
 
@@ -561,6 +568,14 @@ async function handleHtmlMessage(msg, component) {
 
       case 'searchDrivers':
         await handleSearchDrivers(msg.data, component);
+        break;
+
+      case 'searchDriversAsync':
+        await handleSearchDrivers(msg.data, component);
+        break;
+
+      case 'checkSearchStatus':
+        await handleCheckSearchStatus(msg.data, component);
         break;
 
       case 'viewDriverProfile':
@@ -1663,6 +1678,34 @@ async function handleSearchDrivers(data, component) {
 
   console.log('Searching drivers for carrier:', currentCarrierDOT);
 
+  // ── Async polling path (feature-flagged) ──
+  if (FEATURE_FLAGS.asyncPollingEnabled) {
+    try {
+      const recruiterId = cachedRecruiterProfile?._id || 'unknown';
+      const result = await initiateAsyncDriverSearch(currentCarrierDOT, data, { recruiterId });
+
+      if (result.success) {
+        sendToHtml(component, 'searchJobStarted', {
+          jobId: result.jobId,
+          carrierDot: currentCarrierDOT
+        });
+      } else {
+        // Fallback to sync if async init fails
+        console.warn('Async search init failed, falling back to sync:', result.error);
+        await _handleSyncSearch(data, component);
+      }
+    } catch (error) {
+      console.error('Async search init error, falling back to sync:', error);
+      await _handleSyncSearch(data, component);
+    }
+    return;
+  }
+
+  // ── Sync path (default) ──
+  await _handleSyncSearch(data, component);
+}
+
+async function _handleSyncSearch(data, component) {
   try {
     const result = await findMatchingDrivers(currentCarrierDOT, data, { includeQuotaStatus: true });
 
@@ -1687,6 +1730,41 @@ async function handleSearchDrivers(data, component) {
     console.error('Search drivers error:', error);
     sendToHtml(component, 'searchDriversResult', {
       success: false,
+      error: error.message
+    });
+  }
+}
+
+async function handleCheckSearchStatus(data, component) {
+  if (!data || !data.jobId) {
+    sendToHtml(component, 'searchStatusUpdate', {
+      status: 'error',
+      error: 'Missing jobId'
+    });
+    return;
+  }
+
+  try {
+    const result = await checkAsyncSearchStatus(data.jobId);
+
+    if (result.status === 'complete') {
+      // Enrich with quota status
+      const quotaStatus = await getQuotaStatus(currentCarrierDOT);
+      sendToHtml(component, 'searchStatusUpdate', {
+        status: 'complete',
+        results: result.results,
+        quotaStatus: quotaStatus
+      });
+    } else {
+      sendToHtml(component, 'searchStatusUpdate', {
+        status: result.status,
+        error: result.error
+      });
+    }
+  } catch (error) {
+    console.error('Check search status error:', error);
+    sendToHtml(component, 'searchStatusUpdate', {
+      status: 'error',
       error: error.message
     });
   }

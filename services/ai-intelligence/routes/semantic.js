@@ -770,6 +770,70 @@ async function _postCallback(callbackUrl, payload) {
   }
 }
 
+// ── POST /search/drivers/async ──────────────────────────────────────────────
+// Recruiter-side async driver search. Accepts { jobId, query, filters, topK, callbackUrl }.
+// Returns 202 immediately, runs embed + Pinecone in background, POSTs results to callbackUrl.
+
+semanticRouter.post('/search/drivers/async', async (c) => {
+  const requestId = crypto.randomUUID();
+  let body;
+
+  try { body = await c.req.json(); } catch {
+    return c.json({ error: { code: 'INVALID_BODY', message: 'Invalid JSON', requestId } }, 400);
+  }
+
+  const { jobId, query, filters = {}, topK = 50, callbackUrl } = body;
+  if (!jobId || !query || !callbackUrl) {
+    return c.json({ error: { code: 'MISSING_FIELD', message: 'jobId, query, callbackUrl required', requestId } }, 400);
+  }
+
+  // Run search in background — do NOT await
+  (async () => {
+    const start = Date.now();
+    try {
+      const queryVector = await embed(query);
+      const matches = await queryVectors('drivers', queryVector, Math.min(topK, 200), filters, true);
+
+      const now = Date.now();
+      const results = matches.map(m => ({
+        driverId: m.id,
+        score: Math.round(m.score * 1000) / 1000,
+        stale: m.metadata?.last_active
+          ? (now - new Date(m.metadata.last_active).getTime()) > 86_400_000
+          : false,
+        metadata: m.metadata,
+      }));
+
+      // POST results back to Wix callback
+      await _postCallback(callbackUrl, {
+        jobId,
+        status: 'complete',
+        results: {
+          results,
+          totalReturned: results.length,
+          queryLatencyMs: Date.now() - start,
+          requestId,
+        }
+      });
+
+      console.log(`[search/drivers/async] Job ${jobId} completed in ${Date.now() - start}ms, ${results.length} results`);
+    } catch (err) {
+      console.error(`[search/drivers/async] Job ${jobId} failed:`, err.message);
+
+      await _postCallback(callbackUrl, {
+        jobId,
+        status: 'error',
+        error: err.message,
+      }).catch(callbackErr => {
+        console.error(`[search/drivers/async] Callback POST failed for job ${jobId}:`, callbackErr.message);
+      });
+    }
+  })();
+
+  // Return 202 immediately
+  return c.json({ accepted: true, jobId, requestId }, 202);
+});
+
 // ── POST /search/carriers ─────────────────────────────────────────────────────
 
 semanticRouter.post('/search/carriers', async (c) => {

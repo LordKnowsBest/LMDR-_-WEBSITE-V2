@@ -2,8 +2,9 @@ import { currentUser } from 'wix-users-backend';
 import { getSubscription, checkViewQuota, recordProfileView } from 'backend/subscriptionService';
 import { calculateDriverMatchScore, blendSemanticScore, generateDriverMatchRationale, getCarrierFeedbackWeights, applyFeedbackAdjustments, DEFAULT_WEIGHTS } from 'backend/driverScoring';
 import { getDriverMatchingWeights } from 'backend/admin_config_service';
-import { searchDriversSemantic } from 'backend/semanticSearchService';
+import { searchDriversSemantic, triggerAsyncSearch } from 'backend/semanticSearchService';
 import { FEATURE_FLAGS } from 'backend/configData';
+import { createSearchJob, getSearchJobStatus } from 'backend/searchJobService';
 import { startTrace, endTrace, log, logDatabase } from 'backend/observabilityService';
 import { withRetry } from 'backend/utils/retryUtils';
 import { logFeatureInteraction } from 'backend/featureAdoptionService';
@@ -1307,4 +1308,87 @@ export async function detectMutualMatch(carrierDot, driverId) {
       error: err.message || 'An unexpected error occurred while checking for mutual match.'
     };
   }
+}
+
+// ============================================================================
+// ASYNC SEARCH (Phase 3 — Polling Architecture)
+// ============================================================================
+
+/**
+ * Initiate an async driver search. Creates a job record and fires off
+ * the search to Railway without waiting for results.
+ *
+ * @param {string} carrierDot - Carrier DOT number
+ * @param {object} filters - Search filters from recruiter UI
+ * @param {object} options - { recruiterId, callbackBaseUrl }
+ * @returns {{ success: boolean, jobId: string }}
+ */
+export async function initiateAsyncDriverSearch(carrierDot, filters = {}, options = {}) {
+  const jobId = _generateJobId();
+  const recruiterId = options.recruiterId || 'unknown';
+
+  // Build semantic query from filters (same logic used in sync path)
+  const query = _buildSemanticQuery(carrierDot, filters);
+
+  // Callback URL for Railway to POST results back to
+  const callbackUrl = 'https://www.lastmiledr.app/_functions/completeSearch';
+
+  try {
+    // 1. Create job record
+    const createResult = await createSearchJob(jobId, carrierDot, recruiterId, filters);
+    if (!createResult.success) {
+      return { success: false, error: 'Failed to create search job' };
+    }
+
+    // 2. Fire-and-forget to Railway
+    const triggerResult = await triggerAsyncSearch(
+      jobId,
+      query,
+      { is_discoverable: 'Yes', ...filters.semanticFilters },
+      filters.topK || 50,
+      callbackUrl
+    );
+
+    if (!triggerResult.triggered) {
+      return { success: false, error: triggerResult.reason || 'Trigger failed' };
+    }
+
+    return { success: true, jobId };
+  } catch (err) {
+    console.error('[driverMatching] initiateAsyncDriverSearch error:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Check the status of an async search job.
+ * Thin wrapper around searchJobService — exposed as a .jsw export
+ * so page code can call it directly.
+ *
+ * @param {string} jobId
+ * @returns {{ status: string, results: any|null, error: string|null }}
+ */
+export async function checkAsyncSearchStatus(jobId) {
+  return getSearchJobStatus(jobId);
+}
+
+// ── Private helpers ─────────────────────────────────────────────────────────
+
+function _generateJobId() {
+  // Compact UUID-like ID: timestamp + random hex
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).substring(2, 10);
+  return `sj_${ts}_${rand}`;
+}
+
+function _buildSemanticQuery(carrierDot, filters) {
+  const parts = [`carrier DOT ${carrierDot}`];
+  if (filters.cdlClass) parts.push(`CDL Class ${filters.cdlClass}`);
+  if (filters.experience) parts.push(`${filters.experience} years experience`);
+  if (filters.endorsements && filters.endorsements.length > 0) {
+    parts.push(`endorsements: ${filters.endorsements.join(', ')}`);
+  }
+  if (filters.homeState) parts.push(`home state: ${filters.homeState}`);
+  if (filters.keyword) parts.push(filters.keyword);
+  return parts.join(', ');
 }
