@@ -524,6 +524,7 @@ async function handleGetRunDetail(component, message) {
                 steps: replay?.steps || [],
                 gates: replay?.gates || [],
                 plan: replay?.plan || {},
+                verifier: replay?.verifier || {},
                 execution: replay?.execution || {},
                 branches: replay?.branches || [],
                 timeline: replay?.timeline || [],
@@ -531,7 +532,7 @@ async function handleGetRunDetail(component, message) {
             }
         });
     } catch (err) {
-        safeSend(component, { action: 'runDetailLoaded', payload: { run: {}, steps: [], gates: [], plan: {}, execution: {}, branches: [], timeline: [], outcome: {}, error: err.message } });
+        safeSend(component, { action: 'runDetailLoaded', payload: { run: {}, steps: [], gates: [], plan: {}, verifier: {}, execution: {}, branches: [], timeline: [], outcome: {}, error: err.message } });
     }
 }
 

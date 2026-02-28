@@ -106,6 +106,11 @@
             <div style="font-size: 24px; font-weight: 700; color: #c084fc;">${stats.avg_approval_wait || '-'}</div>
             <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 4px;">Avg Gate Wait</div>
           </div>
+
+          <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 14px; text-align: center;">
+            <div style="font-size: 24px; font-weight: 700; color: #fb7185;">${stats.verifier_degraded_rate || 0}%</div>
+            <div style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 4px;">Verifier Degraded</div>
+          </div>
         </div>
 
         <div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px;">

@@ -3,6 +3,9 @@ const { executePlannedReadNodes, isPlanExecutorEligible } = require('backend/age
 describe('agentDagExecutorService', () => {
   it('recognizes admin diagnostics plans as eligible', () => {
     expect(isPlanExecutorEligible({ workflow_type: 'admin_diagnostics', nodes: [] })).toBe(true);
+    expect(isPlanExecutorEligible({ workflow_type: 'driver_carrier_intelligence', nodes: [] })).toBe(true);
+    expect(isPlanExecutorEligible({ workflow_type: 'recruiter_candidate_assessment', nodes: [] })).toBe(true);
+    expect(isPlanExecutorEligible({ workflow_type: 'carrier_operational_benchmark', nodes: [] })).toBe(true);
     expect(isPlanExecutorEligible({ workflow_type: 'driver_general', nodes: [] })).toBe(false);
   });
 
@@ -54,6 +57,9 @@ describe('agentDagExecutorService', () => {
     expect(result.skipped_nodes).toContain('n3');
     expect(result.summary_text).toContain('observability_ops.get_tracing_dashboard');
     expect(result.summary_text).toContain('external_api.get_api_health');
+    expect(result.branch_results).toEqual(expect.objectContaining({
+      sequential: expect.any(Array)
+    }));
   });
 
   it('returns skipped nodes only for ineligible plans', async () => {

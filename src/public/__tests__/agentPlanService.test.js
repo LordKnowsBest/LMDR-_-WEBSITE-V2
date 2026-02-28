@@ -20,8 +20,6 @@ describe('agentPlanService', () => {
 
   it('builds a driver carrier intelligence plan for carrier comparison prompts', async () => {
     const tools = [
-      { name: 'get_carrier_details' },
-      { name: 'get_fmcsa_data' },
       { name: 'driver_utility' },
       { name: 'cross_role_utility' }
     ];
@@ -32,7 +30,8 @@ describe('agentPlanService', () => {
     });
 
     expect(plan.workflow_type).toBe('driver_carrier_intelligence');
-    expect(plan.nodes.some(n => n.tool === 'get_carrier_details')).toBe(true);
+    expect(plan.nodes.some(n => n.tool === 'driver_utility')).toBe(true);
+    expect(plan.nodes.some(n => n.tool === 'cross_role_utility')).toBe(true);
     expect(plan.nodes.some(n => n.tool === 'assistant_synthesis')).toBe(true);
   });
 

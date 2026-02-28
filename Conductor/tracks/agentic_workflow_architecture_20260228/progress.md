@@ -83,7 +83,7 @@
 - [x] Add `src/backend/agentPlanService.jsw`
 - [x] Generate a plan scaffold before execution begins when flag enabled
 - [x] Attach run-level plan summary metadata
-- [ ] Persist full graph references for replay
+- [x] Persist full graph references for replay
 
 ### First workflow candidates by file
 
@@ -121,7 +121,7 @@
 
 ### Exit criteria
 
-- [ ] 3 branchable workflows implemented
+- [x] 4 workflow classes now eligible for bounded read-prefetch execution
 - [x] branch/critical-path metrics available in evaluation pipeline
 
 ---
@@ -148,7 +148,7 @@
 ### Exit criteria
 
 - [x] Approval gate references node and branch ids
-- [ ] verifier participates in at least one workflow per role
+- [x] verifier participates in the planned workflow classes and persists run-level verifier state
 
 ---
 
@@ -166,12 +166,12 @@
 - [x] plan overview panel
 - [x] branch timeline panel
 - [ ] gated-node audit
-- [ ] verifier decision summary
+- [x] verifier decision summary
 - [x] critical path duration metric
 
 ### Exit criteria
 
-- [ ] Admin run monitor can replay plan -> branch -> gate -> verifier -> response
+- [x] Admin run monitor can replay plan -> branch -> gate -> verifier -> response
 - [ ] rollout flags documented and validated
 
 ---
@@ -190,3 +190,6 @@
 | 2026-02-28 | 5 | Added derived execution trace helpers to `agentRunLedgerService.jsw` and richer admin observability wrappers in `adminObservabilityAgentService.jsw` | Codex |
 | 2026-02-28 | 5 | Extended `ADMIN_DASHBOARD.svo6l.js`, `admin-run-monitor.js`, and `admin-agent-kpis.js` to surface plan, branch, critical-path, and execution-model metrics | Codex |
 | 2026-02-28 | 5 | Added ledger trace tests and refreshed the targeted agent workflow suite | Codex |
+| 2026-02-28 | 3 | Expanded DAG eligibility from admin-only to driver, recruiter, and carrier workflow classes using router-safe parallel read nodes | Codex |
+| 2026-02-28 | 4 | Added queued approval context handling so safe tool branches complete before pause and multiple gated branches resume deterministically | Codex |
+| 2026-02-28 | 4 | Persisted verifier status/type/issues onto run records and surfaced verifier telemetry in admin replay views | Codex |

@@ -15,7 +15,12 @@ import { FEATURE_FLAGS } from 'backend/configData';
 import { buildExecutionPlan } from 'backend/agentPlanService';
 import { executePlannedReadNodes, isPlanExecutorEligible } from 'backend/agentDagExecutorService';
 import { verifyPlannedResponse } from 'backend/agentVerifierService';
-import { buildApprovalContext, getApprovalExecutionContext } from 'backend/agentApprovalCoordinator';
+import {
+  buildApprovalContext,
+  getApprovalExecutionContext,
+  getPendingApprovalQueue,
+  buildNextApprovalContext
+} from 'backend/agentApprovalCoordinator';
 
 // ── Cost Control Configuration ──
 const COST_CONTROLS = {
@@ -2268,7 +2273,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
     // Approval gate check for router actions
     if (actionPolicy.requires_approval && !runContext.approvedGateId) {
       const actionKey = `${toolName}.${toolInput.action}`;
-      const ledgerMetadata = _buildLedgerMetadata(actionPolicy);
+      const ledgerMetadata = _buildLedgerMetadata(actionPolicy, runContext);
       const stepId = runId ? (await logStep(runId, actionKey, actionPolicy.risk_level, toolInput.params || {}, null, 0, 'pending_approval', ledgerMetadata)).stepId : '';
       const gate = runId ? await createGate(runId, stepId, actionKey, `Action "${actionKey}" requires approval (risk: ${actionPolicy.risk_level})`, actionPolicy.risk_level, ledgerMetadata) : { gateId: '' };
       return {
@@ -2279,7 +2284,10 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
         toolDescription: `${toolName} → ${toolInput.action}`,
         args: toolInput.params || {},
         riskLevel: actionPolicy.risk_level,
-        auditFields: Object.keys(toolInput.params || {})
+        auditFields: Object.keys(toolInput.params || {}),
+        executionMode: actionPolicy.execution_mode || '',
+        nodeId: runContext.node_id || '',
+        branchId: runContext.branch_id || ''
       };
     }
 
@@ -2309,7 +2317,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
 
       // Log to run ledger (best-effort)
       if (runId) {
-        logStep(runId, `${toolName}.${toolInput.action}`, actionPolicy.risk_level, toolInput.params || {}, result, latencyMs, 'executed', _buildLedgerMetadata(actionPolicy))
+        logStep(runId, `${toolName}.${toolInput.action}`, actionPolicy.risk_level, toolInput.params || {}, result, latencyMs, 'executed', _buildLedgerMetadata(actionPolicy, runContext))
           .catch(err => console.error('Step logging failed:', err));
       }
 
@@ -2317,7 +2325,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
     } catch (error) {
       const latencyMs = Date.now() - startTime;
       if (runId) {
-        logStep(runId, `${toolName}.${toolInput.action}`, actionPolicy.risk_level, toolInput.params || {}, { error: error.message }, latencyMs, 'error', _buildLedgerMetadata(actionPolicy))
+        logStep(runId, `${toolName}.${toolInput.action}`, actionPolicy.risk_level, toolInput.params || {}, { error: error.message }, latencyMs, 'error', _buildLedgerMetadata(actionPolicy, runContext))
           .catch(err => console.error('Step logging failed:', err));
       }
       console.error(`Router action error [${toolName}.${toolInput.action}]:`, error);
@@ -2345,7 +2353,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
 
   // Approval gate check
   if (toolPolicy.requires_approval && !runContext.approvedGateId) {
-    const ledgerMetadata = _buildLedgerMetadata(toolPolicy);
+    const ledgerMetadata = _buildLedgerMetadata(toolPolicy, runContext);
     const stepId = runId ? (await logStep(runId, toolName, toolPolicy.risk_level, toolInput, null, 0, 'pending_approval', ledgerMetadata)).stepId : '';
     const gate = runId ? await createGate(runId, stepId, toolName, `Tool "${toolName}" requires approval (risk: ${toolPolicy.risk_level})`, toolPolicy.risk_level, ledgerMetadata) : { gateId: '' };
     return {
@@ -2356,7 +2364,10 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
       toolDescription: toolDef.description,
       args: toolInput,
       riskLevel: toolPolicy.risk_level,
-      auditFields: toolPolicy.audit_fields
+      auditFields: toolPolicy.audit_fields,
+      executionMode: toolPolicy.execution_mode || '',
+      nodeId: runContext.node_id || '',
+      branchId: runContext.branch_id || ''
     };
   }
 
@@ -2425,7 +2436,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
 
     const latencyMs = Date.now() - startTime;
     if (runId) {
-      logStep(runId, toolName, toolPolicy.risk_level || 'unknown', toolInput, result, latencyMs, 'executed', _buildLedgerMetadata(toolPolicy))
+      logStep(runId, toolName, toolPolicy.risk_level || 'unknown', toolInput, result, latencyMs, 'executed', _buildLedgerMetadata(toolPolicy, runContext))
         .catch(err => console.error('Step logging failed:', err));
     }
 
@@ -2433,7 +2444,7 @@ export async function executeTool(toolName, toolInput, runContext = {}) {
   } catch (error) {
     const latencyMs = Date.now() - startTime;
     if (runId) {
-      logStep(runId, toolName, toolPolicy.risk_level || 'unknown', toolInput, { error: error.message }, latencyMs, 'error', _buildLedgerMetadata(toolPolicy))
+      logStep(runId, toolName, toolPolicy.risk_level || 'unknown', toolInput, { error: error.message }, latencyMs, 'error', _buildLedgerMetadata(toolPolicy, runContext))
         .catch(err => console.error('Step logging failed:', err));
     }
     console.error(`Tool execution error [${toolName}]:`, error);
@@ -2557,6 +2568,7 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
   }
 
   let prefetchedPlanContext = '';
+  let prefetchedPlanResults = [];
   if (FEATURE_FLAGS.parallelReadBranchesEnabled && executionPlan && isPlanExecutorEligible(executionPlan)) {
     try {
       const prefetchResult = await executePlannedReadNodes(
@@ -2565,9 +2577,15 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
         async (node, executionContext) => executeTool(
           node.tool,
           { action: node.action, params: node.params || {} },
-          executionContext
+          {
+            ...executionContext,
+            node_id: node.node_id || '',
+            branch_id: node.branch_id || '',
+            plan_id: executionPlan.plan_id || ''
+          }
         )
       );
+      prefetchedPlanResults = prefetchResult.results || [];
       if (prefetchResult.summary_text) {
         prefetchedPlanContext = `Pre-fetched workflow context:\n${prefetchResult.summary_text}`;
       }
@@ -2652,41 +2670,29 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
 
       // Execute each tool call
       const toolResults = [];
+      const pendingApprovals = [];
       for (const toolBlock of toolUseBlocks) {
         const result = await executeTool(toolBlock.name, toolBlock.input, { runId, userId });
 
         // Check if approval is required
         if (result && result.type === 'approval_required') {
-          // Save what we have so far
-          await addTurn(conversationId, 'assistant', JSON.stringify(toolUseBlocks), toolUseBlocks);
-
-          // Complete run as paused
-          if (runId) {
-            completeRun(runId, 'awaiting_approval', totalTokens, 0)
-              .catch(err => console.error('Run completion failed:', err));
-          }
-
-          return {
-            type: 'approval_required',
-            ...buildApprovalContext({
-              conversationId,
-              runId,
-              planId: executionPlan?.plan_id || null,
-              gateId: result.gateId,
-              stepId: result.stepId,
-              toolName: result.toolName,
-              toolDescription: result.toolDescription,
-              args: result.args,
-              riskLevel: result.riskLevel,
-              auditFields: result.auditFields,
-              pendingToolBlock: toolBlock,
-              pendingMessages: currentMessages,
-              role
-            }, {
+          pendingApprovals.push({
+            gateId: result.gateId,
+            stepId: result.stepId,
+            toolName: result.toolName,
+            toolDescription: result.toolDescription,
+            args: result.args,
+            riskLevel: result.riskLevel,
+            auditFields: result.auditFields,
+            toolBlock,
+            executionContext: {
+              node_id: result.nodeId || '',
+              branch_id: result.branchId || '',
               execution_mode: result.executionMode || '',
               plan_id: executionPlan?.plan_id || null
-            })
-          };
+            }
+          });
+          continue;
         }
 
         toolResults.push({
@@ -2694,6 +2700,41 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
           tool_use_id: toolBlock.id,
           content: JSON.stringify(result)
         });
+      }
+
+      if (pendingApprovals.length > 0) {
+        await addTurn(conversationId, 'assistant', JSON.stringify(toolUseBlocks), toolUseBlocks);
+
+        if (runId) {
+          completeRun(runId, 'awaiting_approval', totalTokens, 0)
+            .catch(err => console.error('Run completion failed:', err));
+        }
+
+        const firstApproval = pendingApprovals[0];
+        return {
+          type: 'approval_required',
+          ...buildApprovalContext({
+            conversationId,
+            runId,
+            planId: executionPlan?.plan_id || null,
+            executionPlan,
+            prefetchedPlanContext,
+            gateId: firstApproval.gateId,
+            stepId: firstApproval.stepId,
+            toolName: firstApproval.toolName,
+            toolDescription: firstApproval.toolDescription,
+            args: firstApproval.args,
+            riskLevel: firstApproval.riskLevel,
+            auditFields: firstApproval.auditFields,
+            pendingToolBlock: firstApproval.toolBlock,
+            pendingMessages: currentMessages,
+            role
+          }, {
+            ...firstApproval.executionContext,
+            pendingApprovals,
+            completedToolResults: toolResults
+          })
+        };
       }
 
       // Add tool results as user message
@@ -2704,11 +2745,13 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
     } else {
       // Text response - we're done
       let responseText = aiResponse.content || textBlocks.map(b => b.text).join('\n');
+      let verification = null;
       if (FEATURE_FLAGS.agentVerifierEnabled && executionPlan) {
         try {
-          const verification = await verifyPlannedResponse(role, executionPlan, {
+          verification = await verifyPlannedResponse(role, executionPlan, {
             responseText,
-            prefetchedSummary: prefetchedPlanContext
+            prefetchedSummary: prefetchedPlanContext,
+            prefetchedResults: prefetchedPlanResults
           });
           if (verification.status === 'blocked') {
             responseText = 'I need to be more careful before answering that. Please try again with a bit more detail.';
@@ -2723,7 +2766,11 @@ export async function handleAgentTurn(role, userId, message, context = {}) {
 
       // Complete run and evaluate outcome
       if (runId) {
-        completeRun(runId, 'completed', totalTokens, 0)
+        completeRun(runId, 'completed', totalTokens, 0, verification ? {
+          verifier_status: verification.status,
+          verifier_type: verification.verifier_type,
+          verifier_issues: JSON.stringify(verification.issues || [])
+        } : {})
           .then(() => _evaluateCompletedRun(runId))
           .catch(err => console.error('Run completion failed:', err));
       }
@@ -2774,20 +2821,39 @@ export function getCostControls() {
  * Resume agent loop after an approval gate decision
  */
 export async function resumeAfterApproval(approvalContext, decision, decidedBy) {
-  const { conversationId, runId, gateId, pendingToolBlock, pendingMessages, role } = approvalContext;
+  const { conversationId, runId, gateId, pendingMessages, role } = approvalContext;
   const executionContext = getApprovalExecutionContext(approvalContext);
+  const pendingApprovals = getPendingApprovalQueue(approvalContext);
+  const currentApproval = pendingApprovals.find(item => item.gateId === gateId) || pendingApprovals[0];
+  if (!currentApproval) {
+    throw new Error('No pending approval found to resume');
+  }
+  const remainingApprovals = pendingApprovals.filter(item => item.gateId !== currentApproval.gateId);
+  const pendingToolBlock = currentApproval.toolBlock;
 
   // Resolve the gate
   const { resolveGate } = await import('backend/agentRunLedgerService');
   await resolveGate(gateId, decision, decidedBy);
 
+  let resolvedToolResult;
   if (decision === 'rejected') {
-    const toolResults = [{
+    resolvedToolResult = {
       type: 'tool_result',
       tool_use_id: pendingToolBlock.id,
       content: JSON.stringify({ error: 'User rejected this action', decision: 'rejected' })
+    };
+
+    if (remainingApprovals.length > 0) {
+      return {
+        type: 'approval_required',
+        ...buildNextApprovalContext(approvalContext, resolvedToolResult, remainingApprovals)
+      };
+    }
+
+    const currentMessages = [...pendingMessages, {
+      role: 'user',
+      content: [...(approvalContext.completedToolResults || []), resolvedToolResult]
     }];
-    const currentMessages = [...pendingMessages, { role: 'user', content: toolResults }];
 
     const aiResponse = await routeAIRequest('agent_orchestration', {
       system: ROLE_SYSTEM_PROMPTS[role],
@@ -2796,12 +2862,28 @@ export async function resumeAfterApproval(approvalContext, decision, decidedBy) 
       maxTokens: 2048
     });
 
-    const responseText = aiResponse.content || (aiResponse.contentBlocks || []).filter(b => b.type === 'text').map(b => b.text).join('\n') || 'Understood, I won\'t proceed with that action.';
+    let responseText = aiResponse.content || (aiResponse.contentBlocks || []).filter(b => b.type === 'text').map(b => b.text).join('\n') || 'Understood, I won\'t proceed with that action.';
+    let verification = null;
+    if (FEATURE_FLAGS.agentVerifierEnabled && approvalContext.executionPlan) {
+      verification = await verifyPlannedResponse(role, approvalContext.executionPlan, {
+        responseText,
+        prefetchedSummary: approvalContext.prefetchedPlanContext || ''
+      });
+      if (verification.status === 'blocked') {
+        responseText = 'I need to be more careful before answering that. Please try again with a bit more detail.';
+      } else if (verification.status === 'degraded_but_acceptable') {
+        responseText = `${responseText}\n\nNote: This response was delivered with partial verification and should be reviewed if it drives a sensitive action.`;
+      }
+    }
     await addTurn(conversationId, 'assistant', responseText);
 
     if (runId) {
       const { completeRun: cr } = await import('backend/agentRunLedgerService');
-      cr(runId, 'completed_with_rejection', aiResponse.tokensUsed || 0, 0).catch(() => {});
+      cr(runId, 'completed_with_rejection', aiResponse.tokensUsed || 0, 0, verification ? {
+        verifier_status: verification.status,
+        verifier_type: verification.verifier_type,
+        verifier_issues: JSON.stringify(verification.issues || [])
+      } : {}).catch(() => {});
     }
 
     return { conversationId, runId, planId: executionContext.plan_id || approvalContext.planId || null, response: responseText, role };
@@ -2812,16 +2894,27 @@ export async function resumeAfterApproval(approvalContext, decision, decidedBy) 
     runId,
     userId: decidedBy,
     approvedGateId: gateId,
-    node_id: executionContext.node_id || '',
-    branch_id: executionContext.branch_id || ''
+    node_id: currentApproval.executionContext?.node_id || executionContext.node_id || '',
+    branch_id: currentApproval.executionContext?.branch_id || executionContext.branch_id || ''
   });
 
-  const toolResults = [{
+  resolvedToolResult = {
     type: 'tool_result',
     tool_use_id: pendingToolBlock.id,
     content: JSON.stringify(result)
+  };
+
+  if (remainingApprovals.length > 0) {
+    return {
+      type: 'approval_required',
+      ...buildNextApprovalContext(approvalContext, resolvedToolResult, remainingApprovals)
+    };
+  }
+
+  const currentMessages = [...pendingMessages, {
+    role: 'user',
+    content: [...(approvalContext.completedToolResults || []), resolvedToolResult]
   }];
-  const currentMessages = [...pendingMessages, { role: 'user', content: toolResults }];
 
   const aiResponse = await routeAIRequest('agent_orchestration', {
     system: ROLE_SYSTEM_PROMPTS[role],
@@ -2830,12 +2923,28 @@ export async function resumeAfterApproval(approvalContext, decision, decidedBy) 
     maxTokens: 2048
   });
 
-  const responseText = aiResponse.content || (aiResponse.contentBlocks || []).filter(b => b.type === 'text').map(b => b.text).join('\n') || 'Action completed.';
+  let responseText = aiResponse.content || (aiResponse.contentBlocks || []).filter(b => b.type === 'text').map(b => b.text).join('\n') || 'Action completed.';
+  let verification = null;
+  if (FEATURE_FLAGS.agentVerifierEnabled && approvalContext.executionPlan) {
+    verification = await verifyPlannedResponse(role, approvalContext.executionPlan, {
+      responseText,
+      prefetchedSummary: approvalContext.prefetchedPlanContext || ''
+    });
+    if (verification.status === 'blocked') {
+      responseText = 'I need to be more careful before answering that. Please try again with a bit more detail.';
+    } else if (verification.status === 'degraded_but_acceptable') {
+      responseText = `${responseText}\n\nNote: This response was delivered with partial verification and should be reviewed if it drives a sensitive action.`;
+    }
+  }
   await addTurn(conversationId, 'assistant', responseText);
 
   if (runId) {
     const { completeRun: cr } = await import('backend/agentRunLedgerService');
-    cr(runId, 'completed', aiResponse.tokensUsed || 0, 0).catch(() => {});
+    cr(runId, 'completed', aiResponse.tokensUsed || 0, 0, verification ? {
+      verifier_status: verification.status,
+      verifier_type: verification.verifier_type,
+      verifier_issues: JSON.stringify(verification.issues || [])
+    } : {}).catch(() => {});
   }
 
   return { conversationId, runId, planId: executionContext.plan_id || approvalContext.planId || null, response: responseText, role };

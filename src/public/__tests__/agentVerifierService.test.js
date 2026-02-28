@@ -29,4 +29,21 @@ describe('agentVerifierService', () => {
     expect(result.status).toBe('blocked');
     expect(result.issues).toContain('empty_response');
   });
+
+  it('degrades when prefetched evidence is partially failed', async () => {
+    const result = await verifyPlannedResponse('recruiter', {
+      workflow_type: 'recruiter_candidate_assessment',
+      nodes: [{ verifier_required: true }]
+    }, {
+      responseText: 'Candidate assessment is ready.',
+      prefetchedResults: [
+        { success: true, result: { ok: true } },
+        { success: false, result: { error: 'timeout' } }
+      ]
+    });
+
+    expect(result.status).toBe('degraded_but_acceptable');
+    expect(result.issues).toContain('partial_prefetch_failure');
+    expect(result.evidence_count).toBe(2);
+  });
 });

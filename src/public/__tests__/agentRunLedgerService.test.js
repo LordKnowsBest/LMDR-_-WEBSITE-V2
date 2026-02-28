@@ -13,6 +13,7 @@ const {
   logStep,
   createGate,
   logAgentAction,
+  completeRun,
   updateRunPlanningMetadata,
   getRunExecutionTrace,
   getRecentRunsWithExecution
@@ -137,6 +138,30 @@ describe('agentRunLedgerService phase 1 metadata compatibility', () => {
     );
   });
 
+  it('completeRun persists verifier metadata when provided', async () => {
+    mockQueryRecords.mockResolvedValueOnce({
+      items: [{ _id: 'rec_run_1', run_id: 'run_1', started_at: '2026-02-28T00:00:00.000Z' }]
+    });
+
+    await completeRun('run_1', 'completed', 1200, 0.01, {
+      verifier_status: 'degraded_but_acceptable',
+      verifier_type: 'policy_verifier',
+      verifier_issues: '["partial_prefetch_failure"]'
+    });
+
+    expect(mockUpdateRecord).toHaveBeenCalledWith(
+      'agentRuns',
+      'rec_run_1',
+      expect.objectContaining({
+        status: 'completed',
+        verifier_status: 'degraded_but_acceptable',
+        verifier_type: 'policy_verifier',
+        verifier_issues: '["partial_prefetch_failure"]'
+      }),
+      { suppressAuth: true }
+    );
+  });
+
   it('getRunExecutionTrace returns derived plan, branch, and timeline summaries', async () => {
     mockQueryRecords
       .mockResolvedValueOnce({
@@ -182,6 +207,11 @@ describe('agentRunLedgerService phase 1 metadata compatibility', () => {
       execution_model: 'planned_sequential',
       planned_nodes: 4,
       parallel_nodes: 2
+    });
+    expect(trace.verifier).toEqual({
+      status: '',
+      type: '',
+      issues: ''
     });
     expect(trace.execution).toEqual(expect.objectContaining({
       branch_count: 2,

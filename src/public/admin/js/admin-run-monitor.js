@@ -328,6 +328,7 @@
     var execution = payload.execution || {};
     var branches = payload.branches || [];
     var timeline = payload.timeline || [];
+    var verifier = payload.verifier || {};
     var outcome = payload.outcome || {};
 
     var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
@@ -356,6 +357,7 @@
     html += infoCard('Branches', execution.branch_count || 0);
     html += infoCard('Critical Path', execution.critical_path_ms ? (execution.critical_path_ms / 1000).toFixed(1) + 's' : '-');
     html += infoCard('Degraded Path', execution.degraded_path ? 'yes' : 'no');
+    html += infoCard('Verifier', verifier.status || '-');
     html += '</div>';
 
     // Goal
@@ -381,6 +383,17 @@
         }
         html += '</div>';
       }
+      html += '</div>';
+    }
+
+    if (verifier.status || verifier.type || verifier.issues) {
+      html += '<div style="font-size:12px;font-weight:600;color:rgba(255,255,255,0.7);margin-bottom:8px;">Verifier</div>';
+      html += '<div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:10px;margin-bottom:16px;">';
+      html += '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">';
+      html += statusBadge(verifier.status || 'unknown');
+      html += '<span style="font-size:11px;color:rgba(255,255,255,0.7);">' + esc(verifier.type || '-') + '</span>';
+      html += '</div>';
+      html += '<div style="font-size:11px;color:rgba(255,255,255,0.5);">Issues: ' + esc(formatVerifierIssues(verifier.issues)) + '</div>';
       html += '</div>';
     }
 
@@ -483,6 +496,17 @@
     var keys = Object.keys(map || {});
     if (keys.length === 0) return '-';
     return keys.map(function (key) { return key + ':' + map[key]; }).join(', ');
+  }
+
+  function formatVerifierIssues(issues) {
+    if (!issues) return '-';
+    if (Array.isArray(issues)) return issues.join(', ') || '-';
+    try {
+      var parsed = JSON.parse(issues);
+      return Array.isArray(parsed) ? (parsed.join(', ') || '-') : String(issues);
+    } catch (e) {
+      return String(issues);
+    }
   }
 
   // ===================== APPROVAL AUDIT =====================
