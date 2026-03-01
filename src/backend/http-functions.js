@@ -1180,7 +1180,7 @@ export async function post_completeSearch(request) {
 // ASYNC ENRICHMENT CALLBACK
 // POST https://www.lastmiledr.app/_functions/completeEnrichment
 //
-// Called by Railway /v1/enrich/carrier/async when a single-carrier Perplexity
+// Called by Railway /v1/enrich/carrier/async when a single-carrier AI
 // enrichment job finishes (triggered by "Get AI Profile" button click).
 // Stores the enrichment result in SearchJobs so the page-code polling loop
 // can pick it up and deliver it to the HTML card.

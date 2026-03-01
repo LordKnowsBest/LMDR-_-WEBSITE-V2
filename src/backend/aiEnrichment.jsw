@@ -2,7 +2,7 @@ import { getSecret } from 'wix-secrets-backend';
 import { fetch } from 'wix-fetch';
 import * as dataAccess from 'backend/dataAccess';
 import { getCarrierSafetyData } from 'backend/fmcsaService';
-import { log, logAIOperation, startTrace, endTrace } from 'backend/observabilityService';
+import { logAIOperation, startTrace, endTrace } from 'backend/observabilityService';
 
 // ============================================================================
 // CONFIGURATION - PRODUCTION-HARDENED 2025 STACK
@@ -28,29 +28,24 @@ const CONFIG = {
   geminiEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
   geminiTimeoutMs: 5000,
 
-  // Perplexity Configuration — kept as fallback (disabled)
-  perplexityModel: 'sonar',
-  perplexitySecret: 'PERPLEXITY_API_KEY',
-  perplexityEndpoint: 'https://api.perplexity.ai/chat/completions',
-  perplexityTimeoutMs: 4000,
+  groqResearchModel: 'groq/compound',
 
   // Timeouts & Limits
   claudeTimeoutMs: 5000,
   maxTokens: 800,
   cacheExpiryDays: 14,
 
-  // Feature Flags — Web research disabled for real-time (both Perplexity and Gemini
+  // Feature Flags — Web research disabled for real-time (both Groq and Gemini
   // Search grounding take 5-8s+, always timing out). FMCSA + Groq produces solid
   // results in ~3s. Web research should be a nightly batch job instead.
   enableWebResearch: false,
-  researchProvider: 'gemini', // 'gemini' or 'perplexity' (when enableWebResearch: true)
+  researchProvider: 'groq', // 'groq' or 'gemini' (when enableWebResearch: true)
   fallbackToClaudeOnly: false
 };
 
 // ============================================================================
 // SECRET CACHING (avoid repeated Wix Secrets lookups)
 // ============================================================================
-let __perplexityKeyCache = null;
 let __claudeKeyCache = null;
 let __groqKeyCache = null;
 let __geminiKeyCache = null;
@@ -59,12 +54,10 @@ const KEY_CACHE_TTL = 3600000; // 1 hour
 
 async function getCachedSecret(secretName) {
   const now = Date.now();
-  if (secretName === CONFIG.perplexitySecret && __perplexityKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __perplexityKeyCache;
   if (secretName === CONFIG.claudeSecret && __claudeKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __claudeKeyCache;
   if (secretName === CONFIG.groqSecret && __groqKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __groqKeyCache;
   if (secretName === CONFIG.geminiSecret && __geminiKeyCache && (now - __keyCacheTime < KEY_CACHE_TTL)) return __geminiKeyCache;
   const key = await getSecret(secretName);
-  if (secretName === CONFIG.perplexitySecret) __perplexityKeyCache = key;
   if (secretName === CONFIG.claudeSecret) __claudeKeyCache = key;
   if (secretName === CONFIG.groqSecret) __groqKeyCache = key;
   if (secretName === CONFIG.geminiSecret) __geminiKeyCache = key;
@@ -83,7 +76,7 @@ async function getCachedSecret(secretName) {
  * @param {string|null} socialIntel
  * @param {Object} [options] - Pipeline overrides
  * @param {boolean} [options.enableWebResearch] - Force web research on/off
- * @param {string}  [options.researchProvider] - 'perplexity' | 'gemini'
+ * @param {string}  [options.researchProvider] - 'groq' | 'gemini'
  * @param {number}  [options.budgetMs] - Override pipeline timeout
  * @param {boolean} [options.skipCache] - Ignore existing cache (force re-enrich)
  */
@@ -154,7 +147,7 @@ async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialInt
     traceId
   }).catch(() => {});
 
-  // PARALLEL PHASE: FMCSA + Web Research (Gemini or Perplexity)
+  // PARALLEL PHASE: FMCSA + Web Research (Gemini or Groq)
   const carrierName = carrierData.LEGAL_NAME || carrierData.DBA_NAME || 'Unknown Carrier';
   const carrierLocation = `${carrierData.PHY_CITY || ''}, ${carrierData.PHY_STATE || ''}`;
 
@@ -168,7 +161,7 @@ async function _runBackgroundEnrichment(dot, carrierData, driverPrefs, socialInt
   const researchFn = doWebResearch
     ? (provider === 'gemini'
         ? fetchGeminiResearchWithTimeout(carrierName, carrierLocation, traceId, researchTimeoutMs)
-        : fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId, researchTimeoutMs))
+        : fetchGroqResearchWithTimeout(carrierName, carrierLocation, traceId, researchTimeoutMs))
     : Promise.resolve('');
 
   const [fmcsaResult, researchResult] = await Promise.allSettled([
@@ -216,8 +209,8 @@ async function fetchGeminiResearchWithTimeout(carrierName, carrierLocation, trac
   try {
     const apiKey = await getCachedSecret(CONFIG.geminiSecret);
     if (!apiKey) {
-      console.warn('[aiEnrichment] Gemini API key not configured — falling back to Perplexity');
-      return fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId, timeoutOverrideMs);
+      console.warn('[aiEnrichment] Gemini API key not configured — falling back to Groq');
+      return fetchGroqResearchWithTimeout(carrierName, carrierLocation, traceId, timeoutOverrideMs);
     }
 
     console.log(`[aiEnrichment] Gemini: Researching "${carrierName}" with Google Search (${timeoutMs / 1000}s timeout)`);
@@ -285,39 +278,38 @@ async function fetchGeminiResearchWithTimeout(carrierName, carrierLocation, trac
 }
 
 // ============================================================================
-// STAGE 1b: PERPLEXITY RESEARCHER (legacy fallback)
+// STAGE 1b: GROQ RESEARCHER
 // ============================================================================
 
-async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, traceId = null, timeoutOverrideMs = null) {
+async function fetchGroqResearchWithTimeout(carrierName, carrierLocation, traceId = null, timeoutOverrideMs = null) {
   const apiStartTime = Date.now();
-  const timeoutMs = timeoutOverrideMs || CONFIG.perplexityTimeoutMs;
+  const timeoutMs = timeoutOverrideMs || CONFIG.groqTimeoutMs;
 
   try {
-    const apiKey = await getCachedSecret(CONFIG.perplexitySecret);
+    const apiKey = await getCachedSecret(CONFIG.groqSecret);
     if (!apiKey) {
-      console.warn('[aiEnrichment] Perplexity API key not configured');
+      console.warn('[aiEnrichment] Groq API key not configured');
       return generateInternalResearchFallback(carrierName);
     }
 
-    console.log(`[aiEnrichment] Perplexity: Researching "${carrierName}" (${timeoutMs / 1000}s timeout)`);
+    console.log(`[aiEnrichment] Groq Research: Researching "${carrierName}" (${timeoutMs / 1000}s timeout)`);
 
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Perplexity timeout')), timeoutMs);
+      setTimeout(() => reject(new Error('Groq research timeout')), timeoutMs);
     });
 
-    const fetchPromise = fetch(CONFIG.perplexityEndpoint, {
+    const fetchPromise = fetch(CONFIG.groqEndpoint, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        // Use sonar-pro for nightly batch (thorough), sonar for real-time (fast)
-        model: timeoutMs >= 10000 ? 'sonar-pro' : CONFIG.perplexityModel,
+        model: CONFIG.groqResearchModel,
         messages: [
           {
             role: "system",
-            content: "You are a trucking industry researcher. Provide factual, concise information about carrier jobs. Include source citations as [1], [2] etc. Be brief - max 300 words."
+            content: "You are a trucking industry researcher. Provide factual, concise information about carrier jobs. If a detail cannot be verified confidently, say it is unknown. Be brief - max 300 words."
           },
           {
             role: "user",
@@ -333,13 +325,13 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
     const latencyMs = Date.now() - apiStartTime;
 
     if (!response.ok) {
-      console.warn(`[aiEnrichment] Perplexity API Error: ${response.status}`);
+      console.warn(`[aiEnrichment] Groq research API Error: ${response.status}`);
       logAIOperation({
         source: 'ai-enrichment',
         operation: 'research',
-        functionId: 'perplexity-research',
-        provider: 'perplexity',
-        model: CONFIG.perplexityModel,
+        functionId: 'groq-research',
+        provider: 'groq',
+        model: CONFIG.groqResearchModel,
         latencyMs,
         error: `HTTP ${response.status}`,
         traceId
@@ -351,15 +343,15 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
     const content = result.choices?.[0]?.message?.content || '';
     const usage = result.usage || {};
 
-    console.log(`[aiEnrichment] Perplexity returned ${content.length} chars`);
+    console.log(`[aiEnrichment] Groq research returned ${content.length} chars`);
 
     // Log successful AI operation
     logAIOperation({
       source: 'ai-enrichment',
       operation: 'research',
-      functionId: 'perplexity-research',
-      provider: 'perplexity',
-      model: CONFIG.perplexityModel,
+      functionId: 'groq-research',
+      provider: 'groq',
+      model: CONFIG.groqResearchModel,
       inputTokens: usage.prompt_tokens,
       outputTokens: usage.completion_tokens,
       totalTokens: usage.total_tokens,
@@ -371,17 +363,17 @@ async function fetchPerplexityResearchWithTimeout(carrierName, carrierLocation, 
 
   } catch (e) {
     const latencyMs = Date.now() - apiStartTime;
-    if (e.message === 'Perplexity timeout') {
-      console.warn(`[aiEnrichment] Perplexity timed out after ${timeoutMs}ms - using fallback`);
+    if (e.message === 'Groq research timeout') {
+      console.warn(`[aiEnrichment] Groq research timed out after ${timeoutMs}ms - using fallback`);
     } else {
-      console.error("[aiEnrichment] Perplexity fetch failed:", e.message);
+      console.error("[aiEnrichment] Groq research fetch failed:", e.message);
     }
     logAIOperation({
       source: 'ai-enrichment',
       operation: 'research',
-      functionId: 'perplexity-research',
-      provider: 'perplexity',
-      model: CONFIG.perplexityModel,
+      functionId: 'groq-research',
+      provider: 'groq',
+      model: CONFIG.groqResearchModel,
       latencyMs,
       error: e.message,
       traceId
@@ -777,8 +769,8 @@ function parseSentimentResponse(responseText, dotNumber) {
       data_confidence: parsed.data_confidence || 'Low',
       ai_summary: parsed.ai_summary || '• **Data:** Limited information available\n• **Action:** Contact carrier directly for job details',
       enriched_date: new Date(),
-      enrichment_version: 10,
-      source: 'groq-perplexity-hybrid-v4'
+      enrichment_version: 11,
+      source: 'groq-research-hybrid-v5'
     };
   } catch (parseError) {
     console.error('[aiEnrichment] Failed to parse Claude response:', parseError.message);
@@ -864,7 +856,6 @@ async function cacheSentimentEnrichment(sentimentData, traceId = null) {
 // ============================================================================
 
 function generateFallbackEnrichment(dotNumber, carrierData, driverPrefs, errorMessage, fmcsaData) {
-  const carrierName = carrierData?.LEGAL_NAME || fmcsaData?.legal_name || 'This carrier';
   const city = carrierData?.PHY_CITY || fmcsaData?.phy_city || 'their location';
   const state = carrierData?.PHY_STATE || fmcsaData?.phy_state || '';
   const fleetSize = carrierData?.NBR_POWER_UNIT || fmcsaData?.total_power_units || 0;

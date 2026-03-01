@@ -745,7 +745,7 @@ function buildLocalExplanation(carrierDot) {
       ? 'This carrier partially matches your preferences.'
       : 'This carrier has some differences from your preferences.';
 
-  // Build a rich narrative from Perplexity AI intel + FMCSA data if available
+  // Build a rich narrative from AI intel + FMCSA data if available
   let llm_narrative = null;
   const carrierName = carrier.LEGAL_NAME || carrier.DBA_NAME || 'This carrier';
   const parts = [];
@@ -1013,7 +1013,7 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
     source: 'async-option-b',
   });
 
-  // Fire enrichmentUpdate for every visible carrier Railway pre-enriched via Perplexity
+  // Fire enrichmentUpdate for every visible carrier Railway pre-enriched via Groq
   // so the renderer paints immediately without waiting for a second round-trip.
   const visiblePreEnriched = visibleMatches.filter(m => !m.needsEnrichment && m.enrichment);
   if (visiblePreEnriched.length > 0) {
@@ -1031,7 +1031,7 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
     sendToHtml('enrichmentComplete', { totalEnriched: visiblePreEnriched.length });
   }
 
-  // For visible carriers Railway didn't enrich, use Railway/Perplexity (richer than Wix Groq)
+  // For visible carriers Railway didn't enrich, use Railway/Groq first
   const visibleNeedsEnrich = visibleMatches.find(m => m.needsEnrichment && !m.fmcsaOnly);
   if (visibleNeedsEnrich) {
     const dotNumber = String(visibleNeedsEnrich.carrier.DOT_NUMBER);
@@ -1290,11 +1290,11 @@ async function handleRetryEnrichment(data) {
   const dotNumber = data.dot || data.dot_number;
   if (!dotNumber) return;
 
-  console.log(`🔄 [async] Triggering Railway/Perplexity enrichment for DOT: ${dotNumber}`);
+  console.log(`🔄 [async] Triggering Railway/Groq enrichment for DOT: ${dotNumber}`);
   sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'loading', message: 'Researching...' });
 
   try {
-    // Pull carrier context from last search results for better Perplexity accuracy
+    // Pull carrier context from last search results for better AI research context
     const matchData   = lastSearchResults?.matches?.find(
       m => String(m.carrier?.DOT_NUMBER) === String(dotNumber)
     );
@@ -1314,7 +1314,7 @@ async function handleRetryEnrichment(data) {
 
     console.log(`📡 [enrich] Job ${jobId} started for DOT ${dotNumber} — polling...`);
 
-    // Poll every 3s until Railway/Perplexity finishes (max 90s = 30 attempts)
+    // Poll every 3s until Railway enrichment finishes (max 90s = 30 attempts)
     let attempts = 0;
     const maxAttempts = 30;
     await new Promise((resolve) => {

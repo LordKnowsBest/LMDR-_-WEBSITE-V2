@@ -11,7 +11,7 @@ import { Hono } from 'hono';
 import crypto from 'node:crypto';
 import { embed, buildDriverText, buildCarrierText } from '../lib/embeddings.js';
 import { upsertVector, queryVectors, fetchVector } from '../lib/pinecone.js';
-import { enrichCarriersBatch, enrichCarrierWithPerplexity } from '../lib/perplexity.js';
+import { enrichCarriersBatch, enrichCarrierWithGroqResearch } from '../lib/perplexity.js';
 
 export const semanticRouter = new Hono();
 
@@ -685,7 +685,7 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
     const elapsed = Date.now() - started;
     console.log(`[search/carriers-async] ${jobId}: returning ${finalResults.length} raw results in ${elapsed}ms`);
 
-    // Pre-enrich top carriers with Perplexity before sending callback.
+    // Pre-enrich top carriers with Groq before sending callback.
     // Non-blocking — failure falls through to needsEnrichment=true (on-demand fallback).
     const carriersToEnrich = finalResults
       .filter(r => r.carrier.LEGAL_NAME && r.carrier.LEGAL_NAME !== 'Unknown Carrier')
@@ -705,11 +705,11 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
     let enrichmentMap = {};
     if (carriersToEnrich.length > 0) {
       try {
-        console.log(`[search/carriers-async] ${jobId}: Perplexity enriching ${carriersToEnrich.length} carriers`);
+        console.log(`[search/carriers-async] ${jobId}: Groq enriching ${carriersToEnrich.length} carriers`);
         enrichmentMap = await enrichCarriersBatch(carriersToEnrich, { maxConcurrent: 5 });
-        console.log(`[search/carriers-async] ${jobId}: Perplexity enrichment complete`);
+        console.log(`[search/carriers-async] ${jobId}: Groq enrichment complete`);
       } catch (enrichErr) {
-        console.warn(`[search/carriers-async] ${jobId}: Perplexity enrichment failed (non-blocking):`, enrichErr.message);
+        console.warn(`[search/carriers-async] ${jobId}: Groq enrichment failed (non-blocking):`, enrichErr.message);
       }
     }
 
@@ -717,7 +717,7 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
       const dot            = String(r.carrier.DOT_NUMBER);
       const enrichment     = enrichmentMap[dot] || null;
       const hasEnrichment  = enrichment && !enrichment.error;
-      // For FMCSA-only carriers, backfill PAY_CPM from Perplexity pay_estimate if not already set
+      // For FMCSA-only carriers, backfill PAY_CPM from AI pay_estimate if not already set
       if (hasEnrichment && r.fmcsaOnly && !r.carrier.PAY_CPM) {
         const parsedCpm = _parseCpmFromEstimate(enrichment.pay_estimate);
         if (parsedCpm) r.carrier.PAY_CPM = parsedCpm;
@@ -943,7 +943,7 @@ async function _runEnrichmentAsync(jobId, dotNumber, carrierName, knownData, cal
       }
     }
 
-    const enrichment = await enrichCarrierWithPerplexity(carrierName, String(dotNumber), enrichKnownData);
+    const enrichment = await enrichCarrierWithGroqResearch(carrierName, String(dotNumber), enrichKnownData);
     await _callback({ jobId, dotNumber, status: 'COMPLETE', enrichment });
 
     // Step 3: write pay data back to Pinecone metadata so future searches see it immediately
@@ -988,7 +988,7 @@ semanticRouter.post('/enrich/carrier', async (c) => {
 
   try {
     // If we don't have city/state from the caller, try a live FMCSA lookup first
-    // so Perplexity gets better context (location helps narrow web search results)
+    // so the enrichment model gets better carrier context.
     let enrichKnownData = { ...knownData };
     if (!enrichKnownData.city || !enrichKnownData.state) {
       const fmcsa = await fetchFmcsaCarrier(String(dotNumber));
@@ -1000,7 +1000,7 @@ semanticRouter.post('/enrich/carrier', async (c) => {
       }
     }
 
-    const enrichment = await enrichCarrierWithPerplexity(carrierName, String(dotNumber), enrichKnownData);
+    const enrichment = await enrichCarrierWithGroqResearch(carrierName, String(dotNumber), enrichKnownData);
     return c.json({ enrichment, requestId });
   } catch (err) {
     console.error('[enrich/carrier]', err.message);
