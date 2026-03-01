@@ -172,36 +172,10 @@ try {
 // HTML COMPONENT DISCOVERY
 // ============================================================================
 
-// Try named ID first, then fall back to Wix defaults (#html1..#html5, #htmlEmbed1)
-const HTML_COMPONENT_IDS = [
-  '#htmlRecruiterDashboard',
-  '#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'
-];
-
-function findHtmlComponent() {
-  let firstCapable = null;
-  for (const id of HTML_COMPONENT_IDS) {
-    try {
-      const el = $w(id);
-      if (el && typeof el.onMessage === 'function') {
-        const isRendered = el.rendered === true;
-        console.log('Recruiter Console: candidate', id, '| rendered:', isRendered);
-        if (isRendered) {
-          console.log('Recruiter Console: using', id, '(rendered)');
-          return el;
-        }
-        if (!firstCapable) firstCapable = { id, el };
-      }
-    } catch (e) {
-      // Element not present — try next
-    }
-  }
-  if (firstCapable) {
-    console.log('Recruiter Console: using', firstCapable.id, '(not rendered — fallback)');
-    return firstCapable.el;
-  }
-  return null;
-}
+// Standard Wix HTML component IDs — register onMessage on ALL of them.
+// Wix stubs $w() for any ID so capability checks are unreliable.
+// The one that actually contains RecruiterOS.html will fire.
+const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
 // ============================================================================
 // STATE
@@ -504,18 +478,24 @@ function sendToHtml(component, type, data) {
 $w.onReady(async function () {
   console.log('Recruiter Console Ready');
 
-  const htmlComponent = findHtmlComponent();
-
-  if (!htmlComponent) {
-    console.error('Recruiter Console: No HTML component found (tried:', HTML_COMPONENT_IDS.join(', '), ')');
-    return;
+  // Register onMessage on every standard HTML component ID.
+  // Wix $w() stubs all IDs — rendered check is unreliable.
+  // The element that actually contains RecruiterOS.html will fire.
+  let attached = 0;
+  for (const id of HTML_COMPONENT_IDS) {
+    try {
+      const el = $w(id);
+      el.onMessage(async (event) => {
+        console.log('[RC] onMessage from', id, ':', event?.data?.type || event?.data);
+        await handleHtmlMessage(event.data, el);
+      });
+      attached++;
+      console.log('Recruiter Console: attached onMessage to', id);
+    } catch (e) {
+      // Element not present on this page
+    }
   }
-
-  // Set up message listener
-  htmlComponent.onMessage(async (event) => {
-    console.log('[RC] onMessage received:', event?.data?.type || event?.data);
-    await handleHtmlMessage(event.data, htmlComponent);
-  });
+  console.log('Recruiter Console: attached to', attached, 'component(s)');
 
   // Set up gamification widget if present
   // Add an HTML component with ID #gamificationHtml pointing to public/recruiter/RECRUITER_GAMIFICATION.html
