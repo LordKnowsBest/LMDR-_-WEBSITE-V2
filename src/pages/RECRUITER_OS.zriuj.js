@@ -95,7 +95,7 @@ import {
 } from 'backend/recruiterAnalyticsService.jsw';
 
 // Recruiter OS — New View imports
-import { getBGCStatus, getDrugTestStatus, getOrientationSlots } from 'backend/recruiterOnboardingService';
+import { getBGCStatus, getDrugTestStatus, getOrientationSlots, getOnboardingDashboard } from 'backend/recruiterOnboardingService.jsw';
 import { getFMCSAAlerts } from 'backend/complianceService';
 import { requestDocuments } from 'backend/documentCollectionService';
 import { createEmailCampaign, sendEmailCampaign } from 'backend/emailCampaignService';
@@ -145,7 +145,6 @@ import { retrieveContext } from 'backend/ragService';
 
 // Recruiter OS — Retention intelligence imports (for NBA chips)
 import { getAtRiskCount } from 'backend/recruiterRetentionService.jsw';
-import { getOnboardingDashboard } from 'backend/recruiterOnboardingService.jsw';
 
 // Recruiter OS — Leaderboard imports
 import {
