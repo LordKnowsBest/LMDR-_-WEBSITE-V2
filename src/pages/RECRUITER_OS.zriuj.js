@@ -1,162 +1,146 @@
 // ============================================================================
 // RECRUITER CONSOLE - Page Code
 // Supports Agency Model: Recruiters can manage multiple carriers
+//
+// All backend calls go through a single facade to prevent the Wix bundler
+// from choking on 40+ direct module imports (which silently kills $w.onReady).
 // ============================================================================
 
 import {
-  getOrCreateRecruiterProfile,
-  addCarrier,
-  removeCarrier,
-  getRecruiterCarriers,
-  validateCarrierDOT,
-  getPipelineCandidates,
-  updateCandidateStatus,
-  getPipelineStats,
-  getCandidateDetails,
-  addRecruiterNotes,
-  updateRecruiterProfile
-} from 'backend/recruiter_service';
+  rosGetOrCreateRecruiterProfile as getOrCreateRecruiterProfile,
+  rosAddCarrier as addCarrier,
+  rosRemoveCarrier as removeCarrier,
+  rosGetRecruiterCarriers as getRecruiterCarriers,
+  rosValidateCarrierDOT as validateCarrierDOT,
+  rosGetPipelineCandidates as getPipelineCandidates,
+  rosUpdateCandidateStatus as updateCandidateStatus,
+  rosGetPipelineStats as getPipelineStats,
+  rosGetCandidateDetails as getCandidateDetails,
+  rosAddRecruiterNotes as addRecruiterNotes,
+  rosUpdateRecruiterProfile as updateRecruiterProfile,
+  rosRequestAvailability as requestAvailability,
+  rosConfirmTimeSlot as confirmInterviewSlot,
+  rosGetInterviewState as getInterviewState,
+  rosSendMessage as sendMessage,
+  rosGetConversation as getConversation,
+  rosMarkAsRead as markAsRead,
+  rosGetRecruiterConversations as getRecruiterConversations,
+  rosGetUnreadCount as getUnreadCount,
+  rosLogFeatureInteraction as logFeatureInteraction,
+  rosFindMatchingDrivers as findMatchingDrivers,
+  rosGetDriverProfile as getDriverProfile,
+  rosInitiateAsyncDriverSearch as initiateAsyncDriverSearch,
+  rosCheckAsyncSearchStatus as checkAsyncSearchStatus,
+  rosSaveToRecruiterPipeline as saveToRecruiterPipeline,
+  rosSendMessageToDriver as sendMessageToDriver,
+  rosGetQuotaStatus as getQuotaStatus,
+  rosCreateSavedSearch as createSavedSearch,
+  rosUpdateSavedSearch as updateSavedSearch,
+  rosDeleteSavedSearch as deleteSavedSearch,
+  rosGetSavedSearches as getSavedSearches,
+  rosExecuteSavedSearch as executeSavedSearch,
+  rosLogCallOutcome as logCallOutcome,
+  rosGetCarrierOutcomes as getCarrierOutcomes,
+  rosGetOutcomeAnalytics as getOutcomeAnalytics,
+  rosGetDriverOutcomes as getDriverOutcomes,
+  rosGetInterventionTemplates as getInterventionTemplates,
+  rosGetAllTemplates as getAllTemplates,
+  rosCreateTemplate as createTemplate,
+  rosUpdateInterventionTemplate as updateInterventionTemplate,
+  rosDeleteTemplate as deleteTemplate,
+  rosSendIntervention as sendIntervention,
+  rosLogInterventionOutcome as logInterventionOutcome,
+  rosGetDriverInterventions as getDriverInterventions,
+  rosGetAutomationRules as getAutomationRules,
+  rosCreateAutomationRule as createAutomationRule,
+  rosUpdateAutomationRule as updateAutomationRule,
+  rosDeleteAutomationRule as deleteAutomationRule,
+  rosToggleRuleStatus as toggleRuleStatus,
+  rosGetAutomationLog as getAutomationLog,
+  rosGetRecruiterHealthStatus as getRecruiterHealthStatus,
+  rosRouteAIRequest as routeAIRequest,
+  rosHandleAgentTurn as handleAgentTurn,
+  rosResumeAfterApproval as resumeAfterApproval,
+  rosExecuteTool as executeTool,
+  rosGetVoiceConfig as getVoiceConfig,
+  rosGetCampaigns as getCampaigns,
+  rosCreateVoiceCampaign as createVoiceCampaign,
+  rosStartCampaign as startCampaign,
+  rosGetCampaignStatus as getCampaignStatus,
+  rosGetFunnelMetrics as getFunnelMetrics,
+  rosGetBottleneckAnalysis as getBottleneckAnalysis,
+  rosCalculateCostPerHire as calculateCostPerHire,
+  rosGetCompetitorComparison as getCompetitorComparison,
+  rosAddCompetitorIntel as addCompetitorIntel,
+  rosGenerateHiringForecast as generateHiringForecast,
+  rosGetTurnoverRiskAnalysis as getTurnoverRiskAnalysis,
+  rosGetPayBenchmarks as getPayBenchmarks,
+  rosRecordRecruitingSpend as recordRecruitingSpend,
+  rosGetBGCStatus as getBGCStatus,
+  rosGetDrugTestStatus as getDrugTestStatus,
+  rosGetOrientationSlots as getOrientationSlots,
+  rosGetOnboardingDashboard as getOnboardingDashboard,
+  rosGetFMCSAAlerts as getFMCSAAlerts,
+  rosRequestDocuments as requestDocuments,
+  rosCreateEmailCampaign as createEmailCampaign,
+  rosSendEmailCampaign as sendEmailCampaign,
+  rosInitializeProgression as initializeProgression,
+  rosGetJobPostings as getJobPostings,
+  rosConnectJobBoard as connectJobBoard,
+  rosCreateSMSCampaign as createSMSCampaign,
+  rosSendSMSCampaign as sendSMSCampaign,
+  rosGetSocialPosts as getSocialPosts,
+  rosGetConnectedAccounts as getConnectedAccounts,
+  rosConnectSocialAccount as connectSocialAccount,
+  rosCreateSocialPost as createSocialPost,
+  rosPublishSocialPost as publishSocialPost,
+  rosListMetaIntegrations as listMetaIntegrations,
+  rosListAdAccounts as listAdAccounts,
+  rosCreateCampaignDraft as createCampaignDraft,
+  rosCreateMetaCampaign as createMetaCampaign,
+  rosCreateAdSetDraft as createAdSetDraft,
+  rosUpdateAdSetBudget as updateAdSetBudget,
+  rosCreateCreativeDraft as createCreativeDraft,
+  rosGetInsightsCampaignLevel as getInsightsCampaignLevel,
+  rosGetInsightsAdSetLevel as getInsightsAdSetLevel,
+  rosGetInsightsAdLevel as getInsightsAdLevel,
+  rosGetInsightsWithBreakdowns as getInsightsWithBreakdowns,
+  rosCreateAsyncReportJob as createAsyncReportJob,
+  rosGetAsyncReportStatus as getAsyncReportStatus,
+  rosDownloadReport as downloadReport,
+  rosSuggestBudgetReallocation as suggestBudgetReallocation,
+  rosSuggestCreativeRotation as suggestCreativeRotation,
+  rosSuggestAudienceNarrowing as suggestAudienceNarrowing,
+  rosGetFrequencyFatigueAlerts as getFrequencyFatigueAlerts,
+  rosGetPlacementPerformance as getPlacementPerformance,
+  rosGeneratePlatformCopy as generatePlatformCopy,
+  rosGenerateSocialImage as generateSocialImage,
+  rosSaveCredentials as saveCredentials,
+  rosGetCredentialStatus as getCredentialStatus,
+  rosValidateToken as validateToken,
+  rosGetActiveWorkflows as getActiveWorkflows,
+  rosUpdateWorkflowStatus as updateWorkflowStatus,
+  rosGetCarrierRetentionDashboard as getCarrierRetentionDashboard,
+  rosGetInterventionSuggestions as getInterventionSuggestions,
+  rosGetDriverTimeline as getDriverTimeline,
+  rosLogLifecycleEvent as logLifecycleEventBackend,
+  rosTerminateDriver as terminateDriverBackend,
+  rosGetMarketContext as getMarketContext,
+  rosRetrieveContext as retrieveContext,
+  rosGetAtRiskCount as getAtRiskCount,
+  rosGetLeaderboard as getLeaderboard,
+  rosGetLeaderboardSummary as getLeaderboardSummary,
+  rosGetUserLeaderboardPosition as getUserLeaderboardPosition,
+  rosGetCarrierPreferences as getCarrierPreferences,
+  rosGetAIMatchCandidates as getAIMatchCandidates,
+  rosGetRecruiterAlerts as getRecruiterAlerts
+} from 'backend/recruiterOSFacade.jsw';
 
-import {
-  requestAvailability,
-  confirmTimeSlot as confirmInterviewSlot,
-  getInterviewState
-} from 'backend/interviewScheduler.jsw';
-
-import { sendMessage, getConversation, markAsRead, getRecruiterConversations, getUnreadCount } from 'backend/messaging.jsw';
-import { logFeatureInteraction } from 'backend/featureAdoptionService';
+// Public module — not a .jsw backend call, stays as direct import
 import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
 
-// Driver Search imports
-import { findMatchingDrivers, getDriverProfile, initiateAsyncDriverSearch, checkAsyncSearchStatus } from 'backend/driverMatching.jsw';
+// Synchronous config — not a .jsw backend call
 import { FEATURE_FLAGS } from 'backend/configData';
-import {
-  saveToRecruiterPipeline,
-  sendMessageToDriver,
-  getQuotaStatus
-} from 'backend/driverOutreach.jsw';
-
-// Saved Search imports
-import {
-  createSavedSearch,
-  updateSavedSearch,
-  deleteSavedSearch,
-  getSavedSearches,
-  executeSavedSearch
-} from 'backend/savedSearchService';
-
-// Call Outcome imports
-import {
-  logCallOutcome,
-  getCarrierOutcomes,
-  getOutcomeAnalytics,
-  getDriverOutcomes
-} from 'backend/callOutcomeService';
-
-// Intervention imports
-import {
-  getTemplates as getInterventionTemplates,
-  getAllTemplates,
-  createTemplate,
-  updateTemplate as updateInterventionTemplate,
-  deleteTemplate,
-  sendIntervention,
-  logInterventionOutcome,
-  getDriverInterventions
-} from 'backend/interventionService';
-
-// Pipeline Automation imports
-import {
-  getAutomationRules,
-  createAutomationRule,
-  updateAutomationRule,
-  deleteAutomationRule,
-  toggleRuleStatus,
-  getAutomationLog
-} from 'backend/pipelineAutomationService';
-
-import { getRecruiterHealthStatus } from 'backend/recruiterHealthService.jsw';
-import { routeAIRequest } from 'backend/aiRouterService';
-import { handleAgentTurn, resumeAfterApproval, executeTool } from 'backend/agentService';
-import { getVoiceConfig } from 'backend/voiceService';
-import { getCampaigns, createCampaign as createVoiceCampaign, startCampaign, getCampaignStatus } from 'backend/voiceCampaignService';
-
-// Recruiter OS — Analytics imports
-import {
-  getFunnelMetrics,
-  getBottleneckAnalysis,
-  calculateCostPerHire,
-  getCompetitorComparison,
-  addCompetitorIntel,
-  generateHiringForecast,
-  getTurnoverRiskAnalysis,
-  getPayBenchmarks,
-  recordRecruitingSpend
-} from 'backend/recruiterAnalyticsService.jsw';
-
-// Recruiter OS — New View imports
-import { getBGCStatus, getDrugTestStatus, getOrientationSlots, getOnboardingDashboard } from 'backend/recruiterOnboardingService.jsw';
-import { getFMCSAAlerts } from 'backend/complianceService';
-import { requestDocuments } from 'backend/documentCollectionService';
-import { createEmailCampaign, sendEmailCampaign } from 'backend/emailCampaignService';
-import { initializeProgression } from 'backend/gamificationService';
-import { getJobPostings, connectJobBoard } from 'backend/jobBoardService';
-import { createSMSCampaign, sendSMSCampaign } from 'backend/smsCampaignService';
-import { getSocialPosts, getConnectedAccounts, connectSocialAccount, createSocialPost, publishSocialPost } from 'backend/socialPostingService';
-import { listMetaIntegrations, listAdAccounts } from 'backend/metaAdsAuthService';
-import { createCampaignDraft, createCampaign as createMetaCampaign } from 'backend/metaCampaignService';
-import { createAdSetDraft, updateAdSetBudget } from 'backend/metaAdSetService';
-import { createCreativeDraft } from 'backend/metaCreativeService';
-import {
-  getInsightsCampaignLevel, getInsightsAdSetLevel, getInsightsAdLevel,
-  getInsightsWithBreakdowns, createAsyncReportJob, getAsyncReportStatus,
-  downloadReport, suggestBudgetReallocation, suggestCreativeRotation,
-  suggestAudienceNarrowing, getFrequencyFatigueAlerts, getPlacementPerformance
-} from 'backend/metaInsightsService';
-import { generatePlatformCopy } from 'backend/socialCopyService';
-import { generateSocialImage } from 'backend/imagenService';
-import { saveCredentials, getCredentialStatus } from 'backend/socialSecretService';
-import { validateToken } from 'backend/socialTokenService';
-
-// Recruiter OS — Onboarding imports
-import {
-  getActiveWorkflows,
-  updateWorkflowStatus
-} from 'backend/onboardingWorkflowService.jsw';
-
-// Recruiter OS — Retention imports
-import {
-  getCarrierRetentionDashboard,
-  getInterventionSuggestions
-} from 'backend/retentionService.jsw';
-
-// Recruiter OS — Lifecycle imports
-import {
-  getDriverTimeline,
-  logEvent as logLifecycleEventBackend,
-  terminateDriver as terminateDriverBackend
-} from 'backend/lifecycleService.jsw';
-
-// Recruiter OS — Market Signals imports
-import { getMarketContext } from 'backend/marketSignalsService.jsw';
-
-// Recruiter OS — Agent Memory imports (Wave 4)
-import { retrieveContext } from 'backend/ragService';
-
-// Recruiter OS — Retention intelligence imports (for NBA chips)
-import { getAtRiskCount } from 'backend/recruiterRetentionService.jsw';
-
-// Recruiter OS — Leaderboard imports
-import {
-  getLeaderboard,
-  getLeaderboardSummary,
-  getUserLeaderboardPosition
-} from 'backend/leaderboardService.jsw';
-
-import { getCarrierPreferences } from 'backend/carrierPreferences.jsw';
-
-// Recruiter OS — AI Match + Alerts
-import { getAIMatchCandidates, getRecruiterAlerts } from 'backend/recruiterAlertsService.jsw';
 
 import wixLocation from 'wix-location';
 
