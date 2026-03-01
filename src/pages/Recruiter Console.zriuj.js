@@ -137,6 +137,13 @@ import {
   terminateDriver as terminateDriverBackend
 } from 'backend/lifecycleService.jsw';
 
+// Recruiter OS — Market Signals imports
+import { getMarketContext } from 'backend/marketSignalsService.jsw';
+
+// Recruiter OS — Retention intelligence imports (for NBA chips)
+import { getAtRiskCount } from 'backend/recruiterRetentionService.jsw';
+import { getOnboardingDashboard } from 'backend/recruiterOnboardingService.jsw';
+
 // Recruiter OS — Leaderboard imports
 import {
   getLeaderboard,
@@ -295,7 +302,10 @@ const MESSAGE_REGISTRY = {
     'getSocialCredentialStatus',
     // Async Search Polling
     'searchDriversAsync',
-    'checkSearchStatus'
+    'checkSearchStatus',
+    // Wave 3 — Intelligence Layer
+    'refreshNBAChips',
+    'getMarketSignals'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -412,7 +422,10 @@ const MESSAGE_REGISTRY = {
     'socialCredentialStatusLoaded',
     // Async Search Polling
     'searchJobStarted',
-    'searchStatusUpdate'
+    'searchStatusUpdate',
+    // Wave 3 — Intelligence Layer
+    'nbaChipsData',
+    'marketSignalsLoaded'
   ]
 };
 
@@ -1286,6 +1299,14 @@ async function handleHtmlMessage(msg, component) {
         break;
       }
 
+      // ── Wave 3: Intelligence Layer ──
+      case 'refreshNBAChips':
+        await handleRefreshNBAChips(msg.data, component);
+        break;
+      case 'getMarketSignals':
+        await handleGetMarketSignals(component);
+        break;
+
       case 'saveAccountSettings':
         await handleSaveAccountSettings(msg.data, component);
         break;
@@ -2013,6 +2034,79 @@ async function handleSaveWeightPreferences(data, component) {
     sendToHtml(component, 'saveWeightPreferencesResult', {
       success: false,
       error: error.message
+    });
+  }
+}
+
+// ============================================================================
+// Wave 3 — Intelligence Layer Handlers
+// ============================================================================
+
+async function handleRefreshNBAChips(data, component) {
+  try {
+    const dot = currentCarrierDOT;
+    const chips = [];
+
+    // Parallel fetch from 3 services
+    const [atRisk, onboarding, alerts] = await Promise.all([
+      dot ? getAtRiskCount(dot).catch(() => ({ count: 0 })) : { count: 0 },
+      dot ? getOnboardingDashboard(dot, null, 1).catch(() => ({ result: {} })) : { result: {} },
+      dot ? getRecruiterAlerts(dot).catch(() => ({ alerts: [] })) : { alerts: [] }
+    ]);
+
+    const atRiskCount = atRisk.count || 0;
+    const pendingCount = (onboarding.result || {}).pending || 0;
+    const unreadAlerts = (alerts.alerts || []).filter(a => !a.read).length;
+    const overdueCount = (onboarding.result || {}).overdue || 0;
+
+    if (atRiskCount > 0) {
+      chips.push({
+        id: 'at-risk',
+        label: 'At-Risk',
+        icon: 'warning',
+        view: 'retention',
+        count: atRiskCount,
+        priority: atRiskCount >= 3 ? 'high' : 'normal'
+      });
+    }
+
+    if (pendingCount > 0) {
+      chips.push({
+        id: 'pending-docs',
+        label: 'Pending Docs',
+        icon: 'description',
+        view: 'onboard',
+        count: pendingCount,
+        priority: overdueCount > 0 ? 'high' : 'normal'
+      });
+    }
+
+    if (unreadAlerts > 0) {
+      chips.push({
+        id: 'alerts',
+        label: 'Alerts',
+        icon: 'notifications_active',
+        view: 'alerts',
+        count: unreadAlerts,
+        priority: 'normal'
+      });
+    }
+
+    sendToHtml(component, 'nbaChipsData', { chips });
+  } catch (err) {
+    console.error('handleRefreshNBAChips error:', err);
+    sendToHtml(component, 'nbaChipsData', { chips: [] });
+  }
+}
+
+async function handleGetMarketSignals(component) {
+  try {
+    const ctx = await getMarketContext();
+    sendToHtml(component, 'marketSignalsLoaded', ctx);
+  } catch (err) {
+    console.error('handleGetMarketSignals error:', err);
+    sendToHtml(component, 'marketSignalsLoaded', {
+      success: false, condition: 'NEUTRAL', factor: 1.0
     });
   }
 }

@@ -22,8 +22,11 @@
 
         <!-- Welcome Header -->
         <div class="mb-8 mt-2">
-          <h1 class="text-[28px] font-black text-lmdr-dark tracking-tight">${getGreeting()}, Recruiter!</h1>
-          <p class="text-[13px] text-tan mt-1 font-medium">Here's what's happening in your portfolio today.</p>
+          <div class="flex items-center gap-3 mb-1">
+            <h1 class="text-[28px] font-black text-lmdr-dark tracking-tight">${getGreeting()}, Recruiter!</h1>
+            <div data-market-ticker class="market-ticker text-[10px]"></div>
+          </div>
+          <p class="text-[13px] text-tan font-medium">Here's what's happening in your portfolio today.</p>
         </div>
 
         <!-- Quick Stats -->

@@ -23,6 +23,7 @@
             <span class="material-symbols-outlined text-lmdr-yellow text-[16px]">insights</span>
           </div>
           <h2 class="text-lg font-bold text-lmdr-dark">Analytics Dashboard</h2>
+          <div data-market-ticker class="market-ticker text-[10px]"></div>
         </div>
         <div class="flex items-center gap-2">
           <div class="relative group neu-in rounded-xl overflow-hidden flex items-center">

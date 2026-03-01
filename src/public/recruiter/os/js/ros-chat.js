@@ -136,10 +136,21 @@
    */
   function sendToAgent(text) {
     if (window.parent) {
+      var ctx = { surface: 'recruiter' };
+      // View-aware context — Wave 3
+      if (ROS.views && ROS.views.getCurrentView) {
+        ctx.currentView = ROS.views.getCurrentView();
+      }
+      if (ROS.market && ROS.market.getCondition) {
+        ctx.marketCondition = ROS.market.getCondition();
+      }
+      if (ROS.nba && ROS.nba.getViewSnapshot) {
+        ctx.viewSnapshot = ROS.nba.getViewSnapshot();
+      }
       window.parent.postMessage({
         type: 'recruiterOS',
         action: 'agentMessage',
-        data: { text, context: { surface: 'recruiter' } }
+        data: { text, context: ctx }
       }, '*');
     }
   }
