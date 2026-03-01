@@ -479,6 +479,7 @@ $w.onReady(async function () {
 
   // Register onMessage on every standard HTML component ID.
   // Mirrors masterPage.js pattern — no .rendered check, capability guard only.
+  const connectedComponents = [];
   HTML_COMPONENT_IDS.forEach(function(id) {
     try {
       const el = $w(id);
@@ -486,12 +487,60 @@ $w.onReady(async function () {
         el.onMessage(function(event) {
           handleHtmlMessage(event.data, el);
         });
+        connectedComponents.push(el);
         console.log('[RC] onMessage attached to', id);
       }
     } catch (e) {
       // Element not on this page
     }
   });
+
+  // Proactively ping the HTML after a short delay.
+  // The HTML iframe may have already sent 'recruiterOSReady' before
+  // $w.onReady fired, so that message was lost. This kickstarts the
+  // handshake from the Velo side — the HTML bridge listens for
+  // 'recruiterReady' or 'recruiterOSInit' and will fire ready callbacks.
+  if (connectedComponents.length > 0) {
+    setTimeout(function() {
+      connectedComponents.forEach(function(comp) {
+        try {
+          comp.postMessage({ type: 'ping', data: { from: 'velo' } });
+          console.log('[RC] Sent proactive ping to HTML');
+        } catch (e) { /* component may not be ready yet */ }
+      });
+    }, 500);
+
+    // Also pre-load the profile and send init data, matching the
+    // Subscription Success pattern of pushing data without waiting
+    // for the HTML to ask.
+    setTimeout(async function() {
+      try {
+        const result = await getOrCreateRecruiterProfile();
+        if (result.success) {
+          cachedRecruiterProfile = result.profile;
+          cachedCarriers = result.carriers || [];
+          if (cachedCarriers.length > 0) {
+            currentCarrierDOT = result.defaultCarrierDOT || cachedCarriers[0].carrier_dot;
+          }
+          connectedComponents.forEach(function(comp) {
+            try {
+              sendToHtml(comp, 'recruiterReady', {
+                recruiterProfile: result.profile,
+                carriers: cachedCarriers,
+                defaultCarrier: result.defaultCarrier,
+                currentCarrierDOT: currentCarrierDOT,
+                needsSetup: result.needsSetup,
+                memberId: wixUsers?.currentUser?.id || null
+              });
+              console.log('[RC] Sent proactive recruiterReady to HTML');
+            } catch (e) { /* ignore */ }
+          });
+        }
+      } catch (e) {
+        console.error('[RC] Proactive init failed:', e);
+      }
+    }, 800);
+  }
 
   // Set up gamification widget if present
   // Add an HTML component with ID #gamificationHtml pointing to public/recruiter/RECRUITER_GAMIFICATION.html

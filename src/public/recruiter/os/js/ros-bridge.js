@@ -52,6 +52,13 @@
     const type = msg.type || msg.action;
     if (!type) return;
 
+    // Respond to Velo ping by re-announcing readiness
+    if (type === 'ping') {
+      console.log('[ROS Bridge] Received ping from Velo, re-sending ready');
+      sendToVelo('recruiterOSReady', { version: '1.0.0' });
+      return;
+    }
+
     // Handle init/ready signals from Velo
     if (type === 'recruiterOSInit' || type === 'recruiterReady') {
       isReady = true;
