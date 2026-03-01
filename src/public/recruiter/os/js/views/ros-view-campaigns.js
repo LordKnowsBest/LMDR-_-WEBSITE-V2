@@ -282,9 +282,9 @@
 
   function loadCampaigns() {
     loading = true;
-    if (ROS.bridge && ROS.bridge.send) {
-      ROS.bridge.send('getCampaigns', {});
-      ROS.bridge.send('getPaidMediaState', {});
+    if (ROS.bridge && ROS.bridge.sendToVelo) {
+      ROS.bridge.sendToVelo('getCampaigns', {});
+      ROS.bridge.sendToVelo('getPaidMediaState', {});
     }
   }
 
@@ -356,10 +356,10 @@
       return;
     }
 
-    if (ROS.bridge && ROS.bridge.send) {
-      ROS.bridge.send('createPaidMediaDraft', form);
-      ROS.bridge.send('updatePaidMediaAdSet', form);
-      ROS.bridge.send('createPaidMediaCreative', form);
+    if (ROS.bridge && ROS.bridge.sendToVelo) {
+      ROS.bridge.sendToVelo('createPaidMediaDraft', form);
+      ROS.bridge.sendToVelo('updatePaidMediaAdSet', form);
+      ROS.bridge.sendToVelo('createPaidMediaCreative', form);
     }
   };
 
@@ -377,14 +377,14 @@
       return;
     }
     if (warning) warning.classList.add('hidden');
-    if (ROS.bridge && ROS.bridge.send) {
-      ROS.bridge.send('launchPaidMediaCampaign', form);
+    if (ROS.bridge && ROS.bridge.sendToVelo) {
+      ROS.bridge.sendToVelo('launchPaidMediaCampaign', form);
     }
   };
 
   ROS.views.campaigns.start = function (campaignId) {
-    if (ROS.bridge && ROS.bridge.send) {
-      ROS.bridge.send('startCampaign', { campaignId });
+    if (ROS.bridge && ROS.bridge.sendToVelo) {
+      ROS.bridge.sendToVelo('startCampaign', { campaignId });
     }
   };
 

@@ -1,10 +1,17 @@
 // ============================================================================
-// ROS-VOICE — VelocityMatch Recruiter OS Voice Integration
+// ROS-VOICE - VelocityMatch Recruiter OS Voice Integration
 // Wraps VoiceAgent for the Recruiter surface with campaign support
 // ============================================================================
 
 (function () {
   'use strict';
+
+  const BRANDING = {
+    name: 'VelocityMatch',
+    logo: 'VM',
+    primaryColor: '#2563eb',
+    secondaryColor: '#1e40af'
+  };
 
   let voiceReady = false;
   let currentCallId = null;
@@ -13,38 +20,34 @@
 
   function init() {
     if (!window.VoiceAgent) {
-      console.warn('[ROS Voice] VoiceAgent not loaded — voice features disabled');
+      console.warn('[ROS Voice] VoiceAgent not loaded - voice features disabled');
       return;
     }
 
     window.VoiceAgent.init({
       containerId: 'ros-root',
-      branding: {
-        name: 'VelocityMatch',
-        logo: 'VM',
-        primaryColor: '#2563eb',
-        secondaryColor: '#1e40af'
-      }
+      branding: BRANDING
     });
 
-    // Request voice config from page code
-    if (ROS.bridge && ROS.bridge.send) {
-      ROS.bridge.send('getVoiceConfig', {});
+    if (window.VoiceAgentBridge && typeof window.VoiceAgentBridge.init === 'function') {
+      window.VoiceAgentBridge.init();
     }
 
-    // Listen for voice events
+    if (ROS.bridge && ROS.bridge.sendToVelo) {
+      ROS.bridge.sendToVelo('getVoiceConfig', {});
+    }
+
     window.VoiceAgent.on('callStart', (data) => {
       currentCallId = data?.callId || null;
       console.log('[ROS Voice] Call started:', currentCallId);
     });
 
-    window.VoiceAgent.on('callEnd', (data) => {
+    window.VoiceAgent.on('callEnd', () => {
       console.log('[ROS Voice] Call ended:', currentCallId);
       currentCallId = null;
     });
 
     window.VoiceAgent.on('transcript', (data) => {
-      // Could display live transcript in chat thread
       if (ROS.chat && data?.text) {
         console.log('[ROS Voice] Transcript:', data.text);
       }
@@ -82,13 +85,21 @@
     return currentCallId;
   }
 
-  // Listen for voiceReady from page code
   window.addEventListener('message', (event) => {
     if (!event.data || event.source !== window.parent) return;
-    if (event.data.action === 'voiceReady' && event.data.payload) {
+
+    const type = event.data.type || event.data.action;
+    const payload = event.data.data || event.data.payload || {};
+    if (type === 'voiceReady') {
       console.log('[ROS Voice] Config received from page code');
-      // VoiceAgent handles SDK configuration internally
+      if (payload.publicKey || payload.assistantId) {
+        window.VoiceAgent.init({
+          containerId: 'ros-root',
+          publicKey: payload.publicKey,
+          assistantId: payload.assistantId,
+          branding: BRANDING
+        });
+      }
     }
   });
-
 })();

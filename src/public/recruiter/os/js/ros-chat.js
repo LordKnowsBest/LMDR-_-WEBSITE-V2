@@ -135,7 +135,7 @@
    * Send a message to the agent orchestration layer via postMessage bridge
    */
   function sendToAgent(text) {
-    if (window.parent) {
+    if (ROS.bridge && ROS.bridge.sendToVelo) {
       var ctx = { surface: 'recruiter' };
       // View-aware context — Wave 3
       if (ROS.views && ROS.views.getCurrentView) {
@@ -147,20 +147,17 @@
       if (ROS.nba && ROS.nba.getViewSnapshot) {
         ctx.viewSnapshot = ROS.nba.getViewSnapshot();
       }
-      window.parent.postMessage({
-        type: 'recruiterOS',
-        action: 'agentMessage',
-        data: { text, context: ctx }
-      }, '*');
+      ROS.bridge.sendToVelo('agentMessage', { text, context: ctx });
     }
   }
 
   // Listen for agent responses from page code
   window.addEventListener('message', function (event) {
     if (!event.data || event.source !== window.parent) return;
+    const type = event.data.type || event.data.action;
+    const payload = event.data.data || event.data.payload || {};
 
-    if (event.data.action === 'agentResponse' && event.data.payload) {
-      const payload = event.data.payload;
+    if (type === 'agentResponse') {
       const text = payload.error || payload.response || payload.content || 'I couldn\'t process that request.';
       // Remove typing indicator and show agent response
       const tp = document.getElementById('ros-tp');
@@ -179,8 +176,8 @@
       msgs.scrollTop = msgs.scrollHeight;
     }
 
-    if (event.data.action === 'agentApprovalRequired' && event.data.payload) {
-      onApprovalRequired(event.data.payload);
+    if (type === 'agentApprovalRequired') {
+      onApprovalRequired(payload);
     }
   });
 
@@ -220,11 +217,13 @@
       btn.addEventListener('click', function() {
         var decision = this.getAttribute('data-gate-decision');
         cardDiv.querySelectorAll('button').forEach(function(b) { b.disabled = true; b.style.opacity = '0.5'; });
-        window.parent.postMessage({
-          type: 'recruiterOS',
-          action: 'resolveApprovalGate',
-          data: { approvalContext: payload, decision: decision, decidedBy: 'user' }
-        }, '*');
+        if (ROS.bridge && ROS.bridge.sendToVelo) {
+          ROS.bridge.sendToVelo('resolveApprovalGate', {
+            approvalContext: payload,
+            decision: decision,
+            decidedBy: 'user'
+          });
+        }
       });
     });
 
