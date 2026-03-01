@@ -130,6 +130,13 @@ import {
   getInterventionSuggestions
 } from 'backend/retentionService.jsw';
 
+// Recruiter OS — Lifecycle imports
+import {
+  getDriverTimeline,
+  logEvent as logLifecycleEventBackend,
+  terminateDriver as terminateDriverBackend
+} from 'backend/lifecycleService.jsw';
+
 // Recruiter OS — Leaderboard imports
 import {
   getLeaderboard,
@@ -258,6 +265,10 @@ const MESSAGE_REGISTRY = {
     'getPaidMediaOptimizationSuggestions',
     'saveIntel',
     'getTimelineEvents',
+    'logLifecycleEvent',
+    'terminateDriver',
+    'getConversations',
+    'addCandidateNote',
     // ── New View Messages ──
     'fetchAutomations',
     'toggleAutomation',
@@ -347,6 +358,7 @@ const MESSAGE_REGISTRY = {
     'funnelDataLoaded',
     'costDataLoaded',
     'competitorDataLoaded',
+    'intelAdded',
     'predictionsLoaded',
     'workflowsLoaded',
     'workflowUpdated',
@@ -711,17 +723,34 @@ async function handleHtmlMessage(msg, component) {
       case 'saveIntel':
         await handleSaveIntel(msg.data, component);
         break;
-      case 'getTimelineEvents':
-        sendToHtml(component, 'timelineLoaded', { events: [] });
+      case 'getTimelineEvents': {
+        const { driverId: tlDriverId } = msg.data || {};
+        try {
+          const timeline = tlDriverId ? await getDriverTimeline(tlDriverId) : { events: [] };
+          sendToHtml(component, 'timelineLoaded', timeline);
+        } catch (err) {
+          sendToHtml(component, 'timelineLoaded', { events: [], error: err.message });
+        }
         break;
+      }
       case 'logLifecycleEvent': {
-        // Stub — lifecycle event logging service TBD
-        sendToHtml(component, 'lifecycleEventLogged', { success: true });
+        const { driverId: leDriverId, eventType, metadata } = msg.data || {};
+        try {
+          await logLifecycleEventBackend(leDriverId, currentCarrierDOT, eventType || 'note', metadata || {});
+          sendToHtml(component, 'lifecycleEventLogged', { success: true });
+        } catch (err) {
+          sendToHtml(component, 'lifecycleEventLogged', { success: false, error: err.message });
+        }
         break;
       }
       case 'terminateDriver': {
-        // Stub — termination workflow service TBD
-        sendToHtml(component, 'driverTerminated', { success: true });
+        const { driverId: tdDriverId, reason, disposition } = msg.data || {};
+        try {
+          await terminateDriverBackend(tdDriverId, currentCarrierDOT, { reason, disposition }, 'recruiter');
+          sendToHtml(component, 'driverTerminated', { success: true });
+        } catch (err) {
+          sendToHtml(component, 'driverTerminated', { success: false, error: err.message });
+        }
         break;
       }
       case 'getPredictionsData':
@@ -2431,9 +2460,9 @@ async function handleGetCompetitorData(data, component) {
 async function handleSaveIntel(data, component) {
   try {
     const result = await addCompetitorIntel({ ...data, carrier_dot: currentCarrierDOT });
-    sendToHtml(component, 'intelSaved', { success: result.success, error: result.error });
+    sendToHtml(component, 'intelAdded', { success: result.success, error: result.error });
   } catch (error) {
-    sendToHtml(component, 'intelSaved', { success: false, error: error.message });
+    sendToHtml(component, 'intelAdded', { success: false, error: error.message });
   }
 }
 
