@@ -100,6 +100,13 @@ This file tracks all major tracks for the project. Each track has its own detail
 ## [/] Track: GCP Database Migration
 *Link: [./tracks/gcp_migration_20260218/](./tracks/gcp_migration_20260218/)*
 *Priority: High*
+*Status: In Progress*
+*Completion: 88%*
+
+## [/] Track: AI Matching Surface Refactor
+*Link: [./tracks/ai_matching_refactor_20260228/](./tracks/ai_matching_refactor_20260228/)*
+*Depends on: persistence_20251220, carrier_conversion_20260103, reverse_matching_20251225, semantic_search_polling_20260222, cdn_shell_refactor_20260219*
+*Priority: Critical*
 *Status: Planned*
 *Completion: 0%*
 
