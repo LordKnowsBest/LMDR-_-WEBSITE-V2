@@ -173,9 +173,8 @@ try {
 // ============================================================================
 
 // Standard Wix HTML component IDs — register onMessage on ALL of them.
-// Wix stubs $w() for any ID so capability checks are unreliable.
-// The one that actually contains RecruiterOS.html will fire.
-const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
+// Matches masterPage.js pattern (html1..html6) — the actual component will fire.
+const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#html6'];
 
 // ============================================================================
 // STATE
@@ -479,23 +478,20 @@ $w.onReady(async function () {
   console.log('Recruiter Console Ready');
 
   // Register onMessage on every standard HTML component ID.
-  // Wix $w() stubs all IDs — rendered check is unreliable.
-  // The element that actually contains RecruiterOS.html will fire.
-  let attached = 0;
-  for (const id of HTML_COMPONENT_IDS) {
+  // Mirrors masterPage.js pattern — no .rendered check, capability guard only.
+  HTML_COMPONENT_IDS.forEach(function(id) {
     try {
       const el = $w(id);
-      el.onMessage(async (event) => {
-        console.log('[RC] onMessage from', id, ':', event?.data?.type || event?.data);
-        await handleHtmlMessage(event.data, el);
-      });
-      attached++;
-      console.log('Recruiter Console: attached onMessage to', id);
+      if (el && el.onMessage) {
+        el.onMessage(function(event) {
+          handleHtmlMessage(event.data, el);
+        });
+        console.log('[RC] onMessage attached to', id);
+      }
     } catch (e) {
-      // Element not present on this page
+      // Element not on this page
     }
-  }
-  console.log('Recruiter Console: attached to', attached, 'component(s)');
+  });
 
   // Set up gamification widget if present
   // Add an HTML component with ID #gamificationHtml pointing to public/recruiter/RECRUITER_GAMIFICATION.html
