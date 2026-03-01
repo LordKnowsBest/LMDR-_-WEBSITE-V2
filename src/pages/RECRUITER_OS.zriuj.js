@@ -172,9 +172,9 @@ try {
 // HTML COMPONENT DISCOVERY
 // ============================================================================
 
-// Standard Wix HTML component IDs — register onMessage on ALL of them.
-// Matches masterPage.js pattern (html1..html6) — the actual component will fire.
-const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#html6'];
+// #htmlRecruiterDashboard is the actual HTML component on this page.
+// Standard IDs included as fallback.
+const HTML_COMPONENT_IDS = ['#htmlRecruiterDashboard', '#html1', '#html2', '#html3', '#html4', '#html5', '#html6'];
 
 // ============================================================================
 // STATE
