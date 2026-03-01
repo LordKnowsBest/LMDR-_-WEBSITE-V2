@@ -5,8 +5,8 @@ import {
   rosGetOrCreateRecruiterProfile as getOrCreateRecruiterProfile
 } from 'backend/recruiterOSFacade.jsw';
 
-// import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
-import { FEATURE_FLAGS } from 'backend/configData';
+import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
+// import { FEATURE_FLAGS } from 'backend/configData';
 
 import wixLocation from 'wix-location';
 
