@@ -1,7 +1,11 @@
-// BARE MINIMUM TEST — does the bridge connect at all?
+// STEP 2 TEST — does the facade import kill the page?
+
+import {
+  rosGetOrCreateRecruiterProfile as getOrCreateRecruiterProfile
+} from 'backend/recruiterOSFacade.jsw';
 
 $w.onReady(function () {
-  console.log('[ROS-TEST] $w.onReady fired!');
+  console.log('[ROS-TEST] $w.onReady fired with facade import!');
 
   const ids = ['#html8', '#html1', '#html2', '#html3', '#html4', '#html5', '#html6'];
 
@@ -14,13 +18,8 @@ $w.onReady(function () {
         el.onMessage(function(event) {
           const msg = event.data;
           console.log('[ROS-TEST] Received message:', msg);
-
-          if (msg && msg.type) {
-            el.postMessage({ type: 'pong', data: { echo: msg.type } });
-          }
         });
 
-        // Proactive ping after 500ms
         setTimeout(function() {
           el.postMessage({ type: 'recruiterReady', data: { test: true } });
           console.log('[ROS-TEST] Sent recruiterReady to', id);
