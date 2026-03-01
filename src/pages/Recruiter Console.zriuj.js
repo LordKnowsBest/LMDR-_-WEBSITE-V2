@@ -169,6 +169,31 @@ try {
 }
 
 // ============================================================================
+// HTML COMPONENT DISCOVERY
+// ============================================================================
+
+// Try named ID first, then fall back to Wix defaults (#html1..#html5, #htmlEmbed1)
+const HTML_COMPONENT_IDS = [
+  '#htmlRecruiterDashboard',
+  '#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'
+];
+
+function findHtmlComponent() {
+  for (const id of HTML_COMPONENT_IDS) {
+    try {
+      const el = $w(id);
+      if (el && typeof el.onMessage === 'function') {
+        console.log('Recruiter Console: HTML component found at', id);
+        return el;
+      }
+    } catch (e) {
+      // Element not present — try next
+    }
+  }
+  return null;
+}
+
+// ============================================================================
 // STATE
 // ============================================================================
 
@@ -469,10 +494,10 @@ function sendToHtml(component, type, data) {
 $w.onReady(async function () {
   console.log('Recruiter Console Ready');
 
-  const htmlComponent = $w('#htmlRecruiterDashboard');
+  const htmlComponent = findHtmlComponent();
 
-  if (!htmlComponent.rendered) {
-    console.error('HTML component #htmlRecruiterDashboard not found');
+  if (!htmlComponent) {
+    console.error('Recruiter Console: No HTML component found (tried:', HTML_COMPONENT_IDS.join(', '), ')');
     return;
   }
 
