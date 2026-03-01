@@ -1,10 +1,11 @@
-// STEP 3 TEST — do configData or gamificationPageHandlers kill it?
+// STEP 3b TEST — is it configData or gamificationPageHandlers?
+// Testing configData ONLY (gamification commented out)
 
 import {
   rosGetOrCreateRecruiterProfile as getOrCreateRecruiterProfile
 } from 'backend/recruiterOSFacade.jsw';
 
-import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
+// import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
 import { FEATURE_FLAGS } from 'backend/configData';
 
 import wixLocation from 'wix-location';
