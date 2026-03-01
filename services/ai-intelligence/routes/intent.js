@@ -22,7 +22,7 @@ intentRouter.post('/classify', async (c) => {
     return c.json({ error: { code: 'validation_error', message: 'Invalid JSON body', requestId } }, 400);
   }
 
-  const { message, role, recentContext = [], userId } = body;
+  const { message, role, recentContext = [] } = body;
 
   // Validate required fields
   if (!message || typeof message !== 'string') {

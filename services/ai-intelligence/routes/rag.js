@@ -80,7 +80,7 @@ ragRouter.post('/retrieve', async (c) => {
     return c.json({ error: { code: 'validation_error', message: 'Invalid JSON body', requestId } }, 400);
   }
 
-  const { query, namespaces, roleScope, topK, filters, contextBudgetTokens, userId, traceId } = body;
+  const { query, namespaces, roleScope, topK, filters, contextBudgetTokens, userId } = body;
 
   // Validate required fields
   if (!query || typeof query !== 'string') {

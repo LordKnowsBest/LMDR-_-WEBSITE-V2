@@ -4,15 +4,17 @@
    ========================================= */
 var PipelineRender = (function () {
   'use strict';
+  var pipelineConfig = (typeof globalThis !== 'undefined' && globalThis.PipelineConfig) ? globalThis.PipelineConfig : {};
+  var toastColors = pipelineConfig.TOAST_COLORS || { info: 'bg-slate-700' };
+  var triggerLabels = pipelineConfig.TRIGGER_LABELS || {};
 
   function showToast(message, type) {
     var existing = document.getElementById('toast-notification');
     if (existing) existing.remove();
 
-    var colors = PipelineConfig.TOAST_COLORS;
     var toast = document.createElement('div');
     toast.id = 'toast-notification';
-    toast.className = 'fixed top-4 right-4 z-[100] ' + (colors[type] || colors.info) + ' text-white text-sm font-medium px-4 py-2 rounded-lg shadow-lg transition-opacity duration-300';
+    toast.className = 'fixed top-4 right-4 z-[100] ' + (toastColors[type] || toastColors.info) + ' text-white text-sm font-medium px-4 py-2 rounded-lg shadow-lg transition-opacity duration-300';
     toast.textContent = message;
     document.body.appendChild(toast);
     setTimeout(function () {
@@ -27,8 +29,6 @@ var PipelineRender = (function () {
       container.innerHTML = '<p class="text-sm text-gray-500">No automation rules configured</p>';
       return;
     }
-
-    var triggerLabels = PipelineConfig.TRIGGER_LABELS;
 
     container.innerHTML = rules.map(function (r) {
       var editButtons = !r.is_default

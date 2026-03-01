@@ -142,7 +142,6 @@ async function fireJob(job, port) {
 
 function tick(port) {
   const now   = new Date();
-  const today = todayUTC(now);
 
   for (const job of SCHEDULES) {
     if (!job.matches(now)) continue;

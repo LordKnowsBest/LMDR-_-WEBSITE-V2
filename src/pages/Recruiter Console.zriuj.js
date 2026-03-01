@@ -79,7 +79,7 @@ import { getRecruiterHealthStatus } from 'backend/recruiterHealthService.jsw';
 import { routeAIRequest } from 'backend/aiRouterService';
 import { handleAgentTurn, resumeAfterApproval, executeTool } from 'backend/agentService';
 import { getVoiceConfig } from 'backend/voiceService';
-import { getCampaigns, createCampaign, startCampaign, getCampaignStatus } from 'backend/voiceCampaignService';
+import { getCampaigns, createCampaign as createVoiceCampaign, startCampaign, getCampaignStatus } from 'backend/voiceCampaignService';
 
 // Recruiter OS — Analytics imports
 import {
@@ -104,7 +104,7 @@ import { getJobPostings, connectJobBoard } from 'backend/jobBoardService';
 import { createSMSCampaign, sendSMSCampaign } from 'backend/smsCampaignService';
 import { getSocialPosts, getConnectedAccounts, connectSocialAccount, createSocialPost, publishSocialPost } from 'backend/socialPostingService';
 import { listMetaIntegrations, listAdAccounts } from 'backend/metaAdsAuthService';
-import { createCampaignDraft, createCampaign } from 'backend/metaCampaignService';
+import { createCampaignDraft, createCampaign as createMetaCampaign } from 'backend/metaCampaignService';
 import { createAdSetDraft, updateAdSetBudget } from 'backend/metaAdSetService';
 import { createCreativeDraft } from 'backend/metaCreativeService';
 import {
@@ -800,7 +800,7 @@ async function handleHtmlMessage(msg, component) {
       }
       case 'createCampaign': {
         const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
-        const result = await createCampaign(recruiterId, msg.data);
+        const result = await createVoiceCampaign(recruiterId, msg.data);
         sendToHtml(component, 'campaignCreated', result);
         break;
       }
@@ -2684,7 +2684,7 @@ async function handleLaunchPaidMediaCampaign(recruiterId, data, component) {
   const payload = data || {};
   const context = buildPaidMediaContext(payload);
   try {
-    const result = await createCampaign(recruiterId, {
+    const result = await createMetaCampaign(recruiterId, {
       campaignId: payload.campaignId || '',
       name: payload.name || '',
       objective: payload.objective || '',

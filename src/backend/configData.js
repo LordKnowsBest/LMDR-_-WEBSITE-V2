@@ -474,7 +474,6 @@ export const DATA_SOURCE = {
   intentClassificationLog: 'airtable',
 
   // ── Async Polling ──
-  searchJobs: 'airtable'
 };
 
 // =============================================================================
@@ -1348,7 +1347,6 @@ export const AIRTABLE_TABLE_NAMES = {
   intentClassificationLog: 'v2_Intent Classification Log',
 
   // ── Async Polling ──
-  searchJobs: 'v2_Search Jobs'
 };
 
 // =============================================================================

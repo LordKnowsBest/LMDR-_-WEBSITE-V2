@@ -367,7 +367,7 @@ var AdminObservabilityLogic = (function () {
         // Merge RAG handlers into base handlers
         var allHandlers = baseHandlers;
         for (var key in ragHandlers) {
-            if (ragHandlers.hasOwnProperty(key)) {
+            if (Object.prototype.hasOwnProperty.call(ragHandlers, key)) {
                 allHandlers[key] = ragHandlers[key];
             }
         }

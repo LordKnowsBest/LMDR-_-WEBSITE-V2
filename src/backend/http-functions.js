@@ -983,7 +983,8 @@ export async function get_oauth_linkedin_callback(request) {
 // Receives search results from Railway and updates the search job record.
 // ============================================================================
 
-export async function post_completeSearch(request) {
+// eslint-disable-next-line no-unused-vars
+async function post_completeSearch_legacy(request) {
   try {
     const internalKey = await getSecret('LMDR_INTERNAL_KEY');
     if (request.headers['x-lmdr-internal-key'] !== internalKey) {

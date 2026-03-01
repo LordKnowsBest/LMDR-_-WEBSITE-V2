@@ -133,7 +133,7 @@ async function main() {
 
   let page = 0;
 
-  while (true) {
+  while (offset !== null) {
     let records, nextOffset;
 
     try {

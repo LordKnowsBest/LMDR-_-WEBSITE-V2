@@ -9,8 +9,6 @@
  * Both are serverless, cosine metric, 1024 dims (voyage-3).
  */
 
-const PINECONE_BASE = 'https://api.pinecone.io';
-
 const HOSTS = {
   drivers:  'https://lmdr-drivers-hmmwwf9.svc.aped-4627-b74a.pinecone.io',
   carriers: 'https://lmdr-carriers-hmmwwf9.svc.aped-4627-b74a.pinecone.io',

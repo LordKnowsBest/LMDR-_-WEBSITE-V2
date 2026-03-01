@@ -53,6 +53,7 @@ async function fetchFmcsaBatch(dotNumbers) {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Remove undefined/null fields — Pinecone rejects null metadata values. */
+// eslint-disable-next-line no-unused-vars
 function stripNulls(obj) {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v != null));
 }
@@ -644,8 +645,8 @@ async function _runAsyncCarrierSearch(jobId, driverPrefs, isPremiumUser, callbac
           const f   = fmcsaMap[dot];
           if (!f) continue;
           // Fill in missing carrier fields with live FMCSA data
-          r.carrier.NBR_POWER_UNIT    = r.carrier.NBR_POWER_UNIT    || f.nbrPowerUnit     ?? f.nbr_power_unit    ?? null;
-          r.carrier.TOTAL_DRIVERS     = r.carrier.TOTAL_DRIVERS     || f.totalDrivers     ?? f.total_drivers     ?? null;
+          r.carrier.NBR_POWER_UNIT    = r.carrier.NBR_POWER_UNIT    || (f.nbrPowerUnit ?? f.nbr_power_unit ?? null);
+          r.carrier.TOTAL_DRIVERS     = r.carrier.TOTAL_DRIVERS     || (f.totalDrivers ?? f.total_drivers ?? null);
           r.carrier.SAFETY_RATING     = r.carrier.SAFETY_RATING     || f.safetyRating     || f.safety_rating     || null;
           r.carrier.PHY_CITY          = r.carrier.PHY_CITY          || f.phyCity          || f.phy_city          || null;
           r.carrier.PHY_STATE         = r.carrier.PHY_STATE         || f.phyState         || f.phy_state         || null;

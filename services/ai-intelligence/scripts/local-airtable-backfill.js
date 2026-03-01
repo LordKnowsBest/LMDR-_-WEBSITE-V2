@@ -29,8 +29,6 @@ const PROGRESS_FILE  = path.join(__dirname, '.airtable-backfill-progress.json');
 
 const CONCURRENT     = 8;    // parallel Railway embed calls
 const BATCH_DELAY_MS = 200;  // ms between batches (rate limiting)
-const LOG_EVERY      = 500;  // print stats every N carriers
-
 const FIELDS = [
   'DOT_NUMBER', 'LEGAL_NAME', 'CARRIER_OPERATION',
   'PHY_CITY', 'PHY_STATE', 'NBR_POWER_UNIT', 'DRIVER_TOTAL',
@@ -130,7 +128,7 @@ async function main() {
 
   let page = 0;
 
-  while (true) {
+  while (offset !== null) {
     let records, nextOffset;
 
     try {
