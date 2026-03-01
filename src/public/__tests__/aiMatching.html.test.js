@@ -345,7 +345,8 @@ describe('AI_MATCHING.html DOM Tests', () => {
         test('contains a function to post messages back to parent', () => {
             const hasOutbound =
                 htmlSource.includes('window.parent.postMessage') ||
-                htmlSource.includes('parent.postMessage');
+                htmlSource.includes('parent.postMessage') ||
+                htmlSource.includes('sendToWix(');
             expect(hasOutbound).toBe(true);
         });
 
@@ -365,6 +366,11 @@ describe('AI_MATCHING.html DOM Tests', () => {
                 htmlSource.includes("event.data.type") ||
                 htmlSource.includes("case 'matchResults'");
             expect(hasType).toBe(true);
+        });
+
+        test('uses a single jsdelivr release ref for AI matching assets', () => {
+            expect(htmlSource).not.toContain('@b8c63d6');
+            expect(htmlSource).not.toContain('@d151175');
         });
     });
 

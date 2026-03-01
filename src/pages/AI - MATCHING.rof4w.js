@@ -1,14 +1,41 @@
-import { findMatchingCarriers, logMatchEvent, getDriverSavedCarriers } from 'backend/carrierMatching.jsw';
-import { triggerSemanticSearch, checkSearchStatus, triggerEnrichmentJob, checkEnrichmentStatus } from 'backend/asyncSearchService.jsw';
-import { getMutualInterestForDriver } from 'backend/mutualInterestService.jsw';
-import { enrichCarrier } from 'backend/aiEnrichment.jsw';
-import { getOrCreateDriverProfile, setDiscoverability, getDriverInterests, updateDriverDocuments } from 'backend/driverProfiles.jsw';
-import { submitApplication, getDriverApplications } from 'backend/applicationService.jsw';
-import { extractDocumentForAutoFill } from 'backend/ocrService.jsw';
-import { getMatchExplanationForDriver } from 'backend/matchExplanationService.jsw';
-import { logFeatureInteraction } from 'backend/featureAdoptionService';
-import { handleAgentTurn, resumeAfterApproval } from 'backend/agentService';
-import { getVoiceConfig } from 'backend/voiceService';
+/* eslint-disable no-useless-escape */
+import {
+  loadDriverBootstrapData,
+  findCarrierMatchesForPage,
+  startAsyncCarrierSearchForPage,
+  getAsyncCarrierSearchStatusForPage,
+  startCarrierEnrichmentJobForPage,
+  getCarrierEnrichmentStatusForPage,
+  getDriverMutualInterestsForPage,
+  enrichCarrierForPage,
+  getDriverProfileForPage,
+  getDriverSavedCarriersForPage,
+  updateDriverDiscoverabilityForPage,
+  saveDriverDocumentsForPage,
+  submitDriverApplicationForPage,
+  getDriverApplicationsForPage,
+  extractDocumentForAutoFillForPage,
+  getDriverMatchExplanationForPage,
+  trackFeatureInteractionForPage,
+  logCarrierInterestForPage,
+  handleAgentTurnForPage,
+  resolveApprovalGateForPage,
+  getVoiceConfigForPage
+} from 'backend/aiMatchingFacade.jsw';
+import {
+  DEBUG_MESSAGES as CONTRACT_DEBUG_MESSAGES,
+  isKnownInboundMessage as isKnownContractInboundMessage,
+  isKnownOutboundMessage as isKnownContractOutboundMessage,
+  validateHtmlToPageMessage,
+  logMessageFlow as logContractMessageFlow
+} from 'public/js/ai-matching-contract';
+import {
+  createAIMatchingPageState,
+  normalizeDriverProfileForHtml,
+  buildPageReadyPayload
+} from 'public/js/ai-matching-page-state';
+import { sendToHtmlBridge } from 'public/js/ai-matching-page-bridge';
+import { routeAiMatchingAction } from 'public/js/ai-matching-page-router';
 import wixLocation from 'wix-location';
 import wixWindow from 'wix-window';
 
@@ -39,16 +66,52 @@ const CONFIG = {
 // ============================================================================
 // GLOBAL STATE
 // ============================================================================
-let cachedUserStatus = null;
-let cachedDriverProfile = null;
-let cachedDriverInterests = [];
-let lastSearchResults = null;
+const pageState = createAIMatchingPageState();
+let cachedUserStatus = pageState.cachedUserStatus;
+let cachedDriverProfile = pageState.cachedDriverProfile;
+let cachedDriverInterests = pageState.cachedDriverInterests;
+let lastSearchResults = pageState.lastSearchResults;
+let _veloInitDone = pageState.veloInitDone;
+let _htmlReadyPending = pageState.htmlReadyPending;
+
+function setCachedUserStatus(value) {
+  cachedUserStatus = value;
+  pageState.cachedUserStatus = value;
+  return value;
+}
+
+function setCachedDriverProfile(value) {
+  cachedDriverProfile = value;
+  pageState.cachedDriverProfile = value;
+  return value;
+}
+
+function setCachedDriverInterests(value) {
+  cachedDriverInterests = value;
+  pageState.cachedDriverInterests = value;
+  return value;
+}
+
+function setLastSearchResults(value) {
+  lastSearchResults = value;
+  pageState.lastSearchResults = value;
+  return value;
+}
+
+function setVeloInitDone(value) {
+  _veloInitDone = value;
+  pageState.veloInitDone = value;
+  return value;
+}
+
+function setHtmlReadyPending(value) {
+  _htmlReadyPending = value;
+  pageState.htmlReadyPending = value;
+  return value;
+}
 
 // Init synchronization — prevents carrierMatchingReady from being dropped
 // when the HTML iframe fires before Velo's async profile/interest fetches finish
-let _veloInitDone = false;
-let _htmlReadyPending = false;
-
 // ============================================================================
 // MESSAGE VALIDATION SYSTEM
 // ============================================================================
@@ -115,7 +178,7 @@ const MESSAGE_REGISTRY = {
 };
 
 function validateInboundMessage(action) {
-  if (!MESSAGE_REGISTRY.inbound.includes(action)) {
+  if (!(isKnownContractInboundMessage(action) || MESSAGE_REGISTRY.inbound.includes(action))) {
     console.warn(`⚠️ UNREGISTERED INBOUND MESSAGE: "${action}" - Add to MESSAGE_REGISTRY.inbound`);
     return false;
   }
@@ -123,6 +186,10 @@ function validateInboundMessage(action) {
 }
 
 function logMessageFlow(direction, type, data) {
+  if (DEBUG_MESSAGES && CONTRACT_DEBUG_MESSAGES) {
+    logContractMessageFlow(direction, type, data);
+    return;
+  }
   if (!DEBUG_MESSAGES) return;
   const arrow = direction === 'in' ? '📥' : '📤';
   const label = direction === 'in' ? 'HTML→Velo' : 'Velo→HTML';
@@ -152,24 +219,24 @@ $w.onReady(async function () {
   });
 
   // Get initial user status and driver profile
-  cachedUserStatus = await getUserStatus();
+  setCachedUserStatus(await getUserStatus());
   console.log('👤 Initial user status:', cachedUserStatus);
 
   // If logged in, try to get/create driver profile and fetch interests
   if (cachedUserStatus.loggedIn) {
     try {
-      const profileResult = await getOrCreateDriverProfile();
-      if (profileResult.success) {
-        cachedDriverProfile = profileResult.profile;
+      const profileResult = await loadDriverBootstrapData();
+      if (profileResult.profile) {
+        setCachedDriverProfile(profileResult.profile);
         console.log('👤 Driver profile loaded:', cachedDriverProfile._id);
         console.log('   Is new:', profileResult.isNew);
         console.log('   Completeness:', cachedDriverProfile.profile_completeness_score);
       }
 
       // Fetch driver's existing carrier interests
-      const interestsResult = await getDriverInterests();
+      const interestsResult = { success: true, interests: profileResult.interests || [] };
       if (interestsResult.success) {
-        cachedDriverInterests = interestsResult.interests;
+        setCachedDriverInterests(interestsResult.interests);
         console.log('📋 Driver interests loaded:', cachedDriverInterests.length);
       }
     } catch (profileError) {
@@ -177,11 +244,11 @@ $w.onReady(async function () {
     }
   }
 
-  _veloInitDone = true;
+  setVeloInitDone(true);
 
   // If HTML fired carrierMatchingReady before our async init finished, send pageReady now
   if (_htmlReadyPending) {
-    _htmlReadyPending = false;
+    setHtmlReadyPending(false);
     console.log('📬 Sending deferred pageReady (HTML was ready before Velo init)');
     _sendPageReady();
   }
@@ -264,13 +331,154 @@ function getComponent() {
 
 async function handleHtmlMessage(msg) {
   if (!msg || !msg.type) return;
+  if (!validateHtmlToPageMessage(msg)) {
+    console.warn('Invalid HTML->Velo message envelope received');
+    return;
+  }
 
   const action = msg.action || msg.type;
+  const payload = msg.data || {};
 
   // Validate and log inbound message
   validateInboundMessage(action);
-  logMessageFlow('in', action, msg.data);
+  logMessageFlow('in', action, payload);
 
+  return routeAiMatchingAction(action, payload, {
+      ping: async () => {
+        sendToHtml('pong', {
+          timestamp: Date.now(),
+          registeredInbound: MESSAGE_REGISTRY.inbound.length,
+          registeredOutbound: MESSAGE_REGISTRY.outbound.length
+        });
+      },
+      findMatches: async (driverPrefs) => {
+        const freshStatus = await getUserStatus();
+        setCachedUserStatus(freshStatus);
+        try {
+          await handleFindMatchesAsync(driverPrefs, freshStatus);
+        } catch (asyncErr) {
+          console.warn('[findMatches] Async path failed, falling back to sync:', asyncErr.message);
+          await handleFindMatches(driverPrefs, freshStatus);
+        }
+      },
+      pollSearchJob: async (pollPayload) => {
+        const { jobId } = pollPayload || {};
+        if (!jobId) return;
+        try {
+          const poll = await getAsyncCarrierSearchStatusForPage(jobId);
+          if (poll.status === 'COMPLETE') {
+            await _deliverAsyncResults(poll.results, pollPayload, cachedUserStatus);
+          } else {
+            sendToHtml('searchJobStatus', { jobId, status: poll.status, error: poll.error });
+          }
+        } catch (err) {
+          sendToHtml('searchJobStatus', { jobId, status: 'FAILED', error: err.message });
+        }
+      },
+      logInterest: async (interestPayload) => {
+        await handleLogInterest(interestPayload);
+      },
+      retryEnrichment: async (retryPayload) => {
+        await handleRetryEnrichment(retryPayload);
+      },
+      navigateToSignup: async () => {
+        await handleNavigateToSignup();
+      },
+      navigateToLogin: async () => {
+        await handleNavigateToLogin();
+      },
+      loginForApplication: async (loginPayload) => {
+        if (loginPayload?.mode === 'login') {
+          await handleNavigateToLogin();
+          return;
+        }
+        await handleNavigateToSignup();
+      },
+      checkUserStatus: async () => {
+        const status = await getUserStatus();
+        setCachedUserStatus(status);
+        sendToHtml('userStatusUpdate', status);
+      },
+      getDriverProfile: async () => {
+        await handleGetDriverProfile();
+      },
+      navigateToSavedCarriers: async () => {
+        wixLocation.to(CONFIG.savedCarriersPageUrl);
+      },
+      carrierMatchingReady: async () => {
+        console.log('âœ… HTML Embed Ready');
+        if (!_veloInitDone) {
+          setHtmlReadyPending(true);
+          console.log('â³ Deferring pageReady until Velo init completes...');
+          return;
+        }
+        _sendPageReady();
+      },
+      submitApplication: async (applicationPayload) => {
+        await handleSubmitApplication(applicationPayload);
+      },
+      saveProfileDocs: async (docsPayload) => {
+        await handleSaveProfileDocs(docsPayload);
+      },
+      extractDocumentOCR: async (ocrPayload) => {
+        await handleExtractDocumentOCR(ocrPayload);
+      },
+      getMatchExplanation: async (explanationPayload) => {
+        await handleGetMatchExplanation(explanationPayload);
+      },
+      getDriverApplications: async () => {
+        await handleGetDriverApplications();
+      },
+      getMutualInterest: async (interestPayload) => {
+        await handleGetMutualInterest(interestPayload);
+      },
+      logFeatureInteraction: async (featurePayload = {}) => {
+        trackFeatureInteractionForPage(featurePayload.featureId, featurePayload.userId, featurePayload.action, featurePayload)
+          .catch(err => console.warn('Feature tracking failed:', err.message));
+      },
+      agentMessage: async (agentPayload) => {
+        const agentText = agentPayload?.text || '';
+        const agentContext = agentPayload?.context || {};
+        const userId = cachedDriverProfile?._id || cachedUserStatus?.memberId || 'anonymous';
+        sendToHtml('agentTyping', {});
+        try {
+          const agentResult = await handleAgentTurnForPage('driver', userId, agentText, agentContext);
+          if (agentResult.type === 'approval_required') {
+            sendToHtml('agentApprovalRequired', agentResult);
+          } else {
+            sendToHtml('agentResponse', agentResult);
+          }
+        } catch (err) {
+          sendToHtml('agentResponse', { error: err.message });
+        }
+      },
+      resolveApprovalGate: async (approvalPayload) => {
+        const { approvalContext, decision, decidedBy } = approvalPayload || {};
+        sendToHtml('agentTyping', {});
+        try {
+          const result = await resolveApprovalGateForPage(approvalContext, decision, decidedBy || 'user');
+          sendToHtml('agentResponse', result);
+        } catch (err) {
+          sendToHtml('agentResponse', { error: err.message });
+        }
+      },
+      getVoiceConfig: async () => {
+        try {
+          const voiceConf = await getVoiceConfigForPage();
+          sendToHtml('voiceReady', voiceConf);
+        } catch (err) {
+          console.warn('Voice config failed:', err.message);
+        }
+      },
+      startVoiceCall: async () => {},
+      endVoiceCall: async () => {},
+      default: async (_, unknownAction) => {
+        console.log('Unknown message type:', unknownAction);
+      }
+  });
+}
+
+/* Legacy fallback removed
   switch (action) {
     // Health check - respond immediately
     case 'ping':
@@ -283,7 +491,7 @@ async function handleHtmlMessage(msg) {
     case 'findMatches': {
       // Get fresh user status before searching
       const freshStatus = await getUserStatus();
-      cachedUserStatus = freshStatus;
+      setCachedUserStatus(freshStatus);
       // Try async Option B path first; fall back to synchronous Airtable search on error
       try {
         await handleFindMatchesAsync(msg.data, freshStatus);
@@ -299,7 +507,7 @@ async function handleHtmlMessage(msg) {
       const { jobId } = msg.data || {};
       if (!jobId) break;
       try {
-        const poll = await checkSearchStatus(jobId);
+        const poll = await getAsyncCarrierSearchStatusForPage(jobId);
         if (poll.status === 'COMPLETE') {
           // Reshape Railway results into the format handleFindMatches normally returns
           await _deliverAsyncResults(poll.results, msg.data, cachedUserStatus);
@@ -339,7 +547,7 @@ async function handleHtmlMessage(msg) {
 
     case 'checkUserStatus': {
       const status = await getUserStatus();
-      cachedUserStatus = status;
+      setCachedUserStatus(status);
       sendToHtml('userStatusUpdate', status);
       break;
     }
@@ -360,7 +568,7 @@ async function handleHtmlMessage(msg) {
       console.log('✅ HTML Embed Ready');
       if (!_veloInitDone) {
         // Async init not done yet — defer pageReady until profile/interests are loaded
-        _htmlReadyPending = true;
+        setHtmlReadyPending(true);
         console.log('⏳ Deferring pageReady until Velo init completes...');
         break;
       }
@@ -393,7 +601,7 @@ async function handleHtmlMessage(msg) {
 
     case 'logFeatureInteraction':
       // Non-blocking feature tracking
-      logFeatureInteraction(msg.data.featureId, msg.data.userId, msg.data.action, msg.data)
+      trackFeatureInteractionForPage(msg.data.featureId, msg.data.userId, msg.data.action, msg.data)
         .catch(err => console.warn('Feature tracking failed:', err.message));
       break;
 
@@ -403,7 +611,7 @@ async function handleHtmlMessage(msg) {
       const userId = cachedDriverProfile?._id || cachedUserStatus?.memberId || 'anonymous';
       sendToHtml('agentTyping', {});
       try {
-        const agentResult = await handleAgentTurn('driver', userId, agentText, agentContext);
+        const agentResult = await handleAgentTurnForPage('driver', userId, agentText, agentContext);
         if (agentResult.type === 'approval_required') {
           sendToHtml('agentApprovalRequired', agentResult);
         } else {
@@ -419,7 +627,7 @@ async function handleHtmlMessage(msg) {
       const { approvalContext, decision, decidedBy } = msg.data || {};
       sendToHtml('agentTyping', {});
       try {
-        const result = await resumeAfterApproval(approvalContext, decision, decidedBy || 'user');
+        const result = await resolveApprovalGateForPage(approvalContext, decision, decidedBy || 'user');
         sendToHtml('agentResponse', result);
       } catch (err) {
         sendToHtml('agentResponse', { error: err.message });
@@ -429,7 +637,7 @@ async function handleHtmlMessage(msg) {
 
     case 'getVoiceConfig': {
       try {
-        const voiceConf = await getVoiceConfig();
+        const voiceConf = await getVoiceConfigForPage();
         sendToHtml('voiceReady', voiceConf);
       } catch (err) {
         console.warn('Voice config failed:', err.message);
@@ -446,6 +654,7 @@ async function handleHtmlMessage(msg) {
       console.log('Unknown message type:', action);
   }
 }
+*/
 
 async function handleGetMatchExplanation(payload) {
   const carrierDot = payload?.carrierDot;
@@ -455,7 +664,7 @@ async function handleGetMatchExplanation(payload) {
 
     // For logged-in users, try backend service first
     if (userStatus.loggedIn && carrierDot) {
-      const result = await getMatchExplanationForDriver(userStatus.userId, carrierDot);
+      const result = await getDriverMatchExplanationForPage(userStatus.userId, carrierDot);
       if (result.success) {
         sendToHtml('matchExplanation', { ...result, carrierDot });
         return;
@@ -599,13 +808,13 @@ async function handleNavigateToSignup() {
       console.log('✅ User signed up:', user.id);
 
       // Refresh user status
-      cachedUserStatus = await getUserStatus();
+      setCachedUserStatus(await getUserStatus());
 
       // Create driver profile for new user
       try {
-        const profileResult = await getOrCreateDriverProfile();
+        const profileResult = await getDriverProfileForPage();
         if (profileResult.success) {
-          cachedDriverProfile = profileResult.profile;
+          setCachedDriverProfile(profileResult.profile);
           console.log('👤 Created profile for new user');
         }
       } catch (profileError) {
@@ -641,14 +850,14 @@ async function handleNavigateToLogin() {
       console.log('✅ User logged in:', user.id);
 
       // Refresh user status
-      cachedUserStatus = await getUserStatus();
+      setCachedUserStatus(await getUserStatus());
       console.log('👤 Updated user status after login:', cachedUserStatus);
 
       // Load driver profile
       try {
-        const profileResult = await getOrCreateDriverProfile();
+        const profileResult = await getDriverProfileForPage();
         if (profileResult.success) {
-          cachedDriverProfile = profileResult.profile;
+          setCachedDriverProfile(profileResult.profile);
           console.log('👤 Loaded profile after login');
         }
       } catch (profileError) {
@@ -695,7 +904,7 @@ async function handleFindMatchesAsync(driverPrefs, userStatus) {
 
   console.log('🚀 [async] Triggering Option B carrier search...');
 
-  const { jobId } = await triggerSemanticSearch(driverPrefs, isPremium);
+  const { jobId } = await startAsyncCarrierSearchForPage(driverPrefs, isPremium);
 
   console.log(`📡 [async] Job ${jobId} started — Velo polling loop starting`);
 
@@ -719,7 +928,7 @@ function _pollUntilComplete(jobId, driverPrefs, userStatus, attempts) {
   setTimeout(async () => {
     try {
       console.log(`[async poll] Checking job ${jobId} (attempt ${attempts + 1})`);
-      const poll = await checkSearchStatus(jobId);
+      const poll = await getAsyncCarrierSearchStatusForPage(jobId);
       if (poll.status === 'COMPLETE') {
         console.log(`✅ [async poll] Job ${jobId} complete — delivering results`);
         await _deliverAsyncResults(poll.results, driverPrefs, userStatus);
@@ -756,10 +965,12 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
     try {
       const driverId = userStatus.userId || wixUsers?.currentUser?.id;
       if (driverId) {
-        const interestResult = await getMutualInterestForDriver(driverId);
-        if (interestResult.success && interestResult.mutualInterests?.length > 0) {
+        const interestResult = await getDriverMutualInterestsForPage(driverId);
+        interestResult.mutualInterests = interestResult.mutualInterests || interestResult.interests;
+        interestResult.mutualInterests = interestResult.mutualInterests || interestResult.interests;
+        if (interestResult.success && interestResult.interests?.length > 0) {
           const mutualMap = {};
-          interestResult.mutualInterests.forEach(m => { mutualMap[String(m.carrierDot)] = m; });
+          interestResult.interests.forEach(m => { mutualMap[String(m.carrierDot)] = m; });
           enrichedMatches = rawResults.map(match => {
             const dot = String(match.carrier?.DOT_NUMBER);
             return mutualMap[dot]
@@ -773,7 +984,7 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
     }
   }
 
-  lastSearchResults = { matches: enrichedMatches, totalScored: enrichedMatches.length };
+  setLastSearchResults({ matches: enrichedMatches, totalScored: enrichedMatches.length });
 
   const isPremiumUser = userStatus?.isPremium || false;
   const isLoggedIn = !!(userStatus?.loggedIn || userStatus?.userId);
@@ -835,7 +1046,7 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
     sendToHtml('enrichmentUpdate', { dot_number: dotNumber, status: 'loading', position: 1, total: 1, message: 'AI Researching...' });
     try {
       const jobId = 'enr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-      await triggerEnrichmentJob(jobId, dotNumber, carrierName, knownData);
+      await startCarrierEnrichmentJobForPage(jobId, dotNumber, carrierName, knownData);
       console.log(`📡 [auto-enrich] Job ${jobId} started for DOT ${dotNumber} — polling...`);
       let attempts = 0;
       const maxAttempts = 30;
@@ -843,7 +1054,7 @@ async function _deliverAsyncResults(rawResults, origPrefs, userStatus) {
         const timer = setInterval(async () => {
           attempts++;
           try {
-            const statusResult = await checkEnrichmentStatus(jobId);
+            const statusResult = await getCarrierEnrichmentStatusForPage(jobId);
             if (statusResult.status === 'COMPLETE') {
               clearInterval(timer);
               console.log(`✅ [auto-enrich] Job ${jobId} complete — delivering enrichment for DOT ${dotNumber}`);
@@ -902,7 +1113,7 @@ async function handleFindMatches(driverPrefs, userStatus) {
 
   try {
     // Call backend with premium flag
-    const result = await findMatchingCarriers(driverPrefs, isPremium);
+    const result = await findCarrierMatchesForPage(driverPrefs, isPremium);
 
     if (!result.success) {
       sendToHtml('matchError', { error: result.error });
@@ -913,7 +1124,7 @@ async function handleFindMatches(driverPrefs, userStatus) {
 
     // Update cached profile if returned
     if (result.driverProfile) {
-      cachedDriverProfile = { ...cachedDriverProfile, ...result.driverProfile };
+      setCachedDriverProfile({ ...(cachedDriverProfile || {}), ...result.driverProfile });
     }
 
     // Phase 1: Enrich with Mutual Interests (if logged in)
@@ -921,14 +1132,14 @@ async function handleFindMatches(driverPrefs, userStatus) {
     if (userStatus?.userId || userStatus?.loggedIn) {
       try {
         const driverId = userStatus.userId || wixUsers.currentUser.id;
-        const interestResult = await getMutualInterestForDriver(driverId);
+        const interestResult = await getDriverMutualInterestsForPage(driverId);
 
-        if (interestResult.success && interestResult.mutualInterests?.length > 0) {
+        if (interestResult.success && interestResult.interests?.length > 0) {
           console.log(`🤝 Found ${interestResult.mutualInterests.length} mutual matches`);
 
           // Create lookup map for efficiency
           const mutualMap = {};
-          interestResult.mutualInterests.forEach(m => {
+          interestResult.interests.forEach(m => {
             mutualMap[String(m.carrierDot)] = m;
           });
 
@@ -954,7 +1165,7 @@ async function handleFindMatches(driverPrefs, userStatus) {
     }
 
     // Store results for later use (e.g., anonymous match explanations)
-    lastSearchResults = { ...result, matches: enrichedMatches };
+    setLastSearchResults({ ...result, matches: enrichedMatches });
 
     // Handle enrichments — only auto-enrich the #1 match; rest are on-demand via button click
     const needsEnrichment = result.matches.filter(m => m.needsEnrichment);
@@ -1050,7 +1261,7 @@ async function enrichWithRetry(dotNumber, carrierData, driverPrefs) {
 
   for (let attempt = 1; attempt <= CONFIG.maxRetries; attempt++) {
     try {
-      return await enrichCarrier(dotNumber, carrierData, driverPrefs);
+      return await enrichCarrierForPage(dotNumber, carrierData, driverPrefs);
     } catch (error) {
       lastError = error;
       console.error(`❌ Attempt ${attempt} failed for DOT ${dotNumber}:`, error.message);
@@ -1099,7 +1310,7 @@ async function handleRetryEnrichment(data) {
 
     // Generate a job ID and kick Railway async (returns immediately, <1s)
     const jobId = 'enr_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    await triggerEnrichmentJob(jobId, dotNumber, carrierName, knownData);
+    await startCarrierEnrichmentJobForPage(jobId, dotNumber, carrierName, knownData);
 
     console.log(`📡 [enrich] Job ${jobId} started for DOT ${dotNumber} — polling...`);
 
@@ -1110,7 +1321,7 @@ async function handleRetryEnrichment(data) {
       const timer = setInterval(async () => {
         attempts++;
         try {
-          const statusResult = await checkEnrichmentStatus(jobId);
+          const statusResult = await getCarrierEnrichmentStatusForPage(jobId);
           if (statusResult.status === 'COMPLETE') {
             clearInterval(timer);
             console.log(`✅ [enrich] Job ${jobId} complete — delivering enrichment`);
@@ -1181,7 +1392,7 @@ async function handleLogInterest(data) {
 
   try {
     const result = await Promise.race([
-      logMatchEvent({
+      logCarrierInterestForPage({
         carrierDOT: data.carrierDOT,
         carrierName: data.carrierName,
         driverZip: data.driverZip,
@@ -1229,37 +1440,13 @@ async function handleLogInterest(data) {
 
 async function handleGetDriverProfile() {
   try {
-    const profileResult = await getOrCreateDriverProfile();
+    const profileResult = await getDriverProfileForPage();
 
     if (profileResult.success) {
-      cachedDriverProfile = profileResult.profile;
+      setCachedDriverProfile(profileResult.profile);
       sendToHtml('driverProfileLoaded', {
         success: true,
-        profile: {
-          id: cachedDriverProfile._id,
-          displayName: cachedDriverProfile.display_name,
-          email: cachedDriverProfile.email,
-          homeZip: cachedDriverProfile.home_zip,
-          maxDistance: cachedDriverProfile.max_commute_miles,
-          minCPM: cachedDriverProfile.min_cpm,
-          operationType: cachedDriverProfile.preferred_operation_type,
-          maxTurnover: cachedDriverProfile.max_turnover_percent,
-          maxTruckAge: cachedDriverProfile.max_truck_age_years,
-          fleetSize: cachedDriverProfile.fleet_size_preference,
-          yearsExperience: cachedDriverProfile.years_experience,
-          cdlClass: cachedDriverProfile.cdl_class,
-          endorsements: cachedDriverProfile.endorsements,
-          cleanMVR: cachedDriverProfile.clean_mvr,
-          completeness: cachedDriverProfile.profile_completeness_score,
-          totalSearches: cachedDriverProfile.total_searches,
-          isComplete: cachedDriverProfile.is_complete,
-          isDiscoverable: cachedDriverProfile.is_discoverable,
-          missingFields: cachedDriverProfile.missing_fields,
-          cdl_front_image: cachedDriverProfile.cdl_front_image,
-          cdl_back_image: cachedDriverProfile.cdl_back_image,
-          med_card_image: cachedDriverProfile.med_card_image,
-          resume_file: cachedDriverProfile.resume_file
-        },
+        profile: normalizeDriverProfileForHtml(cachedDriverProfile),
         isNew: profileResult.isNew
       });
     } else {
@@ -1273,7 +1460,7 @@ async function handleGetDriverProfile() {
 
 async function handleGetSavedCarriers() {
   try {
-    const result = await getDriverSavedCarriers();
+    const result = await getDriverSavedCarriersForPage();
 
     sendToHtml('savedCarriersLoaded', {
       success: result.success,
@@ -1289,10 +1476,10 @@ async function handleGetSavedCarriers() {
 
 async function handleToggleDiscoverability(data) {
   try {
-    const result = await setDiscoverability(data.isDiscoverable);
+    const result = await updateDriverDiscoverabilityForPage(data.isDiscoverable);
 
     if (result.success) {
-      cachedDriverProfile = result.profile;
+      setCachedDriverProfile(result.profile);
       sendToHtml('discoverabilityUpdated', {
         success: true,
         isDiscoverable: result.profile.is_discoverable
@@ -1309,10 +1496,10 @@ async function handleToggleDiscoverability(data) {
 
 async function handleSaveProfileDocs(data) {
   try {
-    const result = await updateDriverDocuments(data);
+    const result = await saveDriverDocumentsForPage(data);
 
     if (result.success) {
-      cachedDriverProfile = result.profile;
+      setCachedDriverProfile(result.profile);
 
       // Send success back to HTML to close modal
       sendToHtml('profileSaved', {
@@ -1369,7 +1556,7 @@ async function handleExtractDocumentOCR(data) {
   console.log(`🔍 Real-time OCR requested for ${data.docType}`);
 
   try {
-    const result = await extractDocumentForAutoFill(data.base64Data, data.docType);
+    const result = await extractDocumentForAutoFillForPage(data.base64Data, data.docType);
 
     console.log(`📄 OCR Result for ${data.docType}:`, result.success ? 'Success' : 'Failed');
 
@@ -1390,36 +1577,7 @@ async function handleExtractDocumentOCR(data) {
 // ============================================================================
 
 function _sendPageReady() {
-  sendToHtml('pageReady', {
-    userStatus: cachedUserStatus,
-    memberId: wixUsers?.currentUser?.id || null,
-    driverProfile: cachedDriverProfile ? {
-      id: cachedDriverProfile._id,
-      displayName: cachedDriverProfile.display_name,
-      homeZip: cachedDriverProfile.home_zip,
-      maxDistance: cachedDriverProfile.max_commute_miles,
-      minCPM: cachedDriverProfile.min_cpm,
-      operationType: cachedDriverProfile.preferred_operation_type,
-      maxTurnover: cachedDriverProfile.max_turnover_percent,
-      maxTruckAge: cachedDriverProfile.max_truck_age_years,
-      fleetSize: cachedDriverProfile.fleet_size_preference,
-      completeness: cachedDriverProfile.profile_completeness_score,
-      totalSearches: cachedDriverProfile.total_searches,
-      isComplete: cachedDriverProfile.is_complete,
-      missingFields: cachedDriverProfile.missing_fields,
-      isDiscoverable: cachedDriverProfile.is_discoverable,
-      cdl_front_image: cachedDriverProfile.cdl_front_image,
-      cdl_back_image: cachedDriverProfile.cdl_back_image,
-      med_card_image: cachedDriverProfile.med_card_image,
-      resume_file: cachedDriverProfile.resume_file
-    } : null,
-    appliedCarriers: cachedDriverInterests.map(i => ({
-      carrierDOT: i.carrier_dot,
-      carrierName: i.carrier_name,
-      actionType: i.action_type,
-      timestamp: i.action_timestamp
-    }))
-  });
+  sendToHtml('pageReady', buildPageReadyPayload(pageState, wixUsers?.currentUser?.id || null));
 }
 
 // ============================================================================
@@ -1428,7 +1586,7 @@ function _sendPageReady() {
 
 function sendToHtml(type, data) {
   // Validate outbound message is registered
-  if (!MESSAGE_REGISTRY.outbound.includes(type)) {
+  if (!(isKnownContractOutboundMessage(type) || MESSAGE_REGISTRY.outbound.includes(type))) {
     console.warn(`⚠️ UNREGISTERED OUTBOUND MESSAGE: "${type}" - Add to MESSAGE_REGISTRY.outbound`);
   }
 
@@ -1436,9 +1594,15 @@ function sendToHtml(type, data) {
 
   try {
     const component = getComponent();
-    if (component && typeof component.postMessage === 'function') {
-      component.postMessage({ type, data, timestamp: Date.now() });
+    if (!(component && typeof component.postMessage === 'function')) {
+      return;
     }
+
+    sendToHtmlBridge(type, data, {
+      component,
+      logMessageFlow: null,
+      fallbackRegistry: MESSAGE_REGISTRY.outbound
+    });
   } catch (error) {
     console.error('Error sending to HTML:', error);
   }
@@ -1462,7 +1626,7 @@ async function handleSubmitApplication(data) {
     console.log('📝 Submitting application to carrier:', data.carrierDOT);
 
     // Pass ALL form data to backend (don't filter - let backend handle it)
-    const result = await submitApplication({
+    const result = await submitDriverApplicationForPage({
       // Carrier info
       carrierDOT: data.carrierDOT,
       carrierName: data.carrierName,
@@ -1562,7 +1726,7 @@ async function handleGetDriverApplications() {
     const driverId = userStatus.userId;
     console.log('📂 Fetching applications for driver:', driverId);
 
-    const result = await getDriverApplications(driverId);
+    const result = await getDriverApplicationsForPage(driverId);
 
     // Check if result is array (old format) or object (new format)
     // Based on previous step, it returns the applications directly if successful, 
@@ -1590,11 +1754,11 @@ async function handleGetMutualInterest(data) {
     if (!driverId) return;
 
     console.log('🤝 Fetching mutual interests for:', driverId);
-    const result = await getMutualInterestForDriver(driverId);
+    const result = await getDriverMutualInterestsForPage(driverId);
 
     if (result.success) {
       sendToHtml('mutualInterestData', {
-        interests: result.mutualInterests || []
+        interests: result.interests || []
       });
     } else {
       console.warn('Mutual interest fetch returned unsuccessful:', result);

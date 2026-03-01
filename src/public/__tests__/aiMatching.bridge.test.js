@@ -27,14 +27,7 @@ const path = require('path');
 const PAGE_FILE = path.resolve(__dirname, '..', '..', 'pages', 'AI - Matching.rof4w.js');
 
 const EXPECTED_IMPORTS = [
-    "from 'backend/carrierMatching.jsw'",
-    "from 'backend/mutualInterestService.jsw'",
-    "from 'backend/aiEnrichment.jsw'",
-    "from 'backend/driverProfiles.jsw'",
-    "from 'backend/applicationService.jsw'",
-    "from 'backend/ocrService.jsw'",
-    "from 'backend/matchExplanationService.jsw'",
-    "from 'backend/featureAdoptionService'"
+    "from 'backend/aiMatchingFacade.jsw'"
 ];
 
 const ALL_ACTIONS = [
