@@ -218,6 +218,14 @@ This file tracks all major tracks for the project. Each track has its own detail
 *Completion: 100% (All 5 Waves Delivered)*
 *Summary: Full feature parity achieved — 30 tool registry entries backed by 27 unique view modules. Wave 1: Solarized Dark mode CSS tokens (Base03 #002B36), RDS sync, feature flag. Wave 2: 4 outreach views (job-boards, SMS campaigns w/ TCPA compliance, email drip campaigns, social posting w/ FB/LinkedIn/Instagram). Wave 3: 4 compliance views (docs w/ OCR, DQF/DOT compliance, orientation scheduler, workflow automation w/ 6 templates). Wave 4: 4 feature views (gamification XP/badges/streaks, cost-per-hire analysis, background check vendor integration, drug testing DOT compliance). Wave 5: Config cleanup — all tools wired, intent map entries, script tags, drawer configs updated. Zero tools with view: null.*
 
+### [ ] Track: RecruiterOS Intelligence Convergence
+*Link: [./tracks/recruiter_os_convergence_20260228/](./tracks/recruiter_os_convergence_20260228/)*
+*Depends on: recruiter_os_feature_parity, full_agentic_buildout_20260218, rag_intent_layer_20260224*
+*Priority: Critical*
+*Status: Planned*
+*Completion: 0%*
+*Summary: 5-wave team delivery. Wave 1: Canonical bridge contract (ros-contract.js) + full message audit. Wave 2: Wire all 7 consolidate-status tools (intel, predict, funnel, attribution, lifecycle, retention, onboard) to real backend data. Wave 3: NBA chips active (NBA_ENABLED=true), view-aware agent context, market signals HOT/SOFT/NEUTRAL ticker. Wave 4: Proactive AI pushes insight bullets to home view; agent memory loaded from Pinecone lmdr-memory on chat open. Wave 5: Evidence Pack — quality_gate.json pass:true across 7 critical paths. Exceeds architecture map v2.*
+
 ## Business Development New Features
 
 ### [/] Track: B2B Business Development Suite
