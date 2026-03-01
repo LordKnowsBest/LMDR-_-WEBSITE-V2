@@ -248,6 +248,10 @@
     const thread = document.getElementById('chatThread');
     if (thread) thread.classList.add('open');
     threadOpen = true;
+    // Load agent memory on first open
+    if (ROS.memory && ROS.memory.load) {
+      ROS.memory.load(null); // userId resolved server-side
+    }
     // Push layout on desktop only
     if (window.innerWidth > 768) {
       ROS.shell.pushChatLayout(true);

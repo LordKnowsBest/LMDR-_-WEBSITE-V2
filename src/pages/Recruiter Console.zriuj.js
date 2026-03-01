@@ -140,6 +140,9 @@ import {
 // Recruiter OS — Market Signals imports
 import { getMarketContext } from 'backend/marketSignalsService.jsw';
 
+// Recruiter OS — Agent Memory imports (Wave 4)
+import { retrieveContext } from 'backend/ragService';
+
 // Recruiter OS — Retention intelligence imports (for NBA chips)
 import { getAtRiskCount } from 'backend/recruiterRetentionService.jsw';
 import { getOnboardingDashboard } from 'backend/recruiterOnboardingService.jsw';
@@ -305,7 +308,10 @@ const MESSAGE_REGISTRY = {
     'checkSearchStatus',
     // Wave 3 — Intelligence Layer
     'refreshNBAChips',
-    'getMarketSignals'
+    'getMarketSignals',
+    // Wave 4 — Proactive AI + Memory
+    'getAgentMemory',
+    'getProactiveInsights'
   ],
   // Messages TO HTML that page code sends
   outbound: [
@@ -425,7 +431,10 @@ const MESSAGE_REGISTRY = {
     'searchStatusUpdate',
     // Wave 3 — Intelligence Layer
     'nbaChipsData',
-    'marketSignalsLoaded'
+    'marketSignalsLoaded',
+    // Wave 4 — Proactive AI + Memory
+    'agentMemoryLoaded',
+    'proactiveInsightsLoaded'
   ]
 };
 
@@ -1307,6 +1316,17 @@ async function handleHtmlMessage(msg, component) {
         await handleGetMarketSignals(component);
         break;
 
+      // ── Wave 4: Proactive AI + Memory ──
+      case 'getAgentMemory': {
+        await handleGetAgentMemory(msg.data, component);
+        break;
+      }
+
+      case 'getProactiveInsights': {
+        await handleGetProactiveInsights(msg.data, component);
+        break;
+      }
+
       case 'saveAccountSettings':
         await handleSaveAccountSettings(msg.data, component);
         break;
@@ -2108,6 +2128,47 @@ async function handleGetMarketSignals(component) {
     sendToHtml(component, 'marketSignalsLoaded', {
       success: false, condition: 'NEUTRAL', factor: 1.0
     });
+  }
+}
+
+async function handleGetAgentMemory(data, component) {
+  try {
+    const userId = data && data.userId ? String(data.userId) : 'anonymous';
+    const result = await retrieveContext(
+      'recent recruiter activity',
+      ['conversation_memory'],
+      'recruiter',
+      { user_id: userId },
+      500
+    );
+    const chunks = (result && result.chunks) || [];
+    const summaries = chunks.map(function(c) {
+      return (c.text || '').split('\n')[0];
+    }).filter(Boolean).slice(0, 3);
+    sendToHtml(component, 'agentMemoryLoaded', { summaries, hasMemory: summaries.length > 0 });
+  } catch (err) {
+    console.error('handleGetAgentMemory error:', err);
+    sendToHtml(component, 'agentMemoryLoaded', { summaries: [], hasMemory: false });
+  }
+}
+
+async function handleGetProactiveInsights(data, component) {
+  try {
+    const userId = currentUser && currentUser.id ? currentUser.id : 'anonymous';
+    const dot = currentCarrierDOT || null;
+    const context = Object.assign({}, data && data.context || {}, {
+      recruiterDot: dot,
+      role: 'recruiter',
+      trigger: '__proactive__'
+    });
+    const PROACTIVE_PROMPT = 'Surface 2-3 brief insight bullets for this recruiter based on their current data. Each bullet should be 1 short sentence starting with an emoji. Only include actionable items. Reply with just the bullets, no intro text.';
+    const response = await handleAgentTurn('recruiter', userId, PROACTIVE_PROMPT, context);
+    const text = (response && (response.text || response.response || response.content)) || '';
+    const insights = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; }).slice(0, 3);
+    sendToHtml(component, 'proactiveInsightsLoaded', { insights: insights, generatedAt: new Date().toISOString().slice(0, 10) });
+  } catch (err) {
+    console.error('handleGetProactiveInsights error:', err);
+    sendToHtml(component, 'proactiveInsightsLoaded', { insights: [], generatedAt: null });
   }
 }
 

@@ -62,6 +62,9 @@
           </div>
         </div>
 
+        <!-- Proactive AI Insights (Wave 4 — populated 2s after mount) -->
+        <div id="ros-proactive-insights" class="hidden" style="display:none;flex-direction:column;gap:6px;padding:0 4px;"></div>
+
         <div class="grid grid-cols-[1fr_300px] gap-8">
           <!-- Quick Actions -->
           <div>
@@ -143,6 +146,15 @@
     setTimeout(() => {
       document.getElementById('home-stat-matches').textContent = '24';
     }, 800);
+
+    // Wave 4: Trigger proactive AI insights
+    if (typeof ROS !== 'undefined' && ROS.proactive && ROS.proactive.trigger) {
+      var ctx = {
+        currentView: 'home',
+        marketCondition: ROS.market ? ROS.market.getCondition() : null
+      };
+      ROS.proactive.trigger(ctx);
+    }
   }
 
   function onUnmount() { }
