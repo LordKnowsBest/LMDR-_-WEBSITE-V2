@@ -179,16 +179,26 @@ const HTML_COMPONENT_IDS = [
 ];
 
 function findHtmlComponent() {
+  let firstCapable = null;
   for (const id of HTML_COMPONENT_IDS) {
     try {
       const el = $w(id);
       if (el && typeof el.onMessage === 'function') {
-        console.log('Recruiter Console: HTML component found at', id);
-        return el;
+        const isRendered = el.rendered === true;
+        console.log('Recruiter Console: candidate', id, '| rendered:', isRendered);
+        if (isRendered) {
+          console.log('Recruiter Console: using', id, '(rendered)');
+          return el;
+        }
+        if (!firstCapable) firstCapable = { id, el };
       }
     } catch (e) {
       // Element not present — try next
     }
+  }
+  if (firstCapable) {
+    console.log('Recruiter Console: using', firstCapable.id, '(not rendered — fallback)');
+    return firstCapable.el;
   }
   return null;
 }
@@ -503,6 +513,7 @@ $w.onReady(async function () {
 
   // Set up message listener
   htmlComponent.onMessage(async (event) => {
+    console.log('[RC] onMessage received:', event?.data?.type || event?.data);
     await handleHtmlMessage(event.data, htmlComponent);
   });
 
