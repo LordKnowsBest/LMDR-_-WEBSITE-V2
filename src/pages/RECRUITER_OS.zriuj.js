@@ -21,7 +21,7 @@ $w.onReady(function () {
   console.log('[ROS-TEST] FEATURE_FLAGS:', typeof FEATURE_FLAGS);
   console.log('[ROS-TEST] setupRecruiterGamification:', typeof setupRecruiterGamification);
 
-  const ids = ['#html8', '#html1', '#html2', '#html3', '#html4', '#html5', '#html6'];
+  const ids = ['#html8', '#html1', '#html2', '#html3', '#html4', '#html5', '#html6', '#htmlEmbed1'];
 
   ids.forEach(function(id) {
     try {
