@@ -1,34 +1,3011 @@
-// STEP 2 TEST — does the facade import kill the page?
+// ============================================================================
+// RECRUITER CONSOLE - Page Code
+// Supports Agency Model: Recruiters can manage multiple carriers
+//
+// All backend calls go through a single facade to prevent the Wix bundler
+// from choking on 40+ direct module imports (which silently kills $w.onReady).
+// ============================================================================
 
 import {
-  rosGetOrCreateRecruiterProfile as getOrCreateRecruiterProfile
+  rosGetOrCreateRecruiterProfile as getOrCreateRecruiterProfile,
+  rosAddCarrier as addCarrier,
+  rosRemoveCarrier as removeCarrier,
+  rosGetRecruiterCarriers as getRecruiterCarriers,
+  rosValidateCarrierDOT as validateCarrierDOT,
+  rosGetPipelineCandidates as getPipelineCandidates,
+  rosUpdateCandidateStatus as updateCandidateStatus,
+  rosGetPipelineStats as getPipelineStats,
+  rosGetCandidateDetails as getCandidateDetails,
+  rosAddRecruiterNotes as addRecruiterNotes,
+  rosUpdateRecruiterProfile as updateRecruiterProfile,
+  rosRequestAvailability as requestAvailability,
+  rosConfirmTimeSlot as confirmInterviewSlot,
+  rosGetInterviewState as getInterviewState,
+  rosSendMessage as sendMessage,
+  rosGetConversation as getConversation,
+  rosMarkAsRead as markAsRead,
+  rosGetRecruiterConversations as getRecruiterConversations,
+  rosGetUnreadCount as getUnreadCount,
+  rosLogFeatureInteraction as logFeatureInteraction,
+  rosFindMatchingDrivers as findMatchingDrivers,
+  rosGetDriverProfile as getDriverProfile,
+  rosInitiateAsyncDriverSearch as initiateAsyncDriverSearch,
+  rosCheckAsyncSearchStatus as checkAsyncSearchStatus,
+  rosSaveToRecruiterPipeline as saveToRecruiterPipeline,
+  rosSendMessageToDriver as sendMessageToDriver,
+  rosGetQuotaStatus as getQuotaStatus,
+  rosCreateSavedSearch as createSavedSearch,
+  rosUpdateSavedSearch as updateSavedSearch,
+  rosDeleteSavedSearch as deleteSavedSearch,
+  rosGetSavedSearches as getSavedSearches,
+  rosExecuteSavedSearch as executeSavedSearch,
+  rosLogCallOutcome as logCallOutcome,
+  rosGetCarrierOutcomes as getCarrierOutcomes,
+  rosGetOutcomeAnalytics as getOutcomeAnalytics,
+  rosGetDriverOutcomes as getDriverOutcomes,
+  rosGetInterventionTemplates as getInterventionTemplates,
+  rosGetAllTemplates as getAllTemplates,
+  rosCreateTemplate as createTemplate,
+  rosUpdateInterventionTemplate as updateInterventionTemplate,
+  rosDeleteTemplate as deleteTemplate,
+  rosSendIntervention as sendIntervention,
+  rosLogInterventionOutcome as logInterventionOutcome,
+  rosGetDriverInterventions as getDriverInterventions,
+  rosGetAutomationRules as getAutomationRules,
+  rosCreateAutomationRule as createAutomationRule,
+  rosUpdateAutomationRule as updateAutomationRule,
+  rosDeleteAutomationRule as deleteAutomationRule,
+  rosToggleRuleStatus as toggleRuleStatus,
+  rosGetAutomationLog as getAutomationLog,
+  rosGetRecruiterHealthStatus as getRecruiterHealthStatus,
+  rosRouteAIRequest as routeAIRequest,
+  rosHandleAgentTurn as handleAgentTurn,
+  rosResumeAfterApproval as resumeAfterApproval,
+  rosExecuteTool as executeTool,
+  rosGetVoiceConfig as getVoiceConfig,
+  rosGetCampaigns as getCampaigns,
+  rosCreateVoiceCampaign as createVoiceCampaign,
+  rosStartCampaign as startCampaign,
+  rosGetCampaignStatus as getCampaignStatus,
+  rosGetFunnelMetrics as getFunnelMetrics,
+  rosGetBottleneckAnalysis as getBottleneckAnalysis,
+  rosCalculateCostPerHire as calculateCostPerHire,
+  rosGetCompetitorComparison as getCompetitorComparison,
+  rosAddCompetitorIntel as addCompetitorIntel,
+  rosGenerateHiringForecast as generateHiringForecast,
+  rosGetTurnoverRiskAnalysis as getTurnoverRiskAnalysis,
+  rosGetPayBenchmarks as getPayBenchmarks,
+  rosRecordRecruitingSpend as recordRecruitingSpend,
+  rosGetBGCStatus as getBGCStatus,
+  rosGetDrugTestStatus as getDrugTestStatus,
+  rosGetOrientationSlots as getOrientationSlots,
+  rosGetOnboardingDashboard as getOnboardingDashboard,
+  rosGetFMCSAAlerts as getFMCSAAlerts,
+  rosRequestDocuments as requestDocuments,
+  rosCreateEmailCampaign as createEmailCampaign,
+  rosSendEmailCampaign as sendEmailCampaign,
+  rosInitializeProgression as initializeProgression,
+  rosGetJobPostings as getJobPostings,
+  rosConnectJobBoard as connectJobBoard,
+  rosCreateSMSCampaign as createSMSCampaign,
+  rosSendSMSCampaign as sendSMSCampaign,
+  rosGetSocialPosts as getSocialPosts,
+  rosGetConnectedAccounts as getConnectedAccounts,
+  rosConnectSocialAccount as connectSocialAccount,
+  rosCreateSocialPost as createSocialPost,
+  rosPublishSocialPost as publishSocialPost,
+  rosListMetaIntegrations as listMetaIntegrations,
+  rosListAdAccounts as listAdAccounts,
+  rosCreateCampaignDraft as createCampaignDraft,
+  rosCreateMetaCampaign as createMetaCampaign,
+  rosCreateAdSetDraft as createAdSetDraft,
+  rosUpdateAdSetBudget as updateAdSetBudget,
+  rosCreateCreativeDraft as createCreativeDraft,
+  rosGetInsightsCampaignLevel as getInsightsCampaignLevel,
+  rosGetInsightsAdSetLevel as getInsightsAdSetLevel,
+  rosGetInsightsAdLevel as getInsightsAdLevel,
+  rosGetInsightsWithBreakdowns as getInsightsWithBreakdowns,
+  rosCreateAsyncReportJob as createAsyncReportJob,
+  rosGetAsyncReportStatus as getAsyncReportStatus,
+  rosDownloadReport as downloadReport,
+  rosSuggestBudgetReallocation as suggestBudgetReallocation,
+  rosSuggestCreativeRotation as suggestCreativeRotation,
+  rosSuggestAudienceNarrowing as suggestAudienceNarrowing,
+  rosGetFrequencyFatigueAlerts as getFrequencyFatigueAlerts,
+  rosGetPlacementPerformance as getPlacementPerformance,
+  rosGeneratePlatformCopy as generatePlatformCopy,
+  rosGenerateSocialImage as generateSocialImage,
+  rosSaveCredentials as saveCredentials,
+  rosGetCredentialStatus as getCredentialStatus,
+  rosValidateToken as validateToken,
+  rosGetActiveWorkflows as getActiveWorkflows,
+  rosUpdateWorkflowStatus as updateWorkflowStatus,
+  rosGetCarrierRetentionDashboard as getCarrierRetentionDashboard,
+  rosGetInterventionSuggestions as getInterventionSuggestions,
+  rosGetDriverTimeline as getDriverTimeline,
+  rosLogLifecycleEvent as logLifecycleEventBackend,
+  rosTerminateDriver as terminateDriverBackend,
+  rosGetMarketContext as getMarketContext,
+  rosRetrieveContext as retrieveContext,
+  rosGetAtRiskCount as getAtRiskCount,
+  rosGetLeaderboard as getLeaderboard,
+  rosGetLeaderboardSummary as getLeaderboardSummary,
+  rosGetUserLeaderboardPosition as getUserLeaderboardPosition,
+  rosGetCarrierPreferences as getCarrierPreferences,
+  rosGetAIMatchCandidates as getAIMatchCandidates,
+  rosGetRecruiterAlerts as getRecruiterAlerts
 } from 'backend/recruiterOSFacade.jsw';
 
-$w.onReady(function () {
-  console.log('[ROS-TEST] $w.onReady fired with facade import!');
+// Public module — not a .jsw backend call, stays as direct import
+import { setupRecruiterGamification } from 'public/js/gamificationPageHandlers';
 
-  const ids = ['#html8', '#html1', '#html2', '#html3', '#html4', '#html5', '#html6'];
+// Synchronous config — not a .jsw backend call
+import { FEATURE_FLAGS } from 'backend/configData';
 
-  ids.forEach(function(id) {
+import wixLocation from 'wix-location';
+
+let wixUsers;
+try {
+  wixUsers = require('wix-users');
+} catch (e) {
+  console.log('wix-users not available');
+}
+
+// ============================================================================
+// HTML COMPONENT DISCOVERY
+// ============================================================================
+
+// #html8 is the HTML iframe component on this page.
+// Standard IDs included as fallback.
+const HTML_COMPONENT_IDS = ['#html8', '#html1', '#html2', '#html3', '#html4', '#html5', '#html6', '#htmlEmbed1'];
+
+// ============================================================================
+// STATE
+// ============================================================================
+
+let cachedRecruiterProfile = null;
+let cachedCarriers = [];
+let currentCarrierDOT = null;
+
+// ============================================================================
+// MESSAGE VALIDATION SYSTEM
+// ============================================================================
+const DEBUG_MESSAGES = true; // Set to false in production
+
+// Registry of all valid messages - single source of truth
+const MESSAGE_REGISTRY = {
+  // Messages FROM HTML that page code handles
+  inbound: [
+    'recruiterDashboardReady',
+    'validateCarrier',
+    'addCarrier',
+    'removeCarrier',
+    'switchCarrier',
+    'getCarriers',
+    'getPipeline',
+    'updateCandidateStatus',
+    'getStats',
+    'getCandidateDetails',
+    'addNotes',
+    'sendMessage',
+    'getConversation',
+    'getNewMessages',    // Smart polling request
+    'getUnreadCount',    // Unread badge request
+    'markAsRead',
+    'requestAvailability',
+    'confirmTimeSlot',
+    'ping', // Health check
+    // Driver Search messages
+    'driverSearchReady',
+    'searchDrivers',
+    'viewDriverProfile',
+    'saveDriver',
+    'contactDriver',
+    'getQuotaStatus',
+    'getWeightPreferences',
+    'saveWeightPreferences',
+    'generateAIDraft',
+    'navigateTo',
+    'logFeatureInteraction', // Feature adoption tracking
+    // Saved Search messages
+    'saveSearch',
+    'loadSavedSearches',
+    'runSavedSearch',
+    'deleteSavedSearch',
+    'updateSavedSearch',
+    // Call Outcome messages
+    'logCallOutcome',
+    'getCallAnalytics',
+    'getRecentCalls',
+    'getDriverCallHistory',
+    // Intervention messages
+    'getInterventionTemplates',
+    'sendIntervention',
+    'saveTemplate',
+    'deleteTemplate',
+    'logInterventionOutcome',
+    'getDriverInterventions',
+    // Pipeline Automation messages
+    'getAutomationRules',
+    'createAutomationRule',
+    'updateAutomationRule',
+    'deleteAutomationRule',
+    'toggleRuleStatus',
+    'getAutomationLog',
+    'getSystemHealth', // New System Health Check
+    // ── Recruiter OS Messages ──
+    'recruiterOSReady',
+    'getFunnelData',
+    'getCostData',
+    'getCompetitorData',
+    'getPredictionsData',
+    'getWorkflows',
+    'updateWorkflowStep',
+    'getRetentionData',
+    'getAtRiskDrivers',
+    'getLeaderboard',
+    'getBadges',
+    'getSettingsData',
+    // ── Agent & Voice Messages ──
+    'agentMessage',
+    'resolveApprovalGate',
+    'getVoiceConfig',
+    'getCampaigns',
+    'createCampaign',
+    'startCampaign',
+    'getCampaignStatus',
+    'getPaidMediaState',
+    'createPaidMediaDraft',
+    'updatePaidMediaAdSet',
+    'createPaidMediaCreative',
+    'launchPaidMediaCampaign',
+    'getPaidMediaInsights',
+    'createPaidMediaReportJob',
+    'getPaidMediaReportStatus',
+    'downloadPaidMediaReport',
+    'getPaidMediaOptimizationSuggestions',
+    'saveIntel',
+    'getTimelineEvents',
+    'logLifecycleEvent',
+    'terminateDriver',
+    'getConversations',
+    'addCandidateNote',
+    // ── New View Messages ──
+    'fetchAutomations',
+    'toggleAutomation',
+    'fetchCompliance',
+    'fetchDriverDocs',
+    'fetchBgChecks',
+    'fetchDrugTests',
+    'fetchOrientations',
+    'fetchCostAnalysis',
+    'fetchEmailCampaigns',
+    'sendEmailCampaign',
+    'fetchGamification',
+    'fetchJobBoards',
+    'connectJobBoard',
+    'fetchSmsCampaigns',
+    'sendSmsCampaign',
+    'fetchSocialPosts',
+    'connectSocialAccount',
+    'publishSocialPost',
+    'generateSocialCopy',
+    'generateSocialImage',
+    'saveSocialCredentials',
+    'testSocialConnection',
+    'getSocialCredentialStatus',
+    // Async Search Polling
+    'searchDriversAsync',
+    'checkSearchStatus',
+    // Wave 3 — Intelligence Layer
+    'refreshNBAChips',
+    'getMarketSignals',
+    // Wave 4 — Proactive AI + Memory
+    'getAgentMemory',
+    'getProactiveInsights'
+  ],
+  // Messages TO HTML that page code sends
+  outbound: [
+    'recruiterReady',
+    'carrierValidated',
+    'carrierAdded',
+    'carrierRemoved',
+    'carrierSwitched',
+    'carriersLoaded',
+    'pipelineLoaded',
+    'statusUpdated',
+    'statsLoaded',
+    'candidateDetails',
+    'notesAdded',
+    'conversationData',
+    'messageSent',
+    'newMessagesData',   // Smart polling response
+    'unreadCountData',   // Unread badge data
+    'error',
+    'pong', // Health check response
+    // Driver Search responses
+    'driverSearchInit',
+    'searchDriversResult',
+    'viewDriverProfileResult',
+    'saveDriverResult',
+    'contactDriverResult',
+    'getQuotaStatusResult',
+    'getWeightPreferencesResult',
+    'saveWeightPreferencesResult',
+    'generateAIDraftResult',
+    'recruiterProfile',
+    // Saved Search responses
+    'saveSearchResult',
+    'savedSearchesLoaded',
+    'savedSearchExecuted',
+    'savedSearchDeleted',
+    'savedSearchUpdated',
+    // Call Outcome responses
+    'callOutcomeLogged',
+    'callAnalyticsLoaded',
+    'recentCallsLoaded',
+    'driverCallHistoryLoaded',
+    // Intervention responses
+    'interventionTemplatesLoaded',
+    'interventionSent',
+    'templateSaved',
+    'templateDeleted',
+    'interventionOutcomeLogged',
+    'driverInterventionsLoaded',
+    // Pipeline Automation responses
+    'automationRulesLoaded',
+    'automationRuleCreated',
+    'automationRuleUpdated',
+    'automationRuleDeleted',
+    'automationRuleToggled',
+    'automationLogLoaded',
+    'systemHealthUpdate', // New System Health Response
+    // ── Recruiter OS Responses ──
+    'recruiterOSInit',
+    'funnelDataLoaded',
+    'costDataLoaded',
+    'competitorDataLoaded',
+    'intelAdded',
+    'predictionsLoaded',
+    'workflowsLoaded',
+    'workflowUpdated',
+    'retentionDataLoaded',
+    'atRiskDriversLoaded',
+    'leaderboardLoaded',
+    'badgesLoaded',
+    'settingsDataLoaded',
+    // ── Agent & Voice Responses ──
+    'agentResponse',
+    'agentTyping',
+    'agentApprovalRequired',
+    'voiceReady',
+    'campaignsLoaded',
+    'campaignCreated',
+    'campaignStarted',
+    'campaignStatusLoaded',
+    'paidMediaStateLoaded',
+    'paidMediaDraftCreated',
+    'paidMediaAdSetUpdated',
+    'paidMediaCreativeCreated',
+    'paidMediaLaunchResult',
+    'paidMediaInsightsLoaded',
+    'paidMediaReportJobCreated',
+    'paidMediaReportStatusLoaded',
+    'paidMediaReportDownloaded',
+    'paidMediaSuggestionsLoaded',
+    // ── New View Responses ──
+    'automationsLoaded',
+    'automationToggled',
+    'complianceLoaded',
+    'driverDocsLoaded',
+    'bgChecksLoaded',
+    'drugTestsLoaded',
+    'orientationsLoaded',
+    'costAnalysisLoaded',
+    'emailCampaignsLoaded',
+    'emailCampaignSent',
+    'gamificationLoaded',
+    'jobBoardsLoaded',
+    'jobBoardConnected',
+    'smsCampaignsLoaded',
+    'smsCampaignSent',
+    'socialPostsLoaded',
+    'socialAccountConnected',
+    'socialPostPublished',
+    'socialCopyGenerated',
+    'socialImageGenerated',
+    'socialCredentialsSaved',
+    'socialConnectionTested',
+    'socialCredentialStatusLoaded',
+    // Async Search Polling
+    'searchJobStarted',
+    'searchStatusUpdate',
+    // Wave 3 — Intelligence Layer
+    'nbaChipsData',
+    'marketSignalsLoaded',
+    // Wave 4 — Proactive AI + Memory
+    'agentMemoryLoaded',
+    'proactiveInsightsLoaded'
+  ]
+};
+
+function validateInboundMessage(action) {
+  if (!MESSAGE_REGISTRY.inbound.includes(action)) {
+    console.warn(`⚠️ UNREGISTERED INBOUND MESSAGE: "${action}" - Add to MESSAGE_REGISTRY.inbound`);
+    return false;
+  }
+  return true;
+}
+
+function logMessageFlow(direction, type, data) {
+  if (!DEBUG_MESSAGES) return;
+  const arrow = direction === 'in' ? '📥' : '📤';
+  const label = direction === 'in' ? 'HTML→Velo' : 'Velo→HTML';
+  console.log(`${arrow} [${label}] ${type}`, data ? Object.keys(data) : '(no data)');
+}
+
+function sendToHtml(component, type, data) {
+  // Validate outbound message is registered
+  if (!MESSAGE_REGISTRY.outbound.includes(type)) {
+    console.warn(`⚠️ UNREGISTERED OUTBOUND MESSAGE: "${type}" - Add to MESSAGE_REGISTRY.outbound`);
+  }
+  logMessageFlow('out', type, data);
+  component.postMessage({ type, data, timestamp: Date.now() });
+}
+
+// ============================================================================
+// PAGE INITIALIZATION
+// ============================================================================
+
+$w.onReady(async function () {
+  console.log('Recruiter Console Ready');
+
+  // Register onMessage on every standard HTML component ID.
+  // Mirrors masterPage.js pattern — no .rendered check, capability guard only.
+  const connectedComponents = [];
+  HTML_COMPONENT_IDS.forEach(function(id) {
     try {
       const el = $w(id);
-      if (el && typeof el.onMessage === 'function') {
-        console.log('[ROS-TEST] Found HTML component:', id);
-
+      if (el && el.onMessage) {
         el.onMessage(function(event) {
-          const msg = event.data;
-          console.log('[ROS-TEST] Received message:', msg);
+          handleHtmlMessage(event.data, el);
         });
-
-        setTimeout(function() {
-          el.postMessage({ type: 'recruiterReady', data: { test: true } });
-          console.log('[ROS-TEST] Sent recruiterReady to', id);
-        }, 500);
+        connectedComponents.push(el);
+        console.log('[RC] onMessage attached to', id);
       }
     } catch (e) {
-      console.log('[ROS-TEST] Error with', id, ':', e.message);
+      // Element not on this page
     }
   });
 
-  console.log('[ROS-TEST] Init complete');
+  // Proactively ping the HTML after a short delay.
+  // The HTML iframe may have already sent 'recruiterOSReady' before
+  // $w.onReady fired, so that message was lost. This kickstarts the
+  // handshake from the Velo side — the HTML bridge listens for
+  // 'recruiterReady' or 'recruiterOSInit' and will fire ready callbacks.
+  if (connectedComponents.length > 0) {
+    setTimeout(function() {
+      connectedComponents.forEach(function(comp) {
+        try {
+          comp.postMessage({ type: 'ping', data: { from: 'velo' } });
+          console.log('[RC] Sent proactive ping to HTML');
+        } catch (e) { /* component may not be ready yet */ }
+      });
+    }, 500);
+
+    // Also pre-load the profile and send init data, matching the
+    // Subscription Success pattern of pushing data without waiting
+    // for the HTML to ask.
+    setTimeout(async function() {
+      try {
+        const result = await getOrCreateRecruiterProfile();
+        if (result.success) {
+          cachedRecruiterProfile = result.profile;
+          cachedCarriers = result.carriers || [];
+          if (cachedCarriers.length > 0) {
+            currentCarrierDOT = result.defaultCarrierDOT || cachedCarriers[0].carrier_dot;
+          }
+          connectedComponents.forEach(function(comp) {
+            try {
+              sendToHtml(comp, 'recruiterReady', {
+                recruiterProfile: result.profile,
+                carriers: cachedCarriers,
+                defaultCarrier: result.defaultCarrier,
+                currentCarrierDOT: currentCarrierDOT,
+                needsSetup: result.needsSetup,
+                memberId: wixUsers?.currentUser?.id || null
+              });
+              console.log('[RC] Sent proactive recruiterReady to HTML');
+            } catch (e) { /* ignore */ }
+          });
+        }
+      } catch (e) {
+        console.error('[RC] Proactive init failed:', e);
+      }
+    }, 800);
+  }
+
+  // Set up gamification widget if present
+  // Add an HTML component with ID #gamificationHtml pointing to public/recruiter/RECRUITER_GAMIFICATION.html
+  try {
+    const gamificationWidget = $w('#gamificationHtml');
+    if (gamificationWidget.rendered && typeof gamificationWidget.onMessage === 'function') {
+      setupRecruiterGamification(gamificationWidget);
+      console.log('🎮 Recruiter gamification widget initialized');
+    }
+  } catch (e) {
+    // Gamification widget not present on page, that's OK
+  }
 });
+
+// ============================================================================
+// MESSAGE HANDLER
+// ============================================================================
+
+async function handleHtmlMessage(msg, component) {
+  if (!msg || !msg.type) return;
+
+  const action = msg.action || msg.type;
+
+  // Validate and log inbound message
+  validateInboundMessage(action);
+  logMessageFlow('in', action, msg.data);
+
+  try {
+    switch (action) {
+      // Health check - respond immediately
+      case 'ping':
+        sendToHtml(component, 'pong', {
+          timestamp: Date.now(),
+          registeredInbound: MESSAGE_REGISTRY.inbound.length,
+          registeredOutbound: MESSAGE_REGISTRY.outbound.length
+        });
+        break;
+
+      case 'recruiterDashboardReady':
+        await handleDashboardReady(component);
+        break;
+
+      case 'validateCarrier':
+        await handleValidateCarrier(msg.data, component);
+        break;
+
+      case 'addCarrier':
+        await handleAddCarrier(msg.data, component);
+        break;
+
+      case 'removeCarrier':
+        await handleRemoveCarrier(msg.data, component);
+        break;
+
+      case 'switchCarrier':
+        await handleSwitchCarrier(msg.data, component);
+        break;
+
+      case 'getCarriers':
+        await handleGetCarriers(component);
+        break;
+
+      case 'getPipeline':
+        await handleGetPipeline(msg.data, component);
+        break;
+
+      case 'updateCandidateStatus':
+        await handleUpdateStatus(msg.data, component);
+        break;
+
+      case 'getStats':
+        await handleGetStats(component);
+        break;
+
+      case 'getCandidateDetails':
+        await handleGetDetails(msg.data, component);
+        break;
+
+      case 'addNotes':
+      case 'addCandidateNote':
+        await handleAddNotes(msg.data, component);
+        break;
+
+      case 'sendMessage':
+        await handleSendMessage(msg.data, component);
+        break;
+
+      case 'getConversation':
+        await handleGetConversation(msg.data, component);
+        break;
+
+      case 'markAsRead':
+        await handleMarkAsRead(msg.data, component);
+        break;
+
+      case 'getNewMessages':
+        await handleGetNewMessages(msg.data, component);
+        break;
+
+      case 'getUnreadCount':
+        await handleGetUnreadCount(component);
+        break;
+
+      case 'getConversations':
+        await handleGetConversations(component);
+        break;
+
+      case 'requestAvailability':
+        await handleRequestAvailability(msg.data, component);
+        break;
+
+      case 'confirmTimeSlot':
+        await handleConfirmTimeSlot(msg.data, component);
+        break;
+
+      // ========== Driver Search Handlers ==========
+      case 'driverSearchReady':
+        await handleDriverSearchReady(component);
+        break;
+
+      case 'searchDrivers':
+        await handleSearchDrivers(msg.data, component);
+        break;
+
+      case 'searchDriversAsync':
+        await handleSearchDrivers(msg.data, component);
+        break;
+
+      case 'checkSearchStatus':
+        await handleCheckSearchStatus(msg.data, component);
+        break;
+
+      case 'viewDriverProfile':
+        await handleViewDriverProfile(msg.data, component);
+        break;
+
+      case 'saveDriver':
+        await handleSaveDriver(msg.data, component);
+        break;
+
+      case 'contactDriver':
+        await handleContactDriver(msg.data, component);
+        break;
+
+      case 'getQuotaStatus':
+        await handleGetQuotaStatus(component);
+        break;
+
+      case 'getWeightPreferences':
+        await handleGetWeightPreferences(component);
+        break;
+
+      case 'saveWeightPreferences':
+        await handleSaveWeightPreferences(msg.data, component);
+        break;
+
+      case 'getCarrierPreferences':
+        await handleGetCarrierPreferences(component);
+        break;
+
+      case 'generateAIDraft':
+        await handleGenerateAIDraft(msg.data, component);
+        break;
+
+      case 'navigateTo':
+        handleNavigateTo(msg.data);
+        break;
+
+      case 'logFeatureInteraction':
+        // Non-blocking feature tracking
+        logFeatureInteraction(msg.data.featureId, msg.data.userId, msg.data.action, msg.data)
+          .catch(err => console.warn('Feature tracking failed:', err.message));
+        break;
+
+      // ========== Saved Search Handlers ==========
+      case 'saveSearch':
+        await handleSaveSearch(msg.data, component);
+        break;
+      case 'loadSavedSearches':
+        await handleLoadSavedSearches(component);
+        break;
+      case 'runSavedSearch':
+        await handleRunSavedSearch(msg.data, component);
+        break;
+      case 'deleteSavedSearch':
+        await handleDeleteSavedSearch(msg.data, component);
+        break;
+      case 'updateSavedSearch':
+        await handleUpdateSavedSearch(msg.data, component);
+        break;
+
+      // ========== Call Outcome Handlers ==========
+      case 'logCallOutcome':
+        await handleLogCallOutcome(msg.data, component);
+        break;
+      case 'getCallAnalytics':
+        await handleGetCallAnalytics(msg.data, component);
+        break;
+      case 'getRecentCalls':
+        await handleGetRecentCalls(msg.data, component);
+        break;
+      case 'getDriverCallHistory':
+        await handleGetDriverCallHistory(msg.data, component);
+        break;
+
+      // ========== Intervention Handlers ==========
+      case 'getInterventionTemplates':
+        await handleGetInterventionTemplates(msg.data, component);
+        break;
+      case 'sendIntervention':
+        await handleSendIntervention(msg.data, component);
+        break;
+      case 'saveTemplate':
+        await handleSaveTemplate(msg.data, component);
+        break;
+      case 'deleteTemplate':
+        await handleDeleteTemplate(msg.data, component);
+        break;
+      case 'logInterventionOutcome':
+        await handleLogInterventionOutcome(msg.data, component);
+        break;
+      case 'getDriverInterventions':
+        await handleGetDriverInterventions(msg.data, component);
+        break;
+
+      // ========== Pipeline Automation Handlers ==========
+      case 'getAutomationRules':
+        await handleGetAutomationRules(component);
+        break;
+      case 'createAutomationRule':
+        await handleCreateAutomationRule(msg.data, component);
+        break;
+      case 'updateAutomationRule':
+        await handleUpdateAutomationRule(msg.data, component);
+        break;
+      case 'deleteAutomationRule':
+        await handleDeleteAutomationRule(msg.data, component);
+        break;
+      case 'toggleRuleStatus':
+        await handleToggleRuleStatus(msg.data, component);
+        break;
+      case 'getAutomationLog':
+        await handleGetAutomationLog(component);
+        break;
+
+      case 'getSystemHealth':
+        await handleGetSystemHealth(msg.data, component);
+        break;
+
+      // ========== Recruiter OS Handlers ==========
+      case 'recruiterOSReady':
+        await handleRecruiterOSReady(component);
+        break;
+      case 'getFunnelData':
+        await handleGetFunnelData(msg.data, component);
+        break;
+      case 'getCostData':
+        await handleGetCostData(msg.data, component);
+        break;
+      case 'getCompetitorData':
+        await handleGetCompetitorData(msg.data, component);
+        break;
+      case 'saveIntel':
+        await handleSaveIntel(msg.data, component);
+        break;
+      case 'getTimelineEvents': {
+        const { driverId: tlDriverId } = msg.data || {};
+        try {
+          const timeline = tlDriverId ? await getDriverTimeline(tlDriverId) : { events: [] };
+          sendToHtml(component, 'timelineLoaded', timeline);
+        } catch (err) {
+          sendToHtml(component, 'timelineLoaded', { events: [], error: err.message });
+        }
+        break;
+      }
+      case 'logLifecycleEvent': {
+        const { driverId: leDriverId, eventType, metadata } = msg.data || {};
+        try {
+          await logLifecycleEventBackend(leDriverId, currentCarrierDOT, eventType || 'note', metadata || {});
+          sendToHtml(component, 'lifecycleEventLogged', { success: true });
+        } catch (err) {
+          sendToHtml(component, 'lifecycleEventLogged', { success: false, error: err.message });
+        }
+        break;
+      }
+      case 'terminateDriver': {
+        const { driverId: tdDriverId, reason, disposition } = msg.data || {};
+        try {
+          await terminateDriverBackend(tdDriverId, currentCarrierDOT, { reason, disposition }, 'recruiter');
+          sendToHtml(component, 'driverTerminated', { success: true });
+        } catch (err) {
+          sendToHtml(component, 'driverTerminated', { success: false, error: err.message });
+        }
+        break;
+      }
+      case 'getPredictionsData':
+        await handleGetPredictionsData(msg.data, component);
+        break;
+      case 'getWorkflows':
+        await handleGetWorkflows(msg.data, component);
+        break;
+      case 'updateWorkflowStep':
+        await handleUpdateWorkflowStep(msg.data, component);
+        break;
+      case 'getRetentionData':
+        await handleGetRetentionData(msg.data, component);
+        break;
+      case 'getAtRiskDrivers':
+        await handleGetAtRiskDrivers(msg.data, component);
+        break;
+      case 'getLeaderboard':
+        await handleGetLeaderboardData(msg.data, component);
+        break;
+      case 'getBadges':
+        await handleGetBadges(msg.data, component);
+        break;
+      case 'getSettingsData':
+        await handleGetSettingsData(component);
+        break;
+
+      // ── Agent & Voice ──
+      case 'agentMessage': {
+        const agentText = msg.data?.text || '';
+        const agentCtx = msg.data?.context || {};
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        sendToHtml(component, 'agentTyping', {});
+        try {
+          const agentResult = await handleAgentTurn('recruiter', recruiterId, agentText, {
+            ...agentCtx,
+            carrierDot: currentCarrierDOT
+          });
+          if (agentResult.type === 'approval_required') {
+            sendToHtml(component, 'agentApprovalRequired', agentResult);
+          } else {
+            sendToHtml(component, 'agentResponse', agentResult);
+          }
+        } catch (err) {
+          sendToHtml(component, 'agentResponse', { error: err.message });
+        }
+        break;
+      }
+
+      case 'resolveApprovalGate': {
+        const { approvalContext, decision, decidedBy } = msg.data || {};
+        sendToHtml(component, 'agentTyping', {});
+        try {
+          const result = await resumeAfterApproval(approvalContext, decision, decidedBy || 'user');
+          sendToHtml(component, 'agentResponse', result);
+        } catch (err) {
+          sendToHtml(component, 'agentResponse', { error: err.message });
+        }
+        break;
+      }
+      case 'getVoiceConfig': {
+        try {
+          const voiceConf = await getVoiceConfig();
+          sendToHtml(component, 'voiceReady', voiceConf);
+        } catch (err) {
+          console.warn('Voice config failed:', err.message);
+        }
+        break;
+      }
+      case 'getCampaigns': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+        if (!recruiterId) { sendToHtml(component, 'campaignsLoaded', { campaigns: [] }); break; }
+        const campaigns = await getCampaigns(recruiterId);
+        sendToHtml(component, 'campaignsLoaded', { campaigns });
+        break;
+      }
+      case 'createCampaign': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+        const result = await createVoiceCampaign(recruiterId, msg.data);
+        sendToHtml(component, 'campaignCreated', result);
+        break;
+      }
+      case 'startCampaign': {
+        const result = await startCampaign(msg.data?.campaignId);
+        sendToHtml(component, 'campaignStarted', result);
+        break;
+      }
+      case 'getCampaignStatus': {
+        const result = await getCampaignStatus(msg.data?.campaignId);
+        sendToHtml(component, 'campaignStatusLoaded', result);
+        break;
+      }
+      case 'getPaidMediaState': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleGetPaidMediaState(recruiterId, msg.data, component);
+        break;
+      }
+      case 'createPaidMediaDraft': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleCreatePaidMediaDraft(recruiterId, msg.data, component);
+        break;
+      }
+      case 'updatePaidMediaAdSet': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleUpdatePaidMediaAdSet(recruiterId, msg.data, component);
+        break;
+      }
+      case 'createPaidMediaCreative': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleCreatePaidMediaCreative(recruiterId, msg.data, component);
+        break;
+      }
+      case 'launchPaidMediaCampaign': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleLaunchPaidMediaCampaign(recruiterId, msg.data, component);
+        break;
+      }
+      case 'getPaidMediaInsights': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleGetPaidMediaInsights(recruiterId, msg.data, component);
+        break;
+      }
+      case 'createPaidMediaReportJob': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleCreatePaidMediaReportJob(recruiterId, msg.data, component);
+        break;
+      }
+      case 'getPaidMediaReportStatus': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleGetPaidMediaReportStatus(recruiterId, msg.data, component);
+        break;
+      }
+      case 'downloadPaidMediaReport': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleDownloadPaidMediaReport(recruiterId, msg.data, component);
+        break;
+      }
+      case 'getPaidMediaOptimizationSuggestions': {
+        const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id || 'recruiter';
+        await handleGetPaidMediaOptimizationSuggestions(recruiterId, msg.data, component);
+        break;
+      }
+
+      // ========== Automation Handlers (new views) ==========
+      case 'fetchAutomations': {
+        try {
+          const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+          const rules = await getAutomationRules(recruiterId);
+          sendToHtml(component, 'automationsLoaded', { rules });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'toggleAutomation': {
+        try {
+          const rule = await toggleRuleStatus(msg.data?.ruleId, msg.data?.enable);
+          sendToHtml(component, 'automationToggled', { rule });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Compliance Handlers ==========
+      case 'fetchCompliance': {
+        try {
+          const alerts = await getFMCSAAlerts(msg.data?.options || {});
+          sendToHtml(component, 'complianceLoaded', { alerts });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Document Collection Handlers ==========
+      case 'fetchDriverDocs': {
+        try {
+          const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+          const docs = await requestDocuments(recruiterId, msg.data?.params || {});
+          sendToHtml(component, 'driverDocsLoaded', { docs });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Recruiter Onboarding Handlers ==========
+      case 'fetchBgChecks': {
+        try {
+          const raw = await getBGCStatus(msg.data?.checkId || null);
+          const checks = Array.isArray(raw) ? raw : (raw?.items || raw?.checks || []);
+          const stats = {
+            total:   checks.length,
+            pending: checks.filter(c => c.status === 'pending').length,
+            cleared: checks.filter(c => c.status === 'cleared').length,
+            flagged: checks.filter(c => c.status === 'flagged').length
+          };
+          sendToHtml(component, 'bgChecksLoaded', { checks, stats });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'fetchDrugTests': {
+        try {
+          const raw = await getDrugTestStatus(msg.data?.testId || null);
+          const tests = Array.isArray(raw) ? raw : (raw?.items || raw?.tests || []);
+          const stats = {
+            total:   tests.length,
+            pending: tests.filter(t => t.status === 'pending').length,
+            passed:  tests.filter(t => t.status === 'passed').length,
+            failed:  tests.filter(t => t.status === 'failed').length
+          };
+          sendToHtml(component, 'drugTestsLoaded', { tests, stats });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'fetchOrientations': {
+        try {
+          const slots = await getOrientationSlots(msg.data?.carrierId || currentCarrierDOT, msg.data?.filters || {});
+          sendToHtml(component, 'orientationsLoaded', { slots });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Cost Analysis Handlers ==========
+      case 'fetchCostAnalysis': {
+        try {
+          const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+          const analysis = await calculateCostPerHire(recruiterId, currentCarrierDOT);
+          sendToHtml(component, 'costAnalysisLoaded', {
+            avgCost:    analysis?.avgCostPerHire  || analysis?.avgCost    || 0,
+            totalSpend: analysis?.totalSpend      || 0,
+            hires:      analysis?.totalHires      || analysis?.hires      || 0,
+            channels:   analysis?.channels        || []
+          });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Email Campaign Handlers ==========
+      case 'fetchEmailCampaigns': {
+        try {
+          const campaigns = await createEmailCampaign(currentCarrierDOT, msg.data?.campaignData || {});
+          sendToHtml(component, 'emailCampaignsLoaded', { campaigns });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'sendEmailCampaign': {
+        try {
+          const result = await sendEmailCampaign(msg.data?.campaignId);
+          sendToHtml(component, 'emailCampaignSent', { result });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Gamification Handlers ==========
+      case 'fetchGamification': {
+        try {
+          const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+          const progression = await initializeProgression(recruiterId, 'recruiter');
+          sendToHtml(component, 'gamificationLoaded', { progression });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Job Board Handlers ==========
+      case 'fetchJobBoards': {
+        try {
+          const postings = await getJobPostings(currentCarrierDOT, msg.data?.filters || {});
+          sendToHtml(component, 'jobBoardsLoaded', { postings });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'connectJobBoard': {
+        try {
+          const result = await connectJobBoard(currentCarrierDOT, msg.data?.board, msg.data?.credentials || {});
+          sendToHtml(component, 'jobBoardConnected', { result });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== SMS Campaign Handlers ==========
+      case 'fetchSmsCampaigns': {
+        try {
+          const campaigns = await createSMSCampaign(currentCarrierDOT, msg.data?.campaignData || {});
+          sendToHtml(component, 'smsCampaignsLoaded', { campaigns });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'sendSmsCampaign': {
+        try {
+          const result = await sendSMSCampaign(msg.data?.campaignId);
+          sendToHtml(component, 'smsCampaignSent', { result });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+
+      // ========== Social Posting Handlers ==========
+      case 'fetchSocialPosts': {
+        try {
+          const [postsResult, accountsResult] = await Promise.all([
+            getSocialPosts(currentCarrierDOT, msg.data?.filters || {}),
+            getConnectedAccounts(currentCarrierDOT)
+          ]);
+          const posts = postsResult.posts || [];
+          const connectedList = accountsResult.accounts || [];
+          const accounts = {
+            facebook: connectedList.some(a => a.platform === 'facebook'),
+            linkedin: connectedList.some(a => a.platform === 'linkedin'),
+            instagram: connectedList.some(a => a.platform === 'instagram')
+          };
+          const published = posts.filter(p => p.status === 'published');
+          const stats = {
+            published: published.length,
+            impressions: published.reduce((sum, p) => sum + (p.engagement?.impressions || 0), 0),
+            engagement: published.reduce((sum, p) => sum + (p.engagement?.likes || 0) + (p.engagement?.comments || 0) + (p.engagement?.shares || 0), 0),
+            accounts: connectedList.length
+          };
+          sendToHtml(component, 'socialPostsLoaded', { posts, accounts, stats });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'connectSocialAccount': {
+        try {
+          const platform = msg.data?.platform;
+          const result = await connectSocialAccount(currentCarrierDOT, platform, msg.data?.authCode);
+          sendToHtml(component, 'socialAccountConnected', { platform, success: result.success, error: result.error });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'publishSocialPost': {
+        try {
+          // Create draft first, then publish immediately
+          const createResult = await createSocialPost(currentCarrierDOT, {
+            content: msg.data?.content,
+            platforms: msg.data?.platforms || []
+          });
+          if (!createResult.success) {
+            sendToHtml(component, 'error', { message: createResult.error });
+            break;
+          }
+          const publishResult = await publishSocialPost(createResult.postId);
+          sendToHtml(component, 'socialPostPublished', { success: publishResult.success, error: publishResult.error });
+        } catch (err) {
+          sendToHtml(component, 'error', { message: err.message });
+        }
+        break;
+      }
+      case 'generateSocialCopy': {
+        try {
+          const profile = currentRecruiterProfile || {};
+          const result = await generatePlatformCopy({
+            brief: msg.data?.brief || '',
+            platform: msg.data?.platform || 'facebook',
+            companyName: profile.company_name || profile.agency_name || '',
+            jobTitle: msg.data?.jobTitle || 'CDL-A Driver',
+            highlights: msg.data?.highlights || '',
+            carrierDot: currentCarrierDOT
+          });
+          sendToHtml(component, 'socialCopyGenerated', result);
+        } catch (err) {
+          sendToHtml(component, 'socialCopyGenerated', { success: false, error: err.message });
+        }
+        break;
+      }
+      case 'generateSocialImage': {
+        try {
+          const result = await generateSocialImage({
+            prompt: msg.data?.prompt || '',
+            aspectRatio: msg.data?.aspectRatio || '1:1',
+            style: msg.data?.style || 'professional photo',
+            platform: msg.data?.platform || 'facebook',
+            carrierDot: currentCarrierDOT
+          });
+          sendToHtml(component, 'socialImageGenerated', result);
+        } catch (err) {
+          sendToHtml(component, 'socialImageGenerated', { success: false, error: err.message });
+        }
+        break;
+      }
+      case 'saveSocialCredentials': {
+        try {
+          const result = await saveCredentials(msg.data?.platform, msg.data?.credentials || {});
+          sendToHtml(component, 'socialCredentialsSaved', {
+            platform: msg.data?.platform,
+            success: result.success,
+            error: result.error
+          });
+        } catch (err) {
+          sendToHtml(component, 'socialCredentialsSaved', { platform: msg.data?.platform, success: false, error: err.message });
+        }
+        break;
+      }
+      case 'testSocialConnection': {
+        try {
+          const platform = msg.data?.platform;
+          const result = await validateToken(platform, '');
+          sendToHtml(component, 'socialConnectionTested', {
+            platform,
+            success: result.success || result.valid,
+            error: result.error
+          });
+        } catch (err) {
+          sendToHtml(component, 'socialConnectionTested', { platform: msg.data?.platform, success: false, error: err.message });
+        }
+        break;
+      }
+      case 'getSocialCredentialStatus': {
+        try {
+          const [fbStatus, liStatus] = await Promise.all([
+            getCredentialStatus('facebook'),
+            getCredentialStatus('linkedin')
+          ]);
+          sendToHtml(component, 'socialCredentialStatusLoaded', {
+            status: {
+              facebook: fbStatus.status || 'unconfigured',
+              instagram: fbStatus.status || 'unconfigured',
+              linkedin: liStatus.status || 'unconfigured'
+            }
+          });
+        } catch (err) {
+          sendToHtml(component, 'socialCredentialStatusLoaded', {
+            status: { facebook: 'unconfigured', instagram: 'unconfigured', linkedin: 'unconfigured' }
+          });
+        }
+        break;
+      }
+
+      // ========== AI Match Handlers ==========
+      case 'getAIMatches': {
+        if (!currentCarrierDOT) {
+          sendToHtml(component, 'aiMatchesLoaded', { matches: [] });
+          break;
+        }
+        try {
+          const result = await getAIMatchCandidates(currentCarrierDOT, { limit: 3, offset: 0 });
+          sendToHtml(component, 'aiMatchesLoaded', { matches: result.matches || [] });
+        } catch (e) {
+          console.error('getAIMatches error:', e);
+          sendToHtml(component, 'aiMatchesLoaded', { matches: [] });
+        }
+        break;
+      }
+
+      case 'regenerateAIMatch': {
+        // Fetch a fresh pool and return the next candidate not in the current top-3
+        if (!currentCarrierDOT) break;
+        try {
+          const result = await getAIMatchCandidates(currentCarrierDOT, { limit: 1, offset: 3 });
+          const replacement = result.matches?.[0];
+          if (replacement) {
+            // Preserve the original card ID so the view can swap it in-place
+            replacement.id = msg.driverId || replacement.id;
+            sendToHtml(component, 'aiMatchRegenerated', replacement);
+          }
+        } catch (e) {
+          console.error('regenerateAIMatch error:', e);
+        }
+        break;
+      }
+
+      case 'regenerateAIMatches': {
+        // Bulk regen — fetch a fresh set starting at offset 3
+        if (!currentCarrierDOT) {
+          sendToHtml(component, 'aiMatchesLoaded', { matches: [] });
+          break;
+        }
+        try {
+          const result = await getAIMatchCandidates(currentCarrierDOT, { limit: 3, offset: 3 });
+          sendToHtml(component, 'aiMatchesLoaded', { matches: result.matches || [] });
+        } catch (e) {
+          console.error('regenerateAIMatches error:', e);
+          sendToHtml(component, 'aiMatchesLoaded', { matches: [] });
+        }
+        break;
+      }
+
+      // ========== Alert Handlers ==========
+      case 'getAlerts': {
+        if (!currentCarrierDOT) {
+          sendToHtml(component, 'alertsLoaded', { alerts: [] });
+          break;
+        }
+        try {
+          const result = await getRecruiterAlerts(currentCarrierDOT);
+          sendToHtml(component, 'alertsLoaded', { alerts: result.alerts || [] });
+        } catch (e) {
+          console.error('getAlerts error:', e);
+          sendToHtml(component, 'alertsLoaded', { alerts: [] });
+        }
+        break;
+      }
+
+      case 'markAlertRead': {
+        sendToHtml(component, 'alertMarkedRead', { alertId: msg.alertId });
+        break;
+      }
+
+      case 'markAllAlertsRead': {
+        sendToHtml(component, 'allAlertsMarkedRead', {});
+        break;
+      }
+
+      case 'updateAlertPrefs': {
+        // Alert prefs stored client-side in localStorage; this hook for future Airtable persistence
+        sendToHtml(component, 'actionSuccess', { message: 'Alert preferences saved' });
+        break;
+      }
+
+      // ── Wave 3: Intelligence Layer ──
+      case 'refreshNBAChips':
+        await handleRefreshNBAChips(msg.data, component);
+        break;
+      case 'getMarketSignals':
+        await handleGetMarketSignals(component);
+        break;
+
+      // ── Wave 4: Proactive AI + Memory ──
+      case 'getAgentMemory': {
+        await handleGetAgentMemory(msg.data, component);
+        break;
+      }
+
+      case 'getProactiveInsights': {
+        await handleGetProactiveInsights(msg.data, component);
+        break;
+      }
+
+      case 'saveAccountSettings':
+        await handleSaveAccountSettings(msg.data, component);
+        break;
+
+      default:
+        console.warn('⚠️ Unhandled action:', action);
+    }
+  } catch (error) {
+    console.error('Error handling message:', error);
+    sendToHtml(component, 'error', { message: error.message });
+  }
+}
+
+// ============================================================================
+// ACTION HANDLERS
+// ============================================================================
+
+async function handleDashboardReady(component) {
+  console.log('Dashboard ready, initializing...');
+
+  // Get recruiter profile and carriers
+  const result = await getOrCreateRecruiterProfile();
+  console.log('Profile result:', result);
+
+  if (!result.success) {
+    console.error('Failed to get profile:', result.error);
+    sendToHtml(component, 'error', { message: result.error });
+    return;
+  }
+
+  // Cache profile data
+  cachedRecruiterProfile = result.profile;
+  cachedCarriers = result.carriers || [];
+
+  // Set current carrier to first one (if any)
+  if (cachedCarriers.length > 0) {
+    currentCarrierDOT = result.defaultCarrierDOT || cachedCarriers[0].carrier_dot;
+  }
+
+  console.log(`Recruiter authenticated with ${cachedCarriers.length} carriers`);
+
+  // Send ready message to HTML
+  sendToHtml(component, 'recruiterReady', {
+    recruiterProfile: result.profile,
+    carriers: cachedCarriers,
+    defaultCarrier: result.defaultCarrier,
+    currentCarrierDOT: currentCarrierDOT,
+    needsSetup: result.needsSetup,
+    memberId: wixUsers?.currentUser?.id || null
+  });
+}
+
+async function handleValidateCarrier(data, component) {
+  console.log('Validating carrier:', data.carrierDOT);
+
+  const result = await validateCarrierDOT(data.carrierDOT);
+  sendToHtml(component, 'carrierValidated', result);
+}
+
+async function handleAddCarrier(data, component) {
+  console.log('Adding carrier:', data.carrierDOT);
+
+  const result = await addCarrier(data.carrierDOT);
+
+  if (result.success) {
+    // Add to cached carriers
+    cachedCarriers.unshift({
+      carrier_dot: data.carrierDOT,
+      carrier_name: result.carrierInfo?.legal_name || result.carrierInfo?.title || 'Unknown',
+      added_date: new Date()
+    });
+
+    // Set as current if first carrier
+    if (!currentCarrierDOT) {
+      currentCarrierDOT = data.carrierDOT;
+    }
+  }
+
+  sendToHtml(component, 'carrierAdded', {
+    ...result,
+    carriers: cachedCarriers,
+    currentCarrierDOT: currentCarrierDOT
+  });
+}
+
+async function handleRemoveCarrier(data, component) {
+  console.log('Removing carrier:', data.carrierDOT);
+
+  const result = await removeCarrier(data.carrierDOT);
+
+  if (result.success) {
+    // Remove from cached carriers
+    cachedCarriers = cachedCarriers.filter(c => c.carrier_dot !== data.carrierDOT);
+
+    // If current carrier was removed, switch to first available
+    if (currentCarrierDOT === data.carrierDOT) {
+      currentCarrierDOT = cachedCarriers.length > 0 ? cachedCarriers[0].carrier_dot : null;
+    }
+  }
+
+  sendToHtml(component, 'carrierRemoved', {
+    ...result,
+    carriers: cachedCarriers,
+    currentCarrierDOT: currentCarrierDOT
+  });
+}
+
+async function handleSwitchCarrier(data, component) {
+  console.log('Switching to carrier:', data.carrierDOT);
+
+  currentCarrierDOT = data.carrierDOT;
+
+  // Get carrier info
+  const carrier = cachedCarriers.find(c => c.carrier_dot === data.carrierDOT);
+
+  sendToHtml(component, 'carrierSwitched', {
+    success: true,
+    currentCarrierDOT: currentCarrierDOT,
+    carrier: carrier
+  });
+
+  // Auto-load pipeline for new carrier
+  await handleGetPipeline({}, component);
+}
+
+async function handleGetCarriers(component) {
+  console.log('Getting carriers list');
+
+  const result = await getRecruiterCarriers();
+
+  if (result.success) {
+    cachedCarriers = result.carriers;
+  }
+
+  sendToHtml(component, 'carriersLoaded', {
+    ...result,
+    currentCarrierDOT: currentCarrierDOT
+  });
+}
+
+async function handleGetPipeline(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'pipelineLoaded', {
+      success: true,
+      candidates: [],
+      groupedByStatus: {},
+      totalCount: 0,
+      noCarrier: true
+    });
+    return;
+  }
+
+  console.log('Loading pipeline for carrier:', currentCarrierDOT);
+
+  const result = await getPipelineCandidates(currentCarrierDOT, data?.filters || {});
+  sendToHtml(component, 'pipelineLoaded', result);
+}
+
+async function handleUpdateStatus(data, component) {
+  const id = data.interestId || data.candidateId;
+  const status = data.newStatus || data.status;
+  console.log('Updating status:', id, '->', status);
+
+  const result = await updateCandidateStatus(id, status, data.notes || '');
+  sendToHtml(component, 'statusUpdated', result);
+}
+
+async function handleGetStats(component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'statsLoaded', { success: true, stats: {} });
+    return;
+  }
+
+  console.log('Loading stats for carrier:', currentCarrierDOT);
+
+  const result = await getPipelineStats(currentCarrierDOT);
+  sendToHtml(component, 'statsLoaded', result);
+}
+
+async function handleGetDetails(data, component) {
+  const id = data.interestId || data.candidateId;
+  console.log('Loading candidate details:', id);
+
+  const result = await getCandidateDetails(id);
+  sendToHtml(component, 'candidateDetails', result);
+}
+
+async function handleAddNotes(data, component) {
+  const id = data.interestId || data.candidateId;
+  const notes = data.notes || data.note;
+  console.log('Adding notes to:', id);
+
+  const result = await addRecruiterNotes(id, notes);
+  sendToHtml(component, 'notesAdded', result);
+}
+
+async function handleSendMessage(data, component) {
+  try {
+    const appId = data.applicationId || data.conversationId;
+    const content = data.content || data.message;
+    let receiverId = data.receiverId;
+
+    // Look up receiver (driver_id) from the interest record if not provided
+    if (!receiverId && appId) {
+      const details = await getCandidateDetails(appId);
+      const record = (details && details.candidate) || details || {};
+      receiverId = record.driver_id || record.user_id;
+    }
+
+    const result = await sendMessage(appId, content, receiverId, 'recruiter');
+    if (result.success) {
+      sendToHtml(component, 'messageSent', { success: true, message: result.message });
+    } else {
+      sendToHtml(component, 'error', { message: result.error });
+    }
+  } catch (error) {
+    sendToHtml(component, 'error', { message: error.message });
+  }
+}
+
+async function handleGetConversation(data, component) {
+  try {
+    const appId = data.applicationId || data.conversationId;
+    const result = await getConversation(appId);
+    if (result.success) {
+      sendToHtml(component, 'conversationData', { applicationId: appId, messages: result.messages });
+    } else {
+      sendToHtml(component, 'error', { message: result.error });
+    }
+  } catch (error) {
+    sendToHtml(component, 'error', { message: error.message });
+  }
+}
+
+async function handleMarkAsRead(data, component) {
+  try {
+    await markAsRead(data.applicationId || data.conversationId);
+  } catch (error) {
+    console.error('Error marking as read:', error);
+  }
+}
+
+async function handleRequestAvailability(data, component) {
+  const result = await requestAvailability(data.applicationId);
+  if (!result.success) {
+    sendToHtml(component, 'error', { message: result.error });
+  } else {
+    // Refresh conversation to show system message
+    await handleGetConversation(data, component);
+  }
+}
+
+async function handleConfirmTimeSlot(data, component) {
+  const result = await confirmInterviewSlot(data.applicationId, data.slotIndex);
+  if (!result.success) {
+    sendToHtml(component, 'error', { message: result.error });
+  } else {
+    // Refresh conversation to show system message
+    await handleGetConversation(data, component);
+  }
+}
+
+async function handleGetNewMessages(data, component) {
+  if (!data || !data.applicationId) {
+    return;
+  }
+
+  try {
+    const { getNewMessages } = await import('backend/messagingRealtime');
+    const result = await getNewMessages(data.applicationId, data.sinceTimestamp);
+
+    sendToHtml(component, 'newMessagesData', {
+      messages: result.messages || [],
+      hasNew: result.hasNew || false,
+      latestTimestamp: result.latestTimestamp,
+      applicationId: data.applicationId
+    });
+  } catch (error) {
+    console.warn('Could not fetch new messages:', error.message);
+    sendToHtml(component, 'newMessagesData', {
+      messages: [],
+      hasNew: false,
+      applicationId: data.applicationId
+    });
+  }
+}
+
+async function handleGetUnreadCount(component) {
+  try {
+    const result = await getUnreadCount();
+    sendToHtml(component, 'unreadCountData', {
+      count: result.count || 0,
+      byApplication: {}
+    });
+  } catch (error) {
+    console.warn('Could not fetch unread count:', error.message);
+    sendToHtml(component, 'unreadCountData', { count: 0, byApplication: {} });
+  }
+}
+
+async function handleGetConversations(component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'newMessagesData', { conversations: [] });
+    return;
+  }
+  try {
+    const result = await getRecruiterConversations(currentCarrierDOT);
+    sendToHtml(component, 'newMessagesData', { conversations: result.conversations || [] });
+  } catch (error) {
+    console.warn('Could not fetch conversations:', error.message);
+    sendToHtml(component, 'newMessagesData', { conversations: [] });
+  }
+}
+
+// ============================================================================
+// DRIVER SEARCH HANDLERS
+// ============================================================================
+
+async function handleDriverSearchReady(component) {
+  console.log('Driver Search ready, initializing...');
+
+  // Check authentication
+  if (!wixUsers || !wixUsers.currentUser.loggedIn) {
+    sendToHtml(component, 'error', { message: 'Not authenticated' });
+    return;
+  }
+
+  // If profile not loaded yet, load it
+  if (!cachedRecruiterProfile) {
+    const result = await getOrCreateRecruiterProfile();
+    if (result.success) {
+      cachedRecruiterProfile = result.profile;
+      cachedCarriers = result.carriers || [];
+      if (cachedCarriers.length > 0 && !currentCarrierDOT) {
+        currentCarrierDOT = result.defaultCarrierDOT || cachedCarriers[0].carrier_dot;
+      }
+    }
+  }
+
+  // Get initial quota status
+  let quotaStatus = { tier: 'free', used: 0, limit: 5, remaining: 5 };
+  if (currentCarrierDOT) {
+    try {
+      quotaStatus = await getQuotaStatus(currentCarrierDOT);
+    } catch (e) {
+      console.warn('Could not get quota status:', e.message);
+    }
+  }
+
+  // Send initialization data
+  sendToHtml(component, 'driverSearchInit', {
+    success: true,
+    carriers: cachedCarriers,
+    currentCarrierDOT: currentCarrierDOT,
+    quotaStatus: quotaStatus,
+    recruiterProfile: cachedRecruiterProfile
+  });
+
+  // Also send profile for sidebar
+  if (cachedRecruiterProfile) {
+    sendToHtml(component, 'recruiterProfile', {
+      name: cachedRecruiterProfile.display_name || cachedRecruiterProfile.first_name || 'Recruiter',
+      email: cachedRecruiterProfile.email || ''
+    });
+  }
+}
+
+// Maps HTML filter display labels → endorsement codes stored by parseEndorsements
+const ENDORSEMENT_CODE_MAP = {
+  'HazMat': 'H', 'Tanker': 'T', 'Doubles/Triples': 'T', 'Passenger': 'P', 'School Bus': 'S'
+};
+
+// Normalize raw driverProfiles record for HTML renderers
+function normalizeDriverForHtml(d, matchScore, rationale, isMutualMatch) {
+  const name = d.display_name ||
+    [d.first_name, d.last_name].filter(Boolean).join(' ') ||
+    d.full_name || d.name || '';
+  const rawEndo = d.endorsements || [];
+  const endorsements = Array.isArray(rawEndo)
+    ? rawEndo
+    : (typeof rawEndo === 'string' && rawEndo ? rawEndo.split(',').map(e => e.trim()) : []);
+  return {
+    ...d,
+    name,
+    cdlClass: d.cdl_class || d.cdlClass || d.cdl_type || '',
+    endorsements,
+    matchScore: matchScore ?? d.matchScore ?? d.match_score ?? 0,
+    rationale: rationale ?? d.rationale,
+    isMutualMatch: isMutualMatch ?? d.isMutualMatch ?? false
+  };
+}
+
+async function handleSearchDrivers(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'searchDriversResult', {
+      success: false,
+      error: 'No carrier selected. Please add a carrier first.'
+    });
+    return;
+  }
+
+  // Normalize HTML filter keys → backend filter keys
+  if (data) {
+    // cdlClasses → cdl_types
+    if (Array.isArray(data.cdlClasses) && data.cdlClasses.length > 0) {
+      data.cdl_types = data.cdlClasses;
+      delete data.cdlClasses;
+    }
+    // minExperience → min_experience
+    if (data.minExperience != null) {
+      data.min_experience = Number(data.minExperience);
+      delete data.minExperience;
+    }
+    // endorsement display labels → stored codes
+    if (Array.isArray(data.endorsements) && data.endorsements.length > 0) {
+      data.endorsements = data.endorsements.map(e => ENDORSEMENT_CODE_MAP[e] || e);
+    }
+  }
+
+  console.log('Searching drivers for carrier:', currentCarrierDOT);
+
+  // ── Async polling path (feature-flagged) ──
+  if (FEATURE_FLAGS.asyncPollingEnabled) {
+    try {
+      const recruiterId = cachedRecruiterProfile?._id || 'unknown';
+      const result = await initiateAsyncDriverSearch(currentCarrierDOT, data, { recruiterId });
+
+      if (result.success) {
+        sendToHtml(component, 'searchJobStarted', {
+          jobId: result.jobId,
+          carrierDot: currentCarrierDOT
+        });
+      } else {
+        // Fallback to sync if async init fails
+        console.warn('Async search init failed, falling back to sync:', result.error);
+        await _handleSyncSearch(data, component);
+      }
+    } catch (error) {
+      console.error('Async search init error, falling back to sync:', error);
+      await _handleSyncSearch(data, component);
+    }
+    return;
+  }
+
+  // ── Sync path (default) ──
+  await _handleSyncSearch(data, component);
+}
+
+async function _handleSyncSearch(data, component) {
+  try {
+    const result = await findMatchingDrivers(currentCarrierDOT, data, { includeQuotaStatus: true });
+
+    // Get quota status
+    const quotaStatus = await getQuotaStatus(currentCarrierDOT);
+
+    // matches is [{ driver, score, rationale, isMutualMatch }] — flatten + normalize for HTML renderer
+    const flatDrivers = result.success
+      ? (result.matches || []).map(m =>
+          normalizeDriverForHtml(m.driver || m, m.score, m.rationale, m.isMutualMatch))
+      : [];
+
+    sendToHtml(component, 'searchDriversResult', {
+      success: result.success,
+      drivers: flatDrivers,
+      total: result.success ? (result.pagination?.totalCount || 0) : 0,
+      pagination: result.pagination,
+      quotaStatus: quotaStatus,
+      error: result.error
+    });
+  } catch (error) {
+    console.error('Search drivers error:', error);
+    sendToHtml(component, 'searchDriversResult', {
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+async function handleCheckSearchStatus(data, component) {
+  if (!data || !data.jobId) {
+    sendToHtml(component, 'searchStatusUpdate', {
+      status: 'error',
+      error: 'Missing jobId'
+    });
+    return;
+  }
+
+  try {
+    const result = await checkAsyncSearchStatus(data.jobId);
+
+    if (result.status === 'complete') {
+      // Enrich with quota status
+      const quotaStatus = await getQuotaStatus(currentCarrierDOT);
+      sendToHtml(component, 'searchStatusUpdate', {
+        status: 'complete',
+        results: result.results,
+        quotaStatus: quotaStatus
+      });
+    } else {
+      sendToHtml(component, 'searchStatusUpdate', {
+        status: result.status,
+        error: result.error
+      });
+    }
+  } catch (error) {
+    console.error('Check search status error:', error);
+    sendToHtml(component, 'searchStatusUpdate', {
+      status: 'error',
+      error: error.message
+    });
+  }
+}
+
+async function handleViewDriverProfile(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'viewDriverProfileResult', {
+      success: false,
+      error: 'No carrier selected'
+    });
+    return;
+  }
+
+  if (!data || !data.driverId) {
+    sendToHtml(component, 'viewDriverProfileResult', {
+      success: false,
+      error: 'Driver ID required'
+    });
+    return;
+  }
+
+  console.log('Viewing driver profile:', data.driverId);
+
+  try {
+    const result = await getDriverProfile(currentCarrierDOT, data.driverId, { recordView: true });
+
+    // Get updated quota status
+    const quotaStatus = await getQuotaStatus(currentCarrierDOT);
+
+    if (result.success) {
+      sendToHtml(component, 'viewDriverProfileResult', {
+        success: true,
+        driver: normalizeDriverForHtml(result.driver),
+        quota: result.quota,
+        quotaStatus: quotaStatus
+      });
+    } else if (result.error === 'QUOTA_EXCEEDED') {
+      sendToHtml(component, 'viewDriverProfileResult', {
+        success: false,
+        quotaExceeded: true,
+        quotaStatus: quotaStatus,
+        error: 'Monthly profile view quota exceeded'
+      });
+    } else {
+      sendToHtml(component, 'viewDriverProfileResult', {
+        success: false,
+        error: result.error,
+        quotaStatus: quotaStatus
+      });
+    }
+  } catch (error) {
+    console.error('View profile error:', error);
+    sendToHtml(component, 'viewDriverProfileResult', {
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+async function handleSaveDriver(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'saveDriverResult', {
+      success: false,
+      error: 'No carrier selected'
+    });
+    return;
+  }
+
+  if (!data || !data.driverId) {
+    sendToHtml(component, 'saveDriverResult', {
+      success: false,
+      error: 'Driver ID required'
+    });
+    return;
+  }
+
+  console.log('Saving driver to pipeline:', data.driverId);
+
+  try {
+    const result = await saveToRecruiterPipeline(
+      currentCarrierDOT,
+      data.driverId,
+      data.matchScore || 0,
+      data.notes || ''
+    );
+
+    sendToHtml(component, 'saveDriverResult', {
+      success: result.success,
+      interestId: result.interestId,
+      alreadyExists: result.alreadyExists,
+      error: result.error
+    });
+  } catch (error) {
+    console.error('Save driver error:', error);
+    sendToHtml(component, 'saveDriverResult', {
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+async function handleContactDriver(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'contactDriverResult', {
+      success: false,
+      error: 'No carrier selected'
+    });
+    return;
+  }
+
+  if (!data || !data.driverId || !data.message) {
+    sendToHtml(component, 'contactDriverResult', {
+      success: false,
+      error: 'Driver ID and message required'
+    });
+    return;
+  }
+
+  console.log('Sending message to driver:', data.driverId);
+
+  try {
+    const result = await sendMessageToDriver(currentCarrierDOT, data.driverId, data.message);
+
+    sendToHtml(component, 'contactDriverResult', {
+      success: result.success,
+      messageId: result.messageId,
+      error: result.error
+    });
+  } catch (error) {
+    console.error('Contact driver error:', error);
+    sendToHtml(component, 'contactDriverResult', {
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+async function handleGetQuotaStatus(component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'getQuotaStatusResult', {
+      success: true,
+      tier: 'free',
+      used: 0,
+      limit: 5,
+      remaining: 5,
+      hasQuota: true
+    });
+    return;
+  }
+
+  try {
+    const result = await getQuotaStatus(currentCarrierDOT);
+    sendToHtml(component, 'getQuotaStatusResult', result);
+  } catch (error) {
+    console.error('Get quota status error:', error);
+    sendToHtml(component, 'getQuotaStatusResult', {
+      success: false,
+      error: error.message,
+      tier: 'free',
+      used: 0,
+      limit: 5,
+      remaining: 5
+    });
+  }
+}
+
+async function handleGetWeightPreferences(component) {
+  // Get weight preferences from recruiter profile
+  const preferences = cachedRecruiterProfile?.weight_preferences || {
+    weight_qualifications: 25,
+    weight_experience: 20,
+    weight_location: 20,
+    weight_availability: 15,
+    weight_salary_fit: 10,
+    weight_engagement: 10
+  };
+
+  sendToHtml(component, 'getWeightPreferencesResult', {
+    success: true,
+    preferences: preferences
+  });
+}
+
+async function handleSaveWeightPreferences(data, component) {
+  if (!data) {
+    sendToHtml(component, 'saveWeightPreferencesResult', {
+      success: false,
+      error: 'Preferences data required'
+    });
+    return;
+  }
+
+  try {
+    // Update recruiter profile with new weight preferences
+    const result = await updateRecruiterProfile({
+      weight_preferences: {
+        weight_qualifications: data.weight_qualifications || 25,
+        weight_experience: data.weight_experience || 20,
+        weight_location: data.weight_location || 20,
+        weight_availability: data.weight_availability || 15,
+        weight_salary_fit: data.weight_salary_fit || 10,
+        weight_engagement: data.weight_engagement || 10
+      }
+    });
+
+    if (result.success && result.profile) {
+      cachedRecruiterProfile = result.profile;
+    }
+
+    sendToHtml(component, 'saveWeightPreferencesResult', {
+      success: result.success,
+      error: result.error
+    });
+  } catch (error) {
+    console.error('Save weight preferences error:', error);
+    sendToHtml(component, 'saveWeightPreferencesResult', {
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+// ============================================================================
+// Wave 3 — Intelligence Layer Handlers
+// ============================================================================
+
+async function handleRefreshNBAChips(data, component) {
+  try {
+    const dot = currentCarrierDOT;
+    const chips = [];
+
+    // Parallel fetch from 3 services
+    const [atRisk, onboarding, alerts] = await Promise.all([
+      dot ? getAtRiskCount(dot).catch(() => ({ count: 0 })) : { count: 0 },
+      dot ? getOnboardingDashboard(dot, null, 1).catch(() => ({ result: {} })) : { result: {} },
+      dot ? getRecruiterAlerts(dot).catch(() => ({ alerts: [] })) : { alerts: [] }
+    ]);
+
+    const atRiskCount = atRisk.count || 0;
+    const pendingCount = (onboarding.result || {}).pending || 0;
+    const unreadAlerts = (alerts.alerts || []).filter(a => !a.read).length;
+    const overdueCount = (onboarding.result || {}).overdue || 0;
+
+    if (atRiskCount > 0) {
+      chips.push({
+        id: 'at-risk',
+        label: 'At-Risk',
+        icon: 'warning',
+        view: 'retention',
+        count: atRiskCount,
+        priority: atRiskCount >= 3 ? 'high' : 'normal'
+      });
+    }
+
+    if (pendingCount > 0) {
+      chips.push({
+        id: 'pending-docs',
+        label: 'Pending Docs',
+        icon: 'description',
+        view: 'onboard',
+        count: pendingCount,
+        priority: overdueCount > 0 ? 'high' : 'normal'
+      });
+    }
+
+    if (unreadAlerts > 0) {
+      chips.push({
+        id: 'alerts',
+        label: 'Alerts',
+        icon: 'notifications_active',
+        view: 'alerts',
+        count: unreadAlerts,
+        priority: 'normal'
+      });
+    }
+
+    sendToHtml(component, 'nbaChipsData', { chips });
+  } catch (err) {
+    console.error('handleRefreshNBAChips error:', err);
+    sendToHtml(component, 'nbaChipsData', { chips: [] });
+  }
+}
+
+async function handleGetMarketSignals(component) {
+  try {
+    const ctx = await getMarketContext();
+    sendToHtml(component, 'marketSignalsLoaded', ctx);
+  } catch (err) {
+    console.error('handleGetMarketSignals error:', err);
+    sendToHtml(component, 'marketSignalsLoaded', {
+      success: false, condition: 'NEUTRAL', factor: 1.0
+    });
+  }
+}
+
+async function handleGetAgentMemory(data, component) {
+  try {
+    const userId = data && data.userId ? String(data.userId) : 'anonymous';
+    const result = await retrieveContext(
+      'recent recruiter activity',
+      ['conversation_memory'],
+      'recruiter',
+      { user_id: userId },
+      500
+    );
+    const chunks = (result && result.chunks) || [];
+    const summaries = chunks.map(function(c) {
+      return (c.text || '').split('\n')[0];
+    }).filter(Boolean).slice(0, 3);
+    sendToHtml(component, 'agentMemoryLoaded', { summaries, hasMemory: summaries.length > 0 });
+  } catch (err) {
+    console.error('handleGetAgentMemory error:', err);
+    sendToHtml(component, 'agentMemoryLoaded', { summaries: [], hasMemory: false });
+  }
+}
+
+async function handleGetProactiveInsights(data, component) {
+  try {
+    const userId = currentUser && currentUser.id ? currentUser.id : 'anonymous';
+    const dot = currentCarrierDOT || null;
+    const context = Object.assign({}, data && data.context || {}, {
+      recruiterDot: dot,
+      role: 'recruiter',
+      trigger: '__proactive__'
+    });
+    const PROACTIVE_PROMPT = 'Surface 2-3 brief insight bullets for this recruiter based on their current data. Each bullet should be 1 short sentence starting with an emoji. Only include actionable items. Reply with just the bullets, no intro text.';
+    const response = await handleAgentTurn('recruiter', userId, PROACTIVE_PROMPT, context);
+    const text = (response && (response.text || response.response || response.content)) || '';
+    const insights = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; }).slice(0, 3);
+    sendToHtml(component, 'proactiveInsightsLoaded', { insights: insights, generatedAt: new Date().toISOString().slice(0, 10) });
+  } catch (err) {
+    console.error('handleGetProactiveInsights error:', err);
+    sendToHtml(component, 'proactiveInsightsLoaded', { insights: [], generatedAt: null });
+  }
+}
+
+async function handleSaveAccountSettings(data, component) {
+  if (!data || !data.account) {
+    sendToHtml(component, 'accountSettingsError', { message: 'Account data required' });
+    return;
+  }
+
+  try {
+    const { account } = data;
+    const result = await updateRecruiterProfile({
+      displayName:   account.displayName,
+      email:         account.email,
+      phone:         account.phone,
+      agencyName:    account.agencyName,
+      isIndependent: account.isIndependent
+    });
+
+    if (result.success && result.profile) {
+      cachedRecruiterProfile = result.profile;
+    }
+
+    sendToHtml(component, result.success ? 'accountSettingsSaved' : 'accountSettingsError', {
+      profile: result.profile,
+      message: result.error
+    });
+  } catch (error) {
+    console.error('Save account settings error:', error);
+    sendToHtml(component, 'accountSettingsError', { message: error.message });
+  }
+}
+
+function handleNavigateTo(data) {
+  if (!data || !data.page) return;
+
+  console.log('Navigating to:', data.page);
+
+  // Map page names to Wix routes
+  const pageRoutes = {
+    'dashboard': '/recruiter-console',
+    'driver-search': '/recruiter-driver-search',
+    'pipeline': '/recruiter-console',
+    'retention': '/carrier-retention',
+    'settings': '/login',
+    'compliance-calendar': '/carrier-compliance-calendar',
+    'document-vault': '/carrier-document-vault',
+    'dq-tracker': '/carrier-dq-tracker',
+    'csa-monitor': '/carrier-csa-monitor',
+    'incident-reporting': '/carrier-incident-reporting',
+    'carrier-welcome': '/carrier-welcome'
+  };
+
+  const route = pageRoutes[data.page] || data.page;
+  wixLocation.to(route);
+}
+
+async function handleGetCarrierPreferences(component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'carrierPreferencesLoaded', { success: true, preferences: null });
+    return;
+  }
+  try {
+    const result = await getCarrierPreferences(currentCarrierDOT);
+    sendToHtml(component, 'carrierPreferencesLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'carrierPreferencesLoaded', { success: false, error: error.message });
+  }
+}
+
+// ============================================================================
+// AI DRAFT HANDLER
+// ============================================================================
+
+async function handleGenerateAIDraft(data, component) {
+  try {
+    const driver = data.driver || {};
+    const mode = data.mode || 'email';
+    const isText = mode === 'text';
+
+    const rawEndo = driver.endorsements || [];
+    const endorsementsArr = Array.isArray(rawEndo)
+      ? rawEndo
+      : (typeof rawEndo === 'string' && rawEndo ? rawEndo.split(',').map(e => e.trim()) : []);
+    const equipmentArr = Array.isArray(driver.equipment) ? driver.equipment : [];
+
+    const driverSummary = [
+      driver.name ? `Name: ${driver.name}` : null,
+      driver.cdlClass ? `CDL: Class ${driver.cdlClass}` : null,
+      endorsementsArr.length ? `Endorsements: ${endorsementsArr.join(', ')}` : null,
+      (driver.years_experience || driver.experienceYears) ? `Experience: ${driver.years_experience || driver.experienceYears} years` : null,
+      driver.city ? `Location: ${driver.city}, ${driver.state}` : (driver.location ? `Location: ${driver.location}` : null),
+      driver.availability ? `Availability: ${driver.availability}` : null,
+      equipmentArr.length ? `Equipment: ${equipmentArr.join(', ')}` : null
+    ].filter(Boolean).join('\n');
+
+    const prompt = isText
+      ? `Write a short, friendly SMS recruitment text message (under 160 characters) to a truck driver. Be professional but casual. Do not include subject lines or greetings like "Dear". Just a direct, compelling message. Do not use placeholder brackets like [Company Name] — just say "we" or "our team".\n\nDriver info:\n${driverSummary}\n\nWrite ONLY the text message, nothing else.`
+      : `Write a brief, professional recruitment email to a truck driver. Keep it under 150 words. Be warm and specific to their qualifications. Do not use placeholder brackets like [Company Name] — just say "we" or "our team". Include a subject line on the first line prefixed with "Subject: ".\n\nDriver info:\n${driverSummary}\n\nWrite ONLY the email (subject line + body), nothing else.`;
+
+    const aiResult = await routeAIRequest('driver_chat', {
+      prompt,
+      maxTokens: isText ? 100 : 300,
+      temperature: 0.8
+    });
+
+    sendToHtml(component, 'generateAIDraftResult', {
+      success: true,
+      draft: aiResult.content?.trim() || '',
+      model: aiResult.model,
+      tokensUsed: aiResult.tokensUsed
+    });
+  } catch (error) {
+    console.error('AI draft generation error:', error);
+    sendToHtml(component, 'generateAIDraftResult', {
+      success: false,
+      error: error.message || 'AI generation failed'
+    });
+  }
+}
+
+// ============================================================================
+// SAVED SEARCH HANDLERS
+// ============================================================================
+
+async function handleSaveSearch(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'saveSearchResult', { success: false, error: 'No carrier selected' });
+    return;
+  }
+  try {
+    const result = await createSavedSearch(currentCarrierDOT, data);
+    sendToHtml(component, 'saveSearchResult', result);
+  } catch (error) {
+    sendToHtml(component, 'saveSearchResult', { success: false, error: error.message });
+  }
+}
+
+async function handleLoadSavedSearches(component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'savedSearchesLoaded', { success: true, searches: [] });
+    return;
+  }
+  try {
+    const result = await getSavedSearches(currentCarrierDOT);
+    sendToHtml(component, 'savedSearchesLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'savedSearchesLoaded', { success: false, error: error.message });
+  }
+}
+
+async function handleRunSavedSearch(data, component) {
+  try {
+    const result = await executeSavedSearch(data.searchId);
+    sendToHtml(component, 'savedSearchExecuted', result);
+  } catch (error) {
+    sendToHtml(component, 'savedSearchExecuted', { success: false, error: error.message });
+  }
+}
+
+async function handleDeleteSavedSearch(data, component) {
+  try {
+    const result = await deleteSavedSearch(data.searchId);
+    sendToHtml(component, 'savedSearchDeleted', { ...result, searchId: data.searchId });
+  } catch (error) {
+    sendToHtml(component, 'savedSearchDeleted', { success: false, error: error.message });
+  }
+}
+
+async function handleUpdateSavedSearch(data, component) {
+  try {
+    const result = await updateSavedSearch(data.searchId, data);
+    sendToHtml(component, 'savedSearchUpdated', result);
+  } catch (error) {
+    sendToHtml(component, 'savedSearchUpdated', { success: false, error: error.message });
+  }
+}
+
+// ============================================================================
+// CALL OUTCOME HANDLERS
+// ============================================================================
+
+async function handleLogCallOutcome(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'callOutcomeLogged', { success: false, error: 'No carrier selected' });
+    return;
+  }
+  try {
+    const result = await logCallOutcome(currentCarrierDOT, data);
+    sendToHtml(component, 'callOutcomeLogged', result);
+  } catch (error) {
+    sendToHtml(component, 'callOutcomeLogged', { success: false, error: error.message });
+  }
+}
+
+async function handleGetCallAnalytics(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'callAnalyticsLoaded', { success: true, analytics: {} });
+    return;
+  }
+  try {
+    const result = await getOutcomeAnalytics(currentCarrierDOT, data || {});
+    sendToHtml(component, 'callAnalyticsLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'callAnalyticsLoaded', { success: false, error: error.message });
+  }
+}
+
+async function handleGetRecentCalls(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'recentCallsLoaded', { success: true, outcomes: [] });
+    return;
+  }
+  try {
+    const result = await getCarrierOutcomes(currentCarrierDOT, data || {});
+    sendToHtml(component, 'recentCallsLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'recentCallsLoaded', { success: false, error: error.message });
+  }
+}
+
+async function handleGetDriverCallHistory(data, component) {
+  try {
+    const result = await getDriverOutcomes(data.driverId);
+    sendToHtml(component, 'driverCallHistoryLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'driverCallHistoryLoaded', { success: false, error: error.message });
+  }
+}
+
+// ============================================================================
+// INTERVENTION HANDLERS
+// ============================================================================
+
+async function handleGetInterventionTemplates(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'interventionTemplatesLoaded', { success: true, templatesByRiskType: {} });
+    return;
+  }
+  try {
+    const result = data && data.riskType
+      ? await getInterventionTemplates(currentCarrierDOT, data.riskType)
+      : await getAllTemplates(currentCarrierDOT);
+    sendToHtml(component, 'interventionTemplatesLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'interventionTemplatesLoaded', { success: false, error: error.message });
+  }
+}
+
+async function handleSendIntervention(data, component) {
+  try {
+    // Retention view sends { driverId, driverName } without templateId — fall back to default retention follow-up template
+    const templateId = data.templateId || 'default_retention_followup';
+    const result = await sendIntervention(templateId, data.driverId, data.overrides || { driverName: data.driverName });
+    sendToHtml(component, 'interventionSent', result);
+  } catch (error) {
+    sendToHtml(component, 'interventionSent', { success: false, error: error.message });
+  }
+}
+
+async function handleSaveTemplate(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'templateSaved', { success: false, error: 'No carrier selected' });
+    return;
+  }
+  try {
+    let result;
+    if (data.templateId) {
+      result = await updateInterventionTemplate(data.templateId, data);
+    } else {
+      result = await createTemplate(currentCarrierDOT, data);
+    }
+    sendToHtml(component, 'templateSaved', result);
+  } catch (error) {
+    sendToHtml(component, 'templateSaved', { success: false, error: error.message });
+  }
+}
+
+async function handleDeleteTemplate(data, component) {
+  try {
+    const result = await deleteTemplate(data.templateId);
+    sendToHtml(component, 'templateDeleted', { ...result, templateId: data.templateId });
+  } catch (error) {
+    sendToHtml(component, 'templateDeleted', { success: false, error: error.message });
+  }
+}
+
+async function handleLogInterventionOutcome(data, component) {
+  try {
+    const result = await logInterventionOutcome(data.interventionId, data.outcome);
+    sendToHtml(component, 'interventionOutcomeLogged', result);
+  } catch (error) {
+    sendToHtml(component, 'interventionOutcomeLogged', { success: false, error: error.message });
+  }
+}
+
+async function handleGetDriverInterventions(data, component) {
+  try {
+    const result = await getDriverInterventions(data.driverId);
+    sendToHtml(component, 'driverInterventionsLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'driverInterventionsLoaded', { success: false, error: error.message });
+  }
+}
+
+// ============================================================================
+// PIPELINE AUTOMATION HANDLERS
+// ============================================================================
+
+async function handleGetAutomationRules(component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'automationRulesLoaded', { success: true, rules: [] });
+    return;
+  }
+  try {
+    const result = await getAutomationRules(currentCarrierDOT);
+    sendToHtml(component, 'automationRulesLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'automationRulesLoaded', { success: false, error: error.message });
+  }
+}
+
+async function handleCreateAutomationRule(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'automationRuleCreated', { success: false, error: 'No carrier selected' });
+    return;
+  }
+  try {
+    const result = await createAutomationRule(currentCarrierDOT, data);
+    sendToHtml(component, 'automationRuleCreated', result);
+  } catch (error) {
+    sendToHtml(component, 'automationRuleCreated', { success: false, error: error.message });
+  }
+}
+
+async function handleUpdateAutomationRule(data, component) {
+  try {
+    const result = await updateAutomationRule(data.ruleId, data);
+    sendToHtml(component, 'automationRuleUpdated', result);
+  } catch (error) {
+    sendToHtml(component, 'automationRuleUpdated', { success: false, error: error.message });
+  }
+}
+
+async function handleDeleteAutomationRule(data, component) {
+  try {
+    const result = await deleteAutomationRule(data.ruleId);
+    sendToHtml(component, 'automationRuleDeleted', { ...result, ruleId: data.ruleId });
+  } catch (error) {
+    sendToHtml(component, 'automationRuleDeleted', { success: false, error: error.message });
+  }
+}
+
+async function handleToggleRuleStatus(data, component) {
+  try {
+    const result = await toggleRuleStatus(data.ruleId, data.isActive);
+    sendToHtml(component, 'automationRuleToggled', { ...result, ruleId: data.ruleId });
+  } catch (error) {
+    sendToHtml(component, 'automationRuleToggled', { success: false, error: error.message });
+  }
+}
+
+async function handleGetAutomationLog(component) {
+  if (!currentCarrierDOT) return;
+  const result = await getAutomationLog(currentCarrierDOT);
+  sendToHtml(component, 'automationLogLoaded', result);
+}
+
+// ============================================================================
+// SYSTEM HEALTH HANDLERS
+// ============================================================================
+
+// ============================================================================
+// RECRUITER OS HANDLERS
+// ============================================================================
+
+async function handleRecruiterOSReady(component) {
+  console.log('Recruiter OS ready, initializing...');
+
+  // Reuse existing profile/carrier init
+  const result = await getOrCreateRecruiterProfile();
+  if (!result.success) {
+    sendToHtml(component, 'error', { message: result.error });
+    return;
+  }
+
+  cachedRecruiterProfile = result.profile;
+  cachedCarriers = result.carriers || [];
+  if (cachedCarriers.length > 0) {
+    currentCarrierDOT = result.defaultCarrierDOT || cachedCarriers[0].carrier_dot;
+  }
+
+  sendToHtml(component, 'recruiterOSInit', {
+    profile: {
+      name: result.profile.name || result.profile.recruiter_name || '',
+      tier: result.profile.subscription_tier || 'Free',
+      currentCarrierDOT
+    },
+    carriers: cachedCarriers.map(c => ({
+      dot: c.carrier_dot,
+      name: c.carrier_name || c.legal_name || ''
+    })),
+    memberId: wixUsers?.currentUser?.id || null
+  });
+}
+
+async function handleGetFunnelData(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'funnelDataLoaded', { stages: [] });
+    return;
+  }
+  try {
+    const result = await getFunnelMetrics(currentCarrierDOT, data?.dateRange);
+    sendToHtml(component, 'funnelDataLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'funnelDataLoaded', { error: error.message, stages: [] });
+  }
+}
+
+async function handleGetCostData(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'costDataLoaded', {});
+    return;
+  }
+  try {
+    const result = await calculateCostPerHire(currentCarrierDOT, data?.dateRange);
+    sendToHtml(component, 'costDataLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'costDataLoaded', { error: error.message });
+  }
+}
+
+async function handleGetCompetitorData(data, component) {
+  try {
+    const region = data?.region || 'national';
+    const jobType = data?.jobType || 'CDL-A OTR';
+    const result = await getCompetitorComparison(region, jobType);
+    sendToHtml(component, 'competitorDataLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'competitorDataLoaded', { error: error.message });
+  }
+}
+
+async function handleSaveIntel(data, component) {
+  try {
+    const result = await addCompetitorIntel({ ...data, carrier_dot: currentCarrierDOT });
+    sendToHtml(component, 'intelAdded', { success: result.success, error: result.error });
+  } catch (error) {
+    sendToHtml(component, 'intelAdded', { success: false, error: error.message });
+  }
+}
+
+async function handleGetPredictionsData(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'predictionsLoaded', {});
+    return;
+  }
+  try {
+    const [forecast, risk] = await Promise.all([
+      generateHiringForecast(currentCarrierDOT, data?.monthsAhead || 3),
+      getTurnoverRiskAnalysis(currentCarrierDOT)
+    ]);
+    sendToHtml(component, 'predictionsLoaded', { forecast, risk });
+  } catch (error) {
+    sendToHtml(component, 'predictionsLoaded', { error: error.message });
+  }
+}
+
+async function handleGetWorkflows(data, component) {
+  try {
+    const filters = data?.filters || {};
+    if (currentCarrierDOT) filters.carrierId = currentCarrierDOT;
+    const result = await getActiveWorkflows(filters);
+    sendToHtml(component, 'workflowsLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'workflowsLoaded', { error: error.message, workflows: [] });
+  }
+}
+
+async function handleUpdateWorkflowStep(data, component) {
+  try {
+    const result = await updateWorkflowStatus(data.workflowId, data.status, data.metadata || {});
+    sendToHtml(component, 'workflowUpdated', result);
+  } catch (error) {
+    sendToHtml(component, 'workflowUpdated', { success: false, error: error.message });
+  }
+}
+
+async function handleGetRetentionData(data, component) {
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'retentionDataLoaded', {});
+    return;
+  }
+  try {
+    const result = await getCarrierRetentionDashboard(currentCarrierDOT);
+    sendToHtml(component, 'retentionDataLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'retentionDataLoaded', { error: error.message });
+  }
+}
+
+async function handleGetAtRiskDrivers(data, component) {
+  // At-risk drivers come from retention dashboard
+  if (!currentCarrierDOT) {
+    sendToHtml(component, 'atRiskDriversLoaded', { drivers: [] });
+    return;
+  }
+  try {
+    const result = await getCarrierRetentionDashboard(currentCarrierDOT);
+    sendToHtml(component, 'atRiskDriversLoaded', {
+      drivers: result.atRiskDrivers || result.at_risk_drivers || []
+    });
+  } catch (error) {
+    sendToHtml(component, 'atRiskDriversLoaded', { error: error.message, drivers: [] });
+  }
+}
+
+async function handleGetLeaderboardData(data, component) {
+  try {
+    const type = data?.type || 'overall';
+    const period = data?.period || 'monthly';
+    const result = await getLeaderboard(type, period);
+    sendToHtml(component, 'leaderboardLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'leaderboardLoaded', { error: error.message, entries: [] });
+  }
+}
+
+async function handleGetBadges(data, component) {
+  try {
+    const recruiterId = cachedRecruiterProfile?.recruiter_id || cachedRecruiterProfile?._id;
+    if (!recruiterId) {
+      sendToHtml(component, 'badgesLoaded', { badges: [] });
+      return;
+    }
+    const result = await getUserLeaderboardPosition(recruiterId);
+    sendToHtml(component, 'badgesLoaded', result);
+  } catch (error) {
+    sendToHtml(component, 'badgesLoaded', { error: error.message, badges: [] });
+  }
+}
+
+async function handleGetSettingsData(component) {
+  sendToHtml(component, 'settingsDataLoaded', {
+    profile: cachedRecruiterProfile,
+    carriers: cachedCarriers,
+    currentCarrierDOT
+  });
+}
+
+async function handleGetSystemHealth(data, component) {
+  // Use currentCarrierDOT as context if not provided
+  const carrierDot = data?.carrierDot || currentCarrierDOT;
+
+  try {
+    const result = await getRecruiterHealthStatus(carrierDot);
+    sendToHtml(component, 'systemHealthUpdate', result);
+  } catch (error) {
+    console.warn('Health check failed:', error);
+    sendToHtml(component, 'systemHealthUpdate', {
+      status: 'unknown',
+      error: error.message
+    });
+  }
+}
+
+function buildPaidMediaContext(data = {}) {
+  return {
+    carrierDot: data.carrierDot || currentCarrierDOT || '',
+    integrationId: data.integrationId || '',
+    adAccountId: data.adAccountId || '',
+    idempotencyKey: data.idempotencyKey || `paid_media_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+  };
+}
+
+async function handleGetPaidMediaState(recruiterId, data, component) {
+  const payload = data || {};
+  try {
+    const carrierDot = payload.carrierDot || currentCarrierDOT || '';
+    const [integrationsResult, accountsResult] = await Promise.all([
+      listMetaIntegrations({ carrierDot }),
+      listAdAccounts(payload.integrationId || '')
+    ]);
+    const integrations = integrationsResult.integrations || [];
+    const activeIntegration = integrations.find(i => i.is_active) || integrations[0] || null;
+    const adAccounts = accountsResult.adAccounts || [];
+    const activeAccount = adAccounts.find(a => a.is_active) || adAccounts[0] || null;
+    sendToHtml(component, 'paidMediaStateLoaded', {
+      success: true,
+      recruiterId,
+      carrierDot,
+      integrationId: activeIntegration?._id || payload.integrationId || '',
+      adAccountId: activeAccount?.account_id || payload.adAccountId || '',
+      integrations,
+      adAccounts,
+      hasActiveIntegration: !!activeIntegration,
+      generatedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    sendToHtml(component, 'paidMediaStateLoaded', { success: false, error: err.message });
+  }
+}
+
+async function handleCreatePaidMediaDraft(recruiterId, data, component) {
+  const payload = data || {};
+  const context = buildPaidMediaContext(payload);
+  try {
+    const campaignDraft = await createCampaignDraft(recruiterId, {
+      campaignId: payload.campaignId || '',
+      name: payload.name || '',
+      objective: payload.objective || '',
+      category: payload.category || 'recruitment',
+      dailyBudget: Number(payload.dailyBudget || 0),
+      startTime: payload.startTime || '',
+      endTime: payload.endTime || '',
+      integrationId: context.integrationId,
+      adAccountId: context.adAccountId,
+      idempotencyKey: `${context.idempotencyKey}_campaign`
+    });
+    if (!campaignDraft.success) {
+      sendToHtml(component, 'paidMediaDraftCreated', campaignDraft);
+      return;
+    }
+    const campaignId = campaignDraft.campaign?.campaign_id || payload.campaignId || '';
+    const adSetDraft = await createAdSetDraft(recruiterId, {
+      adSetId: payload.adSetId || '',
+      campaignId,
+      name: payload.adSetName || `${payload.name || 'Campaign'} - Primary Ad Set`,
+      dailyBudget: Number(payload.dailyBudget || 0),
+      targeting: payload.targeting || {
+        regions: payload.regions || [],
+        audience: payload.audience || 'broad',
+        placements: payload.placements || []
+      },
+      schedule: payload.schedule || {
+        start_time: payload.startTime || '',
+        end_time: payload.endTime || ''
+      },
+      integrationId: context.integrationId,
+      adAccountId: context.adAccountId,
+      idempotencyKey: `${context.idempotencyKey}_adset`
+    });
+    sendToHtml(component, 'paidMediaDraftCreated', {
+      success: campaignDraft.success && adSetDraft.success,
+      campaign: campaignDraft.campaign || null,
+      adSet: adSetDraft.adSet || null,
+      errors: [campaignDraft.error, adSetDraft.error].filter(Boolean)
+    });
+  } catch (err) {
+    sendToHtml(component, 'paidMediaDraftCreated', { success: false, error: err.message });
+  }
+}
+
+async function handleUpdatePaidMediaAdSet(recruiterId, data, component) {
+  const payload = data || {};
+  const context = buildPaidMediaContext(payload);
+  try {
+    const result = await updateAdSetBudget(recruiterId, {
+      adSetId: payload.adSetId || '',
+      dailyBudget: Number(payload.dailyBudget || 0),
+      lifetimeBudget: Number(payload.lifetimeBudget || 0),
+      schedule: payload.schedule || null,
+      targeting: payload.targeting || null,
+      integrationId: context.integrationId,
+      adAccountId: context.adAccountId
+    });
+    sendToHtml(component, 'paidMediaAdSetUpdated', result);
+  } catch (err) {
+    sendToHtml(component, 'paidMediaAdSetUpdated', { success: false, error: err.message });
+  }
+}
+
+async function handleCreatePaidMediaCreative(recruiterId, data, component) {
+  const payload = data || {};
+  const context = buildPaidMediaContext(payload);
+  try {
+    const result = await createCreativeDraft(recruiterId, {
+      creativeId: payload.creativeId || '',
+      campaignId: payload.campaignId || '',
+      adSetId: payload.adSetId || '',
+      name: payload.creativeName || `${payload.name || 'Campaign'} Creative`,
+      headline: payload.headline || '',
+      body: payload.body || '',
+      ctaType: payload.ctaType || 'APPLY_NOW',
+      destinationUrl: payload.destinationUrl || '',
+      mediaAssets: payload.mediaAssets || [],
+      integrationId: context.integrationId,
+      adAccountId: context.adAccountId
+    });
+    sendToHtml(component, 'paidMediaCreativeCreated', result);
+  } catch (err) {
+    sendToHtml(component, 'paidMediaCreativeCreated', { success: false, error: err.message });
+  }
+}
+
+async function handleLaunchPaidMediaCampaign(recruiterId, data, component) {
+  const payload = data || {};
+  const context = buildPaidMediaContext(payload);
+  try {
+    const result = await createMetaCampaign(recruiterId, {
+      campaignId: payload.campaignId || '',
+      name: payload.name || '',
+      objective: payload.objective || '',
+      category: payload.category || 'recruitment',
+      dailyBudget: Number(payload.dailyBudget || 0),
+      startTime: payload.startTime || '',
+      endTime: payload.endTime || '',
+      status: 'active',
+      integrationId: context.integrationId,
+      adAccountId: context.adAccountId
+    });
+    sendToHtml(component, 'paidMediaLaunchResult', result);
+  } catch (err) {
+    sendToHtml(component, 'paidMediaLaunchResult', { success: false, error: err.message });
+  }
+}
+
+async function handleGetPaidMediaInsights(recruiterId, data, component) {
+  const params = data || {};
+  try {
+    const [campaign, adSet, ad, breakdown] = await Promise.all([
+      getInsightsCampaignLevel(recruiterId, params),
+      getInsightsAdSetLevel(recruiterId, params),
+      getInsightsAdLevel(recruiterId, params),
+      getInsightsWithBreakdowns(recruiterId, { ...params, breakdownBy: params.breakdownBy || 'placement' })
+    ]);
+    sendToHtml(component, 'paidMediaInsightsLoaded', {
+      success: campaign.success && adSet.success && ad.success && breakdown.success,
+      campaign,
+      adSet,
+      ad,
+      breakdown,
+      pipeline: null // Attribution pipeline analytics — wired in metaAttributionBridgeService (future)
+    });
+  } catch (err) {
+    sendToHtml(component, 'paidMediaInsightsLoaded', { success: false, error: err.message });
+  }
+}
+
+async function handleCreatePaidMediaReportJob(recruiterId, data, component) {
+  const params = data || {};
+  try {
+    const result = await createAsyncReportJob(recruiterId, {
+      reportScope: params.reportScope || 'campaign',
+      format: params.format || 'json',
+      dateRange: params.dateRange || {},
+      breakdownBy: params.breakdownBy || ''
+    });
+    sendToHtml(component, 'paidMediaReportJobCreated', result);
+  } catch (err) {
+    sendToHtml(component, 'paidMediaReportJobCreated', { success: false, error: err.message });
+  }
+}
+
+async function handleGetPaidMediaReportStatus(recruiterId, data, component) {
+  const params = data || {};
+  try {
+    const result = await getAsyncReportStatus(recruiterId, { jobId: params.jobId || '' });
+    sendToHtml(component, 'paidMediaReportStatusLoaded', result);
+  } catch (err) {
+    sendToHtml(component, 'paidMediaReportStatusLoaded', { success: false, error: err.message });
+  }
+}
+
+async function handleDownloadPaidMediaReport(recruiterId, data, component) {
+  const params = data || {};
+  try {
+    const result = await downloadReport(recruiterId, { jobId: params.jobId || '' });
+    sendToHtml(component, 'paidMediaReportDownloaded', result);
+  } catch (err) {
+    sendToHtml(component, 'paidMediaReportDownloaded', { success: false, error: err.message });
+  }
+}
+
+async function handleGetPaidMediaOptimizationSuggestions(recruiterId, data, component) {
+  const params = data || {};
+  try {
+    const [budget, creative, audience, fatigue, placement] = await Promise.all([
+      suggestBudgetReallocation(recruiterId, params),
+      suggestCreativeRotation(recruiterId, params),
+      suggestAudienceNarrowing(recruiterId, params),
+      getFrequencyFatigueAlerts(recruiterId, params),
+      getPlacementPerformance(recruiterId, params)
+    ]);
+    sendToHtml(component, 'paidMediaSuggestionsLoaded', {
+      success: budget.success && creative.success && audience.success && fatigue.success && placement.success,
+      budget,
+      creative,
+      audience,
+      fatigue,
+      placement
+    });
+  } catch (err) {
+    sendToHtml(component, 'paidMediaSuggestionsLoaded', { success: false, error: err.message });
+  }
+}
