@@ -36,7 +36,7 @@ import {
   dosGetFeatureFlags
 } from 'backend/driverOSFacade.jsw';
 
-const HTML_COMPONENT_IDS = ['#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
+const HTML_COMPONENT_IDS = ['#html8', '#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
 
 let _component = null;
 let _driverId = null;
@@ -45,9 +45,9 @@ let _carrierId = null;
 // FEATURE_FLAGS routed through facade (.jsw server-side) to avoid
 // configData.js client-side bundling which kills the Wix page bundler.
 let FEATURE_FLAGS = {};
-try { FEATURE_FLAGS = dosGetFeatureFlags() || {}; } catch (e) { /* fallback to empty */ }
 
-$w.onReady(function () {
+$w.onReady(async function () {
+  try { FEATURE_FLAGS = await dosGetFeatureFlags() || {}; } catch (e) { /* fallback to empty */ }
   initBridge();
 });
 
