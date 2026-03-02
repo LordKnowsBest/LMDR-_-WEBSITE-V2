@@ -2201,7 +2201,7 @@ async function handleGetAgentMemory(data, component) {
 
 async function handleGetProactiveInsights(data, component) {
   try {
-    const userId = currentUser && currentUser.id ? currentUser.id : 'anonymous';
+    const userId = wixUsers?.currentUser?.id || 'anonymous';
     const dot = currentCarrierDOT || null;
     const context = Object.assign({}, data && data.context || {}, {
       recruiterDot: dot,
