@@ -23,6 +23,7 @@
 | R12 | 19 lazy-loaded view modules cause slow first navigation | Low | Medium | **Low** | CDN cache means second load is instant. For first load, show loading skeleton in VLM while script downloads. Each view module should be < 50KB. | W3 |
 | R13 | Existing 19 HTML files left in repo confuse developers | Low | Low | **Low** | Add deprecation banner comment to each old HTML file header. Create follow-up track for removal after migration confirmed stable. | W6 |
 | R14 | Market signals service returns no data for new drivers | Low | Low | **Low** | `dos-market.js` handles empty response gracefully — condition pill hidden, `DOS.market.condition` set to `null`. Agent context omits market field. | W5 |
+| R15 | configData.js import in page code kills Wix bundler silently | High | Critical | **Critical** | NEVER import `configData.js` directly in page code. Route ALL config (FEATURE_FLAGS, collection keys) through `driverOSFacade.jsw` server-side. Proven fix from RecruiterOS (2-hour debugging session). See `RECRUITER_OS.zriuj.js` lines 143-146 for pattern. | W4 |
 
 ---
 
