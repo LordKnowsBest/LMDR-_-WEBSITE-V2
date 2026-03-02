@@ -1,5 +1,7 @@
 import { getSecret } from 'wix-secrets-backend';
+import { currentUser } from 'wix-users-backend';
 import * as dataAccess from 'backend/dataAccess';
+import crypto from 'crypto';
 
 const COLLECTIONS = {
   partners: 'apiPartners',
@@ -100,6 +102,10 @@ export async function validateApiKey({ authorizationHeader, ipAddress = null }) 
  * @returns {Promise<Object>}
  */
 export async function rotateApiKey(partnerId, keyId, options = {}) {
+  if (!currentUser.loggedIn) {
+    return { success: false, error: 'Unauthorized' };
+  }
+
   const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
     suppressAuth: true
   });
@@ -143,15 +149,23 @@ async function getActiveSubscription(partnerId) {
   return result.items[0];
 }
 
+function secureCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 function hasMatchingKey(partner, keyHash) {
   const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
-  return keys.some((key) => key.is_active !== false && key.key_hash === keyHash);
+  return keys.some((key) => key.is_active !== false && secureCompare(key.key_hash, keyHash));
 }
 
 function isIpAllowed(partner, ipAddress) {
-  if (!ipAddress) return true;
   const whitelist = Array.isArray(partner.ip_whitelist) ? partner.ip_whitelist : [];
   if (!whitelist.length) return true;
+  if (!ipAddress) return false;
   return whitelist.includes(ipAddress);
 }
 
@@ -196,7 +210,7 @@ async function resolvePartnerByKeyHash(keyHash) {
   }
 
   const keyMeta = (partner.api_keys || []).find((k) =>
-    k.is_active !== false && k.key_hash === keyHash
+    k.is_active !== false && secureCompare(k.key_hash, keyHash)
   ) || null;
 
   keyLookupCache.set(keyHash, {
