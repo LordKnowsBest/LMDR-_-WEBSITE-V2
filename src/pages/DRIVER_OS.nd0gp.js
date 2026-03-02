@@ -36,9 +36,11 @@ import {
   dosGetFeatureFlags
 } from 'backend/driverOSFacade.jsw';
 
-const HTML_COMPONENT_IDS = ['#html8', '#html1', '#html2', '#html3', '#html4', '#html5', '#htmlEmbed1'];
+// #html8 is the HTML iframe component on this page.
+// Standard IDs included as fallback.
+const HTML_COMPONENT_IDS = ['#html8', '#html1', '#html2', '#html3', '#html4', '#html5', '#html6', '#htmlEmbed1'];
 
-let _component = null;
+let _connectedComponents = [];
 let _driverId = null;
 let _carrierId = null;
 
@@ -47,23 +49,59 @@ let _carrierId = null;
 let FEATURE_FLAGS = {};
 
 $w.onReady(async function () {
-  try { FEATURE_FLAGS = await dosGetFeatureFlags() || {}; } catch (e) { /* fallback to empty */ }
-  initBridge();
-});
+  console.log('[DriverOS] Page ready');
 
-function initBridge() {
-  for (const id of HTML_COMPONENT_IDS) {
+  try { FEATURE_FLAGS = await dosGetFeatureFlags() || {}; } catch (e) { /* fallback to empty */ }
+
+  // Register onMessage on every standard HTML component ID.
+  // Mirrors RecruiterOS pattern — no .rendered check, capability guard only.
+  HTML_COMPONENT_IDS.forEach(function(id) {
     try {
       const el = $w(id);
-      if (el && el.rendered && typeof el.onMessage === 'function') {
-        _component = el;
-        el.onMessage(async (event) => routeMessage(el, event?.data));
-        safeSend(el, { action: 'init' });
-        return;
+      if (el && el.onMessage) {
+        el.onMessage(function(event) {
+          routeMessage(el, event?.data);
+        });
+        _connectedComponents.push(el);
+        console.log('[DriverOS] onMessage attached to', id);
       }
-    } catch (e) { /* Component not on page */ }
+    } catch (e) {
+      // Element not on this page
+    }
+  });
+
+  // Proactively ping the HTML after a short delay.
+  // The HTML iframe may have already sent 'ready' before $w.onReady fired,
+  // so that message was lost. This kickstarts the handshake from the Velo side.
+  if (_connectedComponents.length > 0) {
+    setTimeout(function() {
+      _connectedComponents.forEach(function(comp) {
+        try {
+          comp.postMessage({ action: 'ping', payload: { from: 'velo' } });
+          console.log('[DriverOS] Sent proactive ping to HTML');
+        } catch (e) { /* component may not be ready yet */ }
+      });
+    }, 500);
+
+    // Pre-load driver profile and push init data without waiting for HTML to ask.
+    setTimeout(async function() {
+      try {
+        const profile = await dosGetOrCreateProfile();
+        if (profile) {
+          _driverId = profile._id || profile.driver_id;
+          _connectedComponents.forEach(function(comp) {
+            safeSend(comp, { action: 'pageReady', payload: { profile: profile, featureFlags: FEATURE_FLAGS } });
+          });
+          console.log('[DriverOS] Pushed init data to HTML');
+        }
+      } catch (e) {
+        console.error('[DriverOS] Failed to pre-load profile:', e.message);
+      }
+    }, 1000);
+  } else {
+    console.warn('[DriverOS] No HTML components found on page');
   }
-}
+});
 
 function safeSend(component, data) {
   try { component.postMessage(data); } catch (e) { /* detached element */ }
