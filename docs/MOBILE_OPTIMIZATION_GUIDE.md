@@ -36,32 +36,49 @@ This guide combines industry-standard mobile best practices with the specific LM
 *   **Body:** `text-base` (16px). *Crucial: Inputs must be at least 16px to prevent iOS auto-zoom.*
 *   **Meta/Labels:** `text-xs` or `text-sm`.
 
-### C. Touch Targets
-*   **Minimum Size:** 44x44px for all interactive elements.
-*   **Buttons:** `py-3` or `py-4` is standard.
+### C. Touch Targets (Apple HIG + Material Design 3)
+*   **Minimum Size:** 48x48px for all interactive elements (Material Design 3 = 48dp; Apple HIG = 44pt; we use 48px to satisfy both platforms).
+*   **Minimum Spacing:** 8px between adjacent touch targets (Material Design minimum; prevents accidental taps / rage taps).
+*   **Buttons:** `py-3` or `py-4` is standard. Ensure computed height >= 48px.
 *   **Links:** Ensure inline links have `p-2` padding to expand the clickable area.
+*   **Content within targets** can be as small as 24px — padding fills the 48px minimum.
 
 ---
 
 ## 3. Implementation Checklist (Tailwind CSS)
 
 ### Step 1: Viewport & Base Settings
-Ensure the HTML head contains the correct viewport tag for iOS:
+Ensure the HTML head contains the correct viewport tag:
 ```html
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=yes">
 ```
-*Note: `viewport-fit=cover` allows background colors to extend into safe areas.*
+*   `viewport-fit=cover` is **required** for `env(safe-area-inset-*)` to return non-zero values. Without it, safe-area padding is always 0px.
+*   `user-scalable=yes` is **required** by Apple HIG and WCAG 2.1 for accessibility (allows pinch-to-zoom). Do NOT use `user-scalable=no` or `maximum-scale=1.0`.
 
 ### Step 2: Safe Area Spacing
-Use utility classes to respect the notch and home indicator.
+Use utility classes to respect the notch, home indicator, and landscape cutouts.
 ```css
 /* Add to custom CSS or global styles */
-.pt-safe { padding-top: env(safe-area-inset-top); }
-.pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+.pt-safe { padding-top: env(safe-area-inset-top, 0px); }
+.pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+.pl-safe { padding-left: env(safe-area-inset-left, 0px); }
+.pr-safe { padding-right: env(safe-area-inset-right, 0px); }
 ```
 **Usage:**
 *   Add `.pb-safe` to your fixed bottom navigation or sticky CTA bands.
 *   Add `.pt-safe` to your header or top banner.
+*   Add `.pl-safe` + `.pr-safe` to content containers for landscape mode on notch devices.
+
+**Fixed Header Gotcha (Source: [WebKit Blog](https://webkit.org/blog/7929/designing-websites-for-iphone-x/)):**
+*   Use `top: env(safe-area-inset-top, 0px)` instead of `top: 0` on fixed headers.
+*   Without this, the header slides behind the notch/Dynamic Island when the user scrolls.
+
+**Fixed Bottom Nav:**
+*   Height must be `calc(56px + env(safe-area-inset-bottom, 0px))`.
+*   On iPhone 12+: effective height = 90px (56px nav + 34px home indicator).
+*   Content area needs matching `padding-bottom` to avoid being hidden behind the nav.
+
+**Full-width backgrounds:** Let backgrounds extend under safe areas — only apply safe-area padding to elements containing text or interactive controls.
 
 ### Step 3: Layout Adaptations (Mobile-First)
 
@@ -136,9 +153,26 @@ On mobile, remove complex hover effects or decorative blurs that cause performan
 
 ---
 
-## 5. Testing Protocol (iPhone 12/13)
+## 5. Testing Protocol (iPhone 12-16 + Android)
 
-1.  **Landscape Check:** Does content break when rotated?
+### iOS Testing
+1.  **Landscape Check:** Does content break when rotated? Are left/right safe areas respected?
 2.  **Thumb Zone:** Can you reach the primary CTA with your thumb while holding the phone with one hand?
-3.  **Readable Text:** Is any text smaller than 14px? (Should be rare).
-4.  **Touch Spacing:** Are links at least 8px apart?
+3.  **Readable Text:** Is any text smaller than 13px? Body text should be >= 16px.
+4.  **Touch Targets:** Are all buttons/links >= 48x48px? (Use DevTools Element Inspector to verify computed size)
+5.  **Touch Spacing:** Are adjacent interactive elements at least 8px apart?
+6.  **Input Zoom:** Does tapping an input cause the page to auto-zoom? (If yes, input font is below 16px)
+7.  **Safe Areas:** Does the notch/Dynamic Island overlap any content? Does the home indicator overlap the bottom nav?
+8.  **Pinch Zoom:** Does pinch-to-zoom work without breaking layout? (Required by Apple HIG + WCAG)
+
+### Android Testing
+9.  **Gesture Nav:** Does the Android gesture bar (swipe-up home) conflict with the bottom nav?
+10. **3-Button Nav:** Does the Android 3-button navigation bar add extra padding below the bottom nav?
+11. **Cutout/Hole-Punch:** On devices with camera cutouts, is the top safe area respected?
+
+### Cross-Platform Sources
+*   [Apple HIG](https://developer.apple.com/design/human-interface-guidelines/) — Touch targets, typography, safe areas
+*   [Material Design 3](https://m3.material.io/) — Touch targets (48dp), spacing (8dp), navigation
+*   [WebKit — Designing for iPhone X](https://webkit.org/blog/7929/designing-websites-for-iphone-x/) — `viewport-fit=cover`, `env()`, fixed positioning
+*   [MDN — env()](https://developer.mozilla.org/en-US/docs/Web/CSS/env) — Safe area CSS function reference
+*   [WCAG 2.1 AAA](https://www.w3.org/WAI/WCAG21/quickref/) — Accessible touch target minimum (44px)
