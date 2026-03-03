@@ -1,0 +1,133 @@
+const CHANNELS = Object.freeze({
+  WIX_TRIGGERED_EMAIL: 'wix_triggered_email',
+  SENDGRID_EMAIL: 'sendgrid_email',
+  AGENTMAIL_INBOX: 'agentmail_inbox',
+  TWILIO_SMS: 'twilio_sms',
+  VAPI_VOICE: 'vapi_voice'
+});
+
+const INTENTS = Object.freeze({
+  TRANSACTIONAL_NOTICE: 'transactional_notice',
+  CAMPAIGN_OUTREACH: 'campaign_outreach',
+  CONVERSATION_REPLY: 'conversation_reply',
+  DOCUMENT_COLLECTION: 'document_collection',
+  URGENT_ESCALATION: 'urgent_escalation',
+  VOICE_CALL_FOLLOW_UP: 'voice_call_follow_up',
+  SUPPORT_CASE: 'support_case',
+  COMPLIANCE_CASE: 'compliance_case'
+});
+
+const POLICY_MATRIX = Object.freeze({
+  [INTENTS.TRANSACTIONAL_NOTICE]: {
+    lane: CHANNELS.WIX_TRIGGERED_EMAIL,
+    reason: 'Transactional member/contact notifications stay on Wix.'
+  },
+  [INTENTS.CAMPAIGN_OUTREACH]: {
+    lane: CHANNELS.SENDGRID_EMAIL,
+    reason: 'Bulk outbound email stays on SendGrid by default.'
+  },
+  [INTENTS.CONVERSATION_REPLY]: {
+    lane: CHANNELS.AGENTMAIL_INBOX,
+    reason: 'Thread-aware conversational replies belong in AgentMail.'
+  },
+  [INTENTS.DOCUMENT_COLLECTION]: {
+    lane: CHANNELS.AGENTMAIL_INBOX,
+    reason: 'Document collection needs persistent async threads and attachments.'
+  },
+  [INTENTS.URGENT_ESCALATION]: {
+    lane: CHANNELS.TWILIO_SMS,
+    reason: 'Urgent attention defaults to SMS.'
+  },
+  [INTENTS.VOICE_CALL_FOLLOW_UP]: {
+    lane: CHANNELS.AGENTMAIL_INBOX,
+    reason: 'Voice follow-up artifacts default to an inbox thread.'
+  },
+  [INTENTS.SUPPORT_CASE]: {
+    lane: CHANNELS.AGENTMAIL_INBOX,
+    reason: 'Support cases need durable threads and auditability.'
+  },
+  [INTENTS.COMPLIANCE_CASE]: {
+    lane: CHANNELS.AGENTMAIL_INBOX,
+    reason: 'Compliance cases need durable threads with approval control.'
+  }
+});
+
+function normalizeIntent(intent) {
+  if (!intent || typeof intent !== 'string') {
+    return INTENTS.CONVERSATION_REPLY;
+  }
+  return intent.trim().toLowerCase();
+}
+
+function normalizeUrgency(urgency) {
+  if (!urgency || typeof urgency !== 'string') {
+    return 'normal';
+  }
+  return urgency.trim().toLowerCase();
+}
+
+export function requiresCommunicationApproval(options = {}) {
+  const intent = normalizeIntent(options.intent);
+  return Boolean(
+    options.firstOutboundToNewContact ||
+    options.sensitiveAttachments ||
+    options.highRiskWorkflow ||
+    options.approvalRequired ||
+    intent === INTENTS.COMPLIANCE_CASE
+  );
+}
+
+export function buildEscalationPlan(options = {}) {
+  const intent = normalizeIntent(options.intent);
+  switch (intent) {
+    case INTENTS.URGENT_ESCALATION:
+      return [CHANNELS.TWILIO_SMS, CHANNELS.VAPI_VOICE];
+    case INTENTS.DOCUMENT_COLLECTION:
+      return [CHANNELS.AGENTMAIL_INBOX, CHANNELS.TWILIO_SMS];
+    case INTENTS.VOICE_CALL_FOLLOW_UP:
+      return [CHANNELS.AGENTMAIL_INBOX, CHANNELS.TWILIO_SMS, CHANNELS.VAPI_VOICE];
+    default:
+      return [POLICY_MATRIX[intent]?.lane || CHANNELS.AGENTMAIL_INBOX];
+  }
+}
+
+export function chooseCommunicationLane(options = {}) {
+  const intent = normalizeIntent(options.intent);
+  const urgency = normalizeUrgency(options.urgency);
+  const policy = POLICY_MATRIX[intent] || POLICY_MATRIX[INTENTS.CONVERSATION_REPLY];
+  let lane = policy.lane;
+  let reason = policy.reason;
+
+  if (intent === INTENTS.CAMPAIGN_OUTREACH && options.channel === 'sms') {
+    lane = CHANNELS.TWILIO_SMS;
+    reason = 'SMS campaign outreach stays on Twilio.';
+  }
+
+  if (intent === INTENTS.VOICE_CALL_FOLLOW_UP && options.artifactType === 'sms') {
+    lane = CHANNELS.TWILIO_SMS;
+    reason = 'Short voice follow-up artifacts can ride SMS.';
+  }
+
+  if (urgency === 'critical' && intent !== INTENTS.TRANSACTIONAL_NOTICE) {
+    lane = CHANNELS.TWILIO_SMS;
+    reason = 'Critical urgency overrides to SMS for attention.';
+  }
+
+  if (options.prefersVoice === true) {
+    lane = CHANNELS.VAPI_VOICE;
+    reason = 'Voice was explicitly requested for this action.';
+  }
+
+  const escalation = buildEscalationPlan({ ...options, intent });
+
+  return {
+    success: true,
+    intent,
+    lane,
+    reason,
+    approvalRequired: requiresCommunicationApproval({ ...options, intent }),
+    escalation
+  };
+}
+
+export { CHANNELS, INTENTS };

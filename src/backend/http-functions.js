@@ -38,6 +38,13 @@ import {
   processTwilioStatusWebhook,
   processTwilioIncomingWebhook
 } from 'backend/smsCampaignService';
+import {
+  verifyWebhookSignature as verifyAgentMailWebhookSignature,
+  normalizeWebhookEvent as normalizeAgentMailWebhookEvent,
+  isSupportedWebhookEvent as isSupportedAgentMailWebhookEvent
+} from 'backend/agentMailService';
+import { handleWebhookEvent as handleAgentMailWebhookEvent } from 'backend/agentMailInboxService';
+import { ingestCommunicationEvent } from 'backend/communicationMemoryService';
 import { processJobBoardWebhook } from 'backend/jobBoardService';
 import { connectSocialAccount } from 'backend/socialPostingService';
 
@@ -824,6 +831,99 @@ export async function post_sendgrid_events(request) {
 
 export function get_sendgrid_events(request) {
   return ok({ status: 'healthy', service: 'sendgrid-events' });
+}
+
+// ============================================================================
+// AGENTMAIL WEBHOOK ENDPOINT
+// ============================================================================
+
+async function findExistingAgentMailWebhookEvent(eventId) {
+  if (!eventId) return null;
+  const result = await dataAccess.queryRecords('agentMailWebhookEvents', {
+    filters: { event_id: eventId },
+    limit: 1,
+    suppressAuth: true
+  });
+  return result?.items?.[0] || null;
+}
+
+async function updateAgentMailWebhookRecord(recordId, updates) {
+  if (!recordId) return;
+  await dataAccess.updateRecord('agentMailWebhookEvents', {
+    _id: recordId,
+    ...updates
+  }, { suppressAuth: true });
+}
+
+/**
+ * AgentMail inbound webhook
+ * POST https://www.lastmiledeliveryrecruiting.com/_functions/agentmail_webhook
+ */
+export async function post_agentmail_webhook(request) {
+  let webhookRecordId = '';
+
+  try {
+    const body = await request.body.text();
+    const verificationResult = await verifyAgentMailWebhookSignature(body, request.headers);
+    if (!verificationResult.success) {
+      return badRequest({ error: verificationResult.error || 'Invalid signature' });
+    }
+
+    const payload = JSON.parse(body);
+    const normalizedEvent = normalizeAgentMailWebhookEvent(payload);
+    if (!normalizedEvent.eventId) {
+      return badRequest({ error: 'AgentMail event id missing' });
+    }
+
+    const existing = await findExistingAgentMailWebhookEvent(normalizedEvent.eventId);
+    if (existing) {
+      return ok({ received: true, status: 'already_processed' });
+    }
+
+    const inserted = await dataAccess.insertRecord('agentMailWebhookEvents', {
+      event_id: normalizedEvent.eventId,
+      event_type: normalizedEvent.eventType,
+      inbox_id: normalizedEvent.inboxId || '',
+      thread_id: normalizedEvent.threadId || '',
+      message_id: normalizedEvent.messageId || '',
+      raw_payload: body,
+      status: 'received',
+      received_at: new Date().toISOString()
+    }, { suppressAuth: true });
+
+    webhookRecordId = inserted?.record?._id || inserted?.record?.id || '';
+
+    if (!isSupportedAgentMailWebhookEvent(normalizedEvent.eventType)) {
+      await updateAgentMailWebhookRecord(webhookRecordId, {
+        status: 'ignored',
+        processed_at: new Date().toISOString()
+      });
+      return ok({ received: true, status: 'ignored' });
+    }
+
+    await handleAgentMailWebhookEvent(normalizedEvent);
+    await ingestCommunicationEvent(normalizedEvent);
+
+    await updateAgentMailWebhookRecord(webhookRecordId, {
+      status: 'processed',
+      processed_at: new Date().toISOString(),
+      normalized_json: JSON.stringify(normalizedEvent)
+    });
+
+    return ok({ received: true, status: 'processed' });
+  } catch (error) {
+    console.error('[Webhook] AgentMail error:', error);
+    await updateAgentMailWebhookRecord(webhookRecordId, {
+      status: 'error',
+      error_message: error.message,
+      processed_at: new Date().toISOString()
+    }).catch(() => {});
+    return serverError({ error: error.message });
+  }
+}
+
+export function get_agentmail_webhook(request) {
+  return ok({ status: 'healthy', service: 'agentmail-webhook' });
 }
 
 // ============================================================================

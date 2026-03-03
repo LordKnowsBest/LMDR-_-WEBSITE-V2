@@ -1,0 +1,156 @@
+import * as dataAccess from 'backend/dataAccess';
+
+const COLLECTIONS = {
+  identities: 'communicationIdentities',
+  memories: 'communicationMemories',
+  links: 'communicationLinks'
+};
+
+function truncate(value, maxLength) {
+  const text = String(value || '').trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength - 1)}...`;
+}
+
+function normalizeFacts(event = {}, linkedEntity = {}) {
+  return {
+    channel: event.channel || 'agentmail',
+    thread_id: event.threadId || '',
+    message_id: event.messageId || '',
+    inbox_id: event.inboxId || '',
+    counterpart_email: event.counterpartEmail || '',
+    subject: event.subject || '',
+    has_attachments: Array.isArray(event.attachments) && event.attachments.length > 0,
+    linked_entity_type: linkedEntity.linkedEntityType || linkedEntity.entityType || '',
+    linked_entity_id: linkedEntity.linkedEntityId || linkedEntity.entityId || '',
+    carrier_dot: linkedEntity.carrierDot || event.metadata?.carrier_dot || ''
+  };
+}
+
+async function findOne(collectionKey, filters) {
+  const result = await dataAccess.queryRecords(collectionKey, {
+    filters,
+    limit: 1,
+    suppressAuth: true
+  });
+  return result?.items?.[0] || null;
+}
+
+export function buildThreadSummary(event = {}) {
+  const counterpart = event.counterpartEmail ? ` with ${event.counterpartEmail}` : '';
+  const subject = event.subject ? ` about "${event.subject}"` : '';
+  const body = truncate(event.bodyText || '', 180);
+  return truncate(`Inbound ${event.channel || 'agentmail'} thread${counterpart}${subject}. ${body}`, 240);
+}
+
+export async function upsertCommunicationIdentity(identity = {}) {
+  const uniqueFilters = identity.email_address
+    ? { email_address: identity.email_address }
+    : identity.phone_number
+      ? { phone_number: identity.phone_number }
+      : null;
+
+  if (!uniqueFilters) {
+    return { success: false, error: 'email_address or phone_number required' };
+  }
+
+  const existing = await findOne(COLLECTIONS.identities, uniqueFilters);
+  const record = {
+    entity_type: identity.entity_type || '',
+    entity_id: identity.entity_id || '',
+    role: identity.role || '',
+    carrier_dot: identity.carrier_dot || '',
+    email_address: identity.email_address || '',
+    phone_number: identity.phone_number || '',
+    agentmail_inbox_id: identity.agentmail_inbox_id || '',
+    twilio_phone_key: identity.twilio_phone_key || '',
+    voice_assistant_id: identity.voice_assistant_id || '',
+    status: identity.status || 'active',
+    updated_at: new Date().toISOString()
+  };
+
+  if (existing?._id) {
+    return dataAccess.updateRecord(COLLECTIONS.identities, {
+      ...existing,
+      ...record,
+      _id: existing._id
+    }, { suppressAuth: true });
+  }
+
+  return dataAccess.insertRecord(COLLECTIONS.identities, {
+    ...record,
+    created_at: new Date().toISOString()
+  }, { suppressAuth: true });
+}
+
+export async function ingestCommunicationEvent(event = {}, options = {}) {
+  const linkedEntity = {
+    linkedEntityType: options.linkedEntityType || event.metadata?.linked_entity_type,
+    linkedEntityId: options.linkedEntityId || event.metadata?.linked_entity_id,
+    carrierDot: options.carrierDot || event.metadata?.carrier_dot
+  };
+
+  if (event.counterpartEmail) {
+    await upsertCommunicationIdentity({
+      entity_type: linkedEntity.linkedEntityType || '',
+      entity_id: linkedEntity.linkedEntityId || '',
+      role: event.metadata?.role || '',
+      carrier_dot: linkedEntity.carrierDot || '',
+      email_address: event.counterpartEmail,
+      agentmail_inbox_id: event.inboxId || '',
+      status: 'active'
+    });
+  }
+
+  if (!linkedEntity.linkedEntityType || !linkedEntity.linkedEntityId || !event.threadId) {
+    return { success: true, skipped: true, reason: 'missing_link_context' };
+  }
+
+  const summary = buildThreadSummary(event);
+  const facts = normalizeFacts(event, linkedEntity);
+  const existing = await findOne(COLLECTIONS.memories, {
+    channel: event.channel || 'agentmail',
+    channel_thread_id: event.threadId,
+    entity_type: linkedEntity.linkedEntityType,
+    entity_id: linkedEntity.linkedEntityId
+  });
+
+  const baseRecord = {
+    entity_type: linkedEntity.linkedEntityType,
+    entity_id: linkedEntity.linkedEntityId,
+    channel: event.channel || 'agentmail',
+    channel_thread_id: event.threadId,
+    summary,
+    facts_json: JSON.stringify(facts),
+    last_summarized_at: new Date().toISOString(),
+    confidence: event.metadata?.confidence || 0.65,
+    source_count: Math.max(1, Number(existing?.source_count || 0) + 1)
+  };
+
+  if (existing?._id) {
+    await dataAccess.updateRecord(COLLECTIONS.memories, {
+      ...existing,
+      ...baseRecord,
+      _id: existing._id
+    }, { suppressAuth: true });
+  } else {
+    await dataAccess.insertRecord(COLLECTIONS.memories, {
+      ...baseRecord,
+      created_at: new Date().toISOString()
+    }, { suppressAuth: true });
+  }
+
+  await dataAccess.insertRecord(COLLECTIONS.links, {
+    channel: event.channel || 'agentmail',
+    thread_id: event.threadId,
+    message_id: event.messageId || '',
+    linked_entity_type: linkedEntity.linkedEntityType,
+    linked_entity_id: linkedEntity.linkedEntityId,
+    linked_by: options.linkedBy || 'agentmail_webhook',
+    created_at: new Date().toISOString()
+  }, { suppressAuth: true });
+
+  return { success: true, summary, facts };
+}

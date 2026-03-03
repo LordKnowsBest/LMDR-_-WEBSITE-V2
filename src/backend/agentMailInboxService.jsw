@@ -1,0 +1,257 @@
+import * as dataAccess from 'backend/dataAccess';
+import {
+  createPod,
+  createInbox,
+  listThreads,
+  getThread,
+  createDraft,
+  sendDraft,
+  generateClientId
+} from 'backend/agentMailService';
+
+const COLLECTIONS = {
+  tenants: 'agentMailTenants',
+  inboxes: 'agentMailInboxes',
+  threads: 'agentMailThreads',
+  messages: 'agentMailMessages',
+  drafts: 'agentMailDrafts'
+};
+
+async function findOne(collectionKey, filters) {
+  const result = await dataAccess.queryRecords(collectionKey, {
+    filters,
+    limit: 1,
+    suppressAuth: true
+  });
+  return result?.items?.[0] || null;
+}
+
+async function upsertByField(collectionKey, fieldName, value, record) {
+  const existing = await findOne(collectionKey, { [fieldName]: value });
+  if (existing?._id) {
+    return dataAccess.updateRecord(collectionKey, {
+      ...existing,
+      ...record,
+      _id: existing._id
+    }, { suppressAuth: true });
+  }
+  return dataAccess.insertRecord(collectionKey, record, { suppressAuth: true });
+}
+
+export async function ensureCarrierTenant({ carrierDot, carrierName = '', metadata = {} }) {
+  if (!carrierDot) {
+    return { success: false, error: 'carrierDot required' };
+  }
+
+  const existing = await findOne(COLLECTIONS.tenants, {
+    carrier_dot: carrierDot,
+    status: 'active'
+  });
+  if (existing) {
+    return { success: true, tenant: existing, created: false };
+  }
+
+  const clientId = generateClientId('agentmail_tenant', { carrierDot });
+  const pod = await createPod({
+    name: carrierName || `Carrier ${carrierDot}`,
+    metadata: {
+      carrier_dot: carrierDot,
+      ...metadata
+    },
+    clientId
+  });
+
+  const record = {
+    carrier_dot: carrierDot,
+    pod_id: pod.id || pod.pod_id || '',
+    pod_name: pod.name || carrierName || `Carrier ${carrierDot}`,
+    client_id: clientId,
+    status: 'active',
+    metadata_json: JSON.stringify(metadata || {}),
+    created_at: new Date().toISOString()
+  };
+
+  const inserted = await dataAccess.insertRecord(COLLECTIONS.tenants, record, {
+    suppressAuth: true
+  });
+
+  return {
+    success: inserted.success !== false,
+    tenant: inserted.record || record,
+    created: true
+  };
+}
+
+export async function ensureRecruiterInbox({
+  carrierDot,
+  recruiterId,
+  emailAddress,
+  displayName = '',
+  metadata = {}
+}) {
+  if (!carrierDot || !recruiterId || !emailAddress) {
+    return { success: false, error: 'carrierDot, recruiterId, and emailAddress are required' };
+  }
+
+  const existing = await findOne(COLLECTIONS.inboxes, {
+    carrier_dot: carrierDot,
+    recruiter_id: recruiterId,
+    status: 'active'
+  });
+  if (existing) {
+    return { success: true, inbox: existing, created: false };
+  }
+
+  const tenantResult = await ensureCarrierTenant({ carrierDot, metadata });
+  if (!tenantResult.success) {
+    return tenantResult;
+  }
+
+  const clientId = generateClientId('agentmail_inbox', {
+    carrierDot,
+    recruiterId,
+    emailAddress
+  });
+  const inbox = await createInbox({
+    podId: tenantResult.tenant.pod_id,
+    emailAddress,
+    displayName: displayName || emailAddress,
+    metadata: {
+      carrier_dot: carrierDot,
+      recruiter_id: recruiterId,
+      role: 'recruiter',
+      ...metadata
+    },
+    clientId
+  });
+
+  const record = {
+    carrier_dot: carrierDot,
+    recruiter_id: recruiterId,
+    agentmail_inbox_id: inbox.id || inbox.inbox_id || '',
+    pod_id: tenantResult.tenant.pod_id,
+    email_address: inbox.email_address || emailAddress,
+    display_name: inbox.display_name || displayName || emailAddress,
+    status: 'active',
+    client_id: clientId,
+    metadata_json: JSON.stringify(metadata || {}),
+    created_at: new Date().toISOString()
+  };
+
+  const inserted = await dataAccess.insertRecord(COLLECTIONS.inboxes, record, {
+    suppressAuth: true
+  });
+
+  return {
+    success: inserted.success !== false,
+    inbox: inserted.record || record,
+    created: true
+  };
+}
+
+export async function listRecruiterInboxThreads(inboxId, options = {}) {
+  if (!inboxId) {
+    return { success: false, error: 'inboxId required' };
+  }
+  const result = await listThreads({
+    inboxId,
+    limit: options.limit || 25,
+    cursor: options.cursor || ''
+  });
+  return { success: true, ...result };
+}
+
+export async function readRecruiterInboxThread(threadId) {
+  if (!threadId) {
+    return { success: false, error: 'threadId required' };
+  }
+  const result = await getThread(threadId);
+  return { success: true, thread: result };
+}
+
+export async function createRecruiterDraft(params) {
+  const result = await createDraft(params);
+  return { success: true, draft: result };
+}
+
+export async function sendRecruiterDraft(draftId, payload = {}) {
+  if (!draftId) {
+    return { success: false, error: 'draftId required' };
+  }
+  const result = await sendDraft(draftId, payload);
+  return { success: true, draft: result };
+}
+
+export async function handleWebhookEvent(event) {
+  if (!event?.eventType) {
+    return { success: false, error: 'eventType required' };
+  }
+
+  switch (event.eventType) {
+    case 'inbox.created':
+      await upsertByField(COLLECTIONS.inboxes, 'agentmail_inbox_id', event.inboxId, {
+        agentmail_inbox_id: event.inboxId,
+        pod_id: event.podId || '',
+        email_address: event.counterpartEmail || event.metadata?.email_address || '',
+        display_name: event.metadata?.display_name || '',
+        recruiter_id: event.metadata?.recruiter_id || '',
+        carrier_dot: event.metadata?.carrier_dot || '',
+        status: 'active',
+        updated_at: new Date().toISOString()
+      });
+      break;
+    case 'thread.updated':
+      await upsertByField(COLLECTIONS.threads, 'agentmail_thread_id', event.threadId, {
+        agentmail_thread_id: event.threadId,
+        agentmail_inbox_id: event.inboxId || '',
+        subject: event.subject || '',
+        counterpart_email: event.counterpartEmail || '',
+        status: event.metadata?.status || 'active',
+        last_message_at: event.occurredAt,
+        metadata_json: JSON.stringify(event.metadata || {}),
+        updated_at: new Date().toISOString()
+      });
+      break;
+    case 'message.received':
+      await upsertByField(COLLECTIONS.messages, 'agentmail_message_id', event.messageId, {
+        agentmail_message_id: event.messageId,
+        agentmail_thread_id: event.threadId || '',
+        agentmail_inbox_id: event.inboxId || '',
+        direction: 'inbound',
+        counterpart_email: event.counterpartEmail || '',
+        subject: event.subject || '',
+        body_text: event.bodyText || '',
+        attachments_json: JSON.stringify(event.attachments || []),
+        received_at: event.occurredAt,
+        metadata_json: JSON.stringify(event.metadata || {})
+      });
+      await upsertByField(COLLECTIONS.threads, 'agentmail_thread_id', event.threadId, {
+        agentmail_thread_id: event.threadId,
+        agentmail_inbox_id: event.inboxId || '',
+        subject: event.subject || '',
+        counterpart_email: event.counterpartEmail || '',
+        status: 'active',
+        last_message_at: event.occurredAt,
+        metadata_json: JSON.stringify(event.metadata || {}),
+        updated_at: new Date().toISOString()
+      });
+      break;
+    case 'draft.created':
+    case 'draft.sent':
+      await upsertByField(COLLECTIONS.drafts, 'agentmail_draft_id', event.draftId, {
+        agentmail_draft_id: event.draftId,
+        agentmail_thread_id: event.threadId || '',
+        agentmail_inbox_id: event.inboxId || '',
+        subject: event.subject || '',
+        body_text: event.bodyText || '',
+        status: event.eventType === 'draft.sent' ? 'sent' : 'draft',
+        metadata_json: JSON.stringify(event.metadata || {}),
+        updated_at: new Date().toISOString()
+      });
+      break;
+    default:
+      return { success: true, skipped: true };
+  }
+
+  return { success: true };
+}

@@ -1,0 +1,259 @@
+import { getSecret } from 'wix-secrets-backend';
+
+const DEFAULT_AGENTMAIL_API_URL = 'https://api.agentmail.to/v1';
+const SUPPORTED_AGENTMAIL_EVENTS = Object.freeze([
+  'message.received',
+  'thread.updated',
+  'draft.created',
+  'draft.sent',
+  'inbox.created'
+]);
+
+function stableSerialize(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableSerialize).join(',')}]`;
+  }
+
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+function simpleHash(input) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = ((hash << 5) - hash) + input.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function getRuntimeFetch() {
+  if (typeof globalThis.fetch === 'function') {
+    return globalThis.fetch.bind(globalThis);
+  }
+  throw new Error('Global fetch is not available');
+}
+
+function getHeaderValue(headers, name) {
+  if (!headers) return '';
+  const key = Object.keys(headers).find((headerName) =>
+    headerName.toLowerCase() === name.toLowerCase());
+  return key ? headers[key] : '';
+}
+
+function parseSignature(signatureHeader) {
+  if (!signatureHeader) return '';
+  const trimmed = String(signatureHeader).trim();
+  const parts = trimmed.split('=');
+  return parts.length === 2 ? parts[1] : trimmed;
+}
+
+async function computeHmacSignature(message, secret) {
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(secret);
+  const messageData = encoder.encode(message);
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    keyData,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageData);
+  const bytes = Array.from(new Uint8Array(signature));
+  return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function getAgentMailConfig() {
+  const apiKey = await getSecret('AGENTMAIL_API_KEY');
+  if (!apiKey) {
+    throw new Error('AGENTMAIL_API_KEY not configured');
+  }
+
+  const apiBaseUrl = await getSecret('AGENTMAIL_API_BASE_URL')
+    .catch(() => DEFAULT_AGENTMAIL_API_URL);
+
+  return {
+    apiKey,
+    apiBaseUrl: apiBaseUrl || DEFAULT_AGENTMAIL_API_URL
+  };
+}
+
+export function generateClientId(prefix, seed = {}) {
+  const namespace = prefix || 'resource';
+  const payload = stableSerialize(seed);
+  return `${namespace}_${simpleHash(payload)}`;
+}
+
+export async function agentMailRequest(method, path, options = {}) {
+  const { apiKey, apiBaseUrl } = await getAgentMailConfig();
+  const runtimeFetch = getRuntimeFetch();
+  const url = new URL(path, `${apiBaseUrl.replace(/\/$/, '')}/`);
+
+  if (options.query && typeof options.query === 'object') {
+    Object.entries(options.query).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        url.searchParams.set(key, String(value));
+      }
+    });
+  }
+
+  const headers = {
+    'Authorization': `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+    ...options.headers
+  };
+
+  const payload = options.body ? { ...options.body } : null;
+  if (payload && options.clientId && !payload.client_id) {
+    payload.client_id = options.clientId;
+  }
+  if (options.idempotencyKey) {
+    headers['Idempotency-Key'] = options.idempotencyKey;
+  }
+
+  const response = await runtimeFetch(url.toString(), {
+    method,
+    headers,
+    body: payload ? JSON.stringify(payload) : undefined
+  });
+
+  const contentType = response.headers?.get?.('content-type') || '';
+  const data = contentType.includes('application/json')
+    ? await response.json()
+    : await response.text();
+
+  if (!response.ok) {
+    const message = typeof data === 'string' ? data : data?.error || data?.message || 'AgentMail request failed';
+    throw new Error(`AgentMail API error ${response.status}: ${message}`);
+  }
+
+  return data;
+}
+
+export async function createPod({ name, metadata = {}, clientId }) {
+  const resolvedClientId = clientId || generateClientId('pod', { name, metadata });
+  return agentMailRequest('POST', 'pods', {
+    body: { name, metadata },
+    clientId: resolvedClientId,
+    idempotencyKey: resolvedClientId
+  });
+}
+
+export async function createInbox({ podId, emailAddress, displayName, metadata = {}, clientId }) {
+  const resolvedClientId = clientId || generateClientId('inbox', { podId, emailAddress });
+  return agentMailRequest('POST', 'inboxes', {
+    body: {
+      pod_id: podId,
+      email_address: emailAddress,
+      display_name: displayName,
+      metadata
+    },
+    clientId: resolvedClientId,
+    idempotencyKey: resolvedClientId
+  });
+}
+
+export async function listThreads({ inboxId, limit = 25, cursor = '' }) {
+  return agentMailRequest('GET', 'threads', {
+    query: {
+      inbox_id: inboxId,
+      limit,
+      cursor
+    }
+  });
+}
+
+export async function getThread(threadId) {
+  return agentMailRequest('GET', `threads/${threadId}`);
+}
+
+export async function createDraft({
+  threadId,
+  inboxId,
+  to,
+  subject,
+  body,
+  attachments = [],
+  metadata = {},
+  clientId
+}) {
+  const resolvedClientId = clientId || generateClientId('draft', {
+    threadId,
+    inboxId,
+    to,
+    subject
+  });
+  return agentMailRequest('POST', 'drafts', {
+    body: {
+      thread_id: threadId,
+      inbox_id: inboxId,
+      to,
+      subject,
+      body,
+      attachments,
+      metadata
+    },
+    clientId: resolvedClientId,
+    idempotencyKey: resolvedClientId
+  });
+}
+
+export async function sendDraft(draftId, payload = {}) {
+  return agentMailRequest('POST', `drafts/${draftId}/send`, {
+    body: payload
+  });
+}
+
+export async function verifyWebhookSignature(rawBody, headers, secretOverride) {
+  const timestamp = getHeaderValue(headers, 'x-agentmail-timestamp');
+  const providedSignature = parseSignature(getHeaderValue(headers, 'x-agentmail-signature'));
+
+  if (!timestamp || !providedSignature) {
+    return { success: false, error: 'Missing AgentMail signature headers' };
+  }
+
+  const webhookSecret = secretOverride || await getSecret('AGENTMAIL_WEBHOOK_SECRET');
+  if (!webhookSecret) {
+    return { success: false, error: 'AGENTMAIL_WEBHOOK_SECRET not configured' };
+  }
+
+  const expectedSignature = await computeHmacSignature(`${timestamp}.${rawBody}`, webhookSecret);
+  if (expectedSignature !== providedSignature) {
+    return { success: false, error: 'Invalid AgentMail webhook signature' };
+  }
+
+  return { success: true };
+}
+
+export function normalizeWebhookEvent(payload = {}) {
+  const data = payload.data || payload.message || {};
+  const metadata = data.metadata || payload.metadata || {};
+
+  return {
+    eventId: payload.id || payload.event_id || payload.eventId || '',
+    eventType: payload.type || payload.event_type || payload.eventType || '',
+    occurredAt: payload.created_at || payload.occurred_at || new Date().toISOString(),
+    inboxId: data.inbox_id || data.inboxId || payload.inbox_id || '',
+    threadId: data.thread_id || data.threadId || payload.thread_id || '',
+    messageId: data.message_id || data.messageId || payload.message_id || '',
+    draftId: data.draft_id || data.draftId || payload.draft_id || '',
+    podId: data.pod_id || data.podId || payload.pod_id || '',
+    counterpartEmail: data.from || data.from_email || data.email_address || metadata.email_address || '',
+    subject: data.subject || payload.subject || '',
+    bodyText: data.text || data.body || data.body_text || '',
+    attachments: data.attachments || [],
+    metadata,
+    raw: payload
+  };
+}
+
+export function isSupportedWebhookEvent(eventType) {
+  return SUPPORTED_AGENTMAIL_EVENTS.includes(eventType);
+}
+
+export { DEFAULT_AGENTMAIL_API_URL, SUPPORTED_AGENTMAIL_EVENTS };

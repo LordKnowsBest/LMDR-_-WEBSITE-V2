@@ -354,6 +354,15 @@ export const DATA_SOURCE = {
   agentSteps: 'airtable',
   approvalGates: 'airtable',
   runOutcomes: 'airtable',
+  agentMailTenants: 'airtable',
+  agentMailInboxes: 'airtable',
+  agentMailThreads: 'airtable',
+  agentMailMessages: 'airtable',
+  agentMailDrafts: 'airtable',
+  agentMailWebhookEvents: 'airtable',
+  communicationIdentities: 'airtable',
+  communicationMemories: 'airtable',
+  communicationLinks: 'airtable',
 
   // -------------------------------------------------------------------------
   // Knowledge Compendium
@@ -878,6 +887,15 @@ export const WIX_COLLECTION_NAMES = {
   agentSteps: 'AgentSteps',
   approvalGates: 'ApprovalGates',
   runOutcomes: 'RunOutcomes',
+  agentMailTenants: 'AgentMailTenants',
+  agentMailInboxes: 'AgentMailInboxes',
+  agentMailThreads: 'AgentMailThreads',
+  agentMailMessages: 'AgentMailMessages',
+  agentMailDrafts: 'AgentMailDrafts',
+  agentMailWebhookEvents: 'AgentMailWebhookEvents',
+  communicationIdentities: 'CommunicationIdentities',
+  communicationMemories: 'CommunicationMemories',
+  communicationLinks: 'CommunicationLinks',
 
   // Knowledge Compendium
   compendiumEntries: 'CompendiumEntries',
@@ -1246,6 +1264,15 @@ export const AIRTABLE_TABLE_NAMES = {
   agentSteps: 'v2_Agent Steps',
   approvalGates: 'v2_Approval Gates',
   runOutcomes: 'v2_Run Outcomes',
+  agentMailTenants: 'v2_AgentMail Tenants',
+  agentMailInboxes: 'v2_AgentMail Inboxes',
+  agentMailThreads: 'v2_AgentMail Threads',
+  agentMailMessages: 'v2_AgentMail Messages',
+  agentMailDrafts: 'v2_AgentMail Drafts',
+  agentMailWebhookEvents: 'v2_AgentMail Webhook Events',
+  communicationIdentities: 'v2_Communication Identities',
+  communicationMemories: 'v2_Communication Memories',
+  communicationLinks: 'v2_Communication Links',
 
   // Knowledge Compendium
   compendiumEntries: 'v2_Compendium Entries',
