@@ -5,21 +5,12 @@
 // ---------------------------------------------------------
 
 /**
- * Vulnerable IP Whitelist Logic
- * Finding: Fails OPEN if ipAddress is null/undefined or if whitelist is empty.
+ * Fixed IP Whitelist Logic
  */
 function isIpAllowed(partner, ipAddress) {
-  // VULNERABILITY: Returns true if ipAddress is missing
-  if (!ipAddress) return true;
-
   const whitelist = Array.isArray(partner.ip_whitelist) ? partner.ip_whitelist : [];
-
-  // VULNERABILITY: Returns true (allowed) if whitelist is empty
-  // Ideally, if whitelist is enabled/present, it should default to deny unless matched?
-  // Or if intended as "no whitelist = public", then it's fine.
-  // But usually for secure APIs, empty whitelist means nobody allowed or whitelist disabled.
-  if (!whitelist.length) return true;
-
+  if (!whitelist.length) return true; // No whitelist means all IPs are allowed
+  if (!ipAddress) return false; // Fail-closed: missing IP with active whitelist is denied
   return whitelist.includes(ipAddress);
 }
 
@@ -29,12 +20,12 @@ function isIpAllowed(partner, ipAddress) {
 // ---------------------------------------------------------
 
 /**
- * Vulnerable Rate Limit Bypass Logic
- * Finding: Explicit header bypass without auth check on the header itself.
+ * Fixed Rate Limit Bypass Logic
  */
 function shouldBypassRateLimit(request) {
-  const headerValue = String(getHeader(request, 'x-lmdr-bypass-rate-limit') || '').toLowerCase();
-  return headerValue === 'true';
+  // RATE LIMIT BYPASS ACTIVELY DISABLED
+  // Explicitly return false to prevent bypass header abuse
+  return false;
 }
 
 function getHeader(request, name) {

@@ -1,4 +1,6 @@
+import crypto from 'crypto';
 import { getSecret } from 'wix-secrets-backend';
+import { currentUser } from 'wix-users-backend';
 import * as dataAccess from 'backend/dataAccess';
 
 const COLLECTIONS = {
@@ -100,6 +102,9 @@ export async function validateApiKey({ authorizationHeader, ipAddress = null }) 
  * @returns {Promise<Object>}
  */
 export async function rotateApiKey(partnerId, keyId, options = {}) {
+  // Vulnerability: No authorization check here to ensure the caller owns partnerId.
+  // The global wildcard invoke permissions in permissions.json allow Anonymous execution.
+
   const partner = await dataAccess.findByField(COLLECTIONS.partners, 'partner_id', partnerId, {
     suppressAuth: true
   });
@@ -143,15 +148,26 @@ async function getActiveSubscription(partnerId) {
   return result.items[0];
 }
 
+function secureCompare(a, b) {
+  try {
+    const aBuf = Buffer.from(String(a || ''), 'utf8');
+    const bBuf = Buffer.from(String(b || ''), 'utf8');
+    if (aBuf.length !== bBuf.length) return false;
+    return crypto.timingSafeEqual(aBuf, bBuf);
+  } catch (_e) {
+    return false;
+  }
+}
+
 function hasMatchingKey(partner, keyHash) {
   const keys = Array.isArray(partner.api_keys) ? partner.api_keys : [];
-  return keys.some((key) => key.is_active !== false && key.key_hash === keyHash);
+  return keys.some((key) => key.is_active !== false && secureCompare(key.key_hash, keyHash));
 }
 
 function isIpAllowed(partner, ipAddress) {
-  if (!ipAddress) return true;
   const whitelist = Array.isArray(partner.ip_whitelist) ? partner.ip_whitelist : [];
-  if (!whitelist.length) return true;
+  if (!whitelist.length) return true; // No whitelist means all IPs are allowed
+  if (!ipAddress) return false; // Fail-closed: missing IP with active whitelist is denied
   return whitelist.includes(ipAddress);
 }
 
@@ -196,7 +212,7 @@ async function resolvePartnerByKeyHash(keyHash) {
   }
 
   const keyMeta = (partner.api_keys || []).find((k) =>
-    k.is_active !== false && k.key_hash === keyHash
+    k.is_active !== false && secureCompare(k.key_hash, keyHash)
   ) || null;
 
   keyLookupCache.set(keyHash, {
@@ -219,15 +235,9 @@ function shouldTouchKeyUsage(keyId) {
 }
 
 async function randomHex(byteLength) {
-  const buf = new Uint8Array(byteLength);
-  crypto.getRandomValues(buf);
-  return Array.from(buf).map((b) => b.toString(16).padStart(2, '0')).join('');
+  return crypto.randomBytes(byteLength).toString('hex');
 }
 
 async function sha256Hex(input) {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  return crypto.createHash('sha256').update(input).digest('hex');
 }
