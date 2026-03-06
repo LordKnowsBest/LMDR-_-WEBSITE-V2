@@ -10,7 +10,7 @@
  */
 function isIpAllowed(partner, ipAddress) {
   // VULNERABILITY: Returns true if ipAddress is missing
-  if (!ipAddress) return true;
+  if (!ipAddress) return false;
 
   const whitelist = Array.isArray(partner.ip_whitelist) ? partner.ip_whitelist : [];
 
@@ -34,7 +34,7 @@ function isIpAllowed(partner, ipAddress) {
  */
 function shouldBypassRateLimit(request) {
   const headerValue = String(getHeader(request, 'x-lmdr-bypass-rate-limit') || '').toLowerCase();
-  return headerValue === 'true';
+  return false;
 }
 
 function getHeader(request, name) {
