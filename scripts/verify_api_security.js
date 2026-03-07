@@ -1,108 +1,160 @@
-// scripts/verify_api_security.js
+const fs = require('fs');
+const path = require('path');
 
-// ---------------------------------------------------------
-// MOCKED LOGIC FROM src/backend/apiAuthService.jsw
-// ---------------------------------------------------------
+// Colors for console output
+const RED = '\x1b[31m';
+const GREEN = '\x1b[32m';
+const YELLOW = '\x1b[33m';
+const RESET = '\x1b[0m';
+const BOLD = '\x1b[1m';
 
-/**
- * Vulnerable IP Whitelist Logic
- * Finding: Fails OPEN if ipAddress is null/undefined or if whitelist is empty.
- */
-function isIpAllowed(partner, ipAddress) {
-  // VULNERABILITY: Returns true if ipAddress is missing
-  if (!ipAddress) return true;
-
-  const whitelist = Array.isArray(partner.ip_whitelist) ? partner.ip_whitelist : [];
-
-  // VULNERABILITY: Returns true (allowed) if whitelist is empty
-  // Ideally, if whitelist is enabled/present, it should default to deny unless matched?
-  // Or if intended as "no whitelist = public", then it's fine.
-  // But usually for secure APIs, empty whitelist means nobody allowed or whitelist disabled.
-  if (!whitelist.length) return true;
-
-  return whitelist.includes(ipAddress);
-}
-
-
-// ---------------------------------------------------------
-// MOCKED LOGIC FROM src/backend/apiGateway.jsw
-// ---------------------------------------------------------
-
-/**
- * Vulnerable Rate Limit Bypass Logic
- * Finding: Explicit header bypass without auth check on the header itself.
- */
-function shouldBypassRateLimit(request) {
-  const headerValue = String(getHeader(request, 'x-lmdr-bypass-rate-limit') || '').toLowerCase();
-  return headerValue === 'true';
-}
-
-function getHeader(request, name) {
-  const headers = request?.headers || {};
-  const lower = String(name || '').toLowerCase();
-  // Mocking standard header access
-  return headers[name] || headers[lower] || null;
-}
-
-
-// ---------------------------------------------------------
-// VERIFICATION TESTS
-// ---------------------------------------------------------
-
-console.log('--- STARTING API SECURITY VERIFICATION ---\n');
-
-// TEST 1: IP Whitelist Bypass
-console.log('[TEST 1] IP Whitelist Logic Check (src/backend/apiAuthService.jsw)');
-
-const partnerWithWhitelist = {
-  ip_whitelist: ['1.2.3.4', '5.6.7.8']
+const report = {
+  PASS: [],
+  FAIL: [],
+  WARN: []
 };
 
-const partnerNoWhitelist = {
-  ip_whitelist: []
-};
-
-// Case A: Valid IP
-const resultA = isIpAllowed(partnerWithWhitelist, '1.2.3.4');
-console.log(`  Case A (Valid IP): ${resultA ? 'ALLOWED' : 'DENIED'} (Expected: ALLOWED)`);
-
-// Case B: Invalid IP
-const resultB = isIpAllowed(partnerWithWhitelist, '9.9.9.9');
-console.log(`  Case B (Invalid IP): ${resultB ? 'ALLOWED' : 'DENIED'} (Expected: DENIED)`);
-
-// Case C: Missing IP (Null) - The Vulnerability
-const resultC = isIpAllowed(partnerWithWhitelist, null);
-console.log(`  Case C (Missing IP): ${resultC ? 'ALLOWED (FAIL - BYPASS)' : 'DENIED (PASS)'}`);
-if (resultC) console.error('    !! CRITICAL: IP Check fails open when IP is missing !!');
-
-// Case D: Empty Whitelist
-const resultD = isIpAllowed(partnerNoWhitelist, '9.9.9.9');
-console.log(`  Case D (Empty Whitelist): ${resultD ? 'ALLOWED (WARN - OPEN)' : 'DENIED (PASS)'}`);
-
-
-console.log('\n[TEST 2] Rate Limit Bypass Header Check (src/backend/apiGateway.jsw)');
-
-const requestNormal = {
-  headers: {
-    'user-agent': 'test-bot'
+function logResult(status, message, details = '') {
+  if (status === 'PASS') {
+    report.PASS.push({ message, details });
+    console.log(`${GREEN}[PASS]${RESET} ${message}`);
+  } else if (status === 'FAIL') {
+    report.FAIL.push({ message, details });
+    console.log(`${RED}[FAIL]${RESET} ${message}`);
+    if (details) console.log(`       ${YELLOW}Details: ${details}${RESET}`);
+  } else {
+    report.WARN.push({ message, details });
+    console.log(`${YELLOW}[WARN]${RESET} ${message}`);
+    if (details) console.log(`       ${YELLOW}Details: ${details}${RESET}`);
   }
-};
+}
 
-const requestBypass = {
-  headers: {
-    'x-lmdr-bypass-rate-limit': 'true',
-    'user-agent': 'test-bot'
+function readFile(filePath) {
+  try {
+    return fs.readFileSync(path.join(process.cwd(), filePath), 'utf8');
+  } catch (err) {
+    logResult('FAIL', `Could not read file: ${filePath}`, err.message);
+    return null;
   }
-};
+}
 
-// Case A: Normal Request
-const bypassA = shouldBypassRateLimit(requestNormal);
-console.log(`  Case A (Normal Request): Bypass is ${bypassA ? 'ACTIVE' : 'INACTIVE'} (Expected: INACTIVE)`);
+function runAudit() {
+  console.log(`${BOLD}Starting API Security Audit...${RESET}\n`);
 
-// Case B: Bypass Header Present
-const bypassB = shouldBypassRateLimit(requestBypass);
-console.log(`  Case B (Bypass Header): Bypass is ${bypassB ? 'ACTIVE (FAIL - UNPROTECTED)' : 'INACTIVE (PASS)'}`);
-if (bypassB) console.error('    !! CRITICAL: Rate limit bypass header is active and unprotected !!');
+  // --- 1. Authentication Enforcement ---
+  const gatewayContent = readFile('src/backend/apiGateway.jsw');
+  if (gatewayContent) {
+    if (gatewayContent.includes('authContext = await validateApiKey')) {
+      logResult('PASS', 'Authentication call found in apiGateway.jsw');
+    } else {
+      logResult('FAIL', 'validateApiKey call NOT found in apiGateway.jsw');
+    }
+  }
 
+  // --- 2. Secure Hashing ---
+  const authServiceContent = readFile('src/backend/apiAuthService.jsw');
+  if (authServiceContent) {
+    if (authServiceContent.includes("crypto.subtle.digest('SHA-256'")) {
+      logResult('PASS', 'SHA-256 hashing found in apiAuthService.jsw');
+    } else {
+      logResult('FAIL', 'SHA-256 hashing NOT found in apiAuthService.jsw');
+    }
 
-console.log('\n--- VERIFICATION COMPLETE ---');
+    // Check for plaintext key comparison (heuristic)
+    if (authServiceContent.includes('key.key_hash === keyHash')) {
+       logResult('PASS', 'Keys appear to be compared by hash, not plaintext');
+    } else {
+       logResult('WARN', 'Could not confirm key hash comparison pattern');
+    }
+  }
+
+  // --- 3. IP Whitelisting Integrity ---
+  if (authServiceContent) {
+    // Look for the specific fail-open pattern: if (!ipAddress) return true;
+    const ipCheckRegex = /if\s*\(\s*!ipAddress\s*\)\s*return\s*true/;
+    if (ipCheckRegex.test(authServiceContent)) {
+      logResult('FAIL', 'IP Whitelisting fails open when IP is missing', 'Found: if (!ipAddress) return true');
+    } else {
+      logResult('PASS', 'IP Whitelisting does not appear to fail open on missing IP (static check)');
+    }
+  }
+
+  // --- 4. Tier Checks ---
+  if (gatewayContent) {
+    // Check for assertTier usage
+    if (gatewayContent.includes('assertTier(tier,')) {
+      logResult('PASS', 'Tier enforcement (assertTier) found in apiGateway.jsw');
+    } else {
+      logResult('FAIL', 'Tier enforcement (assertTier) NOT found in apiGateway.jsw');
+    }
+  }
+
+  // --- 5. Rate Limiting Bypass ---
+  if (gatewayContent) {
+    // Check for the bypass header logic
+    const bypassHeader = 'x-lmdr-bypass-rate-limit';
+    if (gatewayContent.includes(bypassHeader)) {
+      logResult('FAIL', 'Rate Limit Bypass header detected', `Found usage of '${bypassHeader}'`);
+    } else {
+      logResult('PASS', 'No Rate Limit Bypass header detected in apiGateway.jsw');
+    }
+  }
+
+  const rateLimitContent = readFile('src/backend/rateLimitService.jsw');
+  if (rateLimitContent) {
+     if (rateLimitContent.includes('bypassRateLimit')) {
+         logResult('WARN', 'Rate limiting service supports bypass flag', 'Function `checkAndTrackUsage` accepts `bypassRateLimit` argument');
+     }
+  }
+
+  // --- 6. Permission Configuration ---
+  const permissionsContent = readFile('src/backend/permissions.json');
+  if (permissionsContent) {
+    try {
+      const permissions = JSON.parse(permissionsContent);
+      const wildcard = permissions['web-methods']?.['*']?.['*'];
+
+      if (wildcard?.anonymous?.invoke === true) {
+        logResult('FAIL', 'Global Wildcard Permission for Anonymous Users detected', 'permissions.json grants invoke access to "*" for "anonymous"');
+      } else {
+        logResult('PASS', 'No Global Wildcard for Anonymous users found in permissions.json');
+      }
+    } catch (e) {
+      logResult('FAIL', 'Could not parse permissions.json', e.message);
+    }
+  }
+
+  // --- 7. Code Hygiene (Comments) ---
+  const filesToScan = [
+    'src/backend/apiGateway.jsw',
+    'src/backend/apiAuthService.jsw',
+    'src/backend/rateLimitService.jsw'
+  ];
+
+  const dangerousKeywords = ['TODO', 'HACK', 'FIXME', 'BYPASS', 'SKIP', 'TEMP', 'DISABLE'];
+
+  filesToScan.forEach(file => {
+      const content = readFile(file);
+      if (content) {
+          dangerousKeywords.forEach(keyword => {
+              const regex = new RegExp(`//\\s*${keyword}`, 'i');
+              if (regex.test(content)) {
+                  logResult('WARN', `Found '${keyword}' comment in ${file}`);
+              }
+          });
+      }
+  });
+
+  // --- Summary ---
+  console.log(`\n${BOLD}Audit Complete.${RESET}`);
+  console.log(`PASS: ${report.PASS.length}`);
+  console.log(`FAIL: ${report.FAIL.length}`);
+  console.log(`WARN: ${report.WARN.length}`);
+
+  // Exit code 1 if any failures
+  if (report.FAIL.length > 0) {
+      process.exit(1);
+  }
+}
+
+runAudit();
