@@ -1,17 +1,19 @@
 'use client';
 
 import { KpiCard, Card, Badge, Button, DataTable, ProgressBar, StatusDot } from '@/components/ui';
+import { analyticsApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 
-/* ── Mock Data ─────────────────────────────────────────────────── */
+/* ── Fallback Mock Data ──────────────────────────────────────────── */
 
-const kpis = [
+const mockKpis = [
   { label: 'Total Revenue', value: '$1.24M', icon: 'payments', trend: '+18.4% YoY', trendUp: true },
   { label: 'Active Accounts', value: '87', icon: 'business', trend: '+12 this quarter', trendUp: true },
   { label: 'Monthly Recurring Revenue', value: '$103.6K', icon: 'autorenew', trend: '+6.2% MoM', trendUp: true },
   { label: 'Churn Rate', value: '2.1%', icon: 'person_remove', trend: '-0.4% vs last month', trendUp: true },
 ];
 
-const revenueMonths = [
+const mockRevenueMonths = [
   { month: 'Oct', value: 72 },
   { month: 'Nov', value: 78 },
   { month: 'Dec', value: 85 },
@@ -30,7 +32,7 @@ interface TopAccount {
   status: string;
 }
 
-const topAccounts: TopAccount[] = [
+const mockTopAccounts: TopAccount[] = [
   { account: 'Werner Enterprises', plan: 'Enterprise', mrr: '$8,400', mrrNum: 8400, healthScore: 92, status: 'Active' },
   { account: 'Schneider National', plan: 'Enterprise', mrr: '$7,200', mrrNum: 7200, healthScore: 88, status: 'Active' },
   { account: 'J.B. Hunt Transport', plan: 'Growth', mrr: '$4,800', mrrNum: 4800, healthScore: 76, status: 'Active' },
@@ -96,7 +98,7 @@ const quickActions = [
   { label: 'Run Report', icon: 'assessment', color: 'from-purple-500 to-purple-700' },
 ];
 
-const recentActivity = [
+const mockRecentActivity = [
   { icon: 'check_circle', iconColor: 'text-green-500', text: 'Knight-Swift signed Enterprise contract', time: '12 min ago' },
   { icon: 'call', iconColor: 'text-blue-500', text: 'Demo call completed with Ryder System', time: '1 hr ago' },
   { icon: 'send', iconColor: 'text-amber-500', text: 'Proposal sent to Old Dominion Freight', time: '2 hrs ago' },
@@ -104,9 +106,28 @@ const recentActivity = [
   { icon: 'warning', iconColor: 'text-red-400', text: 'Health score drop detected for XPO Logistics', time: '6 hrs ago' },
 ];
 
+/* ── Dashboard Data Shape ────────────────────────────────────────── */
+interface DashboardData {
+  kpis?: typeof mockKpis;
+  revenueMonths?: typeof mockRevenueMonths;
+  topAccounts?: TopAccount[];
+  recentActivity?: typeof mockRecentActivity;
+}
+
 /* ── Page Component ────────────────────────────────────────────── */
 
 export default function B2BDashboardPage() {
+  const { data: dashboardData, loading, error, refresh } = useApi<DashboardData>(
+    () => analyticsApi.getDashboard() as Promise<{ data: DashboardData }>,
+    []
+  );
+
+  // Use API data if available, fallback to mock
+  const kpis = dashboardData?.kpis ?? mockKpis;
+  const revenueMonths = dashboardData?.revenueMonths ?? mockRevenueMonths;
+  const topAccounts = dashboardData?.topAccounts ?? mockTopAccounts;
+  const recentActivity = dashboardData?.recentActivity ?? mockRecentActivity;
+
   const maxRevenue = Math.max(...revenueMonths.map((m) => m.value));
 
   return (
@@ -117,7 +138,20 @@ export default function B2BDashboardPage() {
           <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>B2B Sales Dashboard</h2>
           <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>VelocityMatch partner performance overview</p>
         </div>
-        <StatusDot status="active" label="All systems operational" />
+        <div className="flex items-center gap-3">
+          {loading && (
+            <span className="text-xs font-semibold animate-pulse" style={{ color: 'var(--neu-text-muted)' }}>
+              Loading...
+            </span>
+          )}
+          {error && (
+            <Badge variant="warning" icon="cloud_off">Using cached data</Badge>
+          )}
+          <Button variant="ghost" icon="refresh" size="sm" onClick={refresh}>
+            Refresh
+          </Button>
+          <StatusDot status="active" label="All systems operational" />
+        </div>
       </div>
 
       {/* KPI Row */}

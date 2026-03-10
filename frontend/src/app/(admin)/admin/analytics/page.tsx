@@ -2,19 +2,22 @@
 
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
+import { Button } from '@/components/ui/Button';
 import { KpiCard } from '@/components/ui/KpiCard';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { useApi } from '@/lib/hooks';
+import { analyticsApi } from '@/lib/api';
 
-/* ── KPI Data ── */
-const kpis = [
+/* ── Mock KPI Data (fallback) ── */
+const MOCK_KPIS = [
   { label: 'Time-to-Fill', value: '14.2d', icon: 'schedule', trend: '-2.1 days', trendUp: true },
   { label: 'Cost-per-Hire', value: '$847', icon: 'payments', trend: '-$63', trendUp: true },
   { label: 'Pipeline Velocity', value: '3.8x', icon: 'speed', trend: '+0.4x', trendUp: true },
   { label: 'Offer Acceptance', value: '78%', icon: 'thumb_up', trend: '+5%', trendUp: true },
 ];
 
-/* ── Monthly Placements (12 months) ── */
-const monthlyPlacements = [
+/* ── Mock Monthly Placements (fallback) ── */
+const MOCK_MONTHLY_PLACEMENTS = [
   { month: 'Apr', count: 42 },
   { month: 'May', count: 56 },
   { month: 'Jun', count: 51 },
@@ -29,10 +32,8 @@ const monthlyPlacements = [
   { month: 'Mar', count: 84 },
 ];
 
-const maxPlacement = Math.max(...monthlyPlacements.map((m) => m.count));
-
-/* ── Source Attribution ── */
-const sources = [
+/* ── Mock Source Attribution (fallback) ── */
+const MOCK_SOURCES = [
   { name: 'AI Matching', value: 42, color: '#2563eb' },
   { name: 'Recruiter Outreach', value: 28, color: '#7c3aed' },
   { name: 'Job Board Import', value: 15, color: '#06b6d4' },
@@ -40,8 +41,8 @@ const sources = [
   { name: 'Organic / Direct', value: 5, color: '#f59e0b' },
 ];
 
-/* ── Funnel Data ── */
-const funnel = [
+/* ── Mock Funnel Data (fallback) ── */
+const MOCK_FUNNEL = [
   { stage: 'Leads', count: 4291, color: '#3b82f6', width: 100 },
   { stage: 'Contacted', count: 2847, color: '#6366f1', width: 66 },
   { stage: 'Interview', count: 1284, color: '#8b5cf6', width: 30 },
@@ -50,8 +51,27 @@ const funnel = [
 ];
 
 export default function AdminAnalyticsPage() {
+  /* ── API Call ── */
+  const { data: dashData, loading, error, refresh } = useApi<Record<string, unknown>>(() => analyticsApi.getDashboard() as Promise<{ data: Record<string, unknown> }>);
+
+  /* ── Resolve data with fallbacks ── */
+  const kpis = (dashData as Record<string, unknown>)?.kpis as typeof MOCK_KPIS ?? MOCK_KPIS;
+  const monthlyPlacements = (dashData as Record<string, unknown>)?.monthlyPlacements as typeof MOCK_MONTHLY_PLACEMENTS ?? MOCK_MONTHLY_PLACEMENTS;
+  const sources = (dashData as Record<string, unknown>)?.sources as typeof MOCK_SOURCES ?? MOCK_SOURCES;
+  const funnel = (dashData as Record<string, unknown>)?.funnel as typeof MOCK_FUNNEL ?? MOCK_FUNNEL;
+  const maxPlacement = Math.max(...monthlyPlacements.map((m) => m.count));
+
   return (
     <div className="space-y-8">
+      {/* ── Error Banner ── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+          <span className="material-symbols-outlined text-[18px]">warning</span>
+          <span>API unavailable — showing cached data. {error}</span>
+          <button onClick={refresh} className="ml-auto font-semibold underline">Retry</button>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
@@ -62,16 +82,31 @@ export default function AdminAnalyticsPage() {
             Recruiting performance metrics — Last 12 months
           </p>
         </div>
-        <Badge variant="accent" icon="calendar_month">FY 2025-26</Badge>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh} loading={loading}>Refresh</Button>
+          <Badge variant="accent" icon="calendar_month">FY 2025-26</Badge>
+        </div>
       </div>
 
       {/* ── KPI Row ── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-        {kpis.map((k, i) => (
-          <div key={k.label} className={`stagger-${i + 1}`}>
-            <KpiCard label={k.label} value={k.value} icon={k.icon} trend={k.trend} trendUp={k.trendUp} />
-          </div>
-        ))}
+        {loading ? (
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className={`stagger-${i + 1}`}>
+              <Card elevation="sm" className="p-5 animate-pulse">
+                <div className="h-4 rounded bg-current opacity-10 w-24 mb-3" />
+                <div className="h-8 rounded bg-current opacity-10 w-16 mb-2" />
+                <div className="h-3 rounded bg-current opacity-10 w-20" />
+              </Card>
+            </div>
+          ))
+        ) : (
+          kpis.map((k, i) => (
+            <div key={k.label} className={`stagger-${i + 1}`}>
+              <KpiCard label={k.label} value={k.value} icon={k.icon} trend={k.trend} trendUp={k.trendUp} />
+            </div>
+          ))
+        )}
       </div>
 
       {/* ── Charts Row ── */}

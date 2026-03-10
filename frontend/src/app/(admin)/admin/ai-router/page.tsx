@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/Button';
 import { DataTable } from '@/components/ui/DataTable';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { useApi, useMutation } from '@/lib/hooks';
+import { aiApi } from '@/lib/api';
 
 /* ── Types ── */
 interface Provider {
@@ -32,8 +34,8 @@ interface TaskRoute {
   costToday: string;
 }
 
-/* ── Mock Providers (5) ── */
-const providers: Provider[] = [
+/* ── Mock Providers (fallback) ── */
+const MOCK_PROVIDERS: Provider[] = [
   { id: 'openai', name: 'OpenAI', model: 'GPT-4o', status: 'online', latencyMs: 320, costPer1k: 0.015, qualityScore: 94, callsToday: 1847, icon: 'neurology' },
   { id: 'anthropic', name: 'Anthropic', model: 'Claude 3.5 Sonnet', status: 'online', latencyMs: 450, costPer1k: 0.018, qualityScore: 97, callsToday: 1234, icon: 'psychology' },
   { id: 'google', name: 'Google', model: 'Gemini 1.5 Pro', status: 'offline', latencyMs: 0, costPer1k: 0.007, qualityScore: 88, callsToday: 0, icon: 'auto_awesome' },
@@ -41,8 +43,8 @@ const providers: Provider[] = [
   { id: 'cohere', name: 'Cohere', model: 'Command R+', status: 'online', latencyMs: 280, costPer1k: 0.005, qualityScore: 82, callsToday: 456, icon: 'hub' },
 ];
 
-/* ── Mock Task Routes (8) ── */
-const taskRoutes: TaskRoute[] = [
+/* ── Mock Task Routes (fallback) ── */
+const MOCK_TASK_ROUTES: TaskRoute[] = [
   { taskType: 'Carrier Enrichment', primaryProvider: 'OpenAI', fallbackProvider: 'Anthropic', avgLatency: '2.1s', callsToday: 342, successRate: 99.2, costToday: '$5.13' },
   { taskType: 'Driver Matching', primaryProvider: 'OpenAI', fallbackProvider: 'Mistral', avgLatency: '1.8s', callsToday: 287, successRate: 98.8, costToday: '$4.31' },
   { taskType: 'Agent Orchestration', primaryProvider: 'Anthropic', fallbackProvider: 'OpenAI', avgLatency: '3.2s', callsToday: 156, successRate: 99.5, costToday: '$2.81' },
@@ -116,9 +118,21 @@ export default function AdminAIRouterPage() {
   const [testingId, setTestingId] = useState<string | null>(null);
   const [optimizerOn, setOptimizerOn] = useState(true);
 
-  const handleTest = (id: string) => {
+  /* ── API Calls ── */
+  const { data: apiProviders, loading, error, refresh } = useApi<Provider[]>(() => aiApi.getProviders() as Promise<{ data: Provider[] }>);
+  const { execute: testProvider, loading: testLoading } = useMutation<{ providerId: string; prompt: string }>((input) => aiApi.routerComplete(input) as Promise<{ data: unknown }>);
+
+  /* ── Resolve with fallbacks ── */
+  const providers: Provider[] = (apiProviders as Provider[] | null) ?? MOCK_PROVIDERS;
+  const taskRoutes: TaskRoute[] = MOCK_TASK_ROUTES;
+
+  const handleTest = async (id: string) => {
     setTestingId(id);
-    setTimeout(() => setTestingId(null), 2500);
+    try {
+      await testProvider({ providerId: id, prompt: 'Health check test' });
+    } finally {
+      setTimeout(() => setTestingId(null), 500);
+    }
   };
 
   const totalCalls = providers.reduce((a, p) => a + p.callsToday, 0);
@@ -126,6 +140,15 @@ export default function AdminAIRouterPage() {
 
   return (
     <div className="space-y-8">
+      {/* ── Error Banner ── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+          <span className="material-symbols-outlined text-[18px]">warning</span>
+          <span>API unavailable — showing cached data. {error}</span>
+          <button onClick={refresh} className="ml-auto font-semibold underline">Retry</button>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
@@ -137,6 +160,7 @@ export default function AdminAIRouterPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh} loading={loading}>Refresh</Button>
           <Badge variant="success" dot>{onlineCount} online</Badge>
           {providers.filter(p => p.status === 'offline').length > 0 && (
             <Badge variant="error" dot>{providers.filter(p => p.status === 'offline').length} offline</Badge>

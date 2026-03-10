@@ -1,17 +1,19 @@
 'use client';
 
-import { Card, Badge, KpiCard } from '@/components/ui';
+import { Card, Badge, Button, KpiCard } from '@/components/ui';
+import { analyticsApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 
-/* ── KPI Data ─────────────────────────────────────────────────── */
-const kpis = [
+/* ── Fallback KPI Data ───────────────────────────────────────── */
+const fallbackKpis = [
   { label: 'Time-to-Fill', value: '18 days', icon: 'timer', trend: '-3 days vs Q3', trendUp: true },
   { label: 'Cost-per-Hire', value: '$2,340', icon: 'payments', trend: '-$180 vs Q3', trendUp: true },
   { label: 'Pipeline Velocity', value: '4.2x', icon: 'speed', trend: '+0.6x vs last month', trendUp: true },
   { label: 'Offer Acceptance', value: '78%', icon: 'handshake', trend: '-2% vs last month', trendUp: false },
 ];
 
-/* ── Monthly Placements (12 months) ───────────────────────────── */
-const months = [
+/* ── Fallback Monthly Placements (12 months) ─────────────────── */
+const fallbackMonths = [
   { label: 'Apr', value: 4 },
   { label: 'May', value: 6 },
   { label: 'Jun', value: 5 },
@@ -25,10 +27,9 @@ const months = [
   { label: 'Feb', value: 9 },
   { label: 'Mar', value: 6 },
 ];
-const maxMonth = Math.max(...months.map((m) => m.value));
 
-/* ── Source Attribution ────────────────────────────────────────── */
-const sources = [
+/* ── Fallback Source Attribution ──────────────────────────────── */
+const fallbackSources = [
   { name: 'Job Boards', pct: 35, color: 'bg-blue-500', icon: 'work' },
   { name: 'Referrals', pct: 28, color: 'bg-green-500', icon: 'group_add' },
   { name: 'Direct Apply', pct: 20, color: 'bg-amber-500', icon: 'web' },
@@ -36,39 +37,87 @@ const sources = [
   { name: 'Other', pct: 5, color: 'bg-gray-400', icon: 'more_horiz' },
 ];
 
-/* ── Funnel Conversion ────────────────────────────────────────── */
-const funnel = [
+/* ── Fallback Funnel Conversion ──────────────────────────────── */
+const fallbackFunnel = [
   { label: 'Leads', count: 342, color: 'bg-blue-400' },
   { label: 'Contacted', count: 198, color: 'bg-blue-500' },
   { label: 'Interview', count: 87, color: 'bg-purple-500' },
   { label: 'Offer', count: 42, color: 'bg-emerald-500' },
   { label: 'Placed', count: 28, color: 'bg-green-600' },
 ];
-const funnelMax = funnel[0].count;
+
+/* ── Analytics Response Shape ────────────────────────────────── */
+interface AnalyticsData {
+  kpis?: { label: string; value: string; icon: string; trend: string; trendUp: boolean }[];
+  months?: { label: string; value: number }[];
+  sources?: { name: string; pct: number; color: string; icon: string }[];
+  funnel?: { label: string; count: number; color: string }[];
+}
 
 export default function AnalyticsPage() {
+  const { data, loading, error, refresh } = useApi<AnalyticsData>(
+    () => analyticsApi.getDashboard() as Promise<{ data: AnalyticsData }>,
+    []
+  );
+
+  const kpis = data?.kpis ?? fallbackKpis;
+  const months = data?.months ?? fallbackMonths;
+  const sources = data?.sources ?? fallbackSources;
+  const funnel = data?.funnel ?? fallbackFunnel;
+
+  const maxMonth = Math.max(...months.map((m) => m.value));
+  const funnelMax = funnel[0]?.count ?? 1;
+
   return (
     <div className="space-y-8">
       {/* ── Header ─────────────────────────────────────────────── */}
-      <div className="animate-fade-up">
-        <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Analytics</h1>
-        <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>Recruiting performance metrics and pipeline insights</p>
+      <div className="flex items-center justify-between animate-fade-up">
+        <div>
+          <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Analytics</h1>
+          <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>Recruiting performance metrics and pipeline insights</p>
+        </div>
+        <Button variant="ghost" size="sm" icon="refresh" onClick={refresh} disabled={loading}>
+          {loading ? 'Loading...' : 'Refresh'}
+        </Button>
       </div>
 
+      {/* ── Error Banner ─────────────────────────────────────── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 text-sm font-medium text-red-700 bg-red-50 border border-red-200 flex items-center gap-2">
+          <span className="material-symbols-outlined text-[18px]">error</span>
+          Failed to load analytics data. Showing cached results.
+          <button onClick={refresh} className="ml-auto underline text-red-600 hover:text-red-800 text-xs font-bold">Retry</button>
+        </div>
+      )}
+
+      {/* ── Loading Skeleton ─────────────────────────────────── */}
+      {loading && !data && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {[1, 2, 3, 4].map((i) => (
+            <Card key={i} className="animate-pulse">
+              <div className="h-4 bg-gray-200 rounded w-24 mb-3" />
+              <div className="h-8 bg-gray-200 rounded w-16" />
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* ── KPI Cards ──────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {kpis.map((kpi, i) => (
-          <KpiCard
-            key={kpi.label}
-            label={kpi.label}
-            value={kpi.value}
-            icon={kpi.icon}
-            trend={kpi.trend}
-            trendUp={kpi.trendUp}
-            className={`stagger-${i + 1}`}
-          />
-        ))}
-      </div>
+      {(!loading || data) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {kpis.map((kpi, i) => (
+            <KpiCard
+              key={kpi.label}
+              label={kpi.label}
+              value={kpi.value}
+              icon={kpi.icon}
+              trend={kpi.trend}
+              trendUp={kpi.trendUp}
+              className={`stagger-${i + 1}`}
+            />
+          ))}
+        </div>
+      )}
 
       {/* ── Charts Row ─────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -237,7 +286,7 @@ export default function AnalyticsPage() {
             <div>
               <span className="kpi-label block">Overall Conversion</span>
               <span className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>
-                {Math.round((funnel[funnel.length - 1].count / funnel[0].count) * 100)}%
+                {funnel.length >= 2 ? Math.round((funnel[funnel.length - 1].count / funnel[0].count) * 100) : 0}%
               </span>
             </div>
             <div>
@@ -248,7 +297,7 @@ export default function AnalyticsPage() {
             </div>
           </div>
           <Badge variant="info" icon="insights" className="text-xs px-3 py-1.5">
-            {funnel[0].count} → {funnel[funnel.length - 1].count} placed
+            {funnel[0]?.count ?? 0} → {funnel[funnel.length - 1]?.count ?? 0} placed
           </Badge>
         </div>
       </Card>

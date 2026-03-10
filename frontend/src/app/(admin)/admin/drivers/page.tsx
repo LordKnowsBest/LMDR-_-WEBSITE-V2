@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { DataTable } from '@/components/ui/DataTable';
 import { KpiCard } from '@/components/ui/KpiCard';
+import { useApi } from '@/lib/hooks';
+import { matchingApi } from '@/lib/api';
 
 /* ── Types ── */
 type DriverStatus = 'active' | 'pending' | 'suspended';
@@ -30,8 +32,8 @@ const statusVariant: Record<DriverStatus, 'success' | 'warning' | 'error'> = {
   suspended: 'error',
 };
 
-/* ── Mock Drivers (12 rows) ── */
-const mockDrivers: Driver[] = [
+/* ── Mock Drivers (fallback) ── */
+const MOCK_DRIVERS: Driver[] = [
   { id: '1', name: 'Marcus Johnson', cdlClass: 'A', status: 'active', experience: 8, location: 'Dallas, TX', matchScore: 94, endorsements: 'H, T, N', lastActive: '2 hrs ago' },
   { id: '2', name: 'Sarah Chen', cdlClass: 'A', status: 'active', experience: 5, location: 'Los Angeles, CA', matchScore: 91, endorsements: 'T, N', lastActive: '30 min ago' },
   { id: '3', name: 'Robert Davis', cdlClass: 'B', status: 'suspended', experience: 3, location: 'Columbus, OH', matchScore: 67, endorsements: 'P', lastActive: '3 days ago' },
@@ -60,7 +62,13 @@ export default function AdminDriversPage() {
   const [activeFilter, setActiveFilter] = useState<string>('All');
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  const filtered = mockDrivers.filter((d) => {
+  /* ── API Call ── */
+  const { data: apiDrivers, loading, error, refresh } = useApi<Driver[]>(() => matchingApi.searchDrivers({ limit: 100 }) as Promise<{ data: Driver[] }>);
+
+  /* ── Resolve with fallback ── */
+  const allDrivers: Driver[] = apiDrivers ?? MOCK_DRIVERS;
+
+  const filtered = allDrivers.filter((d) => {
     const matchesSearch = d.name.toLowerCase().includes(search.toLowerCase()) || d.location.toLowerCase().includes(search.toLowerCase());
     const matchesFilter = activeFilter === 'All' || d.status === activeFilter.toLowerCase();
     return matchesSearch && matchesFilter;
@@ -83,9 +91,9 @@ export default function AdminDriversPage() {
     }
   };
 
-  const activeCount = mockDrivers.filter((d) => d.status === 'active').length;
-  const pendingCount = mockDrivers.filter((d) => d.status === 'pending').length;
-  const avgScore = Math.round(mockDrivers.reduce((a, d) => a + d.matchScore, 0) / mockDrivers.length);
+  const activeCount = allDrivers.filter((d) => d.status === 'active').length;
+  const pendingCount = allDrivers.filter((d) => d.status === 'pending').length;
+  const avgScore = allDrivers.length > 0 ? Math.round(allDrivers.reduce((a, d) => a + d.matchScore, 0) / allDrivers.length) : 0;
 
   const columns = [
     {
@@ -173,6 +181,15 @@ export default function AdminDriversPage() {
 
   return (
     <div className="space-y-6">
+      {/* ── Error Banner ── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+          <span className="material-symbols-outlined text-[18px]">warning</span>
+          <span>API unavailable — showing cached data. {error}</span>
+          <button onClick={refresh} className="ml-auto font-semibold underline">Retry</button>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
@@ -180,10 +197,13 @@ export default function AdminDriversPage() {
             Driver Management
           </h2>
           <p className="text-sm mt-1 animate-fade-up stagger-1" style={{ color: 'var(--neu-text-muted)' }}>
-            {mockDrivers.length} drivers in system
+            {allDrivers.length} drivers in system
           </p>
         </div>
-        <Button variant="primary" size="sm" icon="person_add">Add Driver</Button>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh} loading={loading}>Refresh</Button>
+          <Button variant="primary" size="sm" icon="person_add">Add Driver</Button>
+        </div>
       </div>
 
       {/* ── KPI Row ── */}
@@ -204,7 +224,7 @@ export default function AdminDriversPage() {
               {f}
               {f !== 'All' && (
                 <span className="ml-1 text-[10px] opacity-70">
-                  ({mockDrivers.filter((d) => d.status === f.toLowerCase()).length})
+                  ({allDrivers.filter((d) => d.status === f.toLowerCase()).length})
                 </span>
               )}
             </Button>
@@ -236,6 +256,7 @@ export default function AdminDriversPage() {
         <DataTable
           columns={columns}
           data={filtered}
+          loading={loading}
           emptyMessage="No drivers match your filters"
           emptyIcon="person_off"
         />

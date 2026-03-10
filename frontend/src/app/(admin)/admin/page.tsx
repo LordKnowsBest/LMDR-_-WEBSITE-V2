@@ -6,25 +6,27 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { useApi } from '@/lib/hooks';
+import { analyticsApi } from '@/lib/api';
 
-/* ── KPI Data ── */
-const kpis = [
+/* ── Mock KPI Data (fallback) ── */
+const MOCK_KPIS = [
   { label: 'Total Drivers', value: '2,847', icon: 'people', trend: '+12% this month', trendUp: true },
   { label: 'Active Carriers', value: '463', icon: 'local_shipping', trend: '+5% this month', trendUp: true },
   { label: 'Matches Made', value: '1,284', icon: 'handshake', trend: '+18% this month', trendUp: true },
   { label: 'Avg Match Score', value: '84.7', icon: 'grade', trend: '-1.2 pts', trendUp: false },
 ];
 
-/* ── System Health ── */
-const healthServices = [
+/* ── Mock System Health (fallback) ── */
+const MOCK_HEALTH_SERVICES = [
   { name: 'Database', status: 'active' as const, detail: 'Cloud SQL — 2ms avg' },
   { name: 'AI Engine', status: 'active' as const, detail: '5 providers online' },
   { name: 'FMCSA API', status: 'warning' as const, detail: 'Rate limit 78%' },
   { name: 'Enrichment', status: 'active' as const, detail: 'Batch #4821 complete' },
 ];
 
-/* ── Activity Feed ── */
-const activity = [
+/* ── Mock Activity Feed (fallback) ── */
+const MOCK_ACTIVITY = [
   { id: 1, action: 'Driver verified', detail: 'Marcus Johnson — CDL-A verified by FMCSA', time: '5 min ago', icon: 'verified', variant: 'success' as const },
   { id: 2, action: 'New carrier registered', detail: 'TransPro Logistics (DOT #3847291)', time: '12 min ago', icon: 'add_business', variant: 'info' as const },
   { id: 3, action: 'Match accepted', detail: 'Sarah Chen ↔ FastFreight Inc — Score 94', time: '28 min ago', icon: 'check_circle', variant: 'success' as const },
@@ -43,8 +45,8 @@ const quickActions = [
   { label: 'FMCSA Sync', icon: 'sync', color: '#06b6d4' },
 ];
 
-/* ── Feature Adoption ── */
-const features = [
+/* ── Mock Feature Adoption (fallback) ── */
+const MOCK_FEATURES = [
   { name: 'AI Matching', users: 2412, pct: 92 },
   { name: 'Voice Agent', users: 823, pct: 38 },
   { name: 'Market Signals', users: 614, pct: 28 },
@@ -53,8 +55,32 @@ const features = [
 ];
 
 export default function AdminDashboardPage() {
+  /* ── API Calls ── */
+  const { data: dashData, loading: dashLoading, error: dashError, refresh: refreshDash } = useApi<Record<string, unknown>>(() => analyticsApi.getDashboard() as Promise<{ data: Record<string, unknown> }>);
+  const { data: adoptionData, loading: adoptionLoading, error: adoptionError, refresh: refreshAdoption } = useApi<Record<string, unknown>>(() => analyticsApi.getFeatureAdoption() as Promise<{ data: Record<string, unknown> }>);
+
+  /* ── Resolve data with fallbacks ── */
+  const kpis = (dashData as Record<string, unknown>)?.kpis as typeof MOCK_KPIS ?? MOCK_KPIS;
+  const healthServices = (dashData as Record<string, unknown>)?.healthServices as typeof MOCK_HEALTH_SERVICES ?? MOCK_HEALTH_SERVICES;
+  const activity = (dashData as Record<string, unknown>)?.activity as typeof MOCK_ACTIVITY ?? MOCK_ACTIVITY;
+  const features = (adoptionData as Record<string, unknown>)?.features as typeof MOCK_FEATURES ?? MOCK_FEATURES;
+
+  const handleRefresh = () => {
+    refreshDash();
+    refreshAdoption();
+  };
+
   return (
     <div className="space-y-8">
+      {/* ── Error Banner ── */}
+      {(dashError || adoptionError) && (
+        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+          <span className="material-symbols-outlined text-[18px]">warning</span>
+          <span>API unavailable — showing cached data. {dashError || adoptionError}</span>
+          <button onClick={handleRefresh} className="ml-auto font-semibold underline">Retry</button>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
@@ -65,16 +91,31 @@ export default function AdminDashboardPage() {
             VelocityMatch platform overview — {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
           </p>
         </div>
-        <Badge variant="accent" icon="circle" dot>LIVE</Badge>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={handleRefresh} loading={dashLoading || adoptionLoading}>Refresh</Button>
+          <Badge variant="accent" icon="circle" dot>LIVE</Badge>
+        </div>
       </div>
 
       {/* ── KPI Row ── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-        {kpis.map((k, i) => (
-          <div key={k.label} className={`stagger-${i + 1}`}>
-            <KpiCard label={k.label} value={k.value} icon={k.icon} trend={k.trend} trendUp={k.trendUp} />
-          </div>
-        ))}
+        {dashLoading ? (
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className={`stagger-${i + 1}`}>
+              <Card elevation="sm" className="p-5 animate-pulse">
+                <div className="h-4 rounded bg-current opacity-10 w-24 mb-3" />
+                <div className="h-8 rounded bg-current opacity-10 w-16 mb-2" />
+                <div className="h-3 rounded bg-current opacity-10 w-20" />
+              </Card>
+            </div>
+          ))
+        ) : (
+          kpis.map((k, i) => (
+            <div key={k.label} className={`stagger-${i + 1}`}>
+              <KpiCard label={k.label} value={k.value} icon={k.icon} trend={k.trend} trendUp={k.trendUp} />
+            </div>
+          ))
+        )}
       </div>
 
       {/* ── System Health + Quick Actions row ── */}
@@ -130,7 +171,7 @@ export default function AdminDashboardPage() {
         <Card elevation="md" className="lg:col-span-2 animate-fade-up stagger-7">
           <div className="flex items-center justify-between mb-5">
             <h3 className="text-base font-bold" style={{ color: 'var(--neu-text)' }}>Activity Feed</h3>
-            <Button variant="ghost" size="sm" icon="refresh">Refresh</Button>
+            <Button variant="ghost" size="sm" icon="refresh" onClick={handleRefresh} loading={dashLoading}>Refresh</Button>
           </div>
           <div className="divide-y" style={{ borderColor: 'var(--neu-border)' }}>
             {activity.map((item, i) => (

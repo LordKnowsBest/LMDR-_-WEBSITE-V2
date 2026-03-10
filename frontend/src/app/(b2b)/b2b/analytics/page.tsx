@@ -1,17 +1,19 @@
 'use client';
 
-import { Card, KpiCard, Badge, ProgressBar } from '@/components/ui';
+import { Card, KpiCard, Badge, Button, ProgressBar } from '@/components/ui';
+import { analyticsApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 
-/* ── Mock Data ─────────────────────────────────────────────────── */
+/* ── Fallback Mock Data ──────────────────────────────────────────── */
 
-const kpis = [
+const mockKpis = [
   { label: 'Win Rate', value: '68%', icon: 'emoji_events', trend: '+4.2% vs last quarter', trendUp: true },
   { label: 'Avg Deal Size', value: '$156K', icon: 'payments', trend: '+$12K vs Q3', trendUp: true },
   { label: 'Sales Cycle', value: '34 days', icon: 'schedule', trend: '-6 days vs Q3', trendUp: true },
   { label: 'Pipeline Coverage', value: '3.8x', icon: 'layers', trend: '+0.4x vs target', trendUp: true },
 ];
 
-const revenueByMonth = [
+const mockRevenueByMonth = [
   { month: 'Apr', value: 62 },
   { month: 'May', value: 58 },
   { month: 'Jun', value: 71 },
@@ -26,7 +28,7 @@ const revenueByMonth = [
   { month: 'Mar', value: 112 },
 ];
 
-const dealSources = [
+const mockDealSources = [
   { source: 'Outbound', count: 42, value: 2840000, pct: 38, color: 'blue' as const },
   { source: 'Inbound', count: 31, value: 1960000, pct: 26, color: 'green' as const },
   { source: 'Referral', count: 18, value: 1420000, pct: 19, color: 'purple' as const },
@@ -34,7 +36,7 @@ const dealSources = [
   { source: 'Event', count: 5, value: 390000, pct: 5, color: 'red' as const },
 ];
 
-const funnelStages = [
+const mockFunnelStages = [
   { stage: 'Leads Generated', count: 342, conversion: null },
   { stage: 'Qualified', count: 186, conversion: 54.4 },
   { stage: 'Demo Completed', count: 98, conversion: 52.7 },
@@ -42,7 +44,7 @@ const funnelStages = [
   { stage: 'Closed Won', count: 38, conversion: 62.3 },
 ];
 
-const topPerformers = [
+const mockTopPerformers = [
   { rank: 1, name: 'Alex Rodriguez', placements: 14, revenue: '$1.42M', winRate: '78%', medal: 'gold' },
   { rank: 2, name: 'Jordan Mitchell', placements: 11, revenue: '$1.08M', winRate: '72%', medal: 'silver' },
   { rank: 3, name: 'Sam Kowalski', placements: 9, revenue: '$860K', winRate: '65%', medal: 'bronze' },
@@ -60,17 +62,53 @@ function formatCurrency(val: number): string {
   return `$${val}`;
 }
 
+/* ── Analytics Data Shape ────────────────────────────────────────── */
+interface AnalyticsData {
+  kpis?: typeof mockKpis;
+  revenueByMonth?: typeof mockRevenueByMonth;
+  dealSources?: typeof mockDealSources;
+  funnelStages?: typeof mockFunnelStages;
+  topPerformers?: typeof mockTopPerformers;
+}
+
 /* ── Page Component ────────────────────────────────────────────── */
 
 export default function B2BAnalyticsPage() {
+  const { data: analyticsData, loading, error, refresh } = useApi<AnalyticsData>(
+    () => analyticsApi.getDashboard() as Promise<{ data: AnalyticsData }>,
+    []
+  );
+
+  // Use API data if available, fallback to mock
+  const kpis = analyticsData?.kpis ?? mockKpis;
+  const revenueByMonth = analyticsData?.revenueByMonth ?? mockRevenueByMonth;
+  const dealSources = analyticsData?.dealSources ?? mockDealSources;
+  const funnelStages = analyticsData?.funnelStages ?? mockFunnelStages;
+  const topPerformers = analyticsData?.topPerformers ?? mockTopPerformers;
+
   const maxRevenue = Math.max(...revenueByMonth.map((m) => m.value));
 
   return (
     <div className="space-y-8">
       {/* Header */}
-      <div className="animate-fade-up">
-        <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>B2B Analytics</h2>
-        <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>Performance metrics and revenue intelligence</p>
+      <div className="animate-fade-up flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>B2B Analytics</h2>
+          <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>Performance metrics and revenue intelligence</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {loading && (
+            <span className="text-xs font-semibold animate-pulse" style={{ color: 'var(--neu-text-muted)' }}>
+              Loading...
+            </span>
+          )}
+          {error && (
+            <Badge variant="warning" icon="cloud_off">Using cached data</Badge>
+          )}
+          <Button variant="ghost" icon="refresh" size="sm" onClick={refresh}>
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* KPI Row */}

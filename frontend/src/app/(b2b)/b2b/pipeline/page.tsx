@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useCallback } from 'react';
 import { Card, Badge, Button, ProgressBar } from '@/components/ui';
 
 /* ── Types & Data ──────────────────────────────────────────────── */
@@ -22,7 +23,7 @@ interface Stage {
   deals: Deal[];
 }
 
-const stages: Stage[] = [
+const initialStages: Stage[] = [
   {
     key: 'prospect',
     label: 'Prospect',
@@ -115,6 +116,39 @@ function daysVariant(days: number): 'default' | 'warning' | 'error' {
 /* ── Page Component ────────────────────────────────────────────── */
 
 export default function B2BPipelinePage() {
+  const [stages, setStages] = useState<Stage[]>(initialStages);
+  const [dragDeal, setDragDeal] = useState<{ stageIdx: number; dealIdx: number } | null>(null);
+
+  const moveDeal = useCallback((fromStage: number, dealIdx: number, toStage: number) => {
+    if (fromStage === toStage) return;
+    setStages((prev) => {
+      const next = prev.map((s) => ({ ...s, deals: [...s.deals] }));
+      const [deal] = next[fromStage].deals.splice(dealIdx, 1);
+      if (!deal) return prev;
+      // Update probability based on target stage
+      const probMap: Record<string, number> = { prospect: 10, demo: 30, proposal: 50, negotiation: 75, won: 100, lost: 0 };
+      deal.probability = probMap[next[toStage].key] ?? deal.probability;
+      deal.daysInStage = 0;
+      next[toStage].deals.push(deal);
+      return next;
+    });
+  }, []);
+
+  const handleDragStart = (stageIdx: number, dealIdx: number) => {
+    setDragDeal({ stageIdx, dealIdx });
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (targetStageIdx: number) => {
+    if (dragDeal) {
+      moveDeal(dragDeal.stageIdx, dragDeal.dealIdx, targetStageIdx);
+      setDragDeal(null);
+    }
+  };
+
   const allDeals = stages.flatMap((s) => s.deals);
   const totalPipeline = stageTotal(allDeals);
   const totalWeighted = weightedTotal(allDeals);
@@ -127,7 +161,7 @@ export default function B2BPipelinePage() {
         <div>
           <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Sales Pipeline</h2>
           <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>
-            {activeDeals.length} active deals in pipeline
+            {activeDeals.length} active deals in pipeline -- drag cards to move between stages
           </p>
         </div>
         <Button variant="primary" icon="add">New Deal</Button>
@@ -148,7 +182,7 @@ export default function B2BPipelinePage() {
           <div className="w-px h-10 bg-[var(--neu-border)]" />
           <div>
             <span className="kpi-label">Avg Deal Size</span>
-            <p className="text-xl font-black" style={{ color: 'var(--neu-text)' }}>{formatCurrency(Math.round(totalPipeline / allDeals.length))}</p>
+            <p className="text-xl font-black" style={{ color: 'var(--neu-text)' }}>{allDeals.length > 0 ? formatCurrency(Math.round(totalPipeline / allDeals.length)) : '$0'}</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
             <Badge variant="success" icon="emoji_events">{stages.find((s) => s.key === 'won')?.deals.length} Won</Badge>
@@ -164,6 +198,8 @@ export default function B2BPipelinePage() {
             key={stage.key}
             className={`flex-shrink-0 w-72 animate-fade-up stagger-${Math.min(si + 2, 8)}`}
             style={{ opacity: stage.muted ? 0.6 : 1 }}
+            onDragOver={handleDragOver}
+            onDrop={() => handleDrop(si)}
           >
             {/* Column Header */}
             <Card elevation="sm" className="mb-3 !p-0 overflow-hidden">
@@ -189,7 +225,9 @@ export default function B2BPipelinePage() {
                   key={`${stage.key}-${di}`}
                   elevation="sm"
                   hover
-                  className="!p-4"
+                  className="!p-4 cursor-grab active:cursor-grabbing"
+                  draggable
+                  onDragStart={() => handleDragStart(si, di)}
                 >
                   <div className="flex items-start justify-between mb-2">
                     <p className="text-sm font-bold leading-tight" style={{ color: 'var(--neu-text)' }}>{deal.company}</p>

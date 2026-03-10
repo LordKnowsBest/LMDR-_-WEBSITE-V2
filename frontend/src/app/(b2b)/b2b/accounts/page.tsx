@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { Card, Badge, Button, Input, DataTable, ProgressBar } from '@/components/ui';
 
 /* ── Mock Data ─────────────────────────────────────────────────── */
@@ -60,18 +60,51 @@ function healthColor(score: number): 'green' | 'amber' | 'red' {
   return 'red';
 }
 
+/* ── Sort Types ────────────────────────────────────────────────── */
+type SortKey = 'name' | 'mrrNum' | 'healthScore';
+type SortDir = 'asc' | 'desc';
+
 /* ── Page Component ────────────────────────────────────────────── */
 
 export default function B2BAccountsPage() {
   const [search, setSearch] = useState('');
   const [segment, setSegment] = useState<Segment>('All');
+  const [sortKey, setSortKey] = useState<SortKey>('mrrNum');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
 
-  const filtered = accounts.filter((a) => {
-    const matchSearch = a.name.toLowerCase().includes(search.toLowerCase()) ||
-      a.industry.toLowerCase().includes(search.toLowerCase());
-    const matchSegment = segment === 'All' || a.segment === segment;
-    return matchSearch && matchSegment;
-  });
+  const filtered = useMemo(() => {
+    let result = accounts.filter((a) => {
+      const matchSearch = a.name.toLowerCase().includes(search.toLowerCase()) ||
+        a.industry.toLowerCase().includes(search.toLowerCase());
+      const matchSegment = segment === 'All' || a.segment === segment;
+      return matchSearch && matchSegment;
+    });
+
+    result = [...result].sort((a, b) => {
+      const aVal = a[sortKey];
+      const bVal = b[sortKey];
+      if (typeof aVal === 'string' && typeof bVal === 'string') {
+        return sortDir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      return sortDir === 'asc' ? (aVal as number) - (bVal as number) : (bVal as number) - (aVal as number);
+    });
+
+    return result;
+  }, [search, segment, sortKey, sortDir]);
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('desc');
+    }
+  };
+
+  const sortIcon = (key: SortKey) => {
+    if (sortKey !== key) return 'unfold_more';
+    return sortDir === 'asc' ? 'expand_less' : 'expand_more';
+  };
 
   const columns = [
     {
@@ -179,11 +212,34 @@ export default function B2BAccountsPage() {
         </div>
       </Card>
 
-      {/* Summary Badges */}
-      <div className="flex items-center gap-3 animate-fade-up stagger-2">
+      {/* Sort Controls + Summary Badges */}
+      <div className="flex items-center gap-3 flex-wrap animate-fade-up stagger-2">
         <Badge variant="success" dot>{filtered.filter((a) => a.status === 'Active').length} Active</Badge>
         <Badge variant="warning" dot>{filtered.filter((a) => a.status === 'Trial').length} Trial</Badge>
         <Badge variant="error" dot>{filtered.filter((a) => a.status === 'Churned').length} Churned</Badge>
+
+        <span className="mx-2 w-px h-5 bg-[var(--neu-border)]" />
+
+        <span className="text-[11px] font-semibold" style={{ color: 'var(--neu-text-muted)' }}>Sort:</span>
+        {([
+          { key: 'name' as SortKey, label: 'Name' },
+          { key: 'mrrNum' as SortKey, label: 'MRR' },
+          { key: 'healthScore' as SortKey, label: 'Health' },
+        ]).map((s) => (
+          <button
+            key={s.key}
+            onClick={() => handleSort(s.key)}
+            className={`
+              inline-flex items-center gap-0.5 px-2 py-1 rounded-lg text-[11px] font-bold transition-all
+              ${sortKey === s.key ? 'bg-[var(--neu-accent)]/10' : 'hover:bg-[var(--neu-shadow-d)]/5'}
+            `}
+            style={{ color: sortKey === s.key ? 'var(--neu-accent)' : 'var(--neu-text-muted)' }}
+          >
+            {s.label}
+            <span className="material-symbols-outlined text-[14px]">{sortIcon(s.key)}</span>
+          </button>
+        ))}
+
         <span className="text-[11px] font-semibold ml-auto" style={{ color: 'var(--neu-text-muted)' }}>
           Showing {filtered.length} of {accounts.length}
         </span>

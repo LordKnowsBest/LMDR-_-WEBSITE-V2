@@ -1,10 +1,12 @@
 'use client';
 
 import { Card, Badge, Button, KpiCard, ProgressBar } from '@/components/ui';
+import { analyticsApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 import Link from 'next/link';
 
-/* ── KPI Data ─────────────────────────────────────────────────── */
-const kpis = [
+/* ── Fallback KPI Data ───────────────────────────────────────── */
+const fallbackKpis = [
   { label: 'Active Candidates', value: '142', icon: 'people', trend: '+12 this week', trendUp: true },
   { label: 'Placements This Month', value: '6', icon: 'handshake', trend: '+2 vs last month', trendUp: true },
   { label: 'Pipeline Value', value: '$84.6K', icon: 'account_balance', trend: '+$12K this week', trendUp: true },
@@ -19,8 +21,8 @@ const quickActions = [
   { label: 'View Pipeline', href: '/recruiter/pipeline', icon: 'filter_alt', gradient: 'from-purple-500 to-purple-700' },
 ];
 
-/* ── Activity Feed ────────────────────────────────────────────── */
-const activityFeed = [
+/* ── Fallback Activity Feed ──────────────────────────────────── */
+const fallbackActivityFeed = [
   { id: 1, text: 'Placement confirmed: Carlos M. started at XPO Logistics', time: '12 min ago', icon: 'check_circle', type: 'placement' as const },
   { id: 2, text: 'Interview scheduled with Maria S. for regional haul role', time: '34 min ago', icon: 'event_available', type: 'interview' as const },
   { id: 3, text: 'Driver John D. applied for OTR position at Werner Enterprises', time: '1 hr ago', icon: 'person_add', type: 'application' as const },
@@ -38,17 +40,35 @@ const activityMeta: Record<string, { variant: 'success' | 'info' | 'warning' | '
   message: { variant: 'accent', badge: 'Message', color: 'text-purple-500' },
 };
 
-/* ── Pipeline Summary ─────────────────────────────────────────── */
-const pipelineStages = [
+/* ── Fallback Pipeline Summary ───────────────────────────────── */
+const fallbackPipelineStages = [
   { label: 'New Lead', count: 38, color: 'bg-blue-400' },
   { label: 'Contacted', count: 24, color: 'bg-amber-400' },
   { label: 'Interview', count: 16, color: 'bg-purple-400' },
   { label: 'Offer', count: 8, color: 'bg-emerald-400' },
   { label: 'Placed', count: 6, color: 'bg-green-600' },
 ];
-const pipelineTotal = pipelineStages.reduce((s, p) => s + p.count, 0);
+
+/* ── Dashboard Response Shape ────────────────────────────────── */
+interface DashboardData {
+  kpis?: { label: string; value: string; icon: string; trend: string; trendUp: boolean }[];
+  activityFeed?: { id: number; text: string; time: string; icon: string; type: 'placement' | 'interview' | 'application' | 'message' }[];
+  pipelineStages?: { label: string; count: number; color: string }[];
+  marketCondition?: string;
+}
 
 export default function RecruiterConsolePage() {
+  const { data, loading, error, refresh } = useApi<DashboardData>(
+    () => analyticsApi.getDashboard() as Promise<{ data: DashboardData }>,
+    []
+  );
+
+  const kpis = data?.kpis ?? fallbackKpis;
+  const activityFeed = data?.activityFeed ?? fallbackActivityFeed;
+  const pipelineStages = data?.pipelineStages ?? fallbackPipelineStages;
+  const marketCondition = data?.marketCondition ?? 'HOT';
+  const pipelineTotal = pipelineStages.reduce((s, p) => s + p.count, 0);
+
   return (
     <div className="space-y-8">
       {/* ── Top Bar: Title + Market Ticker ─────────────────────── */}
@@ -57,25 +77,53 @@ export default function RecruiterConsolePage() {
           <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Recruiter Console</h1>
           <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>Welcome back. Here is your recruiting snapshot.</p>
         </div>
-        <Badge variant="success" icon="local_fire_department" className="text-xs px-3 py-1.5">
-          MARKET: HOT
-        </Badge>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh} disabled={loading}>
+            {loading ? 'Loading...' : 'Refresh'}
+          </Button>
+          <Badge variant="success" icon="local_fire_department" className="text-xs px-3 py-1.5">
+            MARKET: {marketCondition}
+          </Badge>
+        </div>
       </div>
 
+      {/* ── Error Banner ─────────────────────────────────────── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 text-sm font-medium text-red-700 bg-red-50 border border-red-200 flex items-center gap-2">
+          <span className="material-symbols-outlined text-[18px]">error</span>
+          Failed to load dashboard data. Showing cached results.
+          <button onClick={refresh} className="ml-auto underline text-red-600 hover:text-red-800 text-xs font-bold">Retry</button>
+        </div>
+      )}
+
+      {/* ── Loading Skeleton ─────────────────────────────────── */}
+      {loading && !data && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {[1, 2, 3, 4].map((i) => (
+            <Card key={i} className="animate-pulse">
+              <div className="h-4 bg-gray-200 rounded w-24 mb-3" />
+              <div className="h-8 bg-gray-200 rounded w-16" />
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* ── KPI Cards ──────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {kpis.map((kpi, i) => (
-          <KpiCard
-            key={kpi.label}
-            label={kpi.label}
-            value={kpi.value}
-            icon={kpi.icon}
-            trend={kpi.trend}
-            trendUp={kpi.trendUp}
-            className={`stagger-${i + 1}`}
-          />
-        ))}
-      </div>
+      {(!loading || data) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {kpis.map((kpi, i) => (
+            <KpiCard
+              key={kpi.label}
+              label={kpi.label}
+              value={kpi.value}
+              icon={kpi.icon}
+              trend={kpi.trend}
+              trendUp={kpi.trendUp}
+              className={`stagger-${i + 1}`}
+            />
+          ))}
+        </div>
+      )}
 
       {/* ── Quick Action Orbs ──────────────────────────────────── */}
       <div>
@@ -176,7 +224,7 @@ export default function RecruiterConsolePage() {
               <span className="text-[11px] font-semibold" style={{ color: 'var(--neu-text-muted)' }}>Pipeline Total</span>
               <span className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>{pipelineTotal}</span>
             </div>
-            <ProgressBar value={pipelineStages[4].count} max={pipelineStages[0].count} color="green" label="Lead-to-Placed" showValue />
+            <ProgressBar value={pipelineStages[4]?.count ?? 0} max={pipelineStages[0]?.count ?? 1} color="green" label="Lead-to-Placed" showValue />
           </div>
         </Card>
       </div>

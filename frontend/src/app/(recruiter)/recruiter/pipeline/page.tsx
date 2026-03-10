@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useCallback } from 'react';
 import { Card, Badge, Button } from '@/components/ui';
 
 /* ── Types ────────────────────────────────────────────────────── */
@@ -22,8 +23,8 @@ interface PipelineColumn {
   cards: PipelineCard[];
 }
 
-/* ── Mock Data (3 per column = 15 total) ──────────────────────── */
-const columns: PipelineColumn[] = [
+/* ── Initial Mock Data (3 per column = 15 total) ─────────────── */
+const initialColumns: PipelineColumn[] = [
   {
     id: 'new-lead',
     label: 'New Lead',
@@ -99,9 +100,59 @@ function getScoreVariant(score: number) {
   return 'warning' as const;
 }
 
-const totalCandidates = columns.reduce((s, c) => s + c.cards.length, 0);
-
 export default function PipelinePage() {
+  const [columns, setColumns] = useState<PipelineColumn[]>(initialColumns);
+  const [movingCard, setMovingCard] = useState<string | null>(null);
+
+  const totalCandidates = columns.reduce((s, c) => s + c.cards.length, 0);
+
+  // Move a card from its current column to the next column
+  const moveCardForward = useCallback((cardId: string) => {
+    setMovingCard(cardId);
+    setColumns((prev) => {
+      const newCols = prev.map((col) => ({ ...col, cards: [...col.cards] }));
+      // Find which column has this card
+      let sourceIdx = -1;
+      let cardIdx = -1;
+      for (let i = 0; i < newCols.length; i++) {
+        const idx = newCols[i].cards.findIndex((c) => c.id === cardId);
+        if (idx !== -1) {
+          sourceIdx = i;
+          cardIdx = idx;
+          break;
+        }
+      }
+      if (sourceIdx === -1 || cardIdx === -1 || sourceIdx >= newCols.length - 1) return prev;
+      const [card] = newCols[sourceIdx].cards.splice(cardIdx, 1);
+      newCols[sourceIdx + 1].cards.unshift({ ...card, daysInStage: 0 });
+      return newCols;
+    });
+    setTimeout(() => setMovingCard(null), 300);
+  }, []);
+
+  // Move a card backward to the previous column
+  const moveCardBackward = useCallback((cardId: string) => {
+    setMovingCard(cardId);
+    setColumns((prev) => {
+      const newCols = prev.map((col) => ({ ...col, cards: [...col.cards] }));
+      let sourceIdx = -1;
+      let cardIdx = -1;
+      for (let i = 0; i < newCols.length; i++) {
+        const idx = newCols[i].cards.findIndex((c) => c.id === cardId);
+        if (idx !== -1) {
+          sourceIdx = i;
+          cardIdx = idx;
+          break;
+        }
+      }
+      if (sourceIdx <= 0 || cardIdx === -1) return prev;
+      const [card] = newCols[sourceIdx].cards.splice(cardIdx, 1);
+      newCols[sourceIdx - 1].cards.unshift({ ...card, daysInStage: 0 });
+      return newCols;
+    });
+    setTimeout(() => setMovingCard(null), 300);
+  }, []);
+
   return (
     <div className="space-y-6">
       {/* ── Header ─────────────────────────────────────────────── */}
@@ -113,6 +164,9 @@ export default function PipelinePage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={() => setColumns(initialColumns)}>
+            Reset
+          </Button>
           <Button variant="secondary" size="sm" icon="filter_list">Filter</Button>
           <Button size="sm" icon="person_add">Add Candidate</Button>
         </div>
@@ -125,7 +179,7 @@ export default function PipelinePage() {
             <div
               key={col.id}
               className={`${col.bgAccent} transition-all duration-500`}
-              style={{ width: `${(col.cards.length / totalCandidates) * 100}%` }}
+              style={{ width: `${(col.cards.length / Math.max(totalCandidates, 1)) * 100}%` }}
               title={`${col.label}: ${col.cards.length}`}
             />
           ))}
@@ -157,7 +211,7 @@ export default function PipelinePage() {
                     key={card.id}
                     elevation="sm"
                     hover
-                    className={`!p-4 animate-fade-up`}
+                    className={`!p-4 animate-fade-up ${movingCard === card.id ? 'opacity-60 scale-95 transition-all' : ''}`}
                     style={{ animationDelay: `${(colIdx * 0.05) + (cardIdx * 0.08)}s` } as React.CSSProperties}
                   >
                     {/* Driver Name + Days Badge */}
@@ -189,13 +243,32 @@ export default function PipelinePage() {
                       <Badge variant={getScoreVariant(card.score)} className="!text-[10px]">{card.score}%</Badge>
                     </div>
 
-                    {/* Next Action */}
+                    {/* Next Action + Move Buttons */}
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-1.5">
                         <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-accent)' }}>{card.nextActionIcon}</span>
                         <span className="text-[11px] font-semibold" style={{ color: 'var(--neu-accent)' }}>{card.nextAction}</span>
                       </div>
-                      <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-text-muted)', opacity: 0.4 }}>drag_indicator</span>
+                      <div className="flex items-center gap-0.5">
+                        {colIdx > 0 && (
+                          <button
+                            onClick={() => moveCardBackward(card.id)}
+                            className="w-6 h-6 rounded flex items-center justify-center hover:bg-black/5 transition-colors"
+                            title={`Move to ${columns[colIdx - 1].label}`}
+                          >
+                            <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-text-muted)' }}>chevron_left</span>
+                          </button>
+                        )}
+                        {colIdx < columns.length - 1 && (
+                          <button
+                            onClick={() => moveCardForward(card.id)}
+                            className="w-6 h-6 rounded flex items-center justify-center hover:bg-black/5 transition-colors"
+                            title={`Move to ${columns[colIdx + 1].label}`}
+                          >
+                            <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-accent)' }}>chevron_right</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </Card>
                 ))}

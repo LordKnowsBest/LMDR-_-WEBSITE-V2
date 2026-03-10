@@ -1,7 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Card, Button, Badge, ProgressBar, Input } from '@/components/ui';
+import { driverApi } from '@/lib/api';
+import { useApi, useMutation } from '@/lib/hooks';
+
+/* ── Constants ── */
+const DEMO_DRIVER_ID = 'demo-driver-001';
 
 /* ── Step Definitions ── */
 const steps = [
@@ -162,18 +167,84 @@ const stepContent = [PersonalInfoStep, CdlDetailsStep, PreferencesStep, Document
 /* ── Main Component ── */
 export default function DriverOnboardingPage() {
   const [currentStep, setCurrentStep] = useState(3);
+  const [advanceSuccess, setAdvanceSuccess] = useState(false);
+
+  /* ── API Data ── */
+  const { data: onboardingData, loading, error, refresh } = useApi<Record<string, unknown>>(
+    () => driverApi.getOnboardingStatus(DEMO_DRIVER_ID),
+    [DEMO_DRIVER_ID]
+  );
+
+  const advanceMutation = useMutation<{ step: string; data?: Record<string, unknown> }>(
+    useCallback(
+      (input: { step: string; data?: Record<string, unknown> }) =>
+        driverApi.advanceOnboarding(DEMO_DRIVER_ID, input.step, input.data),
+      []
+    )
+  );
+
+  /* ── Sync API data into local state ── */
+  useEffect(() => {
+    if (onboardingData?.currentStep) {
+      setCurrentStep(onboardingData.currentStep as number);
+    }
+  }, [onboardingData]);
+
   const completionPct = Math.round(((currentStep - 1) / (steps.length - 1)) * 100);
+
+  const handleNext = async () => {
+    if (currentStep >= steps.length) return;
+    const stepName = steps[currentStep - 1].name;
+    const result = await advanceMutation.execute({ step: stepName });
+    if (result !== null) {
+      setCurrentStep(s => Math.min(steps.length, s + 1));
+      setAdvanceSuccess(true);
+      refresh();
+      setTimeout(() => setAdvanceSuccess(false), 3000);
+    }
+  };
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
+      {/* ── Error Banner ── */}
+      {(error || advanceMutation.error) && (
+        <Card elevation="xs" className="!bg-red-50 dark:!bg-red-500/10 border border-red-200 dark:border-red-500/20">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-red-500">warning</span>
+              <p className="text-sm text-red-700 dark:text-red-300">
+                {advanceMutation.error || 'Failed to load onboarding status. Showing cached progress.'}
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" icon="refresh" onClick={refresh}>Retry</Button>
+          </div>
+        </Card>
+      )}
+
+      {/* ── Success Banner ── */}
+      {advanceSuccess && (
+        <Card elevation="xs" className="!bg-green-50 dark:!bg-green-500/10 border border-green-200 dark:border-green-500/20">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-green-500">check_circle</span>
+            <p className="text-sm text-green-700 dark:text-green-300">Step completed successfully.</p>
+          </div>
+        </Card>
+      )}
+
       {/* ── Header ── */}
       <div className="text-center animate-fade-up">
         <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Driver Onboarding</h1>
-        <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>Complete all steps to become searchable by carriers</p>
+        <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>
+          {loading ? 'Loading your progress...' : 'Complete all steps to become searchable by carriers'}
+        </p>
       </div>
 
       {/* ── Completion Bar ── */}
       <Card elevation="sm" className="animate-fade-up stagger-1">
+        <div className="flex items-center justify-between mb-2">
+          <span />
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh}>Refresh</Button>
+        </div>
         <ProgressBar
           value={completionPct}
           color={completionPct >= 85 ? 'green' : completionPct >= 50 ? 'blue' : 'amber'}
@@ -290,10 +361,10 @@ export default function DriverOnboardingPage() {
         </div>
         <Button
           icon={currentStep === steps.length ? 'check_circle' : 'arrow_forward'}
-          disabled={currentStep === steps.length}
-          onClick={() => setCurrentStep(s => Math.min(steps.length, s + 1))}
+          disabled={currentStep === steps.length || advanceMutation.loading}
+          onClick={handleNext}
         >
-          {currentStep === steps.length ? 'Complete' : 'Next'}
+          {advanceMutation.loading ? 'Saving...' : currentStep === steps.length ? 'Complete' : 'Next'}
         </Button>
       </div>
 

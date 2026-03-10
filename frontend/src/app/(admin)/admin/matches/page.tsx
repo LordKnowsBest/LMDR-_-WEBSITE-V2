@@ -6,6 +6,8 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { DataTable } from '@/components/ui/DataTable';
 import { KpiCard } from '@/components/ui/KpiCard';
+import { useApi } from '@/lib/hooks';
+import { matchingApi } from '@/lib/api';
 
 /* ── Types ── */
 type MatchStatus = 'applied' | 'interviewed' | 'offered' | 'placed' | 'rejected';
@@ -38,8 +40,8 @@ const statusIcon: Record<MatchStatus, string> = {
   rejected: 'cancel',
 };
 
-/* ── Mock Matches (10 rows) ── */
-const mockMatches: Match[] = [
+/* ── Mock Matches (fallback) ── */
+const MOCK_MATCHES: Match[] = [
   { id: '1', driverName: 'Marcus Johnson', carrierName: 'FastFreight Inc', score: 94, status: 'placed', date: '2026-03-09', driverCdl: 'A', route: 'OTR' },
   { id: '2', driverName: 'Sarah Chen', carrierName: 'Summit Carriers', score: 91, status: 'interviewed', date: '2026-03-09', driverCdl: 'A', route: 'Regional' },
   { id: '3', driverName: 'Kevin Brown', carrierName: 'Pacific Route LLC', score: 88, status: 'placed', date: '2026-03-08', driverCdl: 'A', route: 'OTR' },
@@ -64,15 +66,21 @@ function scoreColor(score: number): string {
 export default function AdminMatchesPage() {
   const [activeTab, setActiveTab] = useState<string>('All');
 
-  const filtered = mockMatches.filter((m) => {
+  /* ── API Call ── */
+  const { data: apiMatches, loading, error, refresh } = useApi<Match[]>(() => matchingApi.findDriversForJob('all') as Promise<{ data: Match[] }>);
+
+  /* ── Resolve with fallback ── */
+  const allMatches: Match[] = apiMatches ?? MOCK_MATCHES;
+
+  const filtered = allMatches.filter((m) => {
     if (activeTab === 'All') return true;
     if (activeTab === 'High Score') return m.score >= 90;
     return m.status === activeTab.toLowerCase();
   });
 
-  const totalMatches = mockMatches.length;
-  const avgScore = Math.round(mockMatches.reduce((a, m) => a + m.score, 0) / totalMatches);
-  const placedCount = mockMatches.filter((m) => m.status === 'placed').length;
+  const totalMatches = allMatches.length;
+  const avgScore = totalMatches > 0 ? Math.round(allMatches.reduce((a, m) => a + m.score, 0) / totalMatches) : 0;
+  const placedCount = allMatches.filter((m) => m.status === 'placed').length;
   const conversionRate = Math.round((placedCount / totalMatches) * 100);
 
   const columns = [
@@ -149,6 +157,15 @@ export default function AdminMatchesPage() {
 
   return (
     <div className="space-y-6">
+      {/* ── Error Banner ── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+          <span className="material-symbols-outlined text-[18px]">warning</span>
+          <span>API unavailable — showing cached data. {error}</span>
+          <button onClick={refresh} className="ml-auto font-semibold underline">Retry</button>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
@@ -159,7 +176,10 @@ export default function AdminMatchesPage() {
             Driver-carrier match pipeline
           </p>
         </div>
-        <Button variant="primary" size="sm" icon="auto_awesome">Run Matching</Button>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh} loading={loading}>Refresh</Button>
+          <Button variant="primary" size="sm" icon="auto_awesome">Run Matching</Button>
+        </div>
       </div>
 
       {/* ── KPIs ── */}
@@ -177,7 +197,7 @@ export default function AdminMatchesPage() {
         </div>
         <div className="flex items-center gap-3 overflow-x-auto pb-2">
           {(['applied', 'interviewed', 'offered', 'placed', 'rejected'] as MatchStatus[]).map((s, i) => {
-            const count = mockMatches.filter((m) => m.status === s).length;
+            const count = allMatches.filter((m) => m.status === s).length;
             return (
               <div key={s} className="flex items-center gap-3">
                 <div className="neu-s rounded-xl px-4 py-3 text-center min-w-[100px]">
@@ -205,7 +225,7 @@ export default function AdminMatchesPage() {
 
       {/* ── Data Table ── */}
       <div className="animate-fade-up stagger-6">
-        <DataTable columns={columns} data={filtered} emptyMessage="No matches found for selected filter" emptyIcon="handshake" />
+        <DataTable columns={columns} data={filtered} loading={loading} emptyMessage="No matches found for selected filter" emptyIcon="handshake" />
       </div>
     </div>
   );

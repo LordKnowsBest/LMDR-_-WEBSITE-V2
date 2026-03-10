@@ -1,7 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Card, Badge, Button, Input } from '@/components/ui';
+import { carrierApi } from '@/lib/api';
+import { useApi, useMutation } from '@/lib/hooks';
+
+const DEMO_CARRIER_ID = 'demo-carrier-001';
 
 /* ── CDL Classes & Route Types ──────────────────────────────── */
 const cdlClasses = ['A', 'B', 'C'];
@@ -19,8 +23,29 @@ const notificationItems = [
 type NotifKey = typeof notificationItems[number]['key'];
 
 export default function CarrierSettingsPage() {
+  const { data: carrierData, loading, error, refresh } = useApi<Record<string, unknown>>(
+    () => carrierApi.getCarrier(DEMO_CARRIER_ID) as Promise<{ data: Record<string, unknown> }>,
+    [DEMO_CARRIER_ID]
+  );
+
+  const updateCarrierMutation = useMutation<Record<string, unknown>>(
+    useCallback((data: Record<string, unknown>) => carrierApi.updateCarrier(DEMO_CARRIER_ID, data), [])
+  );
+
+  const updatePrefsMutation = useMutation<Record<string, unknown>>(
+    useCallback((prefs: Record<string, unknown>) => carrierApi.updatePreferences(DEMO_CARRIER_ID, prefs), [])
+  );
+
+  // Local form state — populated from API or defaults
+  const [companyName, setCompanyName] = useState('TransPro Logistics LLC');
+  const [dotNumber, setDotNumber] = useState('3847291');
+  const [mcNumber, setMcNumber] = useState('MC-928471');
+  const [phone, setPhone] = useState('(555) 234-5678');
+  const [address, setAddress] = useState('4521 Industrial Blvd, Houston, TX 77001');
+
   const [selectedCdl, setSelectedCdl] = useState<string[]>(['A', 'B']);
   const [selectedRoutes, setSelectedRoutes] = useState<string[]>(['OTR', 'Regional']);
+  const [minExperience, setMinExperience] = useState('2');
   const [notifications, setNotifications] = useState<Record<NotifKey, boolean>>({
     emailApps: true,
     emailMatches: true,
@@ -28,6 +53,23 @@ export default function CarrierSettingsPage() {
     pushDispatch: true,
     emailBilling: true,
   });
+
+  const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
+
+  // Populate form from API data when available
+  useEffect(() => {
+    if (carrierData) {
+      const c = carrierData as Record<string, unknown>;
+      if (c.companyName) setCompanyName(c.companyName as string);
+      if (c.dotNumber) setDotNumber(String(c.dotNumber));
+      if (c.mcNumber) setMcNumber(c.mcNumber as string);
+      if (c.phone) setPhone(c.phone as string);
+      if (c.address) setAddress(c.address as string);
+      if (c.preferredCdl) setSelectedCdl(c.preferredCdl as string[]);
+      if (c.preferredRoutes) setSelectedRoutes(c.preferredRoutes as string[]);
+      if (c.minExperience) setMinExperience(String(c.minExperience));
+    }
+  }, [carrierData]);
 
   const toggleCdl = (cls: string) => {
     setSelectedCdl((prev) =>
@@ -45,15 +87,78 @@ export default function CarrierSettingsPage() {
     setNotifications((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
+  const handleSaveCompany = async () => {
+    setSaveSuccess(null);
+    const result = await updateCarrierMutation.execute({
+      companyName,
+      dotNumber,
+      mcNumber,
+      phone,
+      address,
+    });
+    if (result) {
+      setSaveSuccess('Company info saved');
+      setTimeout(() => setSaveSuccess(null), 3000);
+    }
+  };
+
+  const handleSavePreferences = async () => {
+    setSaveSuccess(null);
+    const result = await updatePrefsMutation.execute({
+      preferredCdl: selectedCdl,
+      preferredRoutes: selectedRoutes,
+      minExperience: Number(minExperience),
+    });
+    if (result) {
+      setSaveSuccess('Preferences saved');
+      setTimeout(() => setSaveSuccess(null), 3000);
+    }
+  };
+
+  const mutationError = updateCarrierMutation.error || updatePrefsMutation.error;
+
   return (
     <div className="space-y-7">
       {/* ═══ Header ═══ */}
-      <div className="animate-fade-up">
-        <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Settings</h2>
-        <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>
-          Company profile, hiring preferences, and notification controls
-        </p>
+      <div className="animate-fade-up flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Settings</h2>
+          <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>
+            Company profile, hiring preferences, and notification controls
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {loading && (
+            <span className="text-xs font-semibold animate-pulse" style={{ color: 'var(--neu-text-muted)' }}>
+              Loading...
+            </span>
+          )}
+          {error && (
+            <Badge variant="warning" icon="cloud_off">Using defaults</Badge>
+          )}
+          <Button variant="ghost" icon="refresh" size="sm" onClick={refresh}>
+            Refresh
+          </Button>
+        </div>
       </div>
+
+      {/* ═══ Status Banners ═══ */}
+      {saveSuccess && (
+        <Card elevation="sm" className="animate-fade-up">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[16px] text-green-500">check_circle</span>
+            <span className="text-sm font-semibold text-green-600">{saveSuccess}</span>
+          </div>
+        </Card>
+      )}
+      {mutationError && (
+        <Card elevation="sm" className="animate-fade-up">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[16px] text-red-500">error</span>
+            <span className="text-sm text-red-600">{mutationError}</span>
+          </div>
+        </Card>
+      )}
 
       {/* ═══ Company Information ═══ */}
       <Card elevation="md" className="animate-fade-up stagger-1">
@@ -65,17 +170,24 @@ export default function CarrierSettingsPage() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-          <Input id="companyName" label="Company Name" icon="badge" defaultValue="TransPro Logistics LLC" />
-          <Input id="dotNumber" label="DOT Number" icon="tag" defaultValue="3847291" />
-          <Input id="mcNumber" label="MC Number" icon="confirmation_number" defaultValue="MC-928471" />
-          <Input id="phone" label="Phone" icon="call" defaultValue="(555) 234-5678" />
+          <Input id="companyName" label="Company Name" icon="badge" value={companyName} onChange={(e) => setCompanyName(e.target.value)} />
+          <Input id="dotNumber" label="DOT Number" icon="tag" value={dotNumber} onChange={(e) => setDotNumber(e.target.value)} />
+          <Input id="mcNumber" label="MC Number" icon="confirmation_number" value={mcNumber} onChange={(e) => setMcNumber(e.target.value)} />
+          <Input id="phone" label="Phone" icon="call" value={phone} onChange={(e) => setPhone(e.target.value)} />
           <div className="sm:col-span-2">
-            <Input id="address" label="Address" icon="location_on" defaultValue="4521 Industrial Blvd, Houston, TX 77001" />
+            <Input id="address" label="Address" icon="location_on" value={address} onChange={(e) => setAddress(e.target.value)} />
           </div>
         </div>
 
         <div className="flex justify-end mt-5 pt-4" style={{ borderTop: '1px solid var(--neu-border)' }}>
-          <Button variant="primary" icon="save">Save Company Info</Button>
+          <Button
+            variant="primary"
+            icon="save"
+            onClick={handleSaveCompany}
+            disabled={updateCarrierMutation.loading}
+          >
+            {updateCarrierMutation.loading ? 'Saving...' : 'Save Company Info'}
+          </Button>
         </div>
       </Card>
 
@@ -119,7 +231,8 @@ export default function CarrierSettingsPage() {
             label="Minimum Experience (years)"
             icon="military_tech"
             type="number"
-            defaultValue="2"
+            value={minExperience}
+            onChange={(e) => setMinExperience(e.target.value)}
             className="max-w-xs"
           />
         </div>
@@ -146,7 +259,14 @@ export default function CarrierSettingsPage() {
         </div>
 
         <div className="flex justify-end pt-4" style={{ borderTop: '1px solid var(--neu-border)' }}>
-          <Button variant="primary" icon="save">Save Preferences</Button>
+          <Button
+            variant="primary"
+            icon="save"
+            onClick={handleSavePreferences}
+            disabled={updatePrefsMutation.loading}
+          >
+            {updatePrefsMutation.loading ? 'Saving...' : 'Save Preferences'}
+          </Button>
         </div>
       </Card>
 

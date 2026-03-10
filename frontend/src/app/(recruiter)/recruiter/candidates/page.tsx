@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Card, Badge, Button, Input } from '@/components/ui';
+import { matchingApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 
 /* ── Types ────────────────────────────────────────────────────── */
 interface Driver {
@@ -16,7 +18,7 @@ interface Driver {
   available: boolean;
 }
 
-/* ── Mock Data ────────────────────────────────────────────────── */
+/* ── Mock / Fallback Data ────────────────────────────────────── */
 const mockDrivers: Driver[] = [
   { id: 'd1', name: 'Marcus Johnson', cdlClass: 'A', experience: 8, homeState: 'TX', freightType: 'OTR Dry Van', matchScore: 94, endorsements: ['Hazmat', 'Tanker'], available: true },
   { id: 'd2', name: 'Sarah Chen', cdlClass: 'A', experience: 5, homeState: 'CA', freightType: 'Regional Reefer', matchScore: 88, endorsements: ['Doubles/Triples'], available: true },
@@ -54,13 +56,6 @@ function getScoreColor(score: number): string {
   return 'bg-red-400';
 }
 
-function getScoreVariant(score: number) {
-  if (score >= 90) return 'success' as const;
-  if (score >= 80) return 'info' as const;
-  if (score >= 70) return 'warning' as const;
-  return 'error' as const;
-}
-
 function matchesExpFilter(exp: number, filter: string): boolean {
   if (filter === 'all') return true;
   if (filter === '1-3') return exp >= 1 && exp <= 3;
@@ -75,7 +70,25 @@ export default function CandidateSearchPage() {
   const [expFilter, setExpFilter] = useState('all');
   const [sortBy, setSortBy] = useState('score');
 
-  const filtered = mockDrivers
+  // Build API filters object from current filter state
+  const buildFilters = useCallback(() => {
+    const filters: Record<string, unknown> = {};
+    if (cdlFilter !== 'all') filters.cdlClass = cdlFilter;
+    if (expFilter !== 'all') filters.experience = expFilter;
+    if (searchTerm) filters.query = searchTerm;
+    return filters;
+  }, [cdlFilter, expFilter, searchTerm]);
+
+  const { data: apiDrivers, loading, error, refresh } = useApi<Driver[]>(
+    () => matchingApi.searchDrivers(buildFilters()) as Promise<{ data: Driver[] }>,
+    [cdlFilter, expFilter, searchTerm]
+  );
+
+  // Use API data if available, fall back to mock data with local filters
+  const drivers = apiDrivers ?? mockDrivers;
+
+  // Apply local filtering/sorting (works for both API data and fallback)
+  const filtered = drivers
     .filter((d) => {
       if (searchTerm && !d.name.toLowerCase().includes(searchTerm.toLowerCase())) return false;
       if (cdlFilter !== 'all' && d.cdlClass !== cdlFilter) return false;
@@ -97,6 +110,9 @@ export default function CandidateSearchPage() {
           <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>Find and match CDL drivers to open positions</p>
         </div>
         <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh} disabled={loading}>
+            {loading ? 'Searching...' : 'Refresh'}
+          </Button>
           <label className="kpi-label mr-1">Sort by</label>
           <select
             value={sortBy}
@@ -110,6 +126,15 @@ export default function CandidateSearchPage() {
           </select>
         </div>
       </div>
+
+      {/* ── Error Banner ─────────────────────────────────────── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 text-sm font-medium text-red-700 bg-red-50 border border-red-200 flex items-center gap-2">
+          <span className="material-symbols-outlined text-[18px]">error</span>
+          Failed to search candidates. Showing cached results.
+          <button onClick={refresh} className="ml-auto underline text-red-600 hover:text-red-800 text-xs font-bold">Retry</button>
+        </div>
+      )}
 
       {/* ── Search Bar ─────────────────────────────────────────── */}
       <Card elevation="sm" className="animate-fade-up">
@@ -165,9 +190,17 @@ export default function CandidateSearchPage() {
       </div>
 
       {/* ── Results Count ──────────────────────────────────────── */}
-      <p className="text-sm font-medium" style={{ color: 'var(--neu-text-muted)' }}>
-        {filtered.length} candidate{filtered.length !== 1 ? 's' : ''} found
-      </p>
+      <div className="flex items-center gap-2">
+        <p className="text-sm font-medium" style={{ color: 'var(--neu-text-muted)' }}>
+          {filtered.length} candidate{filtered.length !== 1 ? 's' : ''} found
+        </p>
+        {loading && (
+          <span className="inline-flex items-center gap-1 text-xs font-medium" style={{ color: 'var(--neu-accent)' }}>
+            <span className="material-symbols-outlined text-[14px] animate-spin">progress_activity</span>
+            Searching...
+          </span>
+        )}
+      </div>
 
       {/* ── Candidate Cards Grid ───────────────────────────────── */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
@@ -256,7 +289,7 @@ export default function CandidateSearchPage() {
       </div>
 
       {/* Empty state */}
-      {filtered.length === 0 && (
+      {filtered.length === 0 && !loading && (
         <Card className="text-center py-16 animate-fade-up">
           <span className="material-symbols-outlined text-5xl" style={{ color: 'var(--neu-text-muted)', opacity: 0.4 }}>person_off</span>
           <p className="text-sm mt-3" style={{ color: 'var(--neu-text-muted)' }}>No candidates match your filters. Try broadening your search.</p>

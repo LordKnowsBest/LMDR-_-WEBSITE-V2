@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { Card, Badge, Button, DataTable, StatusDot } from '@/components/ui';
+import { carrierApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 
 /* ── Types ──────────────────────────────────────────────────── */
 interface DispatchRow {
@@ -17,8 +19,8 @@ interface DispatchRow {
 
 type FilterKey = 'all' | 'pending' | 'in_transit' | 'delivered';
 
-/* ── Mock Data ──────────────────────────────────────────────── */
-const dispatches: DispatchRow[] = [
+/* ── Fallback Mock Data ────────────────────────────────────────── */
+const mockDispatches: DispatchRow[] = [
   { loadId: 'LD-7001', driver: 'Marcus Johnson', origin: 'Dallas, TX', destination: 'Atlanta, GA', pickupDate: 'Mar 9, 2026', status: 'in_transit', eta: 'Mar 10, 14:30' },
   { loadId: 'LD-7002', driver: 'Sarah Chen', origin: 'Miami, FL', destination: 'Jacksonville, FL', pickupDate: 'Mar 9, 2026', status: 'in_transit', eta: 'Mar 9, 19:00' },
   { loadId: 'LD-7003', driver: 'James Williams', origin: 'Houston, TX', destination: 'San Antonio, TX', pickupDate: 'Mar 10, 2026', status: 'pending', eta: 'Mar 10, 16:00' },
@@ -104,6 +106,12 @@ const columns = [
 export default function CarrierDispatchPage() {
   const [filter, setFilter] = useState<FilterKey>('all');
 
+  const { data: apiDispatches, loading, error, refresh } = useApi<DispatchRow[]>(
+    () => carrierApi.getDispatchQueue() as Promise<{ data: DispatchRow[] }>,
+    []
+  );
+
+  const dispatches: DispatchRow[] = apiDispatches ?? mockDispatches;
   const filtered = filter === 'all' ? dispatches : dispatches.filter((d) => d.status === filter);
 
   const counts: Record<FilterKey, number> = {
@@ -123,7 +131,20 @@ export default function CarrierDispatchPage() {
             Track loads and manage driver assignments
           </p>
         </div>
-        <Button variant="primary" icon="add_circle">New Dispatch</Button>
+        <div className="flex items-center gap-2">
+          {loading && (
+            <span className="text-xs font-semibold animate-pulse" style={{ color: 'var(--neu-text-muted)' }}>
+              Loading...
+            </span>
+          )}
+          {error && (
+            <Badge variant="warning" icon="cloud_off">Using cached data</Badge>
+          )}
+          <Button variant="ghost" icon="refresh" size="sm" onClick={refresh}>
+            Refresh
+          </Button>
+          <Button variant="primary" icon="add_circle">New Dispatch</Button>
+        </div>
       </div>
 
       {/* ═══ Summary Bar ═══ */}
@@ -151,7 +172,7 @@ export default function CarrierDispatchPage() {
           </div>
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-text-muted)' }}>update</span>
-            <span className="text-xs" style={{ color: 'var(--neu-text-muted)' }}>Last updated: 2 min ago</span>
+            <span className="text-xs" style={{ color: 'var(--neu-text-muted)' }}>Last updated: just now</span>
           </div>
         </div>
       </Card>

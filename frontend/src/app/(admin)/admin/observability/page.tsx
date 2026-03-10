@@ -1,5 +1,6 @@
 'use client';
 
+import { useState, useEffect, useCallback } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -37,8 +38,17 @@ interface RecentError {
   count: number;
 }
 
-/* ── Services (8) ── */
-const services: Service[] = [
+/* ── Service URLs for health checks ── */
+const SERVICE_URLS: Record<string, string> = {
+  'api-gateway': process.env.NEXT_PUBLIC_LMDR_DRIVER_SERVICE_URL || 'https://lmdr-driver-service-140035137711.us-central1.run.app',
+  'ai-intelligence': process.env.NEXT_PUBLIC_LMDR_AI_SERVICE_URL || 'https://lmdr-ai-service-140035137711.us-central1.run.app',
+  'matching-engine': process.env.NEXT_PUBLIC_LMDR_MATCHING_SERVICE_URL || 'https://lmdr-matching-engine-140035137711.us-central1.run.app',
+  'notification-svc': process.env.NEXT_PUBLIC_LMDR_NOTIFICATION_SERVICE_URL || 'https://lmdr-notifications-service-140035137711.us-central1.run.app',
+  'analytics-pipe': process.env.NEXT_PUBLIC_LMDR_ANALYTICS_SERVICE_URL || 'https://lmdr-analytics-service-140035137711.us-central1.run.app',
+};
+
+/* ── Mock Services (fallback) ── */
+const MOCK_SERVICES: Service[] = [
   { name: 'api-gateway', status: 'healthy', uptime: 99.98, latencyP99: '120ms', errorRate: 0.02, instances: 3, icon: 'dns' },
   { name: 'ai-intelligence', status: 'healthy', uptime: 99.95, latencyP99: '450ms', errorRate: 0.05, instances: 4, icon: 'psychology' },
   { name: 'matching-engine', status: 'healthy', uptime: 99.99, latencyP99: '200ms', errorRate: 0.01, instances: 2, icon: 'handshake' },
@@ -61,8 +71,8 @@ const statusBadgeVariant: Record<ServiceHealth, 'success' | 'warning' | 'error'>
   down: 'error',
 };
 
-/* ── Alerts ── */
-const alerts: Alert[] = [
+/* ── Mock Alerts (fallback) ── */
+const MOCK_ALERTS: Alert[] = [
   { id: 1, severity: 'critical', message: 'scheduler service unreachable — 3 consecutive health check failures', service: 'scheduler', time: '2 min ago' },
   { id: 2, severity: 'warning', message: 'enrichment-worker error rate above 1% threshold (currently 1.5%)', service: 'enrichment-worker', time: '15 min ago' },
   { id: 3, severity: 'info', message: 'ai-intelligence auto-scaled to 4 instances (load spike detected)', service: 'ai-intelligence', time: '45 min ago' },
@@ -82,15 +92,15 @@ const alertIcon: Record<AlertSeverity, string> = {
   info: 'info',
 };
 
-/* ── System Resources ── */
-const resources = [
+/* ── Mock System Resources (fallback) ── */
+const MOCK_RESOURCES = [
   { name: 'CPU Usage', value: 42, color: 'blue' as const, icon: 'memory' },
   { name: 'Memory', value: 67, color: 'purple' as const, icon: 'storage' },
   { name: 'Disk I/O', value: 23, color: 'green' as const, icon: 'hard_drive' },
 ];
 
-/* ── Recent Errors (5 rows) ── */
-const recentErrors: RecentError[] = [
+/* ── Mock Recent Errors (fallback) ── */
+const MOCK_RECENT_ERRORS: RecentError[] = [
   { timestamp: '14:23:07', service: 'scheduler', message: 'Connection refused: Cloud SQL primary endpoint', count: 12 },
   { timestamp: '14:18:45', service: 'enrichment-worker', message: 'Timeout: FMCSA API response exceeded 10s', count: 8 },
   { timestamp: '13:55:12', service: 'ai-intelligence', message: 'Rate limit: OpenAI 429 Too Many Requests', count: 3 },
@@ -131,12 +141,59 @@ const errorColumns = [
 ];
 
 export default function AdminObservabilityPage() {
+  const [services, setServices] = useState<Service[]>(MOCK_SERVICES);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const alerts = MOCK_ALERTS;
+  const resources = MOCK_RESOURCES;
+  const recentErrors = MOCK_RECENT_ERRORS;
+
+  const checkHealth = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const results = await Promise.all(
+        MOCK_SERVICES.map(async (svc) => {
+          const url = SERVICE_URLS[svc.name];
+          if (!url) return svc;
+          try {
+            const start = Date.now();
+            const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) });
+            const latency = Date.now() - start;
+            if (res.ok) {
+              return { ...svc, status: 'healthy' as ServiceHealth, latencyP99: `${latency}ms`, instances: svc.instances || 1 };
+            }
+            return { ...svc, status: 'degraded' as ServiceHealth, latencyP99: `${latency}ms` };
+          } catch {
+            return { ...svc, status: 'down' as ServiceHealth, latencyP99: '--', errorRate: 100, instances: 0 };
+          }
+        })
+      );
+      setServices(results);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Health check failed');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { checkHealth(); }, [checkHealth]);
+
   const healthyCount = services.filter((s) => s.status === 'healthy').length;
   const degradedCount = services.filter((s) => s.status === 'degraded').length;
   const downCount = services.filter((s) => s.status === 'down').length;
 
   return (
     <div className="space-y-8">
+      {/* ── Error Banner ── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+          <span className="material-symbols-outlined text-[18px]">warning</span>
+          <span>Health check failed — showing cached data. {error}</span>
+          <button onClick={checkHealth} className="ml-auto font-semibold underline">Retry</button>
+        </div>
+      )}
+
       {/* ── Header ── */}
       <div className="flex items-center justify-between">
         <div>
@@ -151,7 +208,7 @@ export default function AdminObservabilityPage() {
           <Badge variant="success" dot>{healthyCount} healthy</Badge>
           {degradedCount > 0 && <Badge variant="warning" dot>{degradedCount} degraded</Badge>}
           {downCount > 0 && <Badge variant="error" dot>{downCount} down</Badge>}
-          <Button variant="ghost" size="sm" icon="refresh">Refresh</Button>
+          <Button variant="ghost" size="sm" icon="refresh" onClick={checkHealth} loading={loading}>Refresh</Button>
         </div>
       </div>
 
@@ -286,7 +343,7 @@ export default function AdminObservabilityPage() {
           <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>Recent Errors</h3>
           <Button variant="ghost" size="sm" icon="open_in_new">View All Logs</Button>
         </div>
-        <DataTable columns={errorColumns} data={recentErrors} emptyMessage="No errors in the last 24 hours" emptyIcon="check_circle" />
+        <DataTable columns={errorColumns} data={recentErrors} loading={loading} emptyMessage="No errors in the last 24 hours" emptyIcon="check_circle" />
       </div>
     </div>
   );

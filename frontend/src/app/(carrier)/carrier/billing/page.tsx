@@ -1,6 +1,10 @@
 'use client';
 
 import { Card, Badge, Button, DataTable, ProgressBar } from '@/components/ui';
+import { billingApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
+
+const DEMO_CARRIER_ID = 'demo-carrier-001';
 
 /* ── Types ──────────────────────────────────────────────────── */
 interface Invoice {
@@ -11,8 +15,16 @@ interface Invoice {
   status: 'paid' | 'pending' | 'overdue';
 }
 
-/* ── Current Plan ───────────────────────────────────────────── */
-const plan = {
+interface Subscription {
+  name: string;
+  price: string;
+  period: string;
+  renewDate: string;
+  features: string[];
+}
+
+/* ── Fallback Mock Data ───────────────────────────────────────── */
+const mockPlan: Subscription = {
   name: 'Growth Plan',
   price: '$499',
   period: '/month',
@@ -27,15 +39,13 @@ const plan = {
   ],
 };
 
-/* ── Usage ──────────────────────────────────────────────────── */
-const usage = [
+const mockUsage = [
   { label: 'Job Posts', value: 15, max: 20, color: 'blue' as const },
   { label: 'Driver Searches', value: 142, max: 200, color: 'green' as const },
   { label: 'AI Matches', value: 45, max: 50, color: 'amber' as const },
 ];
 
-/* ── Invoices ───────────────────────────────────────────────── */
-const invoices: Invoice[] = [
+const mockInvoices: Invoice[] = [
   { invoiceNo: 'INV-2026-0312', date: 'Mar 1, 2026', amount: '$499.00', status: 'pending' },
   { invoiceNo: 'INV-2026-0287', date: 'Feb 1, 2026', amount: '$499.00', status: 'paid' },
   { invoiceNo: 'INV-2026-0251', date: 'Jan 1, 2026', amount: '$499.00', status: 'paid' },
@@ -72,14 +82,50 @@ const invoiceColumns = [
 ];
 
 export default function CarrierBillingPage() {
+  const { data: apiInvoices, loading: invoicesLoading, error: invoicesError, refresh: refreshInvoices } = useApi<Invoice[]>(
+    () => billingApi.listInvoices(DEMO_CARRIER_ID) as Promise<{ data: Invoice[] }>,
+    [DEMO_CARRIER_ID]
+  );
+
+  const { data: apiSubscription, loading: subLoading, error: subError, refresh: refreshSub } = useApi<Subscription>(
+    () => billingApi.getSubscription(DEMO_CARRIER_ID) as Promise<{ data: Subscription }>,
+    [DEMO_CARRIER_ID]
+  );
+
+  const loading = invoicesLoading || subLoading;
+  const hasError = invoicesError || subError;
+  const invoices: Invoice[] = apiInvoices ?? mockInvoices;
+  const plan: Subscription = apiSubscription ?? mockPlan;
+  const usage = mockUsage; // Usage typically comes from subscription data
+
+  const handleRefresh = () => {
+    refreshInvoices();
+    refreshSub();
+  };
+
   return (
     <div className="space-y-7">
       {/* ═══ Header ═══ */}
-      <div className="animate-fade-up">
-        <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Billing</h2>
-        <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>
-          Manage your subscription, usage, and invoices
-        </p>
+      <div className="animate-fade-up flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Billing</h2>
+          <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>
+            Manage your subscription, usage, and invoices
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {loading && (
+            <span className="text-xs font-semibold animate-pulse" style={{ color: 'var(--neu-text-muted)' }}>
+              Loading...
+            </span>
+          )}
+          {hasError && (
+            <Badge variant="warning" icon="cloud_off">Using cached data</Badge>
+          )}
+          <Button variant="ghost" icon="refresh" size="sm" onClick={handleRefresh}>
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* ═══ Current Plan + Usage ═══ */}
@@ -158,7 +204,7 @@ export default function CarrierBillingPage() {
             <div className="flex items-center gap-2">
               <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-text-muted)' }}>calendar_today</span>
               <span className="text-[11px]" style={{ color: 'var(--neu-text-muted)' }}>
-                Resets Apr 1, 2026
+                Resets {plan.renewDate}
               </span>
             </div>
           </div>

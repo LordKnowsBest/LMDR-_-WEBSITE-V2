@@ -1,24 +1,26 @@
 'use client';
 
 import { Card, KpiCard, Badge, Button, ProgressBar, StatusDot } from '@/components/ui';
+import { carrierApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 
-/* ── KPI Data ───────────────────────────────────────────────── */
-const kpis = [
+const DEMO_CARRIER_ID = 'demo-carrier-001';
+
+/* ── Fallback Mock Data ────────────────────────────────────────── */
+const mockKpis = [
   { label: 'Active Drivers', value: '38', icon: 'people', trend: '+4 this month', trendUp: true },
   { label: 'Open Jobs', value: '12', icon: 'work', trend: '+2 this week', trendUp: true },
   { label: 'Fleet Utilization', value: '87%', icon: 'speed', trend: '+3.2% vs last month', trendUp: true },
   { label: 'Safety Score', value: '94.6', icon: 'verified_user', trend: '+1.1 pts', trendUp: true },
 ];
 
-/* ── Fleet Capacity ─────────────────────────────────────────── */
-const fleetCapacity = [
+const mockFleetCapacity = [
   { label: 'OTR Capacity', value: 28, max: 35, color: 'blue' as const },
   { label: 'Regional Capacity', value: 14, max: 18, color: 'green' as const },
   { label: 'Local Capacity', value: 6, max: 10, color: 'amber' as const },
 ];
 
-/* ── Recent Applications ────────────────────────────────────── */
-const recentApps = [
+const mockRecentApps = [
   { name: 'Marcus Johnson', cdl: 'A', experience: '8 yrs', matchScore: 94, status: 'new' as const },
   { name: 'Sarah Chen', cdl: 'A', experience: '5 yrs', matchScore: 91, status: 'new' as const },
   { name: 'James Williams', cdl: 'B', experience: '3 yrs', matchScore: 82, status: 'reviewed' as const },
@@ -40,8 +42,7 @@ const quickActions = [
   { label: 'Safety Check', icon: 'health_and_safety', href: '#' },
 ];
 
-/* ── Compliance ─────────────────────────────────────────────── */
-const compliance = {
+const mockCompliance = {
   dotAuditDate: 'Jan 15, 2026',
   insuranceExpiry: 'Sep 30, 2026',
   fmcsaRating: 'Satisfactory',
@@ -49,16 +50,43 @@ const compliance = {
 };
 
 export default function CarrierDashboardPage() {
+  const { data: carrierData, loading, error, refresh } = useApi<Record<string, unknown>>(
+    () => carrierApi.getCarrier(DEMO_CARRIER_ID) as Promise<{ data: Record<string, unknown> }>,
+    [DEMO_CARRIER_ID]
+  );
+
+  // Use API data if available, fallback to mock
+  const carrier = carrierData as Record<string, unknown> | null;
+  const kpis = carrier?.kpis ? (carrier.kpis as typeof mockKpis) : mockKpis;
+  const fleetCapacity = carrier?.fleetCapacity ? (carrier.fleetCapacity as typeof mockFleetCapacity) : mockFleetCapacity;
+  const recentApps = carrier?.recentApplications ? (carrier.recentApplications as typeof mockRecentApps) : mockRecentApps;
+  const compliance = carrier?.compliance ? (carrier.compliance as typeof mockCompliance) : mockCompliance;
+
   return (
     <div className="space-y-8">
       {/* ═══ Page Header ═══ */}
-      <div className="animate-fade-up">
-        <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>
-          Carrier Dashboard
-        </h2>
-        <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>
-          Fleet overview and operational snapshot
-        </p>
+      <div className="animate-fade-up flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>
+            Carrier Dashboard
+          </h2>
+          <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>
+            Fleet overview and operational snapshot
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {loading && (
+            <span className="text-xs font-semibold animate-pulse" style={{ color: 'var(--neu-text-muted)' }}>
+              Loading...
+            </span>
+          )}
+          {error && (
+            <Badge variant="warning" icon="cloud_off">Using cached data</Badge>
+          )}
+          <Button variant="ghost" icon="refresh" size="sm" onClick={refresh}>
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* ═══ KPI Row ═══ */}
@@ -108,7 +136,7 @@ export default function CarrierDashboardPage() {
                 Total Active Units
               </span>
               <span className="text-sm font-bold" style={{ color: 'var(--neu-text)' }}>
-                48 / 63
+                {fleetCapacity.reduce((s, f) => s + f.value, 0)} / {fleetCapacity.reduce((s, f) => s + f.max, 0)}
               </span>
             </div>
           </div>
@@ -127,7 +155,7 @@ export default function CarrierDashboardPage() {
                 Recent Applications
               </h3>
             </div>
-            <Badge variant="accent" icon="fiber_new">5 new</Badge>
+            <Badge variant="accent" icon="fiber_new">{recentApps.filter(a => a.status === 'new').length} new</Badge>
           </div>
 
           <div className="space-y-0.5">

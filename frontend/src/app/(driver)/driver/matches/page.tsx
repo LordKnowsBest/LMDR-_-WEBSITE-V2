@@ -1,7 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Card, Button, Badge, ProgressBar } from '@/components/ui';
+import { matchingApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
+
+/* ── Constants ── */
+const DEMO_DRIVER_ID = 'demo-driver-001';
 
 /* ── Types ── */
 interface ScoreBreakdown { safety: number; pay: number; culture: number; location: number; }
@@ -15,7 +20,7 @@ interface Application {
   status: 'Under Review' | 'Interview' | 'Offered' | 'Declined';
 }
 
-/* ── Mock Data ── */
+/* ── Mock Fallback Data ── */
 const cdlClasses = ['A', 'B', 'C'] as const;
 const expRanges = ['0-1 yr', '2-4 yr', '5-9 yr', '10+ yr'] as const;
 const radiusOptions = ['25 mi', '50 mi', '100 mi', '250 mi', 'Nationwide'] as const;
@@ -64,7 +69,29 @@ export default function DriverMatchesPage() {
   const [selectedExp, setSelectedExp] = useState<string>('5-9 yr');
   const [selectedRadius, setSelectedRadius] = useState<string>('100 mi');
   const [expandedCard, setExpandedCard] = useState<string | null>(null);
-  const [matches] = useState<MatchResult[]>(mockMatches);
+
+  /* ── Build filter object from UI state ── */
+  const filters = { cdlClass: selectedCdl, experience: selectedExp, radius: selectedRadius };
+
+  /* ── API Data ── */
+  const fetcher = useCallback(
+    () => matchingApi.findJobsForDriver(DEMO_DRIVER_ID, filters),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedCdl, selectedExp, selectedRadius]
+  );
+  const { data: matchData, loading, error, refresh } = useApi<Record<string, unknown>>(
+    fetcher,
+    [selectedCdl, selectedExp, selectedRadius]
+  );
+
+  /* ── Derive display values (API data with mock fallback) ── */
+  const matches: MatchResult[] = matchData?.matches
+    ? (matchData.matches as MatchResult[])
+    : mockMatches;
+
+  const applications: Application[] = matchData?.applications
+    ? (matchData.applications as Application[])
+    : mockApplications;
 
   return (
     <div className="space-y-8">
@@ -73,11 +100,29 @@ export default function DriverMatchesPage() {
         <div>
           <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>AI Job Matches</h1>
           <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>
-            {matches.length} carriers matched to your profile
+            {loading ? 'Searching...' : `${matches.length} carriers matched to your profile`}
           </p>
         </div>
-        <Button icon="auto_awesome">Run New Match</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh}>Refresh</Button>
+          <Button icon="auto_awesome" onClick={refresh}>Run New Match</Button>
+        </div>
       </div>
+
+      {/* ── Error Banner ── */}
+      {error && (
+        <Card elevation="xs" className="!bg-red-50 dark:!bg-red-500/10 border border-red-200 dark:border-red-500/20">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-red-500">warning</span>
+              <p className="text-sm text-red-700 dark:text-red-300">
+                Failed to load matches from server. Showing cached results.
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" icon="refresh" onClick={refresh}>Retry</Button>
+          </div>
+        </Card>
+      )}
 
       {/* ── Filter Section ── */}
       <Card elevation="sm" className="animate-fade-up stagger-1">
@@ -149,98 +194,118 @@ export default function DriverMatchesPage() {
         </div>
       </Card>
 
+      {/* ── Loading Skeleton ── */}
+      {loading && !matchData && (
+        <div className="space-y-4">
+          {[1, 2, 3].map(i => (
+            <Card key={i} elevation="sm" className="animate-pulse">
+              <div className="flex items-start gap-4">
+                <div className="w-16 h-16 rounded-2xl bg-[var(--neu-border)]" />
+                <div className="flex-1 space-y-3">
+                  <div className="h-5 w-48 rounded bg-[var(--neu-border)]" />
+                  <div className="h-4 w-72 rounded bg-[var(--neu-border)]" />
+                  <div className="h-3 w-64 rounded bg-[var(--neu-border)]" />
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* ── Match Result Cards ── */}
-      <div className="space-y-4">
-        {matches.map((match, i) => (
-          <Card
-            key={match.id}
-            elevation="sm"
-            hover
-            className={`animate-fade-up stagger-${Math.min(i + 2, 8)}`}
-            onClick={() => setExpandedCard(expandedCard === match.id ? null : match.id)}
-          >
-            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-              {/* Left: Info */}
-              <div className="flex items-start gap-4 flex-1">
-                {/* Large Score Circle */}
-                <div className="neu-ins w-16 h-16 rounded-2xl flex flex-col items-center justify-center shrink-0">
-                  <span className={`text-2xl font-black leading-none ${scoreColor(match.score)}`}>{match.score}</span>
-                  <span className="text-[9px] font-bold" style={{ color: 'var(--neu-text-muted)' }}>MATCH</span>
+      {(!loading || matchData) && (
+        <div className="space-y-4">
+          {matches.map((match, i) => (
+            <Card
+              key={match.id}
+              elevation="sm"
+              hover
+              className={`animate-fade-up stagger-${Math.min(i + 2, 8)}`}
+              onClick={() => setExpandedCard(expandedCard === match.id ? null : match.id)}
+            >
+              <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                {/* Left: Info */}
+                <div className="flex items-start gap-4 flex-1">
+                  {/* Large Score Circle */}
+                  <div className="neu-ins w-16 h-16 rounded-2xl flex flex-col items-center justify-center shrink-0">
+                    <span className={`text-2xl font-black leading-none ${scoreColor(match.score)}`}>{match.score}</span>
+                    <span className="text-[9px] font-bold" style={{ color: 'var(--neu-text-muted)' }}>MATCH</span>
+                  </div>
+                  <div className="space-y-2 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>{match.carrier}</h3>
+                      <Badge variant={scoreBadge(match.score)} dot>{match.score}% Match</Badge>
+                    </div>
+                    <p className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>{match.description}</p>
+                    <div className="flex flex-wrap items-center gap-4 text-sm">
+                      <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
+                        <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>location_on</span>
+                        {match.location}
+                      </span>
+                      <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
+                        <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>payments</span>
+                        {match.payRange}
+                      </span>
+                      <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
+                        <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>local_shipping</span>
+                        {match.truckType}
+                      </span>
+                    </div>
+                    {/* Benefits */}
+                    <div className="flex flex-wrap gap-1.5 mt-1">
+                      {match.benefits.map(b => (
+                        <Badge key={b} variant="accent" icon="check_circle">{b}</Badge>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-2 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>{match.carrier}</h3>
-                    <Badge variant={scoreBadge(match.score)} dot>{match.score}% Match</Badge>
-                  </div>
-                  <p className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>{match.description}</p>
-                  <div className="flex flex-wrap items-center gap-4 text-sm">
-                    <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
-                      <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>location_on</span>
-                      {match.location}
-                    </span>
-                    <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
-                      <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>payments</span>
-                      {match.payRange}
-                    </span>
-                    <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
-                      <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>local_shipping</span>
-                      {match.truckType}
-                    </span>
-                  </div>
-                  {/* Benefits */}
-                  <div className="flex flex-wrap gap-1.5 mt-1">
-                    {match.benefits.map(b => (
-                      <Badge key={b} variant="accent" icon="check_circle">{b}</Badge>
-                    ))}
-                  </div>
+
+                {/* Right: Actions */}
+                <div className="flex gap-2 shrink-0 self-start">
+                  <Button variant="ghost" size="sm" icon="info">Details</Button>
+                  <Button size="sm" icon="send">Apply</Button>
                 </div>
               </div>
 
-              {/* Right: Actions */}
-              <div className="flex gap-2 shrink-0 self-start">
-                <Button variant="ghost" size="sm" icon="info">Details</Button>
-                <Button size="sm" icon="send">Apply</Button>
-              </div>
-            </div>
-
-            {/* ── Score Breakdown (expanded) ── */}
-            {expandedCard === match.id && (
-              <div className="mt-5 pt-5 border-t" style={{ borderColor: 'var(--neu-border)' }}>
-                <p className="kpi-label mb-3">Score Breakdown</p>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  {([
-                    { key: 'safety', label: 'Safety', icon: 'shield' },
-                    { key: 'pay', label: 'Pay', icon: 'payments' },
-                    { key: 'culture', label: 'Culture', icon: 'groups' },
-                    { key: 'location', label: 'Location', icon: 'location_on' },
-                  ] as const).map(item => {
-                    const val = match.breakdown[item.key];
-                    return (
-                      <div key={item.key} className="space-y-1.5">
-                        <div className="flex items-center gap-1.5">
-                          <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>{item.icon}</span>
-                          <span className="text-xs font-bold" style={{ color: 'var(--neu-text)' }}>{item.label}</span>
-                          <span className={`text-xs font-black ml-auto ${scoreColor(val)}`}>{val}</span>
+              {/* ── Score Breakdown (expanded) ── */}
+              {expandedCard === match.id && (
+                <div className="mt-5 pt-5 border-t" style={{ borderColor: 'var(--neu-border)' }}>
+                  <p className="kpi-label mb-3">Score Breakdown</p>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {([
+                      { key: 'safety', label: 'Safety', icon: 'shield' },
+                      { key: 'pay', label: 'Pay', icon: 'payments' },
+                      { key: 'culture', label: 'Culture', icon: 'groups' },
+                      { key: 'location', label: 'Location', icon: 'location_on' },
+                    ] as const).map(item => {
+                      const val = match.breakdown[item.key];
+                      return (
+                        <div key={item.key} className="space-y-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>{item.icon}</span>
+                            <span className="text-xs font-bold" style={{ color: 'var(--neu-text)' }}>{item.label}</span>
+                            <span className={`text-xs font-black ml-auto ${scoreColor(val)}`}>{val}</span>
+                          </div>
+                          <ProgressBar value={val} color={scoreBarColor(val)} />
                         </div>
-                        <ProgressBar value={val} color={scoreBarColor(val)} />
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            )}
-          </Card>
-        ))}
-      </div>
+              )}
+            </Card>
+          ))}
+        </div>
+      )}
 
       {/* ── My Applications ── */}
       <Card className="animate-fade-up stagger-8">
         <div className="flex items-center justify-between mb-5">
           <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>My Applications</h3>
-          <Badge variant="accent">{mockApplications.length} Active</Badge>
+          <Badge variant="accent">{applications.length} Active</Badge>
         </div>
         <div className="space-y-3">
-          {mockApplications.map(app => (
+          {applications.map(app => (
             <Card key={app.id} elevation="xs" className="!p-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">

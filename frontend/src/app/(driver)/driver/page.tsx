@@ -2,11 +2,16 @@
 
 import { Card, Badge, KpiCard, ProgressBar, Button } from '@/components/ui';
 import Link from 'next/link';
+import { driverApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 
-/* ── Mock Data ── */
-const driver = { firstName: 'Marcus', lastName: 'Thompson', memberSince: 'Jan 2026', profileCompletion: 72 };
+/* ── Constants ── */
+const DEMO_DRIVER_ID = 'demo-driver-001';
 
-const kpis = [
+/* ── Mock Fallback Data ── */
+const mockDriver = { firstName: 'Marcus', lastName: 'Thompson', memberSince: 'Jan 2026', profileCompletion: 72 };
+
+const mockKpis = [
   { label: 'Match Score', value: '87', icon: 'auto_awesome', trend: '+5 this week', trendUp: true },
   { label: 'Applications Sent', value: '12', icon: 'send', trend: '+3 this week', trendUp: true },
   { label: 'Profile Views', value: '48', icon: 'visibility', trend: '+14% vs last week', trendUp: true },
@@ -19,13 +24,13 @@ const quickActions = [
   { label: 'Check Status', href: '/driver/onboarding', icon: 'fact_check', desc: 'Onboarding progress' },
 ];
 
-const recentMatches = [
+const mockRecentMatches = [
   { id: '1', carrier: 'Swift Transportation', score: 94, location: 'Phoenix, AZ', truckType: 'Dry Van', scoreColor: 'text-green-600' },
   { id: '2', carrier: 'Werner Enterprises', score: 87, location: 'Omaha, NE', truckType: 'Reefer', scoreColor: 'text-blue-600' },
   { id: '3', carrier: 'Schneider National', score: 79, location: 'Green Bay, WI', truckType: 'Intermodal', scoreColor: 'text-amber-600' },
 ];
 
-const onboardingSteps = [
+const mockOnboardingSteps = [
   { name: 'Create Account', done: true },
   { name: 'Personal Info', done: true },
   { name: 'CDL Details', done: true },
@@ -36,10 +41,65 @@ const onboardingSteps = [
 ];
 
 export default function DriverDashboard() {
+  /* ── API Data ── */
+  const { data: profileData, loading: profileLoading, error: profileError, refresh: refreshProfile } = useApi<Record<string, unknown>>(
+    () => driverApi.getProfile(DEMO_DRIVER_ID),
+    [DEMO_DRIVER_ID]
+  );
+  const { data: onboardingData, loading: onboardingLoading, error: onboardingError, refresh: refreshOnboarding } = useApi<Record<string, unknown>>(
+    () => driverApi.getOnboardingStatus(DEMO_DRIVER_ID),
+    [DEMO_DRIVER_ID]
+  );
+
+  /* ── Derive display values (API data with mock fallback) ── */
+  const driver = profileData
+    ? {
+        firstName: (profileData.firstName as string) || mockDriver.firstName,
+        lastName: (profileData.lastName as string) || mockDriver.lastName,
+        memberSince: (profileData.memberSince as string) || mockDriver.memberSince,
+        profileCompletion: (profileData.profileCompletion as number) ?? mockDriver.profileCompletion,
+      }
+    : mockDriver;
+
+  const kpis = profileData
+    ? [
+        { label: 'Match Score', value: String((profileData.matchScore as number) ?? 87), icon: 'auto_awesome', trend: '+5 this week', trendUp: true },
+        { label: 'Applications Sent', value: String((profileData.applicationsSent as number) ?? 12), icon: 'send', trend: '+3 this week', trendUp: true },
+        { label: 'Profile Views', value: String((profileData.profileViews as number) ?? 48), icon: 'visibility', trend: '+14% vs last week', trendUp: true },
+      ]
+    : mockKpis;
+
+  const recentMatches = profileData?.recentMatches
+    ? (profileData.recentMatches as typeof mockRecentMatches)
+    : mockRecentMatches;
+
+  const onboardingSteps = onboardingData?.steps
+    ? (onboardingData.steps as typeof mockOnboardingSteps)
+    : mockOnboardingSteps;
+
   const completedSteps = onboardingSteps.filter(s => s.done).length;
+  const isLoading = profileLoading || onboardingLoading;
+  const hasError = profileError || onboardingError;
 
   return (
     <div className="space-y-8">
+      {/* ── Error Banner ── */}
+      {hasError && (
+        <Card elevation="xs" className="!bg-red-50 dark:!bg-red-500/10 border border-red-200 dark:border-red-500/20">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-red-500">warning</span>
+              <p className="text-sm text-red-700 dark:text-red-300">
+                Failed to load live data. Showing cached results.
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" icon="refresh" onClick={() => { refreshProfile(); refreshOnboarding(); }}>
+              Retry
+            </Button>
+          </div>
+        </Card>
+      )}
+
       {/* ── Welcome Banner ── */}
       <Card elevation="lg" className="animate-fade-up bg-gradient-to-br from-[var(--neu-bg)] to-[var(--neu-border)]/30">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -50,7 +110,11 @@ export default function DriverDashboard() {
               </div>
               <div>
                 <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>
-                  Welcome back, {driver.firstName}!
+                  {isLoading ? (
+                    <span className="inline-block w-48 h-7 rounded bg-[var(--neu-border)] animate-pulse" />
+                  ) : (
+                    <>Welcome back, {driver.firstName}!</>
+                  )}
                 </h1>
                 <p className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>
                   Member since {driver.memberSince} &middot; CDL-A Driver
@@ -147,9 +211,12 @@ export default function DriverDashboard() {
         <Card className="animate-fade-up stagger-6">
           <div className="flex items-center justify-between mb-5">
             <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>Onboarding Progress</h3>
-            <Badge variant="accent" icon="checklist">
-              {completedSteps}/{onboardingSteps.length}
-            </Badge>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" icon="refresh" onClick={refreshOnboarding}>Refresh</Button>
+              <Badge variant="accent" icon="checklist">
+                {completedSteps}/{onboardingSteps.length}
+              </Badge>
+            </div>
           </div>
           <ProgressBar
             value={completedSteps}

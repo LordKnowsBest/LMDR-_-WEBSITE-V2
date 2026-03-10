@@ -1,9 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Card, Button, Input, Badge } from '@/components/ui';
+import { driverApi } from '@/lib/api';
+import { useApi, useMutation } from '@/lib/hooks';
 
-/* ── Mock Data ── */
+/* ── Constants ── */
+const DEMO_DRIVER_ID = 'demo-driver-001';
+
+/* ── Mock Fallback Data ── */
 const endorsementOptions = [
   { code: 'H', label: 'Hazmat' },
   { code: 'N', label: 'Tanker' },
@@ -16,17 +21,51 @@ const endorsementOptions = [
 const truckTypes = ['Dry Van', 'Reefer', 'Flatbed', 'Tanker', 'LTL', 'Intermodal', 'Auto Hauler'];
 const routeTypes = ['OTR (Over the Road)', 'Regional', 'Local', 'Dedicated', 'Team'];
 
+const mockProfile = {
+  firstName: 'Marcus', lastName: 'Thompson',
+  email: 'marcus.t@email.com', phone: '(214) 555-0187',
+  cdlClass: 'A', cdlState: 'TX',
+  endorsements: ['H', 'T'] as string[],
+  yearsExperience: '8',
+  preferredTruck: 'Dry Van', preferredRoute: 'Regional',
+  homeCity: 'Dallas', homeState: 'TX', homeZip: '75201',
+};
+
 export default function DriverProfilePage() {
   const [editing, setEditing] = useState(false);
-  const [profile, setProfile] = useState({
-    firstName: 'Marcus', lastName: 'Thompson',
-    email: 'marcus.t@email.com', phone: '(214) 555-0187',
-    cdlClass: 'A', cdlState: 'TX',
-    endorsements: ['H', 'T'] as string[],
-    yearsExperience: '8',
-    preferredTruck: 'Dry Van', preferredRoute: 'Regional',
-    homeCity: 'Dallas', homeState: 'TX', homeZip: '75201',
-  });
+  const [profile, setProfile] = useState(mockProfile);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  /* ── API Data ── */
+  const { data: profileData, loading, error, refresh } = useApi<Record<string, unknown>>(
+    () => driverApi.getProfile(DEMO_DRIVER_ID),
+    [DEMO_DRIVER_ID]
+  );
+
+  const saveMutation = useMutation<Record<string, unknown>>(
+    useCallback((data: Record<string, unknown>) => driverApi.updateProfile(DEMO_DRIVER_ID, data), [])
+  );
+
+  /* ── Sync API data into local state ── */
+  useEffect(() => {
+    if (profileData) {
+      setProfile({
+        firstName: (profileData.firstName as string) || mockProfile.firstName,
+        lastName: (profileData.lastName as string) || mockProfile.lastName,
+        email: (profileData.email as string) || mockProfile.email,
+        phone: (profileData.phone as string) || mockProfile.phone,
+        cdlClass: (profileData.cdlClass as string) || mockProfile.cdlClass,
+        cdlState: (profileData.cdlState as string) || mockProfile.cdlState,
+        endorsements: (profileData.endorsements as string[]) || mockProfile.endorsements,
+        yearsExperience: String((profileData.yearsExperience as number) ?? mockProfile.yearsExperience),
+        preferredTruck: (profileData.preferredTruck as string) || mockProfile.preferredTruck,
+        preferredRoute: (profileData.preferredRoute as string) || mockProfile.preferredRoute,
+        homeCity: (profileData.homeCity as string) || mockProfile.homeCity,
+        homeState: (profileData.homeState as string) || mockProfile.homeState,
+        homeZip: (profileData.homeZip as string) || mockProfile.homeZip,
+      });
+    }
+  }, [profileData]);
 
   const handleChange = (field: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     setProfile(p => ({ ...p, [field]: e.target.value }));
@@ -42,31 +81,102 @@ export default function DriverProfilePage() {
     }));
   };
 
+  const handleSave = async () => {
+    const result = await saveMutation.execute(profile);
+    if (result !== null) {
+      setSaveSuccess(true);
+      setEditing(false);
+      refresh();
+      setTimeout(() => setSaveSuccess(false), 3000);
+    }
+  };
+
+  const handleCancel = () => {
+    setEditing(false);
+    // Reset to API data or mock
+    if (profileData) {
+      setProfile({
+        firstName: (profileData.firstName as string) || mockProfile.firstName,
+        lastName: (profileData.lastName as string) || mockProfile.lastName,
+        email: (profileData.email as string) || mockProfile.email,
+        phone: (profileData.phone as string) || mockProfile.phone,
+        cdlClass: (profileData.cdlClass as string) || mockProfile.cdlClass,
+        cdlState: (profileData.cdlState as string) || mockProfile.cdlState,
+        endorsements: (profileData.endorsements as string[]) || mockProfile.endorsements,
+        yearsExperience: String((profileData.yearsExperience as number) ?? mockProfile.yearsExperience),
+        preferredTruck: (profileData.preferredTruck as string) || mockProfile.preferredTruck,
+        preferredRoute: (profileData.preferredRoute as string) || mockProfile.preferredRoute,
+        homeCity: (profileData.homeCity as string) || mockProfile.homeCity,
+        homeState: (profileData.homeState as string) || mockProfile.homeState,
+        homeZip: (profileData.homeZip as string) || mockProfile.homeZip,
+      });
+    } else {
+      setProfile(mockProfile);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-4xl">
+      {/* ── Error Banner ── */}
+      {(error || saveMutation.error) && (
+        <Card elevation="xs" className="!bg-red-50 dark:!bg-red-500/10 border border-red-200 dark:border-red-500/20">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-red-500">warning</span>
+              <p className="text-sm text-red-700 dark:text-red-300">
+                {saveMutation.error || 'Failed to load profile. Showing cached data.'}
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" icon="refresh" onClick={refresh}>Retry</Button>
+          </div>
+        </Card>
+      )}
+
+      {/* ── Success Banner ── */}
+      {saveSuccess && (
+        <Card elevation="xs" className="!bg-green-50 dark:!bg-green-500/10 border border-green-200 dark:border-green-500/20">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-green-500">check_circle</span>
+            <p className="text-sm text-green-700 dark:text-green-300">Profile saved successfully.</p>
+          </div>
+        </Card>
+      )}
+
       {/* ── Header ── */}
       <div className="flex items-center justify-between animate-fade-up">
         <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>My Profile</h1>
-        <Button
-          variant={editing ? 'primary' : 'secondary'}
-          icon={editing ? 'save' : 'edit'}
-          onClick={() => setEditing(!editing)}
-        >
-          {editing ? 'Save Changes' : 'Edit Profile'}
-        </Button>
+        <div className="flex items-center gap-2">
+          {!editing && <Button variant="ghost" size="sm" icon="refresh" onClick={refresh}>Refresh</Button>}
+          <Button
+            variant={editing ? 'primary' : 'secondary'}
+            icon={editing ? 'save' : 'edit'}
+            onClick={() => editing ? handleSave() : setEditing(true)}
+            disabled={saveMutation.loading}
+          >
+            {saveMutation.loading ? 'Saving...' : editing ? 'Save Changes' : 'Edit Profile'}
+          </Button>
+        </div>
       </div>
 
       {/* ── Profile Header Card ── */}
       <Card elevation="lg" className="animate-fade-up stagger-1">
         <div className="flex items-center gap-5">
-          <div className="neu-ins w-20 h-20 rounded-2xl flex items-center justify-center shrink-0">
-            <span className="text-3xl font-black" style={{ color: 'var(--neu-accent)' }}>
-              {profile.firstName[0]}{profile.lastName[0]}
-            </span>
-          </div>
+          {loading ? (
+            <div className="w-20 h-20 rounded-2xl bg-[var(--neu-border)] animate-pulse shrink-0" />
+          ) : (
+            <div className="neu-ins w-20 h-20 rounded-2xl flex items-center justify-center shrink-0">
+              <span className="text-3xl font-black" style={{ color: 'var(--neu-accent)' }}>
+                {profile.firstName[0]}{profile.lastName[0]}
+              </span>
+            </div>
+          )}
           <div className="space-y-1">
             <h2 className="text-xl font-bold" style={{ color: 'var(--neu-text)' }}>
-              {profile.firstName} {profile.lastName}
+              {loading ? (
+                <span className="inline-block w-40 h-6 rounded bg-[var(--neu-border)] animate-pulse" />
+              ) : (
+                <>{profile.firstName} {profile.lastName}</>
+              )}
             </h2>
             <p className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>
               CDL Class {profile.cdlClass} Driver &middot; {profile.yearsExperience} years experience
@@ -204,8 +314,10 @@ export default function DriverProfilePage() {
               <p className="text-sm font-medium" style={{ color: 'var(--neu-text)' }}>You have unsaved changes</p>
             </div>
             <div className="flex gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
-              <Button size="sm" icon="save" onClick={() => setEditing(false)}>Save Profile</Button>
+              <Button variant="ghost" size="sm" onClick={handleCancel}>Cancel</Button>
+              <Button size="sm" icon="save" onClick={handleSave} disabled={saveMutation.loading}>
+                {saveMutation.loading ? 'Saving...' : 'Save Profile'}
+              </Button>
             </div>
           </div>
         </Card>

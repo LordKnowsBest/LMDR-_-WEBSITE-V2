@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { Card, Badge, Button, DataTable, ProgressBar, KpiCard } from '@/components/ui';
+import { complianceApi } from '@/lib/api';
+import { useApi } from '@/lib/hooks';
 
 /* ── Types ────────────────────────────────────────────────────── */
 type Stage = 'Document Collection' | 'Background Check' | 'Drug Test' | 'Orientation' | 'Complete';
@@ -27,7 +29,7 @@ const stageConfig: Record<Stage, { variant: 'default' | 'success' | 'warning' | 
   'Complete': { variant: 'success', icon: 'check_circle' },
 };
 
-/* ── Mock Data (8 rows) ──────────────────────────────────────── */
+/* ── Fallback Mock Data (8 rows) ─────────────────────────────── */
 const mockData: OnboardingRow[] = [
   { id: 'o1', name: 'Marcus Johnson', carrier: 'Werner Enterprises', stage: 'Background Check', progress: 62, docsStatus: '6/7 uploaded', docsComplete: false, startDate: 'Feb 28, 2026' },
   { id: 'o2', name: 'Sarah Chen', carrier: 'Schneider National', stage: 'Document Collection', progress: 30, docsStatus: '3/7 uploaded', docsComplete: false, startDate: 'Mar 02, 2026' },
@@ -63,14 +65,36 @@ function progressColor(pct: number): 'green' | 'blue' | 'amber' | 'red' {
   return 'red';
 }
 
+/* ── Compliance API Response Shape ───────────────────────────── */
+interface ComplianceData {
+  rows?: OnboardingRow[];
+  summary?: {
+    total: number;
+    inProgress: number;
+    pendingDocs: number;
+    avgProgress: number;
+    completed: number;
+  };
+}
+
 export default function OnboardingDashboardPage() {
   const [activeFilter, setActiveFilter] = useState<FilterKey>('all');
-  const filtered = filterRows(mockData, activeFilter);
 
-  const countByStage = (stage: Stage) => mockData.filter((r) => r.stage === stage).length;
-  const countInProgress = mockData.filter((r) => r.stage !== 'Complete').length;
-  const pendingDocs = mockData.filter((r) => !r.docsComplete).length;
-  const avgProgress = Math.round(mockData.reduce((s, r) => s + r.progress, 0) / mockData.length);
+  // Fetch compliance status for all active onboarding drivers
+  const { data: complianceData, loading, error, refresh } = useApi<ComplianceData>(
+    () => complianceApi.getStatus('all') as Promise<{ data: ComplianceData }>,
+    []
+  );
+
+  // Use API data if available, fall back to mock data
+  const allRows = complianceData?.rows ?? mockData;
+  const filtered = filterRows(allRows, activeFilter);
+
+  const countByStage = (stage: Stage) => allRows.filter((r) => r.stage === stage).length;
+  const countInProgress = complianceData?.summary?.inProgress ?? allRows.filter((r) => r.stage !== 'Complete').length;
+  const pendingDocs = complianceData?.summary?.pendingDocs ?? allRows.filter((r) => !r.docsComplete).length;
+  const avgProgress = complianceData?.summary?.avgProgress ?? Math.round(allRows.reduce((s, r) => s + r.progress, 0) / allRows.length);
+  const completedCount = complianceData?.summary?.completed ?? countByStage('Complete');
 
   /* ── Table Columns ─────────────────────────────────────────── */
   const columns = [
@@ -151,16 +175,44 @@ export default function OnboardingDashboardPage() {
           <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Onboarding Dashboard</h1>
           <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>Track driver onboarding progress and documentation</p>
         </div>
-        <Button size="sm" icon="person_add">New Onboarding</Button>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh} disabled={loading}>
+            {loading ? 'Loading...' : 'Refresh'}
+          </Button>
+          <Button size="sm" icon="person_add">New Onboarding</Button>
+        </div>
       </div>
 
+      {/* ── Error Banner ─────────────────────────────────────── */}
+      {error && (
+        <div className="rounded-xl px-4 py-3 text-sm font-medium text-red-700 bg-red-50 border border-red-200 flex items-center gap-2">
+          <span className="material-symbols-outlined text-[18px]">error</span>
+          Failed to load compliance data. Showing cached results.
+          <button onClick={refresh} className="ml-auto underline text-red-600 hover:text-red-800 text-xs font-bold">Retry</button>
+        </div>
+      )}
+
+      {/* ── Loading Skeleton ─────────────────────────────────── */}
+      {loading && !complianceData && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+          {[1, 2, 3, 4].map((i) => (
+            <Card key={i} className="animate-pulse">
+              <div className="h-4 bg-gray-200 rounded w-24 mb-3" />
+              <div className="h-8 bg-gray-200 rounded w-16" />
+            </Card>
+          ))}
+        </div>
+      )}
+
       {/* ── KPI Cards ──────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-        <KpiCard label="Total Onboarding" value={String(mockData.length)} icon="groups" trend={`${countInProgress} in progress`} trendUp className="stagger-1" />
-        <KpiCard label="Pending Documents" value={String(pendingDocs)} icon="upload_file" trend={`${mockData.length - pendingDocs} complete`} trendUp className="stagger-2" />
-        <KpiCard label="Avg Progress" value={`${avgProgress}%`} icon="speed" trend="+8% this week" trendUp className="stagger-3" />
-        <KpiCard label="Completed" value={String(countByStage('Complete'))} icon="check_circle" trend="+1 this week" trendUp className="stagger-4" />
-      </div>
+      {(!loading || complianceData) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+          <KpiCard label="Total Onboarding" value={String(allRows.length)} icon="groups" trend={`${countInProgress} in progress`} trendUp className="stagger-1" />
+          <KpiCard label="Pending Documents" value={String(pendingDocs)} icon="upload_file" trend={`${allRows.length - pendingDocs} complete`} trendUp className="stagger-2" />
+          <KpiCard label="Avg Progress" value={`${avgProgress}%`} icon="speed" trend="+8% this week" trendUp className="stagger-3" />
+          <KpiCard label="Completed" value={String(completedCount)} icon="check_circle" trend="+1 this week" trendUp className="stagger-4" />
+        </div>
+      )}
 
       {/* ── Stage Summary Chips ────────────────────────────────── */}
       <Card elevation="xs" className="!p-3 animate-fade-up stagger-2">

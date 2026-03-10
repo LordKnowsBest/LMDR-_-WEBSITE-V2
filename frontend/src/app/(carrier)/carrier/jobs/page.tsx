@@ -1,7 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { Card, Badge, Button, DataTable } from '@/components/ui';
+import { carrierApi } from '@/lib/api';
+import { useApi, useMutation } from '@/lib/hooks';
+
+const DEMO_CARRIER_ID = 'demo-carrier-001';
 
 /* ── Types ──────────────────────────────────────────────────── */
 interface Job {
@@ -18,8 +22,8 @@ interface Job {
 
 type TabFilter = 'all' | 'active' | 'paused' | 'closed';
 
-/* ── Mock Data ──────────────────────────────────────────────── */
-const jobs: Job[] = [
+/* ── Fallback Mock Data ────────────────────────────────────────── */
+const mockJobs: Job[] = [
   { id: 'J-4001', title: 'OTR Dry Van Driver', routeType: 'OTR', payRange: '$0.62 - $0.68/mi', truckType: 'Freightliner Cascadia', posted: 'Mar 3, 2026', applications: 14, status: 'active' },
   { id: 'J-4002', title: 'Regional Reefer Driver', routeType: 'Regional', payRange: '$1,450 - $1,650/wk', truckType: 'Kenworth T680', posted: 'Mar 1, 2026', applications: 8, status: 'active' },
   { id: 'J-4003', title: 'Local Flatbed Operator', routeType: 'Local', payRange: '$26 - $30/hr', truckType: 'Peterbilt 579', posted: 'Feb 28, 2026', applications: 5, status: 'active' },
@@ -93,12 +97,31 @@ const tabs: { key: TabFilter; label: string; icon: string }[] = [
 export default function CarrierJobsPage() {
   const [filter, setFilter] = useState<TabFilter>('all');
 
+  const { data: apiJobs, loading, error, refresh } = useApi<Job[]>(
+    () => carrierApi.getJobs(DEMO_CARRIER_ID) as Promise<{ data: Job[] }>,
+    [DEMO_CARRIER_ID]
+  );
+
+  const createJobMutation = useMutation<Record<string, unknown>>(
+    useCallback((job: Record<string, unknown>) => carrierApi.createJob(DEMO_CARRIER_ID, job), [])
+  );
+
+  const jobs: Job[] = apiJobs ?? mockJobs;
   const filtered = filter === 'all' ? jobs : jobs.filter((j) => j.status === filter);
   const counts: Record<TabFilter, number> = {
     all: jobs.length,
     active: jobs.filter((j) => j.status === 'active').length,
     paused: jobs.filter((j) => j.status === 'paused').length,
     closed: jobs.filter((j) => j.status === 'closed').length,
+  };
+
+  const handleNewJob = async () => {
+    await createJobMutation.execute({
+      title: 'New Job Posting',
+      routeType: 'OTR',
+      status: 'active',
+    });
+    refresh();
   };
 
   return (
@@ -111,8 +134,37 @@ export default function CarrierJobsPage() {
             Manage your open positions and track applicants
           </p>
         </div>
-        <Button variant="primary" icon="add_circle">New Job</Button>
+        <div className="flex items-center gap-2">
+          {loading && (
+            <span className="text-xs font-semibold animate-pulse" style={{ color: 'var(--neu-text-muted)' }}>
+              Loading...
+            </span>
+          )}
+          {error && (
+            <Badge variant="warning" icon="cloud_off">Using cached data</Badge>
+          )}
+          <Button variant="ghost" icon="refresh" size="sm" onClick={refresh}>
+            Refresh
+          </Button>
+          <Button
+            variant="primary"
+            icon="add_circle"
+            onClick={handleNewJob}
+            disabled={createJobMutation.loading}
+          >
+            {createJobMutation.loading ? 'Creating...' : 'New Job'}
+          </Button>
+        </div>
       </div>
+
+      {createJobMutation.error && (
+        <Card elevation="sm" className="!border-red-300 animate-fade-up">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[16px] text-red-500">error</span>
+            <span className="text-sm text-red-600">{createJobMutation.error}</span>
+          </div>
+        </Card>
+      )}
 
       {/* ═══ Filter Tabs ═══ */}
       <div className="flex gap-2 animate-fade-up stagger-2">
@@ -148,7 +200,7 @@ export default function CarrierJobsPage() {
         {[
           { label: 'Total Positions', value: jobs.length, icon: 'work', color: 'var(--neu-accent)' },
           { label: 'Total Applications', value: jobs.reduce((s, j) => s + j.applications, 0), icon: 'description', color: '#22c55e' },
-          { label: 'Avg Apps / Job', value: Math.round(jobs.reduce((s, j) => s + j.applications, 0) / jobs.length), icon: 'trending_up', color: '#f59e0b' },
+          { label: 'Avg Apps / Job', value: jobs.length > 0 ? Math.round(jobs.reduce((s, j) => s + j.applications, 0) / jobs.length) : 0, icon: 'trending_up', color: '#f59e0b' },
           { label: 'Fill Rate', value: '67%', icon: 'pie_chart', color: '#a855f7' },
         ].map((s) => (
           <Card key={s.label} elevation="xs" className="flex items-center gap-3">
