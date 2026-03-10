@@ -21,10 +21,11 @@ export function createApp() {
 
   // Authenticated API routes
   const protectedRouter = express.Router();
-  protectedRouter.use('/', collectionRouter);
+  // Mount specific routers BEFORE the catch-all collection router
   protectedRouter.use('/files', filesRouter);
   protectedRouter.use('/search', searchRouter);
   protectedRouter.use('/jobs', jobsRouter);
+  protectedRouter.use('/', collectionRouter);
   app.use('/v1', authenticate(), rateLimiter(), protectedRouter);
 
   // 404 catch-all

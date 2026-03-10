@@ -87,8 +87,8 @@ router.post('/board-refresh', async (req, res) => {
   try {
     const result = await query(
       `SELECT COUNT(*) AS cnt
-       FROM airtable_carriers_master
-       WHERE data->>'status' = 'active'`
+       FROM carriers
+       WHERE is_active = true`
     );
 
     const processed = parseInt(result.rows[0]?.cnt ?? 0, 10);
@@ -145,7 +145,7 @@ router.post('/weekly-earnings-digest', async (req, res) => {
   try {
     const result = await query(
       `SELECT COUNT(*) AS cnt
-       FROM airtable_v2_driver_profiles
+       FROM airtable_driver_profiles
        WHERE data->>'status' = 'active'`
     );
 
@@ -184,8 +184,10 @@ router.post('/monthly-invoices', async (req, res) => {
   try {
     const result = await query(
       `SELECT COUNT(*) AS cnt
-       FROM airtable_carriers_master
-       WHERE data->>'subscription_status' = 'active'`
+       FROM carriers
+       WHERE subscription_tier IS NOT NULL
+         AND subscription_tier != 'none'
+         AND is_active = true`
     );
 
     const processed = parseInt(result.rows[0]?.cnt ?? 0, 10);

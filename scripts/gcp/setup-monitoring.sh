@@ -8,7 +8,7 @@ set -euo pipefail
 
 PROJECT_ID="ldmr-velocitymatch"
 REGION="us-central1"
-ALERT_EMAIL="ops@lastmiledr.app"
+ALERT_EMAIL="LastMile@velocitymatch.io"
 API_HOST="lmdr-api-140035137711.us-central1.run.app"
 LOG_BUCKET="lmdr-logs"
 LOG_SINK="lmdr-logs-sink"

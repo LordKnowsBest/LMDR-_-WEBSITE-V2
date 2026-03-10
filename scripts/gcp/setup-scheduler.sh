@@ -80,7 +80,7 @@ upsert_job() {
       --attempt-deadline="${TIMEOUT}" \
       --time-zone="UTC" \
       --message-body="{}" \
-      --headers="Content-Type=application/json"
+      --update-headers="Content-Type=application/json"
   else
     gcloud scheduler jobs create http "${JOB_NAME}" \
       --project="${PROJECT}" \

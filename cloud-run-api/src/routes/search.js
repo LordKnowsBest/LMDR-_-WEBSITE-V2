@@ -168,9 +168,10 @@ router.get('/carriers', async (req, res) => {
   const dataSql = `
     SELECT
       _id, company_name, state, city, freight_type,
-      pay_per_mile, dot_number, mc_number, hq_address,
-      phone, website, fleet_size, driver_count,
-      home_time, benefits, _created_at
+      pay_per_mile, pay_per_mile_max, dot_number,
+      num_trucks, num_drivers, home_time,
+      sign_on_bonus, combined_score, safety_score,
+      "_createdDate"
     FROM carriers
     ${whereClause}
     ${orderClause}
@@ -191,16 +192,15 @@ router.get('/carriers', async (req, res) => {
       city: row.city,
       freight_type: row.freight_type,
       pay_per_mile: row.pay_per_mile,
+      pay_per_mile_max: row.pay_per_mile_max,
       dot_number: row.dot_number,
-      mc_number: row.mc_number,
-      hq_address: row.hq_address,
-      phone: row.phone,
-      website: row.website,
-      fleet_size: row.fleet_size,
-      driver_count: row.driver_count,
+      num_trucks: row.num_trucks,
+      num_drivers: row.num_drivers,
       home_time: row.home_time,
-      benefits: row.benefits,
-      _createdAt: row._created_at,
+      sign_on_bonus: row.sign_on_bonus,
+      combined_score: row.combined_score,
+      safety_score: row.safety_score,
+      _createdAt: row._createdDate || row._createddate,
     }));
 
     res.json({
