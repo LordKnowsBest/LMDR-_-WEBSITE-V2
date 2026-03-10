@@ -1,9 +1,10 @@
 ﻿# Phase 3 Frontend Migration — Product Requirements Document
 
 > **Addendum to:** `Conductor/tracks/gcp_migration_20260218/plan.md`
-> **Phase context:** Cloud SQL migration is complete (24,826 records). `lmdr-api` Cloud Run service is built (Phase 1). Phase 2 microservices are planned. This addendum covers migrating the Wix frontend to Next.js 14 on Cloud Run.
+> **Phase context:** Cloud SQL migration is complete (24,826 records). `lmdr-api` Cloud Run service is deployed. Airtable fully disconnected. Phase 2 microservices are in progress. This addendum covers migrating the Wix frontend to Next.js 14 on Cloud Run.
 > **GCP Project:** `ldmr-velocitymatch` — Region: `us-central1`
 > **Date:** 2026-03-09
+> **Implementation note (2026-03-10):** The `frontend/` directory already exists with Next.js project scaffolding, Dockerfile, and cloudbuild.yaml. Pages for all 5 surfaces (driver, recruiter, carrier, admin, b2b) are in progress.
 
 ---
 

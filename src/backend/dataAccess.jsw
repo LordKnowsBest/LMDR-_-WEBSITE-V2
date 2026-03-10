@@ -1,21 +1,15 @@
 /**
- * Data Access Layer - Dual-Source Data Operations
+ * Data Access Layer — Cloud Run Primary
  *
- * Provides a unified interface for data operations that automatically routes
- * to either Wix Data or Airtable based on the config.jsw settings.
- * @sync-test 2026-03-02
- *
- * This module wraps common database operations and handles:
- * - Source routing based on feature flags
- * - Field name transformations between Wix and Airtable
- * - Consistent response formats across both sources
+ * All collections route to Cloud Run (Cloud SQL) except for 4 Wix system
+ * collections that must stay in Wix: AdminUsers, MemberNotifications,
+ * memberBadges, memberPrivateData.
  *
  * @module backend/dataAccess
  */
 
 import wixData from 'wix-data';
-import { usesAirtable, usesCloudRun, getWixCollectionName, getAirtableTableName, GCP_MIGRATION_MODE } from 'backend/configData';
-import * as airtable from 'backend/airtableClient';
+import { usesWix, getWixCollectionName } from 'backend/configData';
 import * as cloudRun from 'backend/cloudRunClient';
 import { logDatabase, log } from 'backend/observabilityService';
 
@@ -26,7 +20,7 @@ import { logDatabase, log } from 'backend/observabilityService';
 /**
  * Query records from the configured data source
  *
- * @param {string} collectionKey - The camelCase collection key from config.jsw
+ * @param {string} collectionKey - The camelCase collection key from configData
  * @param {Object} options - Query options
  * @param {Object} [options.filters] - Filter conditions { field: value } or { field: { op: value }}
  * @param {number} [options.limit] - Maximum records to return
@@ -42,15 +36,12 @@ export async function queryRecords(collectionKey, options = {}) {
 
   try {
     let result;
-    if (usesCloudRun(collectionKey)) {
-      result = await queryCloudRun(collectionKey, options);
-    } else if (usesAirtable(collectionKey)) {
-      result = await queryAirtable(collectionKey, options);
-    } else {
+    if (usesWix(collectionKey)) {
       result = await queryWix(collectionKey, options);
+    } else {
+      result = await queryCloudRun(collectionKey, options);
     }
 
-    // Log database operation for observability (fire-and-forget to avoid blocking)
     logDatabase({
       operation: 'query',
       collection: collectionKey,
@@ -65,7 +56,6 @@ export async function queryRecords(collectionKey, options = {}) {
     const latency = Date.now() - startTime;
     console.error(`[dataAccess] queryRecords error (${collectionKey}):`, error.message);
 
-    // Don't log errors for observability collections — prevents infinite cascade
     if (collectionKey !== 'systemLogs' && collectionKey !== 'systemErrors' && collectionKey !== 'systemTraces') {
       log({
         level: 'ERROR',
@@ -86,18 +76,16 @@ export async function queryRecords(collectionKey, options = {}) {
 }
 
 /**
- * Internal: Query Wix Data
+ * Internal: Query Wix Data (only for system collections)
  */
 async function queryWix(collectionKey, options) {
   const collectionName = getWixCollectionName(collectionKey);
   let query = wixData.query(collectionName);
 
-  // Apply filters
   if (options.filters) {
     query = applyWixFilters(query, options.filters);
   }
 
-  // Apply sorting
   if (options.sort && Array.isArray(options.sort)) {
     for (const sortItem of options.sort) {
       if (sortItem.direction === 'desc') {
@@ -108,17 +96,14 @@ async function queryWix(collectionKey, options) {
     }
   }
 
-  // Apply limit
   if (options.limit) {
     query = query.limit(options.limit);
   }
 
-  // Apply skip (pagination)
   if (options.skip) {
     query = query.skip(options.skip);
   }
 
-  // Execute query
   const queryOptions = options.suppressAuth ? { suppressAuth: true } : {};
   const result = await query.find(queryOptions);
 
@@ -136,7 +121,6 @@ function applyWixFilters(query, filters) {
   for (const [field, value] of Object.entries(filters)) {
     if (value === null || value === undefined) continue;
 
-    // Handle operator objects
     if (typeof value === 'object' && !Array.isArray(value)) {
       for (const [op, operand] of Object.entries(value)) {
         switch (op) {
@@ -155,10 +139,8 @@ function applyWixFilters(query, filters) {
         }
       }
     } else if (Array.isArray(value)) {
-      // Default array behavior: hasSome
       query = query.hasSome(field, value);
     } else {
-      // Simple equality
       query = query.eq(field, value);
     }
   }
@@ -187,67 +169,6 @@ async function queryCloudRun(collectionKey, options) {
   };
 }
 
-/**
- * Internal: Query Airtable
- */
-async function queryAirtable(collectionKey, options) {
-  const queryOptions = {};
-
-  // Build filter formula if filters provided
-  if (options.filters && Object.keys(options.filters).length > 0) {
-    if (typeof airtable.buildFilterFormula === 'function') {
-      queryOptions.filterByFormula = await airtable.buildFilterFormula(options.filters, collectionKey);
-    }
-  }
-
-  // Apply sorting — map Wix field names to Airtable field names
-  if (options.sort && Array.isArray(options.sort)) {
-    const fieldMappings = typeof airtable.getFieldMappingsPublic === 'function'
-      ? await airtable.getFieldMappingsPublic(collectionKey)
-      : {};
-    queryOptions.sort = options.sort.map(s => ({
-      field: fieldMappings[s.field] || s.field,
-      direction: s.direction || 'asc'
-    }));
-  }
-
-  // Apply limit
-  if (options.limit) {
-    queryOptions.maxRecords = options.limit;
-  }
-
-  // Execute query - pass collection key directly, airtableClient handles table name transformation
-  let result = null;
-  if (typeof airtable.queryRecords === 'function') {
-    result = await airtable.queryRecords(collectionKey, queryOptions);
-  }
-
-  // Test fallback: some mocked clients only expose getAllRecords
-  if ((!result || (!result.records && !result.items)) && typeof airtable.getAllRecords === 'function') {
-    const allRecords = await airtable.getAllRecords(
-      collectionKey,
-      queryOptions.filterByFormula || null,
-      queryOptions.sort
-    );
-    const records = Array.isArray(allRecords) ? allRecords : [];
-    result = {
-      records: queryOptions.maxRecords ? records.slice(0, queryOptions.maxRecords) : records
-    };
-  }
-
-  if (result?.error) {
-    return { success: false, items: [], error: result.error };
-  }
-
-  const records = result?.records || result?.items || [];
-
-  return {
-    success: true,
-    items: records,
-    totalCount: records.length
-  };
-}
-
 // ============================================================================
 // GET SINGLE RECORD
 // ============================================================================
@@ -263,32 +184,13 @@ async function queryAirtable(collectionKey, options) {
  */
 export async function getRecord(collectionKey, recordId, options = {}) {
   try {
-    if (usesCloudRun(collectionKey)) {
-      return await cloudRun.getRecord(collectionKey, recordId);
+    if (usesWix(collectionKey)) {
+      const collectionName = getWixCollectionName(collectionKey);
+      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+      return await wixData.get(collectionName, recordId, wixOptions);
     }
 
-    if (usesAirtable(collectionKey)) {
-      if (typeof airtable.getRecord === 'function') {
-        const result = await airtable.getRecord(collectionKey, recordId);
-        if (result?.error) return null;
-        return result || null;
-      }
-
-      if (typeof airtable.queryRecords === 'function') {
-        const result = await airtable.queryRecords(collectionKey, {
-          filterByFormula: `RECORD_ID() = '${recordId}'`,
-          maxRecords: 1
-        });
-        const records = result?.records || result?.items || [];
-        return records[0] || null;
-      }
-
-      return null;
-    }
-
-    const collectionName = getWixCollectionName(collectionKey);
-    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
-    return await wixData.get(collectionName, recordId, wixOptions);
+    return await cloudRun.getRecord(collectionKey, recordId);
   } catch (error) {
     console.error(`[dataAccess] getRecord error (${collectionKey}/${recordId}):`, error.message);
     return null;
@@ -315,28 +217,14 @@ export async function insertRecord(collectionKey, data, options = {}) {
 
   try {
     let inserted;
-    if (usesCloudRun(collectionKey)) {
-      const result = await cloudRun.createRecord(collectionKey, data);
-      if (result?.error) throw new Error(result.error);
-      inserted = result || { ...data };
-    } else if (usesAirtable(collectionKey)) {
-      let result;
-      if (typeof airtable.createRecord === 'function') {
-        result = await airtable.createRecord(collectionKey, data);
-      } else if (typeof airtable.insertRecord === 'function') {
-        result = await airtable.insertRecord(collectionKey, data);
-      } else {
-        result = { ...data };
-      }
-
-      if (result?.error) {
-        throw new Error(result.error);
-      }
-      inserted = result || { ...data };
-    } else {
+    if (usesWix(collectionKey)) {
       const collectionName = getWixCollectionName(collectionKey);
       const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
       inserted = await wixData.insert(collectionName, data, wixOptions);
+    } else {
+      const result = await cloudRun.createRecord(collectionKey, data);
+      if (result?.error) throw new Error(result.error);
+      inserted = result || { ...data };
     }
 
     logDatabase({
@@ -353,7 +241,6 @@ export async function insertRecord(collectionKey, data, options = {}) {
     const latency = Date.now() - startTime;
     console.error(`[dataAccess] insertRecord error (${collectionKey}):`, error.message);
 
-    // Don't log errors for observability collections — prevents infinite cascade
     if (collectionKey !== 'systemLogs' && collectionKey !== 'systemErrors' && collectionKey !== 'systemTraces') {
       log({
         level: 'ERROR',
@@ -392,30 +279,15 @@ export async function updateRecord(collectionKey, data, options = {}) {
     }
 
     let updated;
-    if (usesCloudRun(collectionKey)) {
+    if (usesWix(collectionKey)) {
+      const collectionName = getWixCollectionName(collectionKey);
+      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+      updated = await wixData.update(collectionName, data, wixOptions);
+    } else {
       const { _id, ...fields } = data;
       const result = await cloudRun.updateRecord(collectionKey, _id, fields);
       if (result?.error) throw new Error(result.error);
       updated = result || { ...data };
-    } else if (usesAirtable(collectionKey)) {
-      const { _id, ...fields } = data;
-      let result;
-      if (typeof airtable.updateRecord === 'function') {
-        result = await airtable.updateRecord(collectionKey, _id, fields);
-      } else if (typeof airtable.upsertRecord === 'function') {
-        result = await airtable.upsertRecord(collectionKey, '_id', _id, fields);
-      } else {
-        result = { ...data };
-      }
-
-      if (result?.error) {
-        throw new Error(result.error);
-      }
-      updated = result || { ...data };
-    } else {
-      const collectionName = getWixCollectionName(collectionKey);
-      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
-      updated = await wixData.update(collectionName, data, wixOptions);
     }
 
     logDatabase({
@@ -431,7 +303,7 @@ export async function updateRecord(collectionKey, data, options = {}) {
   } catch (error) {
     const latency = Date.now() - startTime;
     console.error(`[dataAccess] updateRecord error (${collectionKey}):`, error.message);
-    
+
     log({
       level: 'ERROR',
       source: 'data-access',
@@ -459,27 +331,15 @@ export async function updateRecord(collectionKey, data, options = {}) {
  */
 export async function deleteRecord(collectionKey, recordId, options = {}) {
   try {
-    if (usesCloudRun(collectionKey)) {
-      const result = await cloudRun.deleteRecord(collectionKey, recordId);
-      if (result?.error) return { success: false, error: result.error };
+    if (usesWix(collectionKey)) {
+      const collectionName = getWixCollectionName(collectionKey);
+      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+      await wixData.remove(collectionName, recordId, wixOptions);
       return { success: true };
     }
 
-    if (usesAirtable(collectionKey)) {
-      if (typeof airtable.deleteRecord !== 'function') {
-        return { success: true };
-      }
-
-      const result = await airtable.deleteRecord(collectionKey, recordId);
-      if (result?.error) {
-        return { success: false, error: result.error };
-      }
-      return { success: true };
-    }
-
-    const collectionName = getWixCollectionName(collectionKey);
-    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
-    await wixData.remove(collectionName, recordId, wixOptions);
+    const result = await cloudRun.deleteRecord(collectionKey, recordId);
+    if (result?.error) return { success: false, error: result.error };
     return { success: true };
   } catch (error) {
     console.error(`[dataAccess] deleteRecord error (${collectionKey}/${recordId}):`, error.message);
@@ -532,20 +392,14 @@ export async function bulkInsert(collectionKey, records, options = {}) {
       return { success: true, records: [] };
     }
 
-    if (usesCloudRun(collectionKey)) {
-      return await cloudRun.bulkCreate(collectionKey, records);
+    if (usesWix(collectionKey)) {
+      const collectionName = getWixCollectionName(collectionKey);
+      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+      const inserted = await wixData.bulkInsert(collectionName, records, wixOptions);
+      return { success: true, records: inserted.insertedItemIds.map((id, i) => ({ ...records[i], _id: id })) };
     }
 
-    if (usesAirtable(collectionKey)) {
-      const result = await airtable.bulkCreate(collectionKey, records);
-      return result;
-    }
-
-    // Wix bulk insert
-    const collectionName = getWixCollectionName(collectionKey);
-    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
-    const inserted = await wixData.bulkInsert(collectionName, records, wixOptions);
-    return { success: true, records: inserted.insertedItemIds.map((id, i) => ({ ...records[i], _id: id })) };
+    return await cloudRun.bulkCreate(collectionKey, records);
   } catch (error) {
     console.error(`[dataAccess] bulkInsert error (${collectionKey}):`, error.message);
     return { success: false, errors: [{ error: error.message }] };
@@ -566,20 +420,14 @@ export async function bulkUpdate(collectionKey, records, options = {}) {
       return { success: true, records: [] };
     }
 
-    if (usesCloudRun(collectionKey)) {
-      return await cloudRun.bulkUpdate(collectionKey, records);
+    if (usesWix(collectionKey)) {
+      const collectionName = getWixCollectionName(collectionKey);
+      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+      const updated = await wixData.bulkUpdate(collectionName, records, wixOptions);
+      return { success: true, records: updated.updatedItems || records };
     }
 
-    if (usesAirtable(collectionKey)) {
-      const result = await airtable.bulkUpdate(collectionKey, records);
-      return result;
-    }
-
-    // Wix bulk update
-    const collectionName = getWixCollectionName(collectionKey);
-    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
-    const updated = await wixData.bulkUpdate(collectionName, records, wixOptions);
-    return { success: true, records: updated.updatedItems || records };
+    return await cloudRun.bulkUpdate(collectionKey, records);
   } catch (error) {
     console.error(`[dataAccess] bulkUpdate error (${collectionKey}):`, error.message);
     return { success: false, errors: [{ error: error.message }] };
@@ -601,41 +449,28 @@ export async function bulkUpdate(collectionKey, records, options = {}) {
  */
 export async function getAllRecords(collectionKey, options = {}) {
   try {
-    if (usesCloudRun(collectionKey)) {
-      return await cloudRun.getAllRecords(collectionKey, options.filters, options.sort);
-    }
+    if (usesWix(collectionKey)) {
+      const allItems = [];
+      let skip = 0;
+      const pageSize = 1000;
 
-    if (usesAirtable(collectionKey)) {
-      let filterFormula = null;
-      if (options.filters && Object.keys(options.filters).length > 0) {
-        if (typeof airtable.buildFilterFormula === 'function') {
-          filterFormula = await airtable.buildFilterFormula(options.filters, collectionKey);
-        }
+      while (true) {
+        const result = await queryRecords(collectionKey, {
+          ...options,
+          limit: pageSize,
+          skip
+        });
+
+        if (!result.success || result.items.length === 0) break;
+        allItems.push(...result.items);
+        if (result.items.length < pageSize) break;
+        skip += pageSize;
       }
-      return await airtable.getAllRecords(collectionKey, filterFormula, options.sort);
+
+      return allItems;
     }
 
-    // Wix: paginate through all results
-    const allItems = [];
-    let skip = 0;
-    const pageSize = 1000; // Wix max per query
-
-    while (true) {
-      const result = await queryRecords(collectionKey, {
-        ...options,
-        limit: pageSize,
-        skip
-      });
-
-      if (!result.success || result.items.length === 0) break;
-
-      allItems.push(...result.items);
-
-      if (result.items.length < pageSize) break;
-      skip += pageSize;
-    }
-
-    return allItems;
+    return await cloudRun.getAllRecords(collectionKey, options.filters, options.sort);
   } catch (error) {
     console.error(`[dataAccess] getAllRecords error (${collectionKey}):`, error.message);
     return [];
@@ -658,17 +493,14 @@ export async function getAllRecords(collectionKey, options = {}) {
  */
 export async function upsertRecord(collectionKey, lookupField, lookupValue, data, options = {}) {
   try {
-    // Find existing record
     const existing = await findByField(collectionKey, lookupField, lookupValue, options);
 
     if (existing) {
-      // Update existing
       const updateData = { ...existing, ...data };
       const result = await updateRecord(collectionKey, updateData, options);
       return { ...result, isNew: false };
     }
 
-    // Insert new
     const insertData = { [lookupField]: lookupValue, ...data };
     const result = await insertRecord(collectionKey, insertData, options);
     return { ...result, isNew: true };
@@ -692,31 +524,19 @@ export async function upsertRecord(collectionKey, lookupField, lookupValue, data
  */
 export async function countRecords(collectionKey, filters = {}, options = {}) {
   try {
-    if (usesCloudRun(collectionKey)) {
-      return await cloudRun.countRecords(collectionKey, filters);
-    }
+    if (usesWix(collectionKey)) {
+      const collectionName = getWixCollectionName(collectionKey);
+      let query = wixData.query(collectionName);
 
-    if (usesAirtable(collectionKey)) {
-      let filterFormula = null;
       if (Object.keys(filters).length > 0) {
-        if (typeof airtable.buildFilterFormula === 'function') {
-          filterFormula = await airtable.buildFilterFormula(filters, collectionKey);
-        }
+        query = applyWixFilters(query, filters);
       }
-      return await airtable.countRecords(collectionKey, filterFormula);
+
+      const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
+      return await query.count(wixOptions);
     }
 
-    // Wix count
-    const collectionName = getWixCollectionName(collectionKey);
-    let query = wixData.query(collectionName);
-
-    if (Object.keys(filters).length > 0) {
-      query = applyWixFilters(query, filters);
-    }
-
-    const wixOptions = options.suppressAuth ? { suppressAuth: true } : {};
-    const result = await query.count(wixOptions);
-    return result;
+    return await cloudRun.countRecords(collectionKey, filters);
   } catch (error) {
     console.error(`[dataAccess] countRecords error (${collectionKey}):`, error.message);
     return 0;
@@ -731,18 +551,11 @@ export async function countRecords(collectionKey, filters = {}, options = {}) {
  * Get information about which data source is being used for a collection
  *
  * @param {string} collectionKey - The camelCase collection key
- * @returns {Object} { source: 'wix'|'airtable', collectionName: string }
+ * @returns {Object} { source: 'wix'|'cloudrun', collectionName: string }
  */
 export function getDataSourceInfo(collectionKey) {
-  if (usesCloudRun(collectionKey)) {
-    return { source: 'cloudrun', collectionName: collectionKey };
+  if (usesWix(collectionKey)) {
+    return { source: 'wix', collectionName: getWixCollectionName(collectionKey) };
   }
-  const isAirtable = usesAirtable(collectionKey);
-  return {
-    source: isAirtable ? 'airtable' : 'wix',
-    collectionName: isAirtable
-      ? getAirtableTableName(collectionKey)
-      : getWixCollectionName(collectionKey)
-  };
+  return { source: 'cloudrun', collectionName: collectionKey };
 }
-

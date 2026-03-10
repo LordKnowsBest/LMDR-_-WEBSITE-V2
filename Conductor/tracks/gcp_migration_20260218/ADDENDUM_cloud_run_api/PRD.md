@@ -8,17 +8,17 @@
 
 ## 1. Problem Statement
 
-The LMDR platform currently runs ~180 backend service files as Wix `.jsw` functions inside `src/backend/`. Every file imports from `dataAccess.jsw`, which routes reads/writes to Airtable (or, for a handful of collections, Wix CMS).
+The LMDR platform runs ~180 backend service files as Wix `.jsw` functions inside `src/backend/`. Every file imports from `dataAccess.jsw`, which now routes reads/writes to **Cloud Run API** (for Cloud SQL collections) or **Wix CMS** (for 4 frozen system collections). Airtable has been fully disconnected — `airtableClient.jsw` was deleted and `AIRTABLE_PAT` removed.
 
-This architecture creates three hard blockers:
+The original architecture had three hard blockers (now partially resolved):
 
-| Blocker | Impact |
-|---------|--------|
-| All data lives in Airtable | High latency, rate-limited, expensive at scale |
-| Logic locked inside Wix | Cannot test locally, cannot deploy independently, cannot version |
-| No standalone API | External API partners (`lmdr_live_*` keys) must go through Wix HTTP functions — fragile and hard to rate-limit |
+| Blocker | Impact | Status |
+|---------|--------|--------|
+| ~~All data lives in Airtable~~ | ~~High latency, rate-limited~~ | **RESOLVED** — all data in Cloud SQL |
+| Logic locked inside Wix | Cannot test locally, cannot deploy independently | Phase 2 in progress |
+| No standalone API | External API partners need direct access | **RESOLVED** — `lmdr-api` deployed |
 
-The Airtable → Cloud SQL migration is **done**. All 24,826 records live in `lmdr` database on `ldmr-velocitymatch:us-central1:lmdr-postgres`. The missing piece is a query interface.
+The Airtable → Cloud SQL migration is **done**. All 24,826 records live in `lmdr` database on `ldmr-velocitymatch:us-central1:lmdr-postgres`. The Cloud Run API (`lmdr-api`) is deployed and serving queries.
 
 ---
 

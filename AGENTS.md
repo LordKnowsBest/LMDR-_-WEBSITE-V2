@@ -20,8 +20,8 @@
 - HTML files must be placed under `src/public/` (never `docs/`, root, or `src/pages/`).
 
 ## Data & Architecture Notes
-- Dual-source data pattern: only `AdminUsers` and `MemberNotifications` stay in Wix collections; everything else routes to Airtable via helper functions in `backend/config.jsw`.
-- When editing backend files, follow `airtable-routing.md` guidance if injected.
+- **Cloud Run + Wix pattern (post-GCP migration):** Only 4 collections stay in Wix (`AdminUsers`, `MemberNotifications`, `memberBadges`, `memberPrivateData`); everything else routes through Cloud Run API to Cloud SQL. Airtable is fully disconnected.
+- When editing backend files, follow `airtable-routing.md` guidance (now describes Cloud Run routing) if injected.
 
 ## Testing Guidelines
 - Place tests in `src/public/__tests__/` with `*.test.js` or `*.spec.js` naming.

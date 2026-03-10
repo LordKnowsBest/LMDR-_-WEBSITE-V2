@@ -20,7 +20,7 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **promptLibraryService.jsw** - CRUD operations for managing AI prompts with version history and category organization
 
 **Data Services:**
-- **dataAccess.jsw** - Unified data access layer routing between Wix and Airtable based on configuration. **Required for all database operations.**
+- **dataAccess.jsw** - Unified data access layer routing between Wix (4 frozen collections) and Cloud Run/Cloud SQL (everything else). Airtable fully disconnected. **Required for all database operations.**
 - **fmcsaService.jsw** - Fetches carrier safety data from FMCSA SAFER API including BASIC scores, inspection rates, and crash data with 7-day cache
 - **carrierPreferences.jsw** - Manages carrier hiring preferences for the reverse matching engine with CRUD operations for CarrierHiringPreferences
 - **driverProfiles.jsw** - Driver profile management including completeness scoring, document upload handling, and status tracking
@@ -96,18 +96,32 @@ Web modules (.jsw files) expose backend functions callable from frontend. Import
 - **setupCollections.jsw** - One-time setup utilities for creating required Wix collections and test records
 - **http-functions.js** - HTTP endpoints including Stripe webhook handler with HMAC signature verification and idempotency
 
-## Database Architecture (Dual-Source)
+## Database Architecture (Post-GCP Migration — as of 2026-03-10)
 
-The platform uses a **dual-source architecture**. Most business data resides in **Airtable**, while authentication and system integrations stay in **Wix**. All access must go through `dataAccess.jsw`.
+> **Airtable has been fully disconnected.** `airtableClient.jsw` deleted, `AIRTABLE_PAT` removed.
 
-### Collections Staying in Wix (Pinned)
+The platform uses a **Cloud Run + Wix** architecture. All business data resides in **Cloud SQL (PostgreSQL 15)** via the `lmdr-api` Cloud Run service. Only 4 system collections remain in Wix. All access goes through `dataAccess.jsw`.
+
+**Cloud Run API:** `https://lmdr-api-140035137711.us-central1.run.app`
+**Cloud SQL:** `ldmr-velocitymatch:us-central1:lmdr-postgres` / database `lmdr` / user `lmdr_user`
+**Auth:** `LMDR_INTERNAL_KEY` (Wix Secret) for service-to-service auth
+**BigQuery:** `ldmr-velocitymatch.lmdr_analytics` for observability streaming
+
+### Data Flow
+```
+Wix .jsw service → dataAccess.jsw → cloudRunClient.jsw → HTTP → lmdr-api (Cloud Run) → Cloud SQL
+```
+
+### Collections in Wix (Frozen — 4 only)
 - `AdminUsers` - Permissions/auth
 - `MemberNotifications` - In-app notification system
 - `Members/Badges` - Member system badges
 - `Members/PrivateMembersData` - Private account data
 
-### Collections in Airtable (v2_* Tables)
-- ~65+ collections including: `Carriers`, `DriverProfiles`, `Messages`, `CarrierSubscriptions`, `DriverCarrierInterests`, `MatchEvents`, and the complete B2B Suite.
+### Collections in Cloud SQL (120+ JSONB tables)
+- ALL business collections including: `Carriers`, `DriverProfiles`, `Messages`, `CarrierSubscriptions`, `DriverCarrierInterests`, `MatchEvents`, complete B2B Suite, and all others
+- Table naming: `airtable_<snake_case>` (e.g., `airtable_carriers_master`, `airtable_v2_driver_profiles`)
+- Schema: `_id TEXT PK, airtable_id TEXT UNIQUE, _created_at TIMESTAMPTZ, _updated_at TIMESTAMPTZ, data JSONB`
 
 ## API Keys (Wix Secrets Manager)
 

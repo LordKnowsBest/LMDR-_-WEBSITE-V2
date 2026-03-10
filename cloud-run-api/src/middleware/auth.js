@@ -31,6 +31,27 @@ export function isApiKey(token) {
   return !!(token?.startsWith('lmdr_live_') || token?.startsWith('lmdr_test_'));
 }
 
+/**
+ * Check if token matches the internal service key (LMDR_INTERNAL_KEY).
+ * Used for service-to-service calls (Wix cloudRunClient, Next.js frontend, microservices).
+ */
+function isInternalKey(token) {
+  const internalKey = process.env.LMDR_INTERNAL_KEY;
+  if (!internalKey) return false;
+  return crypto.timingSafeEqual(
+    Buffer.from(token),
+    Buffer.from(internalKey)
+  );
+}
+
+function resolveInternalKey() {
+  return {
+    type: 'internal',
+    role: 'service',
+    uid: 'internal-service',
+  };
+}
+
 async function hashApiKey(apiKey) {
   const pepper = process.env.API_KEY_PEPPER || '';
   return crypto.createHash('sha256').update(apiKey + pepper).digest('hex');
@@ -79,9 +100,13 @@ export function authenticate({ optional = false } = {}) {
     }
 
     try {
-      req.auth = isApiKey(token)
-        ? await resolveApiKey(token)
-        : await resolveFirebaseToken(token);
+      if (isInternalKey(token)) {
+        req.auth = resolveInternalKey();
+      } else {
+        req.auth = isApiKey(token)
+          ? await resolveApiKey(token)
+          : await resolveFirebaseToken(token);
+      }
 
       if (!req.auth) {
         return res.status(401).json({ error: 'Invalid credentials' });

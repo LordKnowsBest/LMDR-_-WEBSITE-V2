@@ -1,18 +1,31 @@
 import express from 'express';
 import healthRouter from './routes/health.js';
 import collectionRouter from './routes/collection.js';
+import filesRouter from './routes/files.js';
+import searchRouter from './routes/search.js';
+import jobsRouter from './routes/jobs.js';
 import { authenticate } from './middleware/auth.js';
 import { rateLimiter } from './middleware/rateLimiter.js';
+import { observability } from './middleware/observability.js';
+import { flush as flushBigQuery } from './db/bigquery.js';
 
 export function createApp() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
+  // Observability — traces and logs every request to BigQuery
+  app.use(observability());
+
   // Public routes
   app.use('/health', healthRouter);
 
   // Authenticated API routes
-  app.use('/v1', authenticate(), rateLimiter(), collectionRouter);
+  const protectedRouter = express.Router();
+  protectedRouter.use('/', collectionRouter);
+  protectedRouter.use('/files', filesRouter);
+  protectedRouter.use('/search', searchRouter);
+  protectedRouter.use('/jobs', jobsRouter);
+  app.use('/v1', authenticate(), rateLimiter(), protectedRouter);
 
   // 404 catch-all
   app.use((req, res) => res.status(404).json({ error: 'Not found' }));
@@ -21,6 +34,13 @@ export function createApp() {
   app.use((err, req, res, _next) => {
     console.error(err);
     res.status(500).json({ error: 'Internal server error', detail: err.message });
+  });
+
+  // Graceful shutdown — flush BigQuery buffers
+  process.on('SIGTERM', async () => {
+    console.log('SIGTERM received — flushing BigQuery buffers...');
+    await flushBigQuery();
+    process.exit(0);
   });
 
   return app;

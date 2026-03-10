@@ -56,15 +56,28 @@ git restore package.json package-lock.json
 
 The Wix CLI must be installed globally: `npm install -g @wix/cli`
 
-## Critical Data Routing: Dual-Source Pattern (Wix + Airtable)
+## Critical Data Routing: Cloud Run + Wix (Post-GCP Migration)
 
-**CRITICAL RULE:** This project uses a dual-source data architecture where most data routes to **Airtable** for visibility, while auth-related data stays in **Wix**.
+> **Updated 2026-03-10:** Airtable has been FULLY DISCONNECTED. `airtableClient.jsw` deleted, `AIRTABLE_PAT` removed.
 
-**NEVER call `wixData.*` directly in business logic functions.** Always use the dual-source helper functions.
+**CRITICAL RULE:** All data routes through **Cloud Run (Cloud SQL)** except 4 frozen Wix system collections. There is NO Airtable path.
 
-### Universal Data Access Pattern (Recommended)
+**NEVER call `wixData.*` directly in business logic functions** (unless accessing one of the 4 frozen Wix collections). Always use `dataAccess.jsw`.
 
-The project uses a unified **`dataAccess.jsw`** layer to handle all database operations. This layer automatically routes to the correct source based on `configData.js`.
+### Current Data Architecture
+
+```
+Wix .jsw service → dataAccess.jsw → cloudRunClient.jsw → HTTP → lmdr-api (Cloud Run) → Cloud SQL
+```
+
+- **Cloud Run API:** `https://lmdr-api-140035137711.us-central1.run.app` (revision `lmdr-api-00008-8nm`)
+- **Cloud SQL:** `ldmr-velocitymatch:us-central1:lmdr-postgres` / database `lmdr` / user `lmdr_user`
+- **Auth:** `LMDR_INTERNAL_KEY` (Wix Secret) for service-to-service auth
+- **BigQuery:** `ldmr-velocitymatch.lmdr_analytics` for observability streaming
+
+### Universal Data Access Pattern (Required)
+
+The project uses a unified **`dataAccess.jsw`** layer to handle all database operations. This layer automatically routes to Cloud Run (Cloud SQL) or Wix based on `configData.js`.
 
 **Import:** `import * as dataAccess from 'backend/dataAccess';`
 
@@ -94,7 +107,7 @@ await dataAccess.insertRecord(COLLECTIONS.interests, {
 }, { suppressAuth: true });
 ```
 
-**Type Safety Rule:** Data received from forms (`formData`) is always string. **YOU MUST convert numeric strings to `Number`** before passing them to queries or filters for number-type fields in Airtable/Wix.
+**Type Safety Rule:** Data received from forms (`formData`) is always string. **YOU MUST convert numeric strings to `Number`** before passing them to queries or filters for number-type fields in Cloud SQL.
 
 ```javascript
 // CORRECT - Type conversion
@@ -102,7 +115,7 @@ const dotNum = Number(formData.dotNumber);
 const result = await dataAccess.findByField('carriers', 'dot_number', dotNum);
 ```
 
-### Collections That Stay in Wix (ONLY THESE)
+### Collections That Stay in Wix (ONLY THESE 4)
 
 | Collection | Reason |
 |------------|--------|
@@ -111,25 +124,35 @@ const result = await dataAccess.findByField('carriers', 'dot_number', dotNum);
 | `memberBadges` | `Members/Badges` system collection |
 | `memberPrivateData` | `Members/PrivateMembersData` system collection |
 
-**Everything else (~65+ collections) routes to Airtable.**
+**Everything else (120+ collections) routes through Cloud Run to Cloud SQL.**
 
 ### Config File Reference
 
 Routing is controlled by `backend/configData.js` (synchronous helpers):
-- `usesAirtable(collectionKey)` - Returns `true` if collection routes to Airtable
-- `getAirtableTableName(collectionKey)` - Returns the Airtable table name
-- `getWixCollectionName(collectionKey)` - Returns the Wix PascalCase name
+- `usesAirtable(collectionKey)` - **STUB: Always returns `false`** (Airtable disconnected)
+- `getDataSource(collectionKey)` - Returns `'wix'` or `'cloudrun'`
+- `usesCloudRun(collectionKey)` - Returns `true` for all non-Wix collections
+- `GCP_MIGRATION_MODE` = `'cloudrun'`
 
-### Airtable Base Reference
+### Cloud SQL Table Reference
 
-| Base | ID | Purpose |
-|------|-----|---------|
-| Last Mile Driver recruiting | `app9N1YCJ3gdhExA0` | All application data (v2_* tables) |
-| VelocityMatch DataLake | `appt00rHHBOiKx9xl` | External data feeds (fuel, weather, traffic) |
+All migrated Airtable tables use JSONB schema in Cloud SQL:
+- Table naming: `airtable_<snake_case>` (e.g., `airtable_carriers_master`, `airtable_v2_driver_profiles`)
+- Schema: `_id TEXT PK, airtable_id TEXT UNIQUE, _created_at TIMESTAMPTZ, _updated_at TIMESTAMPTZ, data JSONB`
+- Full mapping: `scripts/migrate-to-cloudsql.js` and `cloud-run-api/src/db/schema.js`
 
-**New feature tables go in `Last Mile Driver recruiting` base.**
+### Airtable Base Reference (HISTORICAL — Airtable Disconnected)
 
-> **Full details:** Helper implementations, audit checklists, field mapping tables, and step-by-step workflows are in `.claude/docs/airtable-routing.md` (auto-injected when editing backend files).
+> These bases still exist but are no longer connected to the live platform. `AIRTABLE_PAT` has been deleted.
+
+| Base | ID | Status |
+|------|-----|--------|
+| Last Mile Driver recruiting | `app9N1YCJ3gdhExA0` | DISCONNECTED — data migrated to Cloud SQL |
+| VelocityMatch DataLake | `appt00rHHBOiKx9xl` | DISCONNECTED — Railway jobs use direct API access |
+
+**New feature tables go in Cloud SQL**, not Airtable.
+
+> **Full details:** Data routing guide, audit checklists, and patterns are in `.claude/docs/airtable-routing.md` (auto-injected when editing backend files).
 
 ## Import Conventions
 
@@ -445,21 +468,22 @@ Always use this site ID. Never prompt the user to select a site.
 **Pattern:**
 ```javascript
 import { chunkArray } from 'backend/utils/arrayUtils';
+import * as dataAccess from 'backend/dataAccess';
 
-// 1. Cache table name ONCE before loop
-const tableName = await getAirtableTableName(COLLECTION_KEY);
-
-// 2. Filter valid items
+// 1. Filter valid items
 const validItems = items.filter(item => item.requiredField);
 
-// 3. Chunk and process in parallel
+// 2. Chunk and process in parallel
 const chunks = chunkArray(validItems, 10);
 
 for (const chunk of chunks) {
   const results = await Promise.all(
     chunk.map(async (item) => {
       try {
-        await airtable.updateRecord(tableName, item.id, { /* fields */ });
+        await dataAccess.updateRecord(COLLECTION_KEY, {
+          _id: item.id,
+          /* fields */
+        });
         return { success: true };
       } catch (error) {
         return { success: false, id: item.id, error: error.message };
@@ -467,14 +491,14 @@ for (const chunk of chunks) {
     })
   );
 
-  // 4. Rate limit between chunks (200ms = 5 req/sec)
+  // 3. Rate limit between chunks (200ms)
   await new Promise(r => setTimeout(r, 200));
 }
 ```
 
 | Operation | Chunk Size | Rationale |
 |-----------|------------|-----------|
-| Airtable CRUD | 10 | API rate limit |
+| Cloud SQL CRUD (via Cloud Run) | 10 | Connection pool balance |
 | Notifications | 10 | Rate balance |
 | Email sending | 5 | Provider limits |
 | Simple updates | 50 | High volume, low complexity |
@@ -523,7 +547,7 @@ Supplementary docs are auto-injected by hooks when editing relevant files. They 
 
 | Document | Auto-injected when | Contents |
 |----------|-------------------|----------|
-| `airtable-routing.md` | Editing `src/backend/*.jsw` | Helper implementations, checklists, field mappings |
+| `airtable-routing.md` | Editing `src/backend/*.jsw` | Data routing guide (Cloud Run + Wix), audit checklists. Airtable disconnected — see doc for current architecture. |
 | `architecture-reference.md` | Manual reference only | All backend services, collections, API keys |
 | `carrier-staffing-forms.md` | Editing carrier/staffing HTML | Form template, PostMessage bridge |
 | `wix-record-linking.md` | Editing record-linking services | Type mismatch gotcha, linking pattern |
@@ -610,16 +634,16 @@ Each surface has a CDN-served JS module that renders a floating chat FAB + slidi
 - `function-call` / `tool-calls` → executes backend service, returns result
 - `assistant-request` → returns dynamic assistant config
 
-### New Airtable Collections
+### Agent & Voice Collections (Cloud SQL)
 
-| Config Key | Airtable Table | Purpose |
-|------------|---------------|---------|
-| `agentConversations` | `v2_Agent Conversations` | Conversation sessions |
-| `agentTurns` | `v2_Agent Turns` | Individual conversation turns |
-| `voiceCallLogs` | `v2_Voice Call Logs` | Call transcripts and metadata |
-| `voiceAssistants` | `v2_Voice Assistants` | VAPI assistant configurations |
-| `voiceCampaigns` | `v2_Voice Campaigns` | Outbound campaign definitions |
-| `voiceCampaignContacts` | `v2_Voice Campaign Contacts` | Campaign contact records |
+| Config Key | Cloud SQL Table | Purpose |
+|------------|----------------|---------|
+| `agentConversations` | `airtable_v2_agent_conversations` | Conversation sessions |
+| `agentTurns` | `airtable_v2_agent_turns` | Individual conversation turns |
+| `voiceCallLogs` | `airtable_v2_voice_call_logs` | Call transcripts and metadata |
+| `voiceAssistants` | `airtable_v2_voice_assistants` | VAPI assistant configurations |
+| `voiceCampaigns` | `airtable_v2_voice_campaigns` | Outbound campaign definitions |
+| `voiceCampaignContacts` | `airtable_v2_voice_campaign_contacts` | Campaign contact records |
 
 ## Page Code Wiring (Priority 1)
 
@@ -664,17 +688,17 @@ All pages (except Recruiter Onboarding) use an **action-based protocol**:
 
 ## Admin Utility Expansion (2026-01-20)
 
-### New Airtable Collections
+### Admin Collections (Cloud SQL)
 
-| Config Key | Airtable Table | Purpose |
-|------------|---------------|---------|
-| `aiProviderCosts` | `v2_AI Provider Costs` | Cost/quality/latency metrics for provider selection |
-| `costOptimizerConfig` | `v2_Cost Optimizer Config` | Singleton configuration for cost optimizer mode |
-| `anomalyAlerts` | `v2_Anomaly Alerts` | Active and historical anomaly alerts |
-| `anomalyRules` | `v2_Anomaly Rules` | Detection rule definitions and thresholds |
-| `baselineMetrics` | `v2_Baseline Metrics` | Time-segmented baseline statistics |
-| `complianceReports` | `v2_Compliance Reports` | Generated report metadata and storage pointers |
-| `scheduledReports` | `v2_Scheduled Reports` | Report schedules for automated generation |
+| Config Key | Cloud SQL Table | Purpose |
+|------------|----------------|---------|
+| `aiProviderCosts` | `airtable_v2_ai_provider_costs` | Cost/quality/latency metrics for provider selection |
+| `costOptimizerConfig` | `airtable_v2_cost_optimizer_config` | Singleton configuration for cost optimizer mode |
+| `anomalyAlerts` | `airtable_v2_anomaly_alerts` | Active and historical anomaly alerts |
+| `anomalyRules` | `airtable_v2_anomaly_rules` | Detection rule definitions and thresholds |
+| `baselineMetrics` | `airtable_v2_baseline_metrics` | Time-segmented baseline statistics |
+| `complianceReports` | `airtable_v2_compliance_reports` | Generated report metadata and storage pointers |
+| `scheduledReports` | `airtable_v2_scheduled_reports` | Report schedules for automated generation |
 
 ### New/Expanded Backend APIs
 

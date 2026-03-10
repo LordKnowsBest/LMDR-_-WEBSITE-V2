@@ -1,8 +1,8 @@
 # Track Plan: GCP Database Migration (Airtable to GCP)
 
-> **STATUS: PLANNING**
+> **STATUS: IN PROGRESS — Phase 1 COMPLETE, Airtable DISCONNECTED (as of 2026-03-10)**
 >
-> **Last Updated**: 2026-02-18 (Gap Analysis Revision)
+> **Last Updated**: 2026-03-10 (Post-Migration Parity Audit)
 >
 > **Specification**: See `spec.md` for technical details
 >
@@ -40,225 +40,130 @@ The following collections **must stay in Wix** and are excluded from all migrati
 > **Estimated Effort**: 3-5 days
 
 ### 1.1 GCP Project & IAM
-- [ ] Task: Create GCP Project `lmdr-prod-db`
-- [ ] Task: Enable Cloud SQL API and provision PostgreSQL instance (`db-custom-1-3840`, Postgres 15)
-- [ ] Task: Enable Cloud Spanner API (for real-time messaging — replaces Firestore)
-- [ ] Task: Create BigQuery Dataset `lmdr_analytics`
-- [ ] Task: Create Service Account `wix-bridge-sa` with roles:
-  - `Secret Manager Secret Accessor` (all databases)
-  - `Cloud SQL Editor` (Postgres)
-  - `BigQuery Admin` (BigQuery)
-  - `Cloud Spanner Database User` (Spanner)
-- [ ] Task: Set up GCP Billing budget alert at $100/month threshold
+- [x] Task: GCP Project `ldmr-velocitymatch` created (note: NOT `lmdr-prod-db` as originally planned)
+- [x] Task: Cloud SQL API enabled, PostgreSQL instance `lmdr-postgres` provisioned (note: NOT `lmdr-primary`)
+- [ ] ~~Task: Enable Cloud Spanner API~~ — Deferred; Cloud SQL handles all current needs
+- [x] Task: BigQuery Dataset `lmdr_analytics` created in `ldmr-velocitymatch`
+- [x] Task: Service accounts created with appropriate roles
+- [x] Task: GCP Billing budget alert configured
 
 ### 1.2 GCP Secret Manager — Secrets Setup
-- [ ] Task: Create `SECRET_KEY` secret (shared key for Wix ↔ adaptor authentication)
-- [ ] Task: Create `PERMISSIONS` secret (JSON file defining role-based read/write per table — `Member`/`Visitor`/`Admin`)
-- [ ] Task: Create `USER`, `PASSWORD`, `DB`, `CLOUD_SQL_CONNECTION_NAME` secrets for Cloud SQL (Postgres)
-- [ ] Task: Create `DATABASE_ID`, `PROJECT_ID` secrets for BigQuery
-- [ ] Task: Create `INSTANCE_ID`, `PROJECT_ID` secrets for Cloud Spanner
+- [x] Task: Secrets created in Secret Manager (`lmdr-pg-password`, `lmdr-api-key-pepper`, etc.)
+- [x] Task: `LMDR_INTERNAL_KEY` set in Wix Secrets for service-to-service auth with Cloud Run
+- [x] Task: `AIRTABLE_PAT` secret DELETED from Wix (Airtable fully disconnected)
+- [ ] ~~Task: Cloud Spanner secrets~~ — Deferred (Spanner not in use)
 
-### 1.3 Cloud Run Adaptor Deployment (Official Wix Pattern)
-- [ ] Task: Deploy Cloud Run service using the **Wix prebuilt container image** (`velo-external-db`)
-  - Container image URL: from Wix docs (select correct DB type)
-  - Autoscaling: All
-  - Authentication: Allow unauthenticated invocations (Wix auth handled via `SECRET_KEY`)
-- [ ] Task: Create a new Service Account for the Cloud Run service (name = Cloud Run instance name)
-- [ ] Task: Grant `Secret Manager Secret Accessor` and appropriate DB roles to the service account
-- [ ] Task: Configure environment variables on Cloud Run service:
-  - `NAME` = `postgres` (the database type)
-  - `CLOUD_VENDOR` = `gcp`
-  - Mount all secrets from Secret Manager as environment variables (latest version)
-- [ ] Task: Deploy the container and capture the Cloud Run service URL
-- [ ] Test: Run `curl` test against Cloud Run URL with SECRET_KEY to verify table listing response
+### 1.3 Cloud Run API Deployment (Actual Implementation)
+> **Architecture correction:** The actual implementation does NOT use Wix External Database adaptors (`velo-external-db`). Instead, a custom Express API (`lmdr-api`) was built and deployed to Cloud Run. Wix `.jsw` files call the API via `cloudRunClient.jsw` using `LMDR_INTERNAL_KEY` for auth.
 
-### 1.4 Wix External Collection Registration
-- [ ] Task: In Wix Editor Code Sidebar → External Databases → Add external database
-  - Cloud Provider: Google Cloud
-  - Namespace: `gcp_carriers` (for Carriers namespace)
-  - Endpoint URL: Cloud Run service URL
-  - Secret Key: value from Secret Manager `SECRET_KEY`
-- [ ] Task: Register additional namespaces for each data domain (drivers, messages, analytics)
-- [ ] Test: Confirm collections appear under "External Databases" in Wix CMS
+- [x] Task: Cloud Run service `lmdr-api` deployed (revision `lmdr-api-00008-8nm`)
+  - URL: `https://lmdr-api-140035137711.us-central1.run.app`
+  - Express REST API with generic `:collection` router
+  - Auth: `LMDR_INTERNAL_KEY` (service-to-service) + Firebase ID tokens + API partner keys
+- [x] Task: Service account with `roles/cloudsql.client` and `roles/secretmanager.secretAccessor`
+- [x] Task: 101 regression tests passing (`cloud-run-api/tests/`)
+- [x] Test: Health check and CRUD operations verified
+
+### 1.4 Wix Integration (Actual Implementation)
+> **Note:** Wix External Database Collections were NOT used. Instead, `dataAccess.jsw` was rewritten to route through `cloudRunClient.jsw` which calls the Cloud Run API directly via HTTP.
+
+- [x] Task: `cloudRunClient.jsw` created — mirrors old `airtableClient.jsw` export signatures
+- [x] Task: `dataAccess.jsw` rewritten — no Airtable imports, only Cloud Run + Wix paths
+- [x] Task: `configData.js` updated — `usesAirtable()` returns `false`, `getDataSource()` returns `'wix'` or `'cloudrun'`
+- [x] Task: `GCP_MIGRATION_MODE` set to `'cloudrun'` in Wix Secrets
 
 ---
 
-## Phase 2: Data Abstraction Layer Update (Medium Risk)
+## Phase 2: Data Abstraction Layer Update — COMPLETE
 
-> **Goal**: Update `dataAccess.jsw` and `configData.js` to route to GCP external collections
+> **Status**: DONE (as of 2026-03-10)
 >
-> **Dependencies**: Phase 1 complete (External Collections registered in Wix)
->
-> **Estimated Effort**: 2-3 days
+> **Actual implementation**: `dataAccess.jsw` routes to Cloud Run API via `cloudRunClient.jsw`. No Wix External Collections used. No dual-write mode needed — direct cutover was performed.
 
-### 2.1 configData.js Updates
-- [ ] Task: Add `GCP_MIGRATION_STATUS` feature flag (global `'off'` | `'dual'` | `'gcp'` toggle)
-- [ ] Task: Add `getGcpCollectionName(collectionKey)` helper returning `'namespace/tableName'` format
-- [ ] Task: Map all 65+ collection keys to their GCP namespaced equivalent (align with Phase 4-5 table builds)
+### 2.1 configData.js Updates — COMPLETE
+- [x] `GCP_MIGRATION_MODE` = `'cloudrun'` (set as Wix Secret + hardcoded constant)
+- [x] `usesAirtable()` stubbed to return `false` for ALL collections
+- [x] `getDataSource()` returns `'wix'` or `'cloudrun'` only (no `'airtable'` path)
+- [x] `usesCloudRun()` returns `true` for non-Wix collections
 
-### 2.2 dataAccess.jsw Updates
-- [ ] Task: Update `queryRecords()`, `insertRecord()`, `updateRecord()`, `deleteRecord()` to check `GCP_MIGRATION_STATUS`
-  - `'off'`: Route to Airtable only (current behavior)
-  - `'dual'`: Write to Airtable (sync) + GCP (async, fire-and-forget)
-  - `'gcp'`: Route to GCP external collection via native `wixData.query('namespace/tableName')`
-- [ ] Task: Implement fire-and-forget async GCP write helper:
-  ```javascript
-  // Write to GCP async (non-blocking)
-  gcpWrite(collectionKey, data).catch(err =>
-    console.error('[GCP dual-write error]', err)
-  );
-  ```
-- [ ] Task: Add `suppressAuth: true` support for GCP external collection queries (backend-initiated)
-- [ ] Test: Unit test dual-write with mocked Airtable and GCP responses
+### 2.2 dataAccess.jsw Updates — COMPLETE
+- [x] Rewritten with NO Airtable imports
+- [x] Imports only `cloudRunClient` (for Cloud Run path) and `wix-data` (for 4 frozen Wix collections)
+- [x] All CRUD operations (`queryRecords`, `insertRecord`, `updateRecord`, `deleteRecord`, etc.) route through Cloud Run
+- [x] `airtableClient.jsw` file DELETED from codebase
 
-### 2.3 ID Mapping Strategy (Critical for Backfill)
-- [ ] Task: Create `v2_ID_Mapping` Airtable table: `{ airtable_record_id, gcp_uuid, collection_name, migrated_at }`
-- [ ] Task: Build `generateDeterministicUUID(airtableRecordId)` utility (UUID v5, seeded from RecordID)
-- [ ] Task: Create `idMappingService.jsw` with `getOrCreateMapping(airtableId, collectionKey)` and `lookupGcpId(airtableId)`
+### 2.3 Data Migration — COMPLETE
+- [x] 24,826 records backfilled from Airtable to Cloud SQL (`lmdr` database on `lmdr-postgres`)
+- [x] JSONB table schema: `airtable_<snake_case>` tables with `_id`, `airtable_id`, `data` JSONB column
+- [x] 120+ tables migrated
+- [x] ID mapping preserved via `airtable_id` column (deterministic UUID not needed — original Airtable IDs kept)
 
 ---
 
-## Phase 3: Cloud SQL Schema Design (Foundation for Phases 4-5)
+## Phase 3: Cloud SQL Schema Design — COMPLETE
 
-> **Goal**: Design all Cloud SQL schemas with Wix-required columns before data migration begins
+> **Status**: DONE
 >
-> **Dependencies**: Phase 2 complete
->
-> **Estimated Effort**: 1-2 days
+> **Actual implementation**: All tables use JSONB schema (`airtable_<snake_case>` naming). A structured `carriers` table with typed columns also exists for optimized search queries.
 
-### 3.1 Required Columns for All Read-Write Tables
-Every Cloud SQL table that needs read-write access from Wix **MUST** include:
+### 3.1 JSONB Table Schema (Actual)
 ```sql
-_id           VARCHAR(36) PRIMARY KEY,  -- UUID (Wix requirement)
-_createdDate  TIMESTAMP NOT NULL,
-_updatedDate  TIMESTAMP NOT NULL,
-_owner        VARCHAR(128)              -- Wix member ID
+CREATE TABLE airtable_<snake_case> (
+  _id          TEXT PRIMARY KEY,
+  airtable_id  TEXT UNIQUE NOT NULL,
+  _created_at  TIMESTAMPTZ DEFAULT NOW(),
+  _updated_at  TIMESTAMPTZ DEFAULT NOW(),
+  data         JSONB NOT NULL
+);
 ```
-Tables without these columns will be **read-only** in Wix CMS.
+> Note: Wix External Collections were NOT used, so the `_createdDate`/`_updatedDate`/`_owner` column requirements do not apply.
 
-### 3.2 Schema Definitions
-- [ ] Task: Create schema for `carriers` table (Postgres):
-  - Columns: `_id`, `_createdDate`, `_updatedDate`, `_owner`, `dot_number`, `company_name`, `combined_score`, `state`, `num_trucks`, `pay_per_mile`, `home_time`, `freight_type`, `is_enriched`, `last_enriched_at`
-  - Indexes: `dot_number` (unique), `combined_score` (DESC), `state`
-- [ ] Task: Create schema for `driver_profiles` table (Postgres):
-  - Columns: `_id`, `_createdDate`, `_updatedDate`, `_owner`, `member_id`, `cdl_class`, `years_experience`, `home_state`, `freight_preference`, `docs_submitted`, `is_searchable`, `visibility_level`
-  - Indexes: `member_id` (unique), `is_searchable`, `cdl_class`
-- [ ] Task: Create schema for `driver_jobs` and `driver_applications` tables
-- [ ] Task: Create schema for `carrier_subscriptions` and `matching_scores` tables
-- [ ] Task: Define BigQuery tables (analytics — read-only, no Wix columns needed): `system_logs`, `system_traces`, `ai_usage_log`, `audit_log`, `match_events`
-- [ ] Task: Define Cloud Spanner table for `messages` (real-time capable, multi-region)
+### 3.2 Schema Status
+- [x] 120+ JSONB tables created and populated
+- [x] Structured `carriers` table with typed columns + full-text search indexes
+- [x] BigQuery dataset `ldmr-velocitymatch.lmdr_analytics` for observability streaming
+- [ ] ~~Cloud Spanner for messages~~ — Deferred; messages use Cloud SQL JSONB table
 
 ---
 
-## Phase 4: Content & Low-Risk Data Migration (Safe Test — Cloud SQL)
+## Phases 4-7: Data Migration & Cutover — ALL COMPLETE
 
-> **Goal**: Migrate low-risk content tables to validate GCP flow end-to-end
+> **Status**: ALL DONE. Airtable is fully disconnected as of 2026-03-10.
 >
-> **Dependencies**: Phase 3 complete
->
-> **Estimated Effort**: 2-3 days
+> **What happened**: Instead of the phased dual-write approach originally planned, ALL collections were migrated in a single batch backfill (`scripts/migrate-to-cloudsql.js`), then `dataAccess.jsw` was rewritten with a direct cutover. No dual-write phase was needed.
 
-### 4.1 Content Table Backfill
-- [ ] Task: Create `faqs`, `blog_posts`, `compliance_guides` tables in Cloud SQL (Postgres)
-- [ ] Task: Run backfill script: Airtable `v2_FAQs` → Postgres `faqs` (using ID mapping)
-- [ ] Test: Verify row counts match between Airtable and Cloud SQL after backfill
-- [ ] Test: Verify content page (`/compliance`) loads correctly after setting `DATA_SOURCE.content = 'gcp'`
+### Summary of Completed Work
+- [x] ALL 120+ Airtable collections backfilled to Cloud SQL JSONB tables (24,826 records)
+- [x] Cloud Spanner was NOT used — all data including messages stays in Cloud SQL
+- [x] BigQuery observability streaming configured to `ldmr-velocitymatch.lmdr_analytics`
+- [x] `airtableClient.jsw` DELETED from codebase
+- [x] `AIRTABLE_PAT` secret deleted from Wix
+- [x] 5 services migrated from direct `airtableClient` imports to `dataAccess`: `b2bContentAIService`, `carrierLeadsService`, `interventionService`, `pipelineAutomationService`, `seasonalEventService`
+- [x] 20 seed files deleted from `src/backend/seeds/`
+- [x] 20 connection test files deleted from `src/backend/tests/`
+- [x] 101 regression tests passing in `cloud-run-api/tests/`
+- [x] `configData.js` `usesAirtable()` stubbed to `return false`
+- [x] `config.jsw` `usesAirtable()` stubbed to `return false`
 
-### 4.2 Dual-Write Enablement & Cutover
-- [ ] Task: Set `GCP_MIGRATION_STATUS = 'dual'` for content collections in `configData.js`
-- [ ] Task: Monitor dual-write latency in `observabilityService.jsw` (target: <200ms overhead)
-- [ ] Task: Set `GCP_MIGRATION_STATUS = 'gcp'` for content collections after 48h of clean dual-write
-- [ ] Test: Wix External Collection namespace shows content tables with data in CMS
+### Rollback Plan (Current)
+Rollback to Airtable is **no longer possible** — `AIRTABLE_PAT` has been deleted and `airtableClient.jsw` has been removed. Forward-only from here.
+
+### Documentation Updates
+- [x] CLAUDE.md needs update (see this audit) to remove Airtable-as-primary references
+- [ ] Update `.claude/docs/airtable-routing.md` to reflect Cloud Run routing (see this audit)
+- [ ] Update `.claude/docs/architecture-reference.md` to reflect Cloud Run architecture (see this audit)
 
 ---
 
-## Phase 5: Core Operational Data Migration (High Risk — Cloud SQL)
-
-> **Goal**: Migrate Carriers and Driver Profiles to Cloud SQL
->
-> **Dependencies**: Phase 4 successful
->
-> **Estimated Effort**: 5-7 days
-
-### 5.1 Core Data Backfill
-- [ ] Task: Export Airtable `v2_Carriers` → Cloud SQL `carriers` (using ID mapping for FK resolution)
-- [ ] Task: Export Airtable `v2_Driver Profiles` → Cloud SQL `driver_profiles`
-- [ ] Task: Resolve all FK references: `carrier_dot`, `driver_id`, `member_id` using `idMappingService`
-- [ ] Test: A/B query comparison — same carrier DOT query returns same data from Airtable and GCP
-
-### 5.2 Dual-Write & Cutover
-- [ ] Task: Enable dual-write for `carriers` and `drivers`
-- [ ] Task: Monitor for 429 errors (Airtable rate limit) — expect reduction as GCP handles more load
-- [ ] Task: Update `carrierMatching.jsw` to use `dataAccess` with GCP target for carrier queries
-- [ ] Task: Update `driverProfiles.jsw` to use GCP external collection for profile reads/writes
-- [ ] Task: Set `GCP_MIGRATION_STATUS = 'gcp'` for carriers and drivers after 7 days of clean dual-write
-
----
-
-## Phase 6: Transactional & Analytics Migration
-
-> **Goal**: Migrate Messages, Subscriptions, and Logs
->
-> **Dependencies**: Phase 5 complete
->
-> **Estimated Effort**: 5-7 days
-
-### 6.1 Messaging — Cloud Spanner
-- [ ] Task: Dual-write `Messages` to Cloud Spanner
-- [ ] Task: Backfill messaging history from Airtable → Spanner
-- [ ] Task: Cutover messaging to Spanner (enables real-time query potential via Spanner change streams)
-
-### 6.2 Billing & Subscriptions — Cloud SQL (Postgres)
-- [ ] Task: Migrate `Subscriptions` and `StripeEvents` to Postgres
-- [ ] Task: Ensure transactional integrity for quota updates (use Postgres transactions)
-
-### 6.3 Observability & Logs — BigQuery
-- [ ] Task: Redirect `SystemLogs`, `SystemTraces`, `AIUsageLog` to BigQuery streaming inserts
-- [ ] Task: Update `observabilityService.jsw` to query BigQuery for dashboard stats
-
----
-
-## Phase 7: Final Validation & Decommission
-
-> **Goal**: Cleanup and final cutover
->
-> **Dependencies**: All Phases complete
->
-> **Estimated Effort**: 3-5 days
-
-### 7.1 Full Regression & Benchmarking
-- [ ] Test: Full Driver/Recruiter/Carrier lifecycle end-to-end through GCP
-- [ ] Test: Measure P95 latency (Target <150ms for Cloud SQL, <200ms for Spanner)
-- [ ] Test: Verify Airtable 429 errors are zero (Airtable no longer primary write path)
-
-### 7.2 Rollback Plan
-**If GCP degrades post-cutover:**
-1. Set `GCP_MIGRATION_STATUS = 'dual'` for affected collection in `configData.js`
-2. Deploy — Airtable resumes as primary, GCP writes become async backup
-3. Investigate and fix GCP issue
-4. Re-run phase cutover once resolved
-
-### 7.3 Documentation & Handover
-- [ ] Task: Update CLAUDE.md with GCP External Database namespace prefix table
-- [ ] Task: Update `dataAccess.jsw` to deprecate Airtable legacy code paths once all collections migrated
-- [ ] Task: Document Cloud Run adaptor maintenance (redeploy required if secrets change)
-- [ ] Task: Archive `idMappingService.jsw` (read-only after full cutover)
-
-### 7.4 Final Cutover
-- [ ] Task: Disable Airtable writes globally (`GCP_MIGRATION_STATUS = 'gcp'` for all collections)
-- [ ] Task: Mark Airtable base `Last Mile Driver recruiting` as READ-ONLY (rename to ARCHIVE)
-- [ ] Task: Update `metadata.json` status to `COMPLETE`
-
----
-
-## Risk Mitigation
+## Risk Mitigation (Post-Migration)
 
 | Risk | Mitigation |
 |------|------------|
-| Dual-write latency | Fire-and-forget async GCP writes (non-blocking) |
-| Data inconsistency | Periodic checksum/count matching scripts during migration |
-| Airtable RecID → UUID FK breakage | `idMappingService.jsw` + `v2_ID_Mapping` Airtable table |
-| Wix auth collections migrated accidentally | Explicit "Frozen Collections" list at top of plan |
-| Cloud Run secret changes not reflected | Note: must redeploy Cloud Run service after any secret update |
-| Cost overrun | GCP Billing budget alert at $100/month (Phase 1.1 task) |
-| Wix External Collection CMS read-only | All SQL tables include `_id`, `_createdDate`, `_updatedDate`, `_owner` |
+| ~~Dual-write latency~~ | N/A — dual-write was never used; direct cutover completed |
+| Cloud Run API downtime | Cloud Run autoscaling + revision rollback; 101 regression tests |
+| ~~Airtable RecID → UUID FK breakage~~ | N/A — original Airtable IDs preserved in `airtable_id` column |
+| Wix auth collections migrated accidentally | Explicit "Frozen Collections" list at top of plan (4 Wix-only collections) |
+| Cloud Run secret changes not reflected | Redeploy Cloud Run service after any secret update |
+| Cost overrun | GCP Billing budget alert configured |
+| ~~Wix External Collection CMS read-only~~ | N/A — Wix External Collections were NOT used |
+| Forward-only migration risk | `AIRTABLE_PAT` deleted, `airtableClient.jsw` deleted — no rollback to Airtable possible |

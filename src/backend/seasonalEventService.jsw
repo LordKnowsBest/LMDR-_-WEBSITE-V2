@@ -1,5 +1,4 @@
-import * as airtableClient from 'backend/airtableClient';
-import { getAirtableTableName } from 'backend/config';
+import * as dataAccess from 'backend/dataAccess';
 import { createNotification } from 'backend/memberService';
 import { log } from 'backend/observabilityService';
 
@@ -18,12 +17,8 @@ const EVENT_STATUS = {
   CANCELLED: 'cancelled'
 };
 
-function table(key) {
-  return getAirtableTableName(key);
-}
-
 function toItems(result) {
-  return result?.records || result?.items || [];
+  return result?.items || [];
 }
 
 function mapEventRecord(r) {
@@ -57,8 +52,9 @@ function mapParticipant(r) {
 }
 
 async function queryEventsByStatus(status) {
-  const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.seasonalEvents), {
-    filters: { status }
+  const result = await dataAccess.queryRecords(COLLECTION_KEYS.seasonalEvents, {
+    filters: { status },
+    suppressAuth: true
   });
   return toItems(result).map(mapEventRecord);
 }
@@ -84,7 +80,7 @@ export async function getUpcomingEvents(daysAhead = 7) {
 
 export async function getEventById(eventId) {
   try {
-    const record = await airtableClient.getRecord(table(COLLECTION_KEYS.seasonalEvents), eventId);
+    const record = await dataAccess.getRecord(COLLECTION_KEYS.seasonalEvents, eventId, { suppressAuth: true });
     return record ? mapEventRecord(record) : null;
   } catch (error) {
     return null;
@@ -98,9 +94,10 @@ export async function joinEvent(userId, userType, eventId) {
       return { success: false, error: 'event_not_active' };
     }
 
-    const existingResult = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
+    const existingResult = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
       filters: { user_id: userId, event_id: eventId },
-      limit: 1
+      limit: 1,
+      suppressAuth: true
     });
     const existing = toItems(existingResult);
 
@@ -109,7 +106,7 @@ export async function joinEvent(userId, userType, eventId) {
     }
 
     const now = new Date().toISOString();
-    const created = await airtableClient.createRecord(table(COLLECTION_KEYS.eventParticipants), {
+    const insertResult = await dataAccess.insertRecord(COLLECTION_KEYS.eventParticipants, {
       user_id: userId,
       user_type: userType,
       event_id: eventId,
@@ -120,9 +117,9 @@ export async function joinEvent(userId, userType, eventId) {
       joined_at: now,
       created_at: now,
       updated_at: now
-    });
+    }, { suppressAuth: true });
 
-    return { success: true, participant: mapParticipant(created || {}) };
+    return { success: true, participant: mapParticipant(insertResult.record || {}) };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -130,9 +127,10 @@ export async function joinEvent(userId, userType, eventId) {
 
 export async function getEventParticipation(userId, eventId) {
   try {
-    const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
       filters: { user_id: userId, event_id: eventId },
-      limit: 1
+      limit: 1,
+      suppressAuth: true
     });
     const items = toItems(result);
     if (!items.length) return { participating: false };
@@ -144,9 +142,10 @@ export async function getEventParticipation(userId, eventId) {
 
 export async function updateEventStats(userId, eventId, stats) {
   try {
-    const res = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
+    const res = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
       filters: { user_id: userId, event_id: eventId },
-      limit: 1
+      limit: 1,
+      suppressAuth: true
     });
     const items = toItems(res);
     if (!items.length) return;
@@ -161,15 +160,16 @@ export async function updateEventStats(userId, eventId, stats) {
       updated_at: new Date().toISOString()
     };
 
-    await airtableClient.updateRecord(table(COLLECTION_KEYS.eventParticipants), update._id, update);
+    await dataAccess.updateRecord(COLLECTION_KEYS.eventParticipants, update, { suppressAuth: true });
   } catch (error) {}
 }
 
 export async function getEventLeaderboard(eventId, userType = 'all', options = {}) {
   try {
     const limit = options.limit || 20;
-    const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
-      filters: userType === 'all' ? { event_id: eventId } : { event_id: eventId, user_type: userType }
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
+      filters: userType === 'all' ? { event_id: eventId } : { event_id: eventId, user_type: userType },
+      suppressAuth: true
     });
     const items = toItems(result).map(mapParticipant);
 
@@ -188,8 +188,9 @@ export async function getEventLeaderboard(eventId, userType = 'all', options = {
 
 export async function getUserEventRank(userId, eventId) {
   try {
-    const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.eventParticipants), {
-      filters: { event_id: eventId }
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.eventParticipants, {
+      filters: { event_id: eventId },
+      suppressAuth: true
     });
     const items = toItems(result).map(mapParticipant).sort((a, b) => (b.xpEarned || 0) - (a.xpEarned || 0));
     const idx = items.findIndex((r) => r.userId === userId);
@@ -215,12 +216,12 @@ export async function startScheduledEvents() {
     const due = events.filter((e) => new Date(e.startDate).getTime() <= Date.now());
 
     for (const e of due) {
-      await airtableClient.updateRecord(table(COLLECTION_KEYS.seasonalEvents), e._id, {
-        Status: EVENT_STATUS.ACTIVE,
+      await dataAccess.updateRecord(COLLECTION_KEYS.seasonalEvents, {
+        _id: e._id,
         status: EVENT_STATUS.ACTIVE,
         activated_at: now,
         updated_at: now
-      });
+      }, { suppressAuth: true });
     }
 
     return { started: true, count: due.length };
@@ -236,12 +237,12 @@ export async function endExpiredEvents() {
     const expired = events.filter((e) => new Date(e.endDate).getTime() <= Date.now());
 
     for (const e of expired) {
-      await airtableClient.updateRecord(table(COLLECTION_KEYS.seasonalEvents), e._id, {
-        Status: EVENT_STATUS.ENDED,
+      await dataAccess.updateRecord(COLLECTION_KEYS.seasonalEvents, {
+        _id: e._id,
         status: EVENT_STATUS.ENDED,
         ended_at: now,
         updated_at: now
-      });
+      }, { suppressAuth: true });
     }
 
     return { ended: true, count: expired.length };
@@ -264,13 +265,14 @@ export async function getCurrentPointsMultiplier() {
 
 export async function getEventChallenges(eventId, userType) {
   try {
-    const result = await airtableClient.queryRecords(table(COLLECTION_KEYS.challengeDefinitions), {
+    const result = await dataAccess.queryRecords(COLLECTION_KEYS.challengeDefinitions, {
       filters: {
         challenge_type: 'event',
         event_id: eventId,
         user_type: userType,
         is_active: 'Yes'
-      }
+      },
+      suppressAuth: true
     });
     const items = toItems(result);
     return items.map((r) => ({

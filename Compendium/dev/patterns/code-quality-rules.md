@@ -10,7 +10,7 @@ This project runs on Wix Velo with a dual-source data layer (Airtable + Wix) and
 
 - **CDN-first page architecture:** All new pages use a thin HTML shell (~90 lines) that loads UI modules from jsDelivr CDN. The HTML file is a static bootloader -- it sets up fonts, Tailwind, inline config, and script tags. All interactive UI lives in JS modules under `src/public/js/` or surface-specific subdirectories. Update workflow: edit JS/CSS, git push, purge jsDelivr cache. No Wix Editor changes needed for UI updates.
 
-- **Dual-source data routing:** Never call `wixData.*` directly in business logic. All data access goes through `dataAccess.jsw`, which reads `configData.js` to route each collection to either Airtable or Wix. Only `AdminUsers` and `MemberNotifications` stay in Wix; everything else (~160 collections) routes to Airtable.
+- **Cloud Run data routing (post-GCP migration):** Never call `wixData.*` directly in business logic. All data access goes through `dataAccess.jsw`, which reads `configData.js` to route each collection to Cloud Run (Cloud SQL) or Wix. Only 4 collections stay in Wix (`AdminUsers`, `MemberNotifications`, `memberBadges`, `memberPrivateData`); everything else (120+ collections) routes through Cloud Run API to Cloud SQL. Airtable is fully disconnected — `airtableClient.jsw` has been deleted.
 
 - **PostMessage bridge pattern:** HTML iframes communicate with Wix page code via `postMessage`. The standard protocol uses `{ action, payload }` shape (except Recruiter Onboarding which uses `{ type, data, timestamp }`). Page code discovers HTML components by iterating `#html1` through `#html5` and `#htmlEmbed1` inside try-catch blocks.
 

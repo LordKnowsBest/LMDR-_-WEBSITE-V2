@@ -1,14 +1,15 @@
 # GCP Migration Scripts
 
-> All scripts for migrating LMDR from Airtable → Google Cloud Platform  
-> Run in order. Each script tells you what to run next.
+> All scripts for migrating LMDR from Airtable → Google Cloud Platform
+> **STATUS: Migration COMPLETE (2026-03-10).** These scripts are historical reference.
+> Airtable is fully disconnected. `AIRTABLE_PAT` has been deleted.
 
 ---
 
-## Prerequisites
+## Prerequisites (Historical — migration already complete)
 
 - A Google account with billing enabled
-- Your Airtable API key (from [airtable.com/create/tokens](https://airtable.com/create/tokens))
+- ~~Your Airtable API key~~ — `AIRTABLE_PAT` has been DELETED; these scripts can no longer run against Airtable
 - Node.js 18+ for backfill scripts
 
 ---
@@ -54,7 +55,7 @@ bash 08_cloud_sql_proxy.sh
 # Terminal 2 — install deps then run backfill
 cd scripts
 npm install airtable pg uuid
-export AIRTABLE_API_KEY="your_key"
+export AIRTABLE_API_KEY="your_key"  # NOTE: AIRTABLE_PAT has been DELETED — this script can no longer run
 export PG_PASSWORD="your_password_from_script_01"
 
 # Phase 4: Content first (low risk)
@@ -73,8 +74,8 @@ node 07_backfill_airtable_to_sql.js --verify
 ## Configuration Values You'll Need
 
 After running script 01, note down:
-- `SQL_CONNECTION_NAME` (e.g., `lmdr-prod-db:us-central1:lmdr-postgres`)
-- `SQL_DB_PASSWORD` (auto-generated, printed at end of script 01)
+- `SQL_CONNECTION_NAME` = `ldmr-velocitymatch:us-central1:lmdr-postgres` (actual value)
+- `SQL_DB_PASSWORD` (stored in Secret Manager as `lmdr-pg-password`)
 
 After running script 02, note down:
 - `SECRET_KEY` (printed at end of script 02 — needed for Wix CMS registration)

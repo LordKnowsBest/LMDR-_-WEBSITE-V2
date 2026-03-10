@@ -7,6 +7,7 @@
 **Region:** `us-central1`
 **Date:** 2026-03-09
 **Status:** Draft — Pending Engineering Review
+**Note (2026-03-10):** Airtable is fully disconnected. References to "Airtable sync" in job registry (e.g., `daily-airtable-sync`) are legacy placeholders and should be removed or repurposed during implementation.
 
 ---
 

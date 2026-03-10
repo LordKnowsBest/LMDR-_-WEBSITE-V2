@@ -1,40 +1,40 @@
 # Specification: GCP Database Migration (Airtable to GCP)
 
-> **Revised:** 2026-02-18 — Corrected integration mechanism and database targets per Wix official docs.
+> **Revised:** 2026-03-10 — Updated to reflect COMPLETED migration. Airtable fully disconnected.
+> **Original:** 2026-02-18 — Corrected integration mechanism and database targets per Wix official docs.
 
 ## Objective
 Migrate LMDR's data architecture from Airtable to Google Cloud Platform (GCP) to overcome Airtable's record limits (50k/base) and rate limits (5 req/sec). Transition to a multi-database architecture using Cloud SQL (PostgreSQL), BigQuery, and Cloud Spanner.
 
-## Integration Mechanism: Official Wix External Database Adaptor
+## Integration Mechanism: Custom Cloud Run Express API
 
-Wix Velo integrates with GCP via a **prebuilt Cloud Run service** (`velo-external-db` container image), NOT a custom Cloud Function. The Cloud Run adaptor exposes GCP databases as **Wix External Collections**, accessible via the native `wixData` API and Wix CMS.
+> **Architecture correction (2026-03-10):** The original plan specified Wix External Database adaptors (`velo-external-db`). The ACTUAL implementation uses a **custom Express REST API** (`lmdr-api`) deployed to Cloud Run. Wix `.jsw` files call this API via `cloudRunClient.jsw` using `LMDR_INTERNAL_KEY` for service-to-service authentication. Wix External Collections were NOT used.
 
-**Official 4-step flow:**
-1. Store DB credentials as secrets in **GCP Secret Manager** (`SECRET_KEY`, `PERMISSIONS`, `USER`, `PASSWORD`, `DB`, `CLOUD_SQL_CONNECTION_NAME`, etc.)
-2. Deploy prebuilt `velo-external-db` container on **Cloud Run** with service account roles and secrets mounted as env vars
-3. Test adaptor via `curl` to confirm table listing
-4. Register the Cloud Run URL as an **External Database** in Wix Editor (Code Sidebar → External Databases)
+**Actual implementation flow:**
+1. `lmdr-api` Express service deployed to Cloud Run (`https://lmdr-api-140035137711.us-central1.run.app`)
+2. `cloudRunClient.jsw` in Wix backend sends HTTP requests to Cloud Run API with `LMDR_INTERNAL_KEY` bearer auth
+3. `dataAccess.jsw` routes all non-Wix collections through `cloudRunClient.jsw`
+4. Cloud Run API queries Cloud SQL (`lmdr-postgres`) JSONB tables directly via `pg` client
 
-## Target Architecture
+## Target Architecture (Actual — as of 2026-03-10)
 
-### 1. Cloud SQL (PostgreSQL) — Operational Data ✅ Wix-Supported
-**Tables**: `carriers`, `driver_profiles`, `driver_jobs`, `driver_applications`, `carrier_subscriptions`, `matching_scores`, `messages` (if not Spanner), `faqs`, `blog_posts`, `compliance_guides`
-**Reasoning**: Transactional integrity, complex JOINs for matching, PostGIS for geospatial route matching.
-**Wix Access**: Via External Collection namespace `gcp_core/tableName`
+### 1. Cloud SQL (PostgreSQL 15) — ALL Operational Data ✅ LIVE
+**Instance**: `lmdr-postgres` in project `ldmr-velocitymatch`, region `us-central1`
+**Database**: `lmdr`, User: `lmdr_user`
+**Tables**: 120+ JSONB tables (`airtable_<snake_case>`) + structured `carriers` table with typed columns
+**Access**: Via Cloud Run API (`lmdr-api`) — NOT via Wix External Collections
+**Records**: 24,826 migrated from Airtable
 
-### 2. Cloud Spanner — Real-Time / High-Throughput Data ✅ Wix-Supported
-**Tables**: `messages` (preferred for real-time potential via change streams)
-**Reasoning**: Multi-region strong consistency, horizontal scale, supports Wix's External Collection adaptor.
-**Wix Access**: Via External Collection namespace `gcp_realtime/tableName`
+### 2. Cloud Spanner — NOT USED
+> Cloud Spanner was deferred. All data including messages uses Cloud SQL JSONB tables.
 
-### 3. BigQuery — Analytics / Log Data ✅ Wix-Supported (Read-Only from CMS)
-**Tables**: `system_logs`, `system_traces`, `ai_usage_log`, `audit_log`, `match_events`
-**Reasoning**: Serverless scale, extremely low storage cost, native BI tools (Looker Studio).
-**Wix Access**: Via External Collection namespace `gcp_analytics/tableName` (read-only — no `_id`/`_owner` columns)
+### 3. BigQuery — Analytics / Observability ✅ LIVE
+**Dataset**: `ldmr-velocitymatch.lmdr_analytics`
+**Purpose**: Observability streaming from Cloud Run services
+**Access**: Direct from Cloud Run services (not from Wix)
 
-> [!WARNING]
-> **Firestore is NOT supported** by the Wix External Database adaptor. All previous Firestore plans have been replaced with Cloud SQL / Cloud Spanner.
-> Supported databases: Cloud SQL (MySQL, Postgres, MSSQL), BigQuery, Cloud Spanner.
+> [!NOTE]
+> **Wix External Database Collections were NOT used.** The integration uses a custom Cloud Run Express API called via HTTP from `cloudRunClient.jsw`. This avoids the `velo-external-db` adaptor entirely.
 
 ## Frozen Collections (Excluded from Migration)
 
@@ -45,48 +45,41 @@ Wix Velo integrates with GCP via a **prebuilt Cloud Run service** (`velo-externa
 | `memberBadges` | `Members/Badges` system collection |
 | `memberPrivateData` | `Members/PrivateMembersData` system collection |
 
-## Wix-Required Schema Columns
+## Cloud SQL Schema (Actual)
 
-For any Cloud SQL or Spanner table to be **read-write** (not read-only) in Wix, it **must** include:
+> Wix External Collections are NOT used, so the `_createdDate`/`_updatedDate`/`_owner` requirements do NOT apply.
 
+All migrated tables use the JSONB schema:
 ```sql
-_id           VARCHAR(36) PRIMARY KEY,  -- UUID
-_createdDate  TIMESTAMP NOT NULL,
-_updatedDate  TIMESTAMP NOT NULL,
-_owner        VARCHAR(128)              -- Wix member ID
+CREATE TABLE airtable_<snake_case> (
+  _id          TEXT PRIMARY KEY,
+  airtable_id  TEXT UNIQUE NOT NULL,
+  _created_at  TIMESTAMPTZ DEFAULT NOW(),
+  _updated_at  TIMESTAMPTZ DEFAULT NOW(),
+  data         JSONB NOT NULL
+);
 ```
 
-Tables without these columns will be **read-only** in the Wix CMS.
+## Authentication
 
-## PERMISSIONS Secret Format
+**Service-to-service (Wix → Cloud Run):** `LMDR_INTERNAL_KEY` bearer token
+**User auth:** Firebase Auth ID tokens
+**API partners:** `lmdr_live_*` API keys hashed and looked up in `airtable_v2_api_partners` table
 
-```json
-{
-  "collectionPermissions": [
-    { "id": "carriers", "read": ["Admin", "Member"], "write": ["Admin"] },
-    { "id": "driver_profiles", "read": ["Admin", "Member"], "write": ["Admin", "Member"] },
-    { "id": "messages", "read": ["Admin", "Member"], "write": ["Admin", "Member"] }
-  ]
-}
-```
+## Integration with dataAccess.jsw (Current State)
 
-Without this secret, all external collections default to **Admin-only** access, breaking all driver/recruiter operations.
+All data operations go through `dataAccess.jsw` → `configData.js`. The current routing:
 
-## Integration with dataAccess.jsw
+- `configData.js` `getDataSource()` returns `'wix'` or `'cloudrun'` (never `'airtable'`)
+- `usesAirtable()` is a stub that always returns `false`
+- `GCP_MIGRATION_MODE` = `'cloudrun'` (hardcoded constant + Wix Secret)
+- `dataAccess.jsw` imports `cloudRunClient.jsw` — sends HTTP requests to `lmdr-api` Cloud Run service
+- 4 frozen Wix collections (AdminUsers, MemberNotifications, memberBadges, memberPrivateData) still use `wixData` directly
+- `airtableClient.jsw` has been DELETED — no Airtable code path exists
 
-Per CLAUDE.md, all data operations go through `dataAccess.jsw` → `configData.js`. GCP integration follows the same pattern:
+## ID Strategy (Actual)
 
-- `configData.js` adds `getGcpCollectionName(key)` returning `'namespace/tableName'`
-- `dataAccess.jsw` checks `GCP_MIGRATION_STATUS` flag: `'off'` | `'dual'` | `'gcp'`
-- In `'dual'` mode, GCP writes are **fire-and-forget** (non-blocking) to protect Wix response time
-- In `'gcp'` mode, all reads/writes go to GCP external collections via `wixData.query('namespace/table')`
-
-## ID Mapping Strategy
-
-Airtable uses opaque Record IDs (`recABC123`). GCP tables use UUIDs (`_id`). During migration:
-1. `v2_ID_Mapping` Airtable table tracks `{airtable_record_id → gcp_uuid}` per collection
-2. `idMappingService.jsw` provides `getOrCreateMapping()` and `lookupGcpId()` helpers
-3. Backfill scripts use deterministic UUID v5 (seeded from Airtable RecordID) for reproducibility
+Original Airtable Record IDs (`recABC123`) are preserved in the `airtable_id` column of each JSONB table. The `_id` column uses the same value. No separate ID mapping table was needed. `idMappingService.jsw` was never created.
 
 ## Cost Analysis (Estimated Monthly)
 - **Cloud SQL (Postgres)**: ~$35 (Shared core instance, 10GB storage)

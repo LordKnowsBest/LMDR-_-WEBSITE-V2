@@ -4,6 +4,8 @@
 > **Addendum series:** This is Addendum 2. Addendum 1 (`ADDENDUM_cloud_run_api/`) covered the generic query API. This addendum covers migrating all ~250 Wix `.jsw` business logic files to Cloud Run microservices.
 > **Date:** 2026-03-09
 > **GCP Project:** `ldmr-velocitymatch` — Region: `us-central1`
+>
+> **Implementation note (2026-03-10):** This PRD references `gcpClient.jsw` for the Strangler Fig HTTP client. The actual file in the codebase is `cloudRunClient.jsw`, which uses `LMDR_INTERNAL_KEY` (not `CLOUD_RUN_API_KEY`). A separate `gcpClient.jsw` also exists but uses the older `CLOUD_RUN_API_KEY` secret name. Airtable has been fully disconnected — `airtableClient.jsw` deleted, `AIRTABLE_PAT` removed.
 
 ---
 
@@ -28,7 +30,7 @@ Phase 2 migrates all `.jsw` business logic to eight new Cloud Run microservices 
 | HTTP functions | ~5 files | Wix Edge (public HTTP, limited) |
 | Scheduled jobs | 3 jobs in `jobs.config` | Wix Cron |
 
-All files import from `backend/dataAccess.jsw`, which currently routes to Airtable. The Cloud SQL migration (Phase 1) replaced Airtable storage. Addendum 1 created `lmdr-api` as the generic CRUD query surface. This addendum replaces the business logic layer.
+All files import from `backend/dataAccess.jsw`, which now routes to **Cloud Run API** (Cloud SQL) — Airtable has been fully disconnected (`airtableClient.jsw` deleted, `AIRTABLE_PAT` removed). Addendum 1 created `lmdr-api` as the generic CRUD query surface. This addendum replaces the business logic layer.
 
 ### 2.2 Pain Points
 

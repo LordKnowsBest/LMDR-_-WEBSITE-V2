@@ -568,60 +568,25 @@ export const SOCIAL_POSTING_SETTINGS = {
 // HELPER FUNCTIONS
 // =============================================================================
 
-/**
- * GCP Migration Mode
- * 'off'      — all Airtable collections route to Airtable (current default)
- * 'cloudrun' — all Airtable collections route to Cloud Run API (Cloud SQL)
- * 'dual'     — write to both Airtable and Cloud Run, read from Cloud Run
- *
- * Change this single flag to cut over from Airtable → Cloud Run.
- * Wix-pinned collections are NEVER affected by this flag.
- */
-export const GCP_MIGRATION_MODE = 'off';
+// =============================================================================
+// DATA SOURCE ROUTING
+// =============================================================================
+// Migration complete: All collections route to Cloud Run (Cloud SQL).
+// Only Wix system collections stay in Wix.
 
 /**
- * Get the data source for a collection
+ * Get the data source for a collection.
+ * Everything goes to Cloud Run except Wix system collections.
  * @param {string} collectionName - The collection name (camelCase)
- * @returns {'wix' | 'airtable' | 'cloudrun'} The data source
+ * @returns {'wix' | 'cloudrun'} The data source
  */
 export function getDataSource(collectionName) {
-  // EXCEPTION LIST: Explicitly pinned to Wix
-  if (['adminUsers'].includes(collectionName)) {
-    return 'wix';
-  }
-
-  const base = DATA_SOURCE[collectionName] || 'airtable';
-
-  // If GCP migration is active, redirect Airtable collections to Cloud Run
-  if (base === 'airtable' && (GCP_MIGRATION_MODE === 'cloudrun' || GCP_MIGRATION_MODE === 'dual')) {
-    return 'cloudrun';
-  }
-
-  return base;
+  if (DATA_SOURCE[collectionName] === 'wix') return 'wix';
+  return 'cloudrun';
 }
 
 /**
- * Check if a collection uses Cloud Run (GCP Cloud SQL)
- * @param {string} collectionName - The collection name
- * @returns {boolean}
- */
-export function usesCloudRun(collectionName) {
-  return getDataSource(collectionName) === 'cloudrun';
-}
-
-/**
- * Check if a collection uses Airtable
- * @param {string} collectionName - The collection name
- * @returns {boolean}
- */
-export function usesAirtable(collectionName) {
-  const source = getDataSource(collectionName);
-  // In dual mode, Airtable still gets writes — so it's still "used"
-  return source === 'airtable' || (GCP_MIGRATION_MODE === 'dual' && DATA_SOURCE[collectionName] === 'airtable');
-}
-
-/**
- * Check if a collection uses Wix
+ * Check if a collection uses Wix (only system collections)
  * @param {string} collectionName - The collection name
  * @returns {boolean}
  */
@@ -630,31 +595,18 @@ export function usesWix(collectionName) {
 }
 
 /**
- * Get all collections using a specific data source
- * @param {'wix' | 'airtable'} source
- * @returns {string[]} Array of collection names
+ * Check if a collection uses Cloud Run (all non-Wix collections)
+ * @param {string} collectionName - The collection name
+ * @returns {boolean}
  */
-export function getCollectionsBySource(source) {
-  return Object.entries(DATA_SOURCE)
-    .filter(([_, src]) => src === source)
-    .map(([name, _]) => name);
+export function usesCloudRun(collectionName) {
+  return getDataSource(collectionName) === 'cloudrun';
 }
 
-/**
- * Get migration status summary
- * @returns {{ wix: number, airtable: number, total: number, percentMigrated: number }}
- */
-export function getMigrationStatus() {
-  const collections = Object.values(DATA_SOURCE);
-  const wixCount = collections.filter(s => s === 'wix').length;
-  const airtableCount = collections.filter(s => s === 'airtable').length;
-  return {
-    wix: wixCount,
-    airtable: airtableCount,
-    total: collections.length,
-    percentMigrated: Math.round((airtableCount / collections.length) * 100)
-  };
-}
+// Legacy exports — kept for backward compatibility with services not yet updated
+export function usesAirtable() { return false; }
+export function getGcpMigrationMode() { return 'cloudrun'; }
+export const GCP_MIGRATION_MODE = 'cloudrun';
 
 // =============================================================================
 // WIX COLLECTION NAMES MAPPING

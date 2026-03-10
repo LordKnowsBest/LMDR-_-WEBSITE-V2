@@ -340,7 +340,7 @@ Achievements: "First Steps", "Deal Finder" (10 apps), "Interview Master" (3 inte
 Badges: Tier-based visual badges displayed on profile and in forums
 
 DATA ARCHITECTURE SUMMARY
-All data (except auth) routes to Airtable via the dataAccess.jsw layer. Key collections touched during the journey:
+All data (except auth) routes to Cloud SQL via the dataAccess.jsw → cloudRunClient.jsw → Cloud Run API layer. (Airtable was disconnected March 2026.) Key collections touched during the journey:
 
 Collection	Created At	Purpose
 driverProfiles	Phase 2	Master driver record
