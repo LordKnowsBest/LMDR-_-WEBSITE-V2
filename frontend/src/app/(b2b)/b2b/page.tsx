@@ -1,86 +1,206 @@
 'use client';
 
-import { Card } from '@/components/ui/Card';
-import { Badge } from '@/components/ui/Badge';
-import { DataTable } from '@/components/ui/DataTable';
+import { KpiCard, Card, Badge, Button, DataTable, ProgressBar, StatusDot } from '@/components/ui';
+
+/* ── Mock Data ─────────────────────────────────────────────────── */
+
+const kpis = [
+  { label: 'Total Revenue', value: '$1.24M', icon: 'payments', trend: '+18.4% YoY', trendUp: true },
+  { label: 'Active Accounts', value: '87', icon: 'business', trend: '+12 this quarter', trendUp: true },
+  { label: 'Monthly Recurring Revenue', value: '$103.6K', icon: 'autorenew', trend: '+6.2% MoM', trendUp: true },
+  { label: 'Churn Rate', value: '2.1%', icon: 'person_remove', trend: '-0.4% vs last month', trendUp: true },
+];
+
+const revenueMonths = [
+  { month: 'Oct', value: 72 },
+  { month: 'Nov', value: 78 },
+  { month: 'Dec', value: 85 },
+  { month: 'Jan', value: 91 },
+  { month: 'Feb', value: 96 },
+  { month: 'Mar', value: 104 },
+];
 
 interface TopAccount {
   [key: string]: unknown;
-  company: string;
-  stage: string;
-  value: string;
-  lastActivity: string;
+  account: string;
+  plan: string;
+  mrr: string;
+  mrrNum: number;
+  healthScore: number;
+  status: string;
 }
 
-const stats = [
-  { label: 'Total Accounts', value: '142', trend: '+8', trendUp: true, icon: 'business' },
-  { label: 'Active Deals', value: '34', trend: '+5', trendUp: true, icon: 'handshake' },
-  { label: 'Pipeline Value', value: '$2.4M', trend: '+12%', trendUp: true, icon: 'trending_up' },
-  { label: 'Won This Quarter', value: '$680K', trend: '+22%', trendUp: true, icon: 'emoji_events' },
-];
-
 const topAccounts: TopAccount[] = [
-  { company: 'Werner Enterprises', stage: 'Negotiation', value: '$240,000', lastActivity: '2 hrs ago' },
-  { company: 'Schneider National', stage: 'Proposal', value: '$185,000', lastActivity: '1 day ago' },
-  { company: 'J.B. Hunt Transport', stage: 'Demo', value: '$320,000', lastActivity: '3 hrs ago' },
-  { company: 'Knight-Swift', stage: 'Qualified', value: '$150,000', lastActivity: '5 hrs ago' },
-  { company: 'XPO Logistics', stage: 'Negotiation', value: '$210,000', lastActivity: '1 day ago' },
+  { account: 'Werner Enterprises', plan: 'Enterprise', mrr: '$8,400', mrrNum: 8400, healthScore: 92, status: 'Active' },
+  { account: 'Schneider National', plan: 'Enterprise', mrr: '$7,200', mrrNum: 7200, healthScore: 88, status: 'Active' },
+  { account: 'J.B. Hunt Transport', plan: 'Growth', mrr: '$4,800', mrrNum: 4800, healthScore: 76, status: 'Active' },
+  { account: 'Knight-Swift Holdings', plan: 'Enterprise', mrr: '$9,100', mrrNum: 9100, healthScore: 95, status: 'Active' },
+  { account: 'XPO Logistics', plan: 'Growth', mrr: '$3,600', mrrNum: 3600, healthScore: 54, status: 'Trial' },
 ];
 
-const stageVariant: Record<string, 'default' | 'info' | 'warning' | 'success'> = {
-  Prospect: 'default',
-  Qualified: 'info',
-  Demo: 'info',
-  Proposal: 'warning',
-  Negotiation: 'warning',
-  'Closed Won': 'success',
+const planBadgeVariant: Record<string, 'accent' | 'info' | 'warning'> = {
+  Enterprise: 'accent',
+  Growth: 'info',
+  Starter: 'warning',
 };
 
-const accountColumns = [
-  { key: 'company', header: 'Company' },
+const statusBadgeVariant: Record<string, 'success' | 'warning' | 'error'> = {
+  Active: 'success',
+  Trial: 'warning',
+  Churned: 'error',
+};
+
+function healthColor(score: number): 'green' | 'amber' | 'red' {
+  if (score >= 80) return 'green';
+  if (score >= 60) return 'amber';
+  return 'red';
+}
+
+const columns = [
+  { key: 'account', header: 'Account' },
   {
-    key: 'stage',
-    header: 'Deal Stage',
+    key: 'plan',
+    header: 'Plan',
     render: (row: TopAccount) => (
-      <Badge variant={stageVariant[row.stage] ?? 'default'}>{row.stage}</Badge>
+      <Badge variant={planBadgeVariant[row.plan] ?? 'default'} icon="verified">{row.plan}</Badge>
     ),
   },
-  { key: 'value', header: 'Value', className: 'text-right font-semibold' },
-  { key: 'lastActivity', header: 'Last Activity' },
+  { key: 'mrr', header: 'MRR', className: 'text-right font-semibold' },
+  {
+    key: 'healthScore',
+    header: 'Health Score',
+    render: (row: TopAccount) => (
+      <ProgressBar value={row.healthScore} color={healthColor(row.healthScore)} showValue className="min-w-[100px]" />
+    ),
+  },
+  {
+    key: 'status',
+    header: 'Status',
+    render: (row: TopAccount) => (
+      <Badge variant={statusBadgeVariant[row.status] ?? 'default'} dot>{row.status}</Badge>
+    ),
+  },
+  {
+    key: 'actions',
+    header: '',
+    render: () => (
+      <Button variant="ghost" size="sm" icon="open_in_new">View</Button>
+    ),
+  },
 ];
 
+const quickActions = [
+  { label: 'New Account', icon: 'person_add', color: 'from-blue-500 to-blue-700' },
+  { label: 'Create Proposal', icon: 'description', color: 'from-emerald-500 to-emerald-700' },
+  { label: 'Schedule Demo', icon: 'videocam', color: 'from-amber-500 to-amber-700' },
+  { label: 'Run Report', icon: 'assessment', color: 'from-purple-500 to-purple-700' },
+];
+
+const recentActivity = [
+  { icon: 'check_circle', iconColor: 'text-green-500', text: 'Knight-Swift signed Enterprise contract', time: '12 min ago' },
+  { icon: 'call', iconColor: 'text-blue-500', text: 'Demo call completed with Ryder System', time: '1 hr ago' },
+  { icon: 'send', iconColor: 'text-amber-500', text: 'Proposal sent to Old Dominion Freight', time: '2 hrs ago' },
+  { icon: 'person_add', iconColor: 'text-purple-500', text: 'New account created: Saia Inc.', time: '4 hrs ago' },
+  { icon: 'warning', iconColor: 'text-red-400', text: 'Health score drop detected for XPO Logistics', time: '6 hrs ago' },
+];
+
+/* ── Page Component ────────────────────────────────────────────── */
+
 export default function B2BDashboardPage() {
+  const maxRevenue = Math.max(...revenueMonths.map((m) => m.value));
+
   return (
     <div className="space-y-8">
-      <h2 className="text-2xl font-bold text-lmdr-dark">B2B Dashboard</h2>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>B2B Sales Dashboard</h2>
+          <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>VelocityMatch partner performance overview</p>
+        </div>
+        <StatusDot status="active" label="All systems operational" />
+      </div>
 
-      {/* Stat Cards */}
+      {/* KPI Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        {stats.map((stat) => (
-          <Card key={stat.label} elevation="sm" className="flex items-start gap-4">
-            <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-lmdr-blue/10 text-lmdr-blue">
-              <span className="material-symbols-outlined text-2xl">{stat.icon}</span>
-            </div>
-            <div className="flex-1">
-              <p className="text-sm text-tan">{stat.label}</p>
-              <p className="text-2xl font-bold text-lmdr-dark">{stat.value}</p>
-              <span className="text-xs font-medium text-sg">
-                {stat.trend} this quarter
-              </span>
-            </div>
-          </Card>
+        {kpis.map((kpi, i) => (
+          <KpiCard key={kpi.label} {...kpi} className={`stagger-${i + 1}`} />
         ))}
       </div>
 
-      {/* Top Accounts */}
-      <div>
-        <h3 className="text-lg font-semibold text-lmdr-dark mb-4">Top Accounts</h3>
-        <DataTable<TopAccount>
-          columns={accountColumns}
-          data={topAccounts}
-          onRowClick={() => {}}
-        />
+      {/* Revenue Trend + Quick Actions */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Revenue Mini Chart */}
+        <Card elevation="md" className="lg:col-span-2 animate-fade-up stagger-5">
+          <div className="flex items-center justify-between mb-5">
+            <h3 className="text-base font-bold" style={{ color: 'var(--neu-text)' }}>Revenue Trend</h3>
+            <Badge variant="success" icon="trending_up">+44% growth</Badge>
+          </div>
+          <Card inset className="p-4">
+            <div className="flex items-end justify-between gap-3" style={{ height: 140 }}>
+              {revenueMonths.map((m) => {
+                const pct = (m.value / maxRevenue) * 100;
+                return (
+                  <div key={m.month} className="flex-1 flex flex-col items-center gap-2">
+                    <span className="text-[10px] font-bold" style={{ color: 'var(--neu-text)' }}>${m.value}K</span>
+                    <div className="w-full relative rounded-lg overflow-hidden" style={{ height: `${pct}%`, minHeight: 8 }}>
+                      <div className="absolute inset-0 bg-gradient-to-t from-blue-600 to-blue-400 rounded-lg" />
+                    </div>
+                    <span className="text-[10px] font-semibold" style={{ color: 'var(--neu-text-muted)' }}>{m.month}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        </Card>
+
+        {/* Quick Actions */}
+        <Card elevation="md" className="animate-fade-up stagger-6">
+          <h3 className="text-base font-bold mb-4" style={{ color: 'var(--neu-text)' }}>Quick Actions</h3>
+          <div className="grid grid-cols-2 gap-3">
+            {quickActions.map((action) => (
+              <button
+                key={action.label}
+                className="neu-s rounded-xl p-3 flex flex-col items-center gap-2 transition-all duration-200 hover:translate-y-[-2px] active:neu-ins active:scale-[0.97] cursor-pointer"
+              >
+                <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${action.color} flex items-center justify-center shadow-md`}>
+                  <span className="material-symbols-outlined text-white text-[20px]">{action.icon}</span>
+                </div>
+                <span className="text-[11px] font-bold" style={{ color: 'var(--neu-text)' }}>{action.label}</span>
+              </button>
+            ))}
+          </div>
+        </Card>
       </div>
+
+      {/* Top Accounts Table */}
+      <div className="animate-fade-up stagger-7">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-base font-bold" style={{ color: 'var(--neu-text)' }}>Top Accounts</h3>
+          <Button variant="ghost" size="sm" icon="arrow_forward">View All</Button>
+        </div>
+        <DataTable<TopAccount> columns={columns} data={topAccounts} onRowClick={() => {}} />
+      </div>
+
+      {/* Recent Activity Feed */}
+      <Card elevation="md" className="animate-fade-up stagger-8">
+        <h3 className="text-base font-bold mb-4" style={{ color: 'var(--neu-text)' }}>Recent Activity</h3>
+        <div className="space-y-1">
+          {recentActivity.map((item, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-3 p-3 rounded-xl transition-colors duration-150 hover:bg-[var(--neu-shadow-d)]/5"
+            >
+              <div className="neu-x w-9 h-9 rounded-xl flex items-center justify-center shrink-0">
+                <span className={`material-symbols-outlined text-[18px] ${item.iconColor}`}>{item.icon}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate" style={{ color: 'var(--neu-text)' }}>{item.text}</p>
+              </div>
+              <span className="text-[11px] font-medium shrink-0" style={{ color: 'var(--neu-text-muted)' }}>{item.time}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }

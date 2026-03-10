@@ -1,188 +1,211 @@
 'use client';
 
 import { useState } from 'react';
-import { Card, Badge, Button, DataTable } from '@/components/ui';
+import { Card, Badge, Button, DataTable, ProgressBar, KpiCard } from '@/components/ui';
 
-type OnboardingStatus = 'documents_needed' | 'in_review' | 'background_check' | 'complete';
+/* ── Types ────────────────────────────────────────────────────── */
+type Stage = 'Document Collection' | 'Background Check' | 'Drug Test' | 'Orientation' | 'Complete';
+type FilterKey = 'all' | 'in_progress' | 'pending_docs' | 'complete';
 
-interface OnboardingDriver {
+interface OnboardingRow {
   id: string;
   name: string;
-  currentStep: number;
-  stepLabel: string;
+  carrier: string;
+  stage: Stage;
   progress: number;
-  requiredDocs: string;
-  lastUpdated: string;
-  status: OnboardingStatus;
+  docsStatus: string;
+  docsComplete: boolean;
+  startDate: string;
 }
 
-const STEPS = [
-  'Application',
-  'CDL Verification',
-  'Document Upload',
-  'Background Check',
-  'Drug Screen',
-  'Orientation',
-  'Placement',
-];
-
-const mockOnboarding: OnboardingDriver[] = [
-  { id: 'o1', name: 'Marcus Johnson', currentStep: 4, stepLabel: 'Background Check', progress: 57, requiredDocs: '1 missing', lastUpdated: '2 hrs ago', status: 'background_check' },
-  { id: 'o2', name: 'Sarah Chen', currentStep: 3, stepLabel: 'Document Upload', progress: 42, requiredDocs: '3 missing', lastUpdated: '1 day ago', status: 'documents_needed' },
-  { id: 'o3', name: 'Aisha Mohammed', currentStep: 5, stepLabel: 'Drug Screen', progress: 71, requiredDocs: 'Complete', lastUpdated: '3 hrs ago', status: 'in_review' },
-  { id: 'o4', name: 'James O\'Brien', currentStep: 6, stepLabel: 'Orientation', progress: 85, requiredDocs: 'Complete', lastUpdated: '5 hrs ago', status: 'in_review' },
-  { id: 'o5', name: 'Priya Patel', currentStep: 2, stepLabel: 'CDL Verification', progress: 28, requiredDocs: '2 missing', lastUpdated: '2 days ago', status: 'documents_needed' },
-  { id: 'o6', name: 'Carlos Martinez', currentStep: 7, stepLabel: 'Placement', progress: 100, requiredDocs: 'Complete', lastUpdated: '1 hr ago', status: 'complete' },
-  { id: 'o7', name: 'Tamika Lewis', currentStep: 4, stepLabel: 'Background Check', progress: 57, requiredDocs: 'Complete', lastUpdated: '6 hrs ago', status: 'background_check' },
-];
-
-const statusConfig: Record<OnboardingStatus, { label: string; variant: 'default' | 'success' | 'warning' | 'error' | 'info' }> = {
-  documents_needed: { label: 'Docs Needed', variant: 'warning' },
-  in_review: { label: 'In Review', variant: 'info' },
-  background_check: { label: 'BG Check', variant: 'default' },
-  complete: { label: 'Complete', variant: 'success' },
+/* ── Stage Config ─────────────────────────────────────────────── */
+const stageConfig: Record<Stage, { variant: 'default' | 'success' | 'warning' | 'error' | 'info' | 'accent'; icon: string }> = {
+  'Document Collection': { variant: 'warning', icon: 'upload_file' },
+  'Background Check': { variant: 'info', icon: 'shield' },
+  'Drug Test': { variant: 'accent', icon: 'science' },
+  'Orientation': { variant: 'default', icon: 'school' },
+  'Complete': { variant: 'success', icon: 'check_circle' },
 };
 
-const filterTabs = [
-  { key: 'all', label: 'All', icon: 'groups' },
-  { key: 'documents_needed', label: 'Documents Needed', icon: 'upload_file' },
-  { key: 'in_review', label: 'In Review', icon: 'pending' },
-  { key: 'background_check', label: 'Background Check', icon: 'shield' },
-] as const;
+/* ── Mock Data (8 rows) ──────────────────────────────────────── */
+const mockData: OnboardingRow[] = [
+  { id: 'o1', name: 'Marcus Johnson', carrier: 'Werner Enterprises', stage: 'Background Check', progress: 62, docsStatus: '6/7 uploaded', docsComplete: false, startDate: 'Feb 28, 2026' },
+  { id: 'o2', name: 'Sarah Chen', carrier: 'Schneider National', stage: 'Document Collection', progress: 30, docsStatus: '3/7 uploaded', docsComplete: false, startDate: 'Mar 02, 2026' },
+  { id: 'o3', name: 'Aisha Mohammed', carrier: 'JB Hunt', stage: 'Drug Test', progress: 75, docsStatus: 'Complete', docsComplete: true, startDate: 'Feb 20, 2026' },
+  { id: 'o4', name: 'James O\'Brien', carrier: 'Old Dominion', stage: 'Orientation', progress: 90, docsStatus: 'Complete', docsComplete: true, startDate: 'Feb 15, 2026' },
+  { id: 'o5', name: 'Priya Patel', carrier: 'FedEx Freight', stage: 'Document Collection', progress: 18, docsStatus: '1/7 uploaded', docsComplete: false, startDate: 'Mar 05, 2026' },
+  { id: 'o6', name: 'Carlos Martinez', carrier: 'XPO Logistics', stage: 'Complete', progress: 100, docsStatus: 'Complete', docsComplete: true, startDate: 'Jan 28, 2026' },
+  { id: 'o7', name: 'Tamika Lewis', carrier: 'Heartland Express', stage: 'Background Check', progress: 55, docsStatus: 'Complete', docsComplete: true, startDate: 'Feb 25, 2026' },
+  { id: 'o8', name: 'David Nguyen', carrier: 'Werner Enterprises', stage: 'Complete', progress: 100, docsStatus: 'Complete', docsComplete: true, startDate: 'Jan 20, 2026' },
+];
 
-function MiniProgressBar({ step, total }: { step: number; total: number }) {
-  return (
-    <div className="flex gap-0.5">
-      {Array.from({ length: total }, (_, i) => (
-        <div
-          key={i}
-          className={`h-1.5 flex-1 rounded-full ${
-            i < step ? 'bg-lmdr-blue' : 'bg-tan/20'
-          }`}
-        />
-      ))}
-    </div>
-  );
+/* ── Filter Tabs ──────────────────────────────────────────────── */
+const filterTabs: { key: FilterKey; label: string; icon: string }[] = [
+  { key: 'all', label: 'All', icon: 'groups' },
+  { key: 'in_progress', label: 'In Progress', icon: 'pending' },
+  { key: 'pending_docs', label: 'Pending Docs', icon: 'upload_file' },
+  { key: 'complete', label: 'Complete', icon: 'check_circle' },
+];
+
+function filterRows(rows: OnboardingRow[], filter: FilterKey): OnboardingRow[] {
+  if (filter === 'all') return rows;
+  if (filter === 'complete') return rows.filter((r) => r.stage === 'Complete');
+  if (filter === 'pending_docs') return rows.filter((r) => !r.docsComplete);
+  // in_progress = everything not complete
+  return rows.filter((r) => r.stage !== 'Complete');
+}
+
+/* ── Progress Color ───────────────────────────────────────────── */
+function progressColor(pct: number): 'green' | 'blue' | 'amber' | 'red' {
+  if (pct >= 90) return 'green';
+  if (pct >= 60) return 'blue';
+  if (pct >= 30) return 'amber';
+  return 'red';
 }
 
 export default function OnboardingDashboardPage() {
-  const [activeFilter, setActiveFilter] = useState<string>('all');
+  const [activeFilter, setActiveFilter] = useState<FilterKey>('all');
+  const filtered = filterRows(mockData, activeFilter);
 
-  const filtered = activeFilter === 'all'
-    ? mockOnboarding
-    : mockOnboarding.filter((d) => d.status === activeFilter);
+  const countByStage = (stage: Stage) => mockData.filter((r) => r.stage === stage).length;
+  const countInProgress = mockData.filter((r) => r.stage !== 'Complete').length;
+  const pendingDocs = mockData.filter((r) => !r.docsComplete).length;
+  const avgProgress = Math.round(mockData.reduce((s, r) => s + r.progress, 0) / mockData.length);
 
+  /* ── Table Columns ─────────────────────────────────────────── */
   const columns = [
     {
       key: 'name',
-      header: 'Driver Name',
-      render: (row: OnboardingDriver) => (
-        <span className="font-medium text-lmdr-dark">{row.name}</span>
+      header: 'Driver',
+      render: (row: OnboardingRow) => (
+        <div className="flex items-center gap-2.5">
+          <div className="neu-x w-8 h-8 rounded-lg flex items-center justify-center shrink-0">
+            <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>person</span>
+          </div>
+          <div>
+            <span className="text-[13px] font-bold block" style={{ color: 'var(--neu-text)' }}>{row.name}</span>
+            <span className="text-[11px]" style={{ color: 'var(--neu-text-muted)' }}>{row.carrier}</span>
+          </div>
+        </div>
       ),
     },
     {
-      key: 'stepLabel',
-      header: 'Current Step',
-      render: (row: OnboardingDriver) => (
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-tan">Step {row.currentStep}/7</span>
-          <span className="text-sm text-lmdr-dark">{row.stepLabel}</span>
-        </div>
-      ),
+      key: 'stage',
+      header: 'Stage',
+      render: (row: OnboardingRow) => {
+        const cfg = stageConfig[row.stage];
+        return <Badge variant={cfg.variant} icon={cfg.icon}>{row.stage}</Badge>;
+      },
     },
     {
       key: 'progress',
       header: 'Progress',
-      render: (row: OnboardingDriver) => (
-        <div className="w-32 space-y-1">
-          <MiniProgressBar step={row.currentStep} total={STEPS.length} />
-          <span className="text-xs text-tan">{row.progress}%</span>
+      render: (row: OnboardingRow) => (
+        <div className="w-28">
+          <ProgressBar value={row.progress} color={progressColor(row.progress)} showValue />
         </div>
       ),
     },
     {
-      key: 'requiredDocs',
-      header: 'Required Docs',
-      render: (row: OnboardingDriver) => (
-        <span className={row.requiredDocs === 'Complete' ? 'text-sg text-sm' : 'text-status-pending text-sm'}>
-          {row.requiredDocs}
-        </span>
+      key: 'docsStatus',
+      header: 'Docs Status',
+      render: (row: OnboardingRow) => (
+        <div className="flex items-center gap-1.5">
+          <span
+            className="material-symbols-outlined text-[16px]"
+            style={{ color: row.docsComplete ? 'var(--neu-accent)' : undefined }}
+          >
+            {row.docsComplete ? 'check_circle' : 'warning'}
+          </span>
+          <span className={`text-[12px] font-medium ${row.docsComplete ? '' : 'text-amber-600'}`} style={row.docsComplete ? { color: 'var(--neu-text)' } : undefined}>
+            {row.docsStatus}
+          </span>
+        </div>
       ),
     },
     {
-      key: 'lastUpdated',
-      header: 'Last Updated',
-      render: (row: OnboardingDriver) => (
-        <span className="text-sm text-tan">{row.lastUpdated}</span>
+      key: 'startDate',
+      header: 'Start Date',
+      render: (row: OnboardingRow) => (
+        <span className="text-[12px]" style={{ color: 'var(--neu-text-muted)' }}>{row.startDate}</span>
       ),
     },
     {
-      key: 'status',
-      header: 'Status',
-      render: (row: OnboardingDriver) => {
-        const cfg = statusConfig[row.status];
-        return <Badge variant={cfg.variant}>{cfg.label}</Badge>;
-      },
-    },
-    {
-      key: 'action',
+      key: 'actions',
       header: '',
-      render: (row: OnboardingDriver) => (
-        <Button variant="ghost" size="sm">
-          <span className="material-symbols-outlined text-base">open_in_new</span>
-        </Button>
+      render: (row: OnboardingRow) => (
+        <div className="flex gap-1">
+          <Button variant="ghost" size="sm" icon="visibility" />
+          <Button variant="ghost" size="sm" icon="mail" />
+          {!row.docsComplete && <Button variant="secondary" size="sm" icon="notification_important" />}
+        </div>
       ),
     },
   ];
 
   return (
     <div className="space-y-6">
-      {/* Summary Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Card elevation="sm" className="!p-4">
-          <p className="text-xs text-tan uppercase tracking-wide">Total In Onboarding</p>
-          <p className="text-2xl font-bold text-lmdr-dark mt-1">{mockOnboarding.length}</p>
-        </Card>
-        <Card elevation="sm" className="!p-4">
-          <p className="text-xs text-tan uppercase tracking-wide">Docs Needed</p>
-          <p className="text-2xl font-bold text-status-pending mt-1">
-            {mockOnboarding.filter((d) => d.status === 'documents_needed').length}
-          </p>
-        </Card>
-        <Card elevation="sm" className="!p-4">
-          <p className="text-xs text-tan uppercase tracking-wide">In Review</p>
-          <p className="text-2xl font-bold text-lmdr-blue mt-1">
-            {mockOnboarding.filter((d) => d.status === 'in_review').length}
-          </p>
-        </Card>
-        <Card elevation="sm" className="!p-4">
-          <p className="text-xs text-tan uppercase tracking-wide">Completed</p>
-          <p className="text-2xl font-bold text-sg mt-1">
-            {mockOnboarding.filter((d) => d.status === 'complete').length}
-          </p>
-        </Card>
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between animate-fade-up">
+        <div>
+          <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Onboarding Dashboard</h1>
+          <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>Track driver onboarding progress and documentation</p>
+        </div>
+        <Button size="sm" icon="person_add">New Onboarding</Button>
       </div>
 
-      {/* Filter Tabs */}
-      <div className="flex gap-2">
+      {/* ── KPI Cards ──────────────────────────────────────────── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <KpiCard label="Total Onboarding" value={String(mockData.length)} icon="groups" trend={`${countInProgress} in progress`} trendUp className="stagger-1" />
+        <KpiCard label="Pending Documents" value={String(pendingDocs)} icon="upload_file" trend={`${mockData.length - pendingDocs} complete`} trendUp className="stagger-2" />
+        <KpiCard label="Avg Progress" value={`${avgProgress}%`} icon="speed" trend="+8% this week" trendUp className="stagger-3" />
+        <KpiCard label="Completed" value={String(countByStage('Complete'))} icon="check_circle" trend="+1 this week" trendUp className="stagger-4" />
+      </div>
+
+      {/* ── Stage Summary Chips ────────────────────────────────── */}
+      <Card elevation="xs" className="!p-3 animate-fade-up stagger-2">
+        <div className="flex items-center gap-4 flex-wrap">
+          <span className="kpi-label">Stages:</span>
+          {(Object.keys(stageConfig) as Stage[]).map((stage) => {
+            const cfg = stageConfig[stage];
+            const count = countByStage(stage);
+            return (
+              <Badge key={stage} variant={cfg.variant} icon={cfg.icon}>
+                {stage} ({count})
+              </Badge>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* ── Filter Tabs ────────────────────────────────────────── */}
+      <div className="flex gap-2 animate-fade-up stagger-3">
         {filterTabs.map((tab) => (
           <button
             key={tab.key}
             onClick={() => setActiveFilter(tab.key)}
-            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            className={`inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-[12px] font-bold tracking-wide transition-all duration-200 ${
               activeFilter === tab.key
-                ? 'bg-lmdr-blue text-white shadow-md'
-                : 'bg-beige text-tan shadow-[3px_3px_6px_#C8B896,-3px_-3px_6px_#FFFFF5] hover:bg-beige-d'
+                ? 'btn-glow text-white'
+                : 'neu-s hover:translate-y-[-1px]'
             }`}
+            style={activeFilter !== tab.key ? { color: 'var(--neu-text)' } : undefined}
           >
-            <span className="material-symbols-outlined text-base">{tab.icon}</span>
+            <span className="material-symbols-outlined text-[16px]">{tab.icon}</span>
             {tab.label}
           </button>
         ))}
       </div>
 
-      {/* Onboarding Table */}
-      <DataTable<OnboardingDriver> columns={columns} data={filtered} emptyMessage="No drivers match this filter." />
+      {/* ── Data Table ─────────────────────────────────────────── */}
+      <div className="animate-fade-up stagger-4">
+        <DataTable<OnboardingRow>
+          columns={columns}
+          data={filtered}
+          emptyMessage="No onboarding records match this filter."
+          emptyIcon="school"
+        />
+      </div>
     </div>
   );
 }

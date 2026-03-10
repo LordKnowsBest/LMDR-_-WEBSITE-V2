@@ -1,116 +1,263 @@
 'use client';
-import { useState, useCallback } from 'react';
-import { Card, Button, Badge, Input } from '@/components/ui';
 
+import { useState } from 'react';
+import { Card, Button, Badge, ProgressBar } from '@/components/ui';
+
+/* ── Types ── */
+interface ScoreBreakdown { safety: number; pay: number; culture: number; location: number; }
 interface MatchResult {
-  carrierId: string;
-  carrierName: string;
-  score: number;
-  reasoning: string;
-  location: string;
-  payRange: string;
-  freightType: string;
+  id: string; carrier: string; score: number; breakdown: ScoreBreakdown;
+  location: string; payRange: string; truckType: string;
+  benefits: string[]; description: string;
+}
+interface Application {
+  id: string; carrier: string; appliedDate: string;
+  status: 'Under Review' | 'Interview' | 'Offered' | 'Declined';
+}
+
+/* ── Mock Data ── */
+const cdlClasses = ['A', 'B', 'C'] as const;
+const expRanges = ['0-1 yr', '2-4 yr', '5-9 yr', '10+ yr'] as const;
+const radiusOptions = ['25 mi', '50 mi', '100 mi', '250 mi', 'Nationwide'] as const;
+
+const mockMatches: MatchResult[] = [
+  { id: '1', carrier: 'Swift Transportation', score: 94, breakdown: { safety: 96, pay: 91, culture: 93, location: 97 }, location: 'Phoenix, AZ', payRange: '$0.62 - $0.68/mi', truckType: 'Dry Van', benefits: ['Health Insurance', '401k Match', 'Paid Training', 'Home Weekly'], description: 'OTR lanes with dedicated routes available.' },
+  { id: '2', carrier: 'Werner Enterprises', score: 89, breakdown: { safety: 92, pay: 88, culture: 85, location: 90 }, location: 'Omaha, NE', payRange: '$0.58 - $0.64/mi', truckType: 'Reefer', benefits: ['Health Insurance', 'Tuition Reimbursement', 'Sign-On Bonus'], description: 'Regional reefer runs, home every weekend.' },
+  { id: '3', carrier: 'Schneider National', score: 85, breakdown: { safety: 90, pay: 82, culture: 87, location: 80 }, location: 'Green Bay, WI', payRange: '$0.60 - $0.66/mi', truckType: 'Intermodal', benefits: ['Health Insurance', '401k', 'Paid Vacation', 'Pet Policy'], description: 'Intermodal & dedicated, great equipment.' },
+  { id: '4', carrier: 'J.B. Hunt Transport', score: 82, breakdown: { safety: 88, pay: 79, culture: 80, location: 81 }, location: 'Lowell, AR', payRange: '$0.56 - $0.62/mi', truckType: 'Dry Van', benefits: ['Health Insurance', 'Stock Purchase', 'Home Time'], description: 'Dedicated contract lanes, consistent freight.' },
+  { id: '5', carrier: 'Old Dominion Freight', score: 78, breakdown: { safety: 85, pay: 76, culture: 74, location: 77 }, location: 'Thomasville, NC', payRange: '$0.54 - $0.60/mi', truckType: 'LTL', benefits: ['Health Insurance', 'Pension', 'Overtime Pay'], description: 'LTL regional routes, excellent work-life balance.' },
+  { id: '6', carrier: 'Heartland Express', score: 74, breakdown: { safety: 80, pay: 70, culture: 72, location: 73 }, location: 'North Liberty, IA', payRange: '$0.52 - $0.58/mi', truckType: 'Dry Van', benefits: ['Health Insurance', 'Rider Program', 'Direct Deposit'], description: 'Short-haul OTR, newer equipment fleet.' },
+];
+
+const mockApplications: Application[] = [
+  { id: 'a1', carrier: 'Swift Transportation', appliedDate: 'Mar 2, 2026', status: 'Interview' },
+  { id: 'a2', carrier: 'Werner Enterprises', appliedDate: 'Feb 28, 2026', status: 'Under Review' },
+  { id: 'a3', carrier: 'Schneider National', appliedDate: 'Feb 20, 2026', status: 'Offered' },
+];
+
+const appStatusVariant: Record<Application['status'], 'info' | 'warning' | 'success' | 'error'> = {
+  'Under Review': 'warning', Interview: 'info', Offered: 'success', Declined: 'error',
+};
+
+/* ── Helpers ── */
+function scoreColor(s: number) {
+  if (s >= 90) return 'text-green-600';
+  if (s >= 80) return 'text-blue-600';
+  if (s >= 70) return 'text-amber-600';
+  return 'text-red-500';
+}
+function scoreBadge(s: number): 'success' | 'info' | 'warning' | 'error' {
+  if (s >= 90) return 'success';
+  if (s >= 80) return 'info';
+  if (s >= 70) return 'warning';
+  return 'error';
+}
+function scoreBarColor(s: number): 'green' | 'blue' | 'amber' | 'red' {
+  if (s >= 90) return 'green';
+  if (s >= 80) return 'blue';
+  if (s >= 70) return 'amber';
+  return 'red';
 }
 
 export default function DriverMatchesPage() {
-  const [matches, setMatches] = useState<MatchResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [filters, setFilters] = useState({ state: '', freightType: '', minPay: '' });
-
-  const runMatch = useCallback(async () => {
-    setLoading(true);
-    try {
-      // TODO: Wire to matchingApi.matchDriver() when auth is ready
-      // For now, show placeholder
-      setMatches([
-        { carrierId: '1', carrierName: 'Swift Transportation', score: 92, reasoning: 'CDL-A match, OTR experience, clean MVR', location: 'Phoenix, AZ', payRange: '$0.62-0.68/mi', freightType: 'Dry Van' },
-        { carrierId: '2', carrierName: 'Werner Enterprises', score: 87, reasoning: 'Regional routes match home-time preference', location: 'Omaha, NE', payRange: '$0.58-0.64/mi', freightType: 'Reefer' },
-        { carrierId: '3', carrierName: 'Schneider National', score: 81, reasoning: 'Dedicated lanes available, good benefits', location: 'Green Bay, WI', payRange: '$0.60-0.66/mi', freightType: 'Intermodal' },
-      ]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const [selectedCdl, setSelectedCdl] = useState<string>('A');
+  const [selectedExp, setSelectedExp] = useState<string>('5-9 yr');
+  const [selectedRadius, setSelectedRadius] = useState<string>('100 mi');
+  const [expandedCard, setExpandedCard] = useState<string | null>(null);
+  const [matches] = useState<MatchResult[]>(mockMatches);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-8">
+      {/* ── Header ── */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 animate-fade-up">
         <div>
-          <h2 className="text-2xl font-bold text-lmdr-dark">AI Job Matches</h2>
-          <p className="text-tan text-sm mt-1">Find your best carrier matches powered by AI</p>
+          <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>AI Job Matches</h1>
+          <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>
+            {matches.length} carriers matched to your profile
+          </p>
         </div>
-        <Button onClick={runMatch} loading={loading}>
-          <span className="material-symbols-outlined text-[18px] mr-2">auto_awesome</span>
-          Find Matches
-        </Button>
+        <Button icon="auto_awesome">Run New Match</Button>
       </div>
 
-      {/* Filters */}
-      <Card elevation="sm">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Input
-            label="Preferred State"
-            placeholder="e.g. TX, CA, FL"
-            value={filters.state}
-            onChange={(e) => setFilters(f => ({ ...f, state: e.target.value }))}
-          />
-          <Input
-            label="Freight Type"
-            placeholder="e.g. Dry Van, Reefer"
-            value={filters.freightType}
-            onChange={(e) => setFilters(f => ({ ...f, freightType: e.target.value }))}
-          />
-          <Input
-            label="Min Pay ($/mi)"
-            placeholder="e.g. 0.55"
-            value={filters.minPay}
-            onChange={(e) => setFilters(f => ({ ...f, minPay: e.target.value }))}
-          />
+      {/* ── Filter Section ── */}
+      <Card elevation="sm" className="animate-fade-up stagger-1">
+        <div className="space-y-4">
+          {/* CDL Class Pills */}
+          <div>
+            <p className="kpi-label mb-2">CDL Class</p>
+            <div className="flex gap-2">
+              {cdlClasses.map(cls => (
+                <button
+                  key={cls}
+                  onClick={() => setSelectedCdl(cls)}
+                  className={`px-5 py-2 rounded-full text-sm font-bold transition-all duration-200 ${
+                    selectedCdl === cls
+                      ? 'btn-glow text-white'
+                      : 'neu-x'
+                  }`}
+                  style={selectedCdl !== cls ? { color: 'var(--neu-text)' } : undefined}
+                >
+                  Class {cls}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Experience Range */}
+            <div>
+              <p className="kpi-label mb-2">Experience</p>
+              <div className="flex flex-wrap gap-2">
+                {expRanges.map(exp => (
+                  <button
+                    key={exp}
+                    onClick={() => setSelectedExp(exp)}
+                    className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-200 ${
+                      selectedExp === exp
+                        ? 'bg-green-100 text-green-800 dark:bg-green-500/15 dark:text-green-300'
+                        : 'neu-x'
+                    }`}
+                    style={selectedExp !== exp ? { color: 'var(--neu-text-muted)' } : undefined}
+                  >
+                    {exp}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Location Radius */}
+            <div>
+              <p className="kpi-label mb-2">Location Radius</p>
+              <div className="flex flex-wrap gap-2">
+                {radiusOptions.map(r => (
+                  <button
+                    key={r}
+                    onClick={() => setSelectedRadius(r)}
+                    className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-200 ${
+                      selectedRadius === r
+                        ? 'bg-blue-100 text-blue-800 dark:bg-blue-500/15 dark:text-blue-300'
+                        : 'neu-x'
+                    }`}
+                    style={selectedRadius !== r ? { color: 'var(--neu-text-muted)' } : undefined}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       </Card>
 
-      {/* Results */}
+      {/* ── Match Result Cards ── */}
       <div className="space-y-4">
-        {matches.map((match) => (
-          <Card key={match.carrierId} elevation="sm" className="hover:shadow-[8px_8px_16px_#C8B896,-8px_-8px_16px_#FFFFF5] transition-shadow">
-            <div className="flex items-start justify-between">
-              <div className="space-y-2">
-                <div className="flex items-center gap-3">
-                  <h3 className="text-lg font-semibold text-lmdr-dark">{match.carrierName}</h3>
-                  <Badge variant={match.score >= 90 ? 'success' : match.score >= 80 ? 'info' : 'warning'}>
-                    {match.score}% Match
-                  </Badge>
+        {matches.map((match, i) => (
+          <Card
+            key={match.id}
+            elevation="sm"
+            hover
+            className={`animate-fade-up stagger-${Math.min(i + 2, 8)}`}
+            onClick={() => setExpandedCard(expandedCard === match.id ? null : match.id)}
+          >
+            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+              {/* Left: Info */}
+              <div className="flex items-start gap-4 flex-1">
+                {/* Large Score Circle */}
+                <div className="neu-ins w-16 h-16 rounded-2xl flex flex-col items-center justify-center shrink-0">
+                  <span className={`text-2xl font-black leading-none ${scoreColor(match.score)}`}>{match.score}</span>
+                  <span className="text-[9px] font-bold" style={{ color: 'var(--neu-text-muted)' }}>MATCH</span>
                 </div>
-                <p className="text-sm text-tan">{match.reasoning}</p>
-                <div className="flex items-center gap-4 text-sm text-lmdr-dark">
-                  <span className="flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[16px]">location_on</span>
-                    {match.location}
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[16px]">payments</span>
-                    {match.payRange}
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[16px]">local_shipping</span>
-                    {match.freightType}
-                  </span>
+                <div className="space-y-2 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>{match.carrier}</h3>
+                    <Badge variant={scoreBadge(match.score)} dot>{match.score}% Match</Badge>
+                  </div>
+                  <p className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>{match.description}</p>
+                  <div className="flex flex-wrap items-center gap-4 text-sm">
+                    <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
+                      <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>location_on</span>
+                      {match.location}
+                    </span>
+                    <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
+                      <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>payments</span>
+                      {match.payRange}
+                    </span>
+                    <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
+                      <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>local_shipping</span>
+                      {match.truckType}
+                    </span>
+                  </div>
+                  {/* Benefits */}
+                  <div className="flex flex-wrap gap-1.5 mt-1">
+                    {match.benefits.map(b => (
+                      <Badge key={b} variant="accent" icon="check_circle">{b}</Badge>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div className="flex gap-2">
-                <Button variant="ghost" size="sm">Details</Button>
-                <Button size="sm">Apply</Button>
+
+              {/* Right: Actions */}
+              <div className="flex gap-2 shrink-0 self-start">
+                <Button variant="ghost" size="sm" icon="info">Details</Button>
+                <Button size="sm" icon="send">Apply</Button>
               </div>
             </div>
+
+            {/* ── Score Breakdown (expanded) ── */}
+            {expandedCard === match.id && (
+              <div className="mt-5 pt-5 border-t" style={{ borderColor: 'var(--neu-border)' }}>
+                <p className="kpi-label mb-3">Score Breakdown</p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {([
+                    { key: 'safety', label: 'Safety', icon: 'shield' },
+                    { key: 'pay', label: 'Pay', icon: 'payments' },
+                    { key: 'culture', label: 'Culture', icon: 'groups' },
+                    { key: 'location', label: 'Location', icon: 'location_on' },
+                  ] as const).map(item => {
+                    const val = match.breakdown[item.key];
+                    return (
+                      <div key={item.key} className="space-y-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>{item.icon}</span>
+                          <span className="text-xs font-bold" style={{ color: 'var(--neu-text)' }}>{item.label}</span>
+                          <span className={`text-xs font-black ml-auto ${scoreColor(val)}`}>{val}</span>
+                        </div>
+                        <ProgressBar value={val} color={scoreBarColor(val)} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </Card>
         ))}
-        {matches.length === 0 && !loading && (
-          <Card className="text-center py-12">
-            <span className="material-symbols-outlined text-5xl text-tan mb-3">search</span>
-            <p className="text-tan">Click &quot;Find Matches&quot; to discover your best carrier matches</p>
-          </Card>
-        )}
       </div>
+
+      {/* ── My Applications ── */}
+      <Card className="animate-fade-up stagger-8">
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>My Applications</h3>
+          <Badge variant="accent">{mockApplications.length} Active</Badge>
+        </div>
+        <div className="space-y-3">
+          {mockApplications.map(app => (
+            <Card key={app.id} elevation="xs" className="!p-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="neu-x w-10 h-10 rounded-xl flex items-center justify-center">
+                    <span className="material-symbols-outlined text-[20px]" style={{ color: 'var(--neu-accent)' }}>business</span>
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold" style={{ color: 'var(--neu-text)' }}>{app.carrier}</p>
+                    <p className="text-[11px]" style={{ color: 'var(--neu-text-muted)' }}>Applied {app.appliedDate}</p>
+                  </div>
+                </div>
+                <Badge variant={appStatusVariant[app.status]} dot>{app.status}</Badge>
+              </div>
+            </Card>
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }

@@ -1,9 +1,8 @@
 'use client';
 
-import { Card } from '@/components/ui/Card';
-import { Badge } from '@/components/ui/Badge';
-import { DataTable } from '@/components/ui/DataTable';
+import { Card, Badge, Button, DataTable, ProgressBar } from '@/components/ui';
 
+/* ── Types ──────────────────────────────────────────────────── */
 interface Invoice {
   [key: string]: unknown;
   invoiceNo: string;
@@ -12,90 +11,172 @@ interface Invoice {
   status: 'paid' | 'pending' | 'overdue';
 }
 
-const invoices: Invoice[] = [
-  { invoiceNo: 'INV-2026-0312', date: '2026-03-01', amount: '$499.00', status: 'pending' },
-  { invoiceNo: 'INV-2026-0287', date: '2026-02-01', amount: '$499.00', status: 'paid' },
-  { invoiceNo: 'INV-2026-0251', date: '2026-01-01', amount: '$499.00', status: 'paid' },
-  { invoiceNo: 'INV-2025-0219', date: '2025-12-01', amount: '$399.00', status: 'paid' },
-  { invoiceNo: 'INV-2025-0188', date: '2025-11-01', amount: '$399.00', status: 'paid' },
+/* ── Current Plan ───────────────────────────────────────────── */
+const plan = {
+  name: 'Growth Plan',
+  price: '$499',
+  period: '/month',
+  renewDate: 'Apr 1, 2026',
+  features: [
+    '20 active job posts',
+    'AI-powered driver matching',
+    'Priority support (4hr SLA)',
+    'Advanced analytics dashboard',
+    'Custom branding on listings',
+    'Unlimited driver searches',
+  ],
+};
+
+/* ── Usage ──────────────────────────────────────────────────── */
+const usage = [
+  { label: 'Job Posts', value: 15, max: 20, color: 'blue' as const },
+  { label: 'Driver Searches', value: 142, max: 200, color: 'green' as const },
+  { label: 'AI Matches', value: 45, max: 50, color: 'amber' as const },
 ];
 
-const statusVariant: Record<string, 'success' | 'warning' | 'error'> = {
-  paid: 'success',
-  pending: 'warning',
-  overdue: 'error',
+/* ── Invoices ───────────────────────────────────────────────── */
+const invoices: Invoice[] = [
+  { invoiceNo: 'INV-2026-0312', date: 'Mar 1, 2026', amount: '$499.00', status: 'pending' },
+  { invoiceNo: 'INV-2026-0287', date: 'Feb 1, 2026', amount: '$499.00', status: 'paid' },
+  { invoiceNo: 'INV-2026-0251', date: 'Jan 1, 2026', amount: '$499.00', status: 'paid' },
+  { invoiceNo: 'INV-2025-0219', date: 'Dec 1, 2025', amount: '$399.00', status: 'paid' },
+  { invoiceNo: 'INV-2025-0188', date: 'Nov 1, 2025', amount: '$399.00', status: 'paid' },
+  { invoiceNo: 'INV-2025-0157', date: 'Oct 1, 2025', amount: '$399.00', status: 'overdue' },
+];
+
+const statusBadge: Record<string, { variant: 'success' | 'warning' | 'error'; icon: string }> = {
+  paid: { variant: 'success', icon: 'check_circle' },
+  pending: { variant: 'warning', icon: 'schedule' },
+  overdue: { variant: 'error', icon: 'error' },
 };
 
 const invoiceColumns = [
-  { key: 'invoiceNo', header: 'Invoice #' },
+  { key: 'invoiceNo', header: 'Invoice #', render: (r: Invoice) => (
+    <span className="font-mono text-xs font-bold" style={{ color: 'var(--neu-accent)' }}>{r.invoiceNo}</span>
+  )},
   { key: 'date', header: 'Date' },
-  { key: 'amount', header: 'Amount' },
-  {
-    key: 'status',
-    header: 'Status',
-    render: (row: Invoice) => (
-      <Badge variant={statusVariant[row.status]}>{row.status}</Badge>
-    ),
-  },
-  {
-    key: 'download',
-    header: '',
-    render: () => (
-      <button className="text-lmdr-blue hover:text-lmdr-deep text-sm flex items-center gap-1">
-        <span className="material-symbols-outlined text-base">download</span>
-        PDF
-      </button>
-    ),
-  },
-];
-
-const rateCards = [
-  { label: 'Per Job Post', value: '$25', note: 'Unlimited applicants' },
-  { label: 'Per Successful Hire', value: '$150', note: 'Charged on acceptance' },
-  { label: 'AI Match Premium', value: '$50/mo', note: 'Top-ranked visibility' },
+  { key: 'amount', header: 'Amount', render: (r: Invoice) => (
+    <span className="font-bold" style={{ color: 'var(--neu-text)' }}>{r.amount}</span>
+  )},
+  { key: 'status', header: 'Status', render: (r: Invoice) => (
+    <Badge variant={statusBadge[r.status].variant} icon={statusBadge[r.status].icon}>
+      {r.status.charAt(0).toUpperCase() + r.status.slice(1)}
+    </Badge>
+  )},
+  { key: 'download', header: '', render: () => (
+    <button className="inline-flex items-center gap-1 text-xs font-semibold transition-colors hover:opacity-80" style={{ color: 'var(--neu-accent)' }}>
+      <span className="material-symbols-outlined text-[16px]">download</span>
+      PDF
+    </button>
+  )},
 ];
 
 export default function CarrierBillingPage() {
   return (
-    <div className="space-y-8">
-      <h2 className="text-2xl font-bold text-lmdr-dark">Billing & Invoices</h2>
-
-      {/* Subscription Status */}
-      <Card elevation="md" className="flex flex-col sm:flex-row sm:items-center gap-6">
-        <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-lmdr-blue/10 text-lmdr-blue">
-          <span className="material-symbols-outlined text-3xl">credit_card</span>
-        </div>
-        <div className="flex-1">
-          <div className="flex items-center gap-2 mb-1">
-            <h3 className="text-lg font-semibold text-lmdr-dark">Growth Plan</h3>
-            <Badge variant="success">Active</Badge>
-          </div>
-          <p className="text-sm text-tan">$499/month &middot; Renews April 1, 2026</p>
-          <p className="text-xs text-tan mt-1">Includes 20 job posts, AI matching, priority support</p>
-        </div>
-        <button className="text-sm text-lmdr-blue hover:text-lmdr-deep font-medium">
-          Manage Subscription
-        </button>
-      </Card>
-
-      {/* Rate Card Summary */}
-      <div>
-        <h3 className="text-lg font-semibold text-lmdr-dark mb-4">Rate Card</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {rateCards.map((rc) => (
-            <Card key={rc.label} elevation="sm" className="text-center">
-              <p className="text-sm text-tan mb-1">{rc.label}</p>
-              <p className="text-2xl font-bold text-lmdr-dark">{rc.value}</p>
-              <p className="text-xs text-tan mt-1">{rc.note}</p>
-            </Card>
-          ))}
-        </div>
+    <div className="space-y-7">
+      {/* ═══ Header ═══ */}
+      <div className="animate-fade-up">
+        <h2 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>Billing</h2>
+        <p className="text-sm mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>
+          Manage your subscription, usage, and invoices
+        </p>
       </div>
 
-      {/* Invoice History */}
-      <div>
-        <h3 className="text-lg font-semibold text-lmdr-dark mb-4">Invoice History</h3>
-        <DataTable<Invoice> columns={invoiceColumns} data={invoices} />
+      {/* ═══ Current Plan + Usage ═══ */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        {/* Plan Card */}
+        <Card elevation="md" className="lg:col-span-3 animate-fade-up stagger-1">
+          <div className="flex items-center gap-3 mb-5">
+            <div className="neu-x w-11 h-11 rounded-xl flex items-center justify-center">
+              <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--neu-accent)' }}>
+                credit_card
+              </span>
+            </div>
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>{plan.name}</h3>
+                <Badge variant="success" icon="check_circle">Active</Badge>
+              </div>
+              <p className="text-xs" style={{ color: 'var(--neu-text-muted)' }}>Renews {plan.renewDate}</p>
+            </div>
+            <div className="text-right">
+              <span className="text-3xl font-bold" style={{ color: 'var(--neu-text)' }}>{plan.price}</span>
+              <span className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>{plan.period}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 mb-5">
+            {plan.features.map((feat) => (
+              <div key={feat} className="flex items-center gap-2 py-1.5">
+                <span className="material-symbols-outlined text-[16px]" style={{ color: '#22c55e' }}>check_circle</span>
+                <span className="text-xs font-medium" style={{ color: 'var(--neu-text)' }}>{feat}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex gap-3 pt-4" style={{ borderTop: '1px solid var(--neu-border)' }}>
+            <Button variant="primary" icon="upgrade">Upgrade Plan</Button>
+            <Button variant="ghost" icon="settings">Manage</Button>
+          </div>
+        </Card>
+
+        {/* Usage Card */}
+        <Card elevation="md" className="lg:col-span-2 animate-fade-up stagger-2">
+          <div className="flex items-center gap-2 mb-5">
+            <div className="neu-x w-9 h-9 rounded-xl flex items-center justify-center">
+              <span className="material-symbols-outlined text-[18px]" style={{ color: 'var(--neu-accent)' }}>
+                data_usage
+              </span>
+            </div>
+            <h3 className="text-base font-bold" style={{ color: 'var(--neu-text)' }}>
+              Usage This Cycle
+            </h3>
+          </div>
+
+          <div className="space-y-6">
+            {usage.map((u) => (
+              <div key={u.label}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-semibold" style={{ color: 'var(--neu-text-muted)' }}>
+                    {u.label}
+                  </span>
+                  <span className="text-xs font-bold" style={{ color: 'var(--neu-text)' }}>
+                    {u.value} / {u.max}
+                  </span>
+                </div>
+                <ProgressBar value={u.value} max={u.max} color={u.color} />
+                {u.value / u.max >= 0.9 && (
+                  <p className="text-[10px] font-semibold mt-1" style={{ color: '#f59e0b' }}>
+                    Approaching limit
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-5 pt-4" style={{ borderTop: '1px solid var(--neu-border)' }}>
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-text-muted)' }}>calendar_today</span>
+              <span className="text-[11px]" style={{ color: 'var(--neu-text-muted)' }}>
+                Resets Apr 1, 2026
+              </span>
+            </div>
+          </div>
+        </Card>
+      </div>
+
+      {/* ═══ Invoice History ═══ */}
+      <div className="animate-fade-up stagger-3">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-base font-bold" style={{ color: 'var(--neu-text)' }}>Invoice History</h3>
+          <Button variant="ghost" icon="download" size="sm">Export All</Button>
+        </div>
+        <DataTable<Invoice>
+          columns={invoiceColumns}
+          data={invoices}
+          emptyMessage="No invoices found"
+          emptyIcon="receipt_long"
+        />
       </div>
     </div>
   );

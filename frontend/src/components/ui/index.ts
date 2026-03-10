@@ -4,3 +4,7 @@ export { Input } from './Input';
 export { Badge } from './Badge';
 export { DataTable } from './DataTable';
 export { Modal } from './Modal';
+export { KpiCard } from './KpiCard';
+export { ProgressBar } from './ProgressBar';
+export { StatusDot } from './StatusDot';
+export { Skeleton, SkeletonCard, SkeletonRows } from './Skeleton';

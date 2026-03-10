@@ -14,27 +14,53 @@ interface DataTableProps<T> {
   onRowClick?: (row: T) => void;
   loading?: boolean;
   emptyMessage?: string;
+  emptyIcon?: string;
+}
+
+function SkeletonRow({ cols }: { cols: number }) {
+  return (
+    <tr>
+      {Array.from({ length: cols }).map((_, i) => (
+        <td key={i} className="px-5 py-4">
+          <div className="skeleton-shimmer h-4 rounded" style={{ width: `${60 + Math.random() * 30}%` }} />
+        </td>
+      ))}
+    </tr>
+  );
 }
 
 export function DataTable<T extends object>({
-  columns, data, onRowClick, loading, emptyMessage = 'No data found',
+  columns, data, onRowClick, loading, emptyMessage = 'No data found', emptyIcon = 'inbox',
 }: DataTableProps<T>) {
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <div className="animate-spin h-8 w-8 border-4 border-lmdr-blue border-t-transparent rounded-full" />
+      <div className="neu rounded-2xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr style={{ borderBottom: '1px solid var(--neu-border)' }}>
+              {columns.map((col) => (
+                <th key={col.key} className={cn('px-5 py-3.5 text-left', col.className)}>
+                  <span className="kpi-label">{col.header}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {[1, 2, 3, 4, 5].map((i) => <SkeletonRow key={i} cols={columns.length} />)}
+          </tbody>
+        </table>
       </div>
     );
   }
 
   return (
-    <div className="overflow-x-auto rounded-card bg-beige shadow-[6px_6px_12px_#C8B896,-6px_-6px_12px_#FFFFF5]">
+    <div className="neu rounded-2xl overflow-hidden">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b border-tan/20">
+          <tr style={{ borderBottom: '1px solid var(--neu-border)' }}>
             {columns.map((col) => (
-              <th key={col.key} className={cn('px-4 py-3 text-left font-semibold text-lmdr-dark', col.className)}>
-                {col.header}
+              <th key={col.key} className={cn('px-5 py-3.5 text-left', col.className)}>
+                <span className="kpi-label">{col.header}</span>
               </th>
             ))}
           </tr>
@@ -42,7 +68,12 @@ export function DataTable<T extends object>({
         <tbody>
           {data.length === 0 ? (
             <tr>
-              <td colSpan={columns.length} className="px-4 py-12 text-center text-tan">{emptyMessage}</td>
+              <td colSpan={columns.length} className="px-5 py-16 text-center">
+                <div className="flex flex-col items-center gap-3">
+                  <span className="material-symbols-outlined text-4xl" style={{ color: 'var(--neu-text-muted)' }}>{emptyIcon}</span>
+                  <span className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>{emptyMessage}</span>
+                </div>
+              </td>
             </tr>
           ) : (
             data.map((row, i) => (
@@ -50,12 +81,16 @@ export function DataTable<T extends object>({
                 key={i}
                 onClick={() => onRowClick?.(row)}
                 className={cn(
-                  'border-b border-tan/10 transition-colors',
-                  onRowClick && 'cursor-pointer hover:bg-beige-d/50'
+                  'animate-fade-up transition-colors duration-150',
+                  onRowClick && 'cursor-pointer hover:bg-[var(--neu-bg-deep)]/40'
                 )}
+                style={{
+                  borderBottom: '1px solid var(--neu-border)',
+                  animationDelay: `${i * 0.03}s`,
+                }}
               >
                 {columns.map((col) => (
-                  <td key={col.key} className={cn('px-4 py-3 text-lmdr-dark', col.className)}>
+                  <td key={col.key} className={cn('px-5 py-3.5', col.className)} style={{ color: 'var(--neu-text)' }}>
                     {col.render ? col.render(row) : String((row as Record<string, unknown>)[col.key] ?? '')}
                   </td>
                 ))}

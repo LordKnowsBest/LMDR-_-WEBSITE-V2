@@ -2,90 +2,203 @@
 
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
+import { KpiCard } from '@/components/ui/KpiCard';
+import { ProgressBar } from '@/components/ui/ProgressBar';
 
-const featureAdoption = [
-  { feature: 'AI Matching', users: 1842, adoption: 92, trend: 'up' },
-  { feature: 'Voice Agent', users: 623, adoption: 31, trend: 'up' },
-  { feature: 'Pet Friendly Map', users: 412, adoption: 21, trend: 'stable' },
-  { feature: 'Health Resources', users: 387, adoption: 19, trend: 'up' },
-  { feature: 'Market Signals', users: 298, adoption: 15, trend: 'down' },
-  { feature: 'Carrier Coaching', users: 256, adoption: 13, trend: 'up' },
+/* ── KPI Data ── */
+const kpis = [
+  { label: 'Time-to-Fill', value: '14.2d', icon: 'schedule', trend: '-2.1 days', trendUp: true },
+  { label: 'Cost-per-Hire', value: '$847', icon: 'payments', trend: '-$63', trendUp: true },
+  { label: 'Pipeline Velocity', value: '3.8x', icon: 'speed', trend: '+0.4x', trendUp: true },
+  { label: 'Offer Acceptance', value: '78%', icon: 'thumb_up', trend: '+5%', trendUp: true },
 ];
 
-function ChartPlaceholder({ title, type, height = 'h-64' }: { title: string; type: string; height?: string }) {
-  return (
-    <Card elevation="sm" className="flex flex-col">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="font-semibold text-lmdr-dark">{title}</h3>
-        <Badge variant="info">{type}</Badge>
-      </div>
-      <div className={`${height} rounded-lg bg-beige-d/50 flex items-center justify-center border border-tan/10`}>
-        <div className="text-center">
-          <span className="material-symbols-outlined text-4xl text-tan/40">bar_chart</span>
-          <p className="text-sm text-tan mt-2">Chart renders here when API is connected</p>
-        </div>
-      </div>
-    </Card>
-  );
-}
+/* ── Monthly Placements (12 months) ── */
+const monthlyPlacements = [
+  { month: 'Apr', count: 42 },
+  { month: 'May', count: 56 },
+  { month: 'Jun', count: 51 },
+  { month: 'Jul', count: 68 },
+  { month: 'Aug', count: 74 },
+  { month: 'Sep', count: 63 },
+  { month: 'Oct', count: 81 },
+  { month: 'Nov', count: 77 },
+  { month: 'Dec', count: 59 },
+  { month: 'Jan', count: 88 },
+  { month: 'Feb', count: 95 },
+  { month: 'Mar', count: 84 },
+];
+
+const maxPlacement = Math.max(...monthlyPlacements.map((m) => m.count));
+
+/* ── Source Attribution ── */
+const sources = [
+  { name: 'AI Matching', value: 42, color: '#2563eb' },
+  { name: 'Recruiter Outreach', value: 28, color: '#7c3aed' },
+  { name: 'Job Board Import', value: 15, color: '#06b6d4' },
+  { name: 'Driver Referral', value: 10, color: '#10b981' },
+  { name: 'Organic / Direct', value: 5, color: '#f59e0b' },
+];
+
+/* ── Funnel Data ── */
+const funnel = [
+  { stage: 'Leads', count: 4291, color: '#3b82f6', width: 100 },
+  { stage: 'Contacted', count: 2847, color: '#6366f1', width: 66 },
+  { stage: 'Interview', count: 1284, color: '#8b5cf6', width: 30 },
+  { stage: 'Offer', count: 463, color: '#a855f7', width: 11 },
+  { stage: 'Placed', count: 312, color: '#10b981', width: 7 },
+];
 
 export default function AdminAnalyticsPage() {
   return (
     <div className="space-y-8">
-      <h2 className="text-2xl font-bold text-lmdr-dark">Platform Analytics</h2>
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-extrabold animate-fade-up" style={{ color: 'var(--neu-text)' }}>
+            Platform Analytics
+          </h2>
+          <p className="text-sm mt-1 animate-fade-up stagger-1" style={{ color: 'var(--neu-text-muted)' }}>
+            Recruiting performance metrics — Last 12 months
+          </p>
+        </div>
+        <Badge variant="accent" icon="calendar_month">FY 2025-26</Badge>
+      </div>
 
-      {/* Summary Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          { label: 'Total Users', value: '4,291', icon: 'group' },
-          { label: 'Match Rate', value: '78%', icon: 'percent' },
-          { label: 'Avg Score', value: '84.2', icon: 'grade' },
-          { label: 'API Calls Today', value: '12,847', icon: 'api' },
-        ].map((s) => (
-          <Card key={s.label} elevation="sm" className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-lmdr-blue/10 text-lmdr-blue">
-              <span className="material-symbols-outlined">{s.icon}</span>
-            </div>
-            <div>
-              <p className="text-xs text-tan">{s.label}</p>
-              <p className="text-xl font-bold text-lmdr-dark">{s.value}</p>
-            </div>
-          </Card>
+      {/* ── KPI Row ── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+        {kpis.map((k, i) => (
+          <div key={k.label} className={`stagger-${i + 1}`}>
+            <KpiCard label={k.label} value={k.value} icon={k.icon} trend={k.trend} trendUp={k.trendUp} />
+          </div>
         ))}
       </div>
 
-      {/* Charts Grid */}
+      {/* ── Charts Row ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <ChartPlaceholder title="User Growth" type="Line Chart" />
-        <ChartPlaceholder title="Match Rate by Month" type="Bar Chart" />
-        <ChartPlaceholder title="AI Provider Usage" type="Pie Chart" />
-
-        {/* Feature Adoption Table */}
-        <Card elevation="sm">
-          <h3 className="font-semibold text-lmdr-dark mb-4">Feature Adoption</h3>
-          <div className="space-y-3">
-            {featureAdoption.map((f) => (
-              <div key={f.feature} className="flex items-center gap-3">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm font-medium text-lmdr-dark">{f.feature}</span>
-                    <span className="text-xs text-tan">{f.users.toLocaleString()} users</span>
-                  </div>
-                  <div className="w-full h-2 rounded-full bg-beige-d">
+        {/* Placements by Month (CSS bar chart) */}
+        <Card elevation="md" className="animate-fade-up stagger-5">
+          <div className="flex items-center justify-between mb-5">
+            <h3 className="text-base font-bold" style={{ color: 'var(--neu-text)' }}>Placements by Month</h3>
+            <Badge variant="info" icon="bar_chart">Bar Chart</Badge>
+          </div>
+          <div className="flex items-end gap-2 h-48">
+            {monthlyPlacements.map((m, i) => {
+              const heightPct = (m.count / maxPlacement) * 100;
+              return (
+                <div key={m.month} className="flex-1 flex flex-col items-center gap-1">
+                  <span className="text-[10px] font-bold" style={{ color: 'var(--neu-text)' }}>{m.count}</span>
+                  <div className="w-full relative" style={{ height: '160px' }}>
                     <div
-                      className="h-2 rounded-full bg-lmdr-blue transition-all"
-                      style={{ width: `${f.adoption}%` }}
+                      className={`absolute bottom-0 w-full rounded-t-lg transition-all duration-700 animate-fade-up stagger-${Math.min(i + 1, 8)}`}
+                      style={{
+                        height: `${heightPct}%`,
+                        background: `linear-gradient(180deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)`,
+                        opacity: 0.85,
+                      }}
                     />
                   </div>
+                  <span className="text-[10px] font-semibold" style={{ color: 'var(--neu-text-muted)' }}>{m.month}</span>
                 </div>
-                <span className={`material-symbols-outlined text-base ${f.trend === 'up' ? 'text-sg' : f.trend === 'down' ? 'text-status-suspended' : 'text-tan'}`}>
-                  {f.trend === 'up' ? 'trending_up' : f.trend === 'down' ? 'trending_down' : 'trending_flat'}
-                </span>
+              );
+            })}
+          </div>
+        </Card>
+
+        {/* Source Attribution */}
+        <Card elevation="md" className="animate-fade-up stagger-6">
+          <div className="flex items-center justify-between mb-5">
+            <h3 className="text-base font-bold" style={{ color: 'var(--neu-text)' }}>Source Attribution</h3>
+            <Badge variant="info" icon="donut_large">Breakdown</Badge>
+          </div>
+          <div className="space-y-4">
+            {sources.map((s) => (
+              <div key={s.name}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded-full" style={{ background: s.color }} />
+                    <span className="text-sm font-medium" style={{ color: 'var(--neu-text)' }}>{s.name}</span>
+                  </div>
+                  <span className="text-sm font-bold" style={{ color: 'var(--neu-text)' }}>{s.value}%</span>
+                </div>
+                <div className="w-full h-3 rounded-full neu-ins overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-700"
+                    style={{ width: `${s.value}%`, background: s.color }}
+                  />
+                </div>
               </div>
             ))}
           </div>
         </Card>
       </div>
+
+      {/* ── Funnel Visualization ── */}
+      <Card elevation="md" className="animate-fade-up stagger-7">
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="text-base font-bold" style={{ color: 'var(--neu-text)' }}>Recruiting Funnel</h3>
+          <Badge variant="info" icon="filter_alt">Conversion</Badge>
+        </div>
+        <div className="space-y-3 max-w-2xl mx-auto">
+          {funnel.map((f, i) => {
+            const conversionPct = i > 0 ? Math.round((f.count / funnel[i - 1].count) * 100) : 100;
+            return (
+              <div key={f.stage} className={`animate-fade-up stagger-${i + 1}`}>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold" style={{ color: 'var(--neu-text)' }}>{f.stage}</span>
+                    {i > 0 && (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: `${f.color}15`, color: f.color }}>
+                        {conversionPct}% from prev
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-sm font-extrabold" style={{ color: 'var(--neu-text)' }}>
+                    {f.count.toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex justify-center">
+                  <div
+                    className="h-8 rounded-xl transition-all duration-700 flex items-center justify-center"
+                    style={{
+                      width: `${Math.max(f.width, 10)}%`,
+                      background: `linear-gradient(135deg, ${f.color}, ${f.color}cc)`,
+                    }}
+                  >
+                    <span className="text-[10px] font-bold text-white/80">
+                      {f.count.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* ── Feature Adoption ── */}
+      <Card elevation="md" className="animate-fade-up stagger-8">
+        <h3 className="text-base font-bold mb-5" style={{ color: 'var(--neu-text)' }}>Feature Usage</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {[
+            { name: 'AI Matching', pct: 92, users: '2,412', icon: 'auto_awesome' },
+            { name: 'Voice Agent', pct: 38, users: '823', icon: 'mic' },
+            { name: 'Market Signals', pct: 28, users: '614', icon: 'trending_up' },
+            { name: 'Health Resources', pct: 22, users: '487', icon: 'health_and_safety' },
+            { name: 'Pet Friendly', pct: 19, users: '412', icon: 'pets' },
+            { name: 'Carrier Coaching', pct: 15, users: '298', icon: 'school' },
+          ].map((f) => (
+            <div key={f.name} className="neu-s rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="material-symbols-outlined text-[18px]" style={{ color: 'var(--neu-accent)' }}>{f.icon}</span>
+                <span className="text-sm font-semibold" style={{ color: 'var(--neu-text)' }}>{f.name}</span>
+                <span className="ml-auto text-[10px] font-bold" style={{ color: 'var(--neu-text-muted)' }}>{f.users}</span>
+              </div>
+              <ProgressBar value={f.pct} color={f.pct > 50 ? 'green' : f.pct > 25 ? 'blue' : 'amber'} showValue />
+            </div>
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }
