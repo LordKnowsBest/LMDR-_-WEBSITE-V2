@@ -14,8 +14,9 @@
  */
 
 import wixData from 'wix-data';
-import { usesAirtable, getWixCollectionName, getAirtableTableName } from 'backend/configData';
+import { usesAirtable, usesCloudRun, getWixCollectionName, getAirtableTableName, GCP_MIGRATION_MODE } from 'backend/configData';
 import * as airtable from 'backend/airtableClient';
+import * as cloudRun from 'backend/cloudRunClient';
 import { logDatabase, log } from 'backend/observabilityService';
 
 // ============================================================================
@@ -41,7 +42,9 @@ export async function queryRecords(collectionKey, options = {}) {
 
   try {
     let result;
-    if (usesAirtable(collectionKey)) {
+    if (usesCloudRun(collectionKey)) {
+      result = await queryCloudRun(collectionKey, options);
+    } else if (usesAirtable(collectionKey)) {
       result = await queryAirtable(collectionKey, options);
     } else {
       result = await queryWix(collectionKey, options);
@@ -163,6 +166,28 @@ function applyWixFilters(query, filters) {
 }
 
 /**
+ * Internal: Query Cloud Run (Cloud SQL)
+ */
+async function queryCloudRun(collectionKey, options) {
+  const result = await cloudRun.queryRecords(collectionKey, {
+    filters: options.filters,
+    limit: options.limit,
+    skip: options.skip,
+    sort: options.sort,
+  });
+
+  if (result.error) {
+    return { success: false, items: [], error: result.error };
+  }
+
+  return {
+    success: true,
+    items: result.records || result.items || [],
+    totalCount: result.totalCount || 0,
+  };
+}
+
+/**
  * Internal: Query Airtable
  */
 async function queryAirtable(collectionKey, options) {
@@ -238,15 +263,17 @@ async function queryAirtable(collectionKey, options) {
  */
 export async function getRecord(collectionKey, recordId, options = {}) {
   try {
+    if (usesCloudRun(collectionKey)) {
+      return await cloudRun.getRecord(collectionKey, recordId);
+    }
+
     if (usesAirtable(collectionKey)) {
-      // Pass collection key directly - airtableClient handles table name transformation
       if (typeof airtable.getRecord === 'function') {
         const result = await airtable.getRecord(collectionKey, recordId);
         if (result?.error) return null;
         return result || null;
       }
 
-      // Mock compatibility fallback
       if (typeof airtable.queryRecords === 'function') {
         const result = await airtable.queryRecords(collectionKey, {
           filterByFormula: `RECORD_ID() = '${recordId}'`,
@@ -288,7 +315,11 @@ export async function insertRecord(collectionKey, data, options = {}) {
 
   try {
     let inserted;
-    if (usesAirtable(collectionKey)) {
+    if (usesCloudRun(collectionKey)) {
+      const result = await cloudRun.createRecord(collectionKey, data);
+      if (result?.error) throw new Error(result.error);
+      inserted = result || { ...data };
+    } else if (usesAirtable(collectionKey)) {
       let result;
       if (typeof airtable.createRecord === 'function') {
         result = await airtable.createRecord(collectionKey, data);
@@ -361,7 +392,12 @@ export async function updateRecord(collectionKey, data, options = {}) {
     }
 
     let updated;
-    if (usesAirtable(collectionKey)) {
+    if (usesCloudRun(collectionKey)) {
+      const { _id, ...fields } = data;
+      const result = await cloudRun.updateRecord(collectionKey, _id, fields);
+      if (result?.error) throw new Error(result.error);
+      updated = result || { ...data };
+    } else if (usesAirtable(collectionKey)) {
       const { _id, ...fields } = data;
       let result;
       if (typeof airtable.updateRecord === 'function') {
@@ -423,8 +459,13 @@ export async function updateRecord(collectionKey, data, options = {}) {
  */
 export async function deleteRecord(collectionKey, recordId, options = {}) {
   try {
+    if (usesCloudRun(collectionKey)) {
+      const result = await cloudRun.deleteRecord(collectionKey, recordId);
+      if (result?.error) return { success: false, error: result.error };
+      return { success: true };
+    }
+
     if (usesAirtable(collectionKey)) {
-      // Pass collection key directly - airtableClient handles table name transformation
       if (typeof airtable.deleteRecord !== 'function') {
         return { success: true };
       }
@@ -491,8 +532,11 @@ export async function bulkInsert(collectionKey, records, options = {}) {
       return { success: true, records: [] };
     }
 
+    if (usesCloudRun(collectionKey)) {
+      return await cloudRun.bulkCreate(collectionKey, records);
+    }
+
     if (usesAirtable(collectionKey)) {
-      // Pass collection key directly - airtableClient handles table name transformation
       const result = await airtable.bulkCreate(collectionKey, records);
       return result;
     }
@@ -522,8 +566,11 @@ export async function bulkUpdate(collectionKey, records, options = {}) {
       return { success: true, records: [] };
     }
 
+    if (usesCloudRun(collectionKey)) {
+      return await cloudRun.bulkUpdate(collectionKey, records);
+    }
+
     if (usesAirtable(collectionKey)) {
-      // Pass collection key directly - airtableClient handles table name transformation
       const result = await airtable.bulkUpdate(collectionKey, records);
       return result;
     }
@@ -554,8 +601,11 @@ export async function bulkUpdate(collectionKey, records, options = {}) {
  */
 export async function getAllRecords(collectionKey, options = {}) {
   try {
+    if (usesCloudRun(collectionKey)) {
+      return await cloudRun.getAllRecords(collectionKey, options.filters, options.sort);
+    }
+
     if (usesAirtable(collectionKey)) {
-      // Pass collection key directly - airtableClient handles table name transformation
       let filterFormula = null;
       if (options.filters && Object.keys(options.filters).length > 0) {
         if (typeof airtable.buildFilterFormula === 'function') {
@@ -642,8 +692,11 @@ export async function upsertRecord(collectionKey, lookupField, lookupValue, data
  */
 export async function countRecords(collectionKey, filters = {}, options = {}) {
   try {
+    if (usesCloudRun(collectionKey)) {
+      return await cloudRun.countRecords(collectionKey, filters);
+    }
+
     if (usesAirtable(collectionKey)) {
-      // Pass collection key directly - airtableClient handles table name transformation
       let filterFormula = null;
       if (Object.keys(filters).length > 0) {
         if (typeof airtable.buildFilterFormula === 'function') {
@@ -681,6 +734,9 @@ export async function countRecords(collectionKey, filters = {}, options = {}) {
  * @returns {Object} { source: 'wix'|'airtable', collectionName: string }
  */
 export function getDataSourceInfo(collectionKey) {
+  if (usesCloudRun(collectionKey)) {
+    return { source: 'cloudrun', collectionName: collectionKey };
+  }
   const isAirtable = usesAirtable(collectionKey);
   return {
     source: isAirtable ? 'airtable' : 'wix',

@@ -569,9 +569,20 @@ export const SOCIAL_POSTING_SETTINGS = {
 // =============================================================================
 
 /**
+ * GCP Migration Mode
+ * 'off'      — all Airtable collections route to Airtable (current default)
+ * 'cloudrun' — all Airtable collections route to Cloud Run API (Cloud SQL)
+ * 'dual'     — write to both Airtable and Cloud Run, read from Cloud Run
+ *
+ * Change this single flag to cut over from Airtable → Cloud Run.
+ * Wix-pinned collections are NEVER affected by this flag.
+ */
+export const GCP_MIGRATION_MODE = 'off';
+
+/**
  * Get the data source for a collection
  * @param {string} collectionName - The collection name (camelCase)
- * @returns {'wix' | 'airtable'} The data source
+ * @returns {'wix' | 'airtable' | 'cloudrun'} The data source
  */
 export function getDataSource(collectionName) {
   // EXCEPTION LIST: Explicitly pinned to Wix
@@ -579,8 +590,23 @@ export function getDataSource(collectionName) {
     return 'wix';
   }
 
-  // DEFAULT POLICY: Everything else goes to Airtable
-  return DATA_SOURCE[collectionName] || 'airtable';
+  const base = DATA_SOURCE[collectionName] || 'airtable';
+
+  // If GCP migration is active, redirect Airtable collections to Cloud Run
+  if (base === 'airtable' && (GCP_MIGRATION_MODE === 'cloudrun' || GCP_MIGRATION_MODE === 'dual')) {
+    return 'cloudrun';
+  }
+
+  return base;
+}
+
+/**
+ * Check if a collection uses Cloud Run (GCP Cloud SQL)
+ * @param {string} collectionName - The collection name
+ * @returns {boolean}
+ */
+export function usesCloudRun(collectionName) {
+  return getDataSource(collectionName) === 'cloudrun';
 }
 
 /**
@@ -589,7 +615,9 @@ export function getDataSource(collectionName) {
  * @returns {boolean}
  */
 export function usesAirtable(collectionName) {
-  return getDataSource(collectionName) === 'airtable';
+  const source = getDataSource(collectionName);
+  // In dual mode, Airtable still gets writes — so it's still "used"
+  return source === 'airtable' || (GCP_MIGRATION_MODE === 'dual' && DATA_SOURCE[collectionName] === 'airtable');
 }
 
 /**
