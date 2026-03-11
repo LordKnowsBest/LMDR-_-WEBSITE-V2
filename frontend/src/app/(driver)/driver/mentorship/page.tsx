@@ -2,8 +2,12 @@
 
 import { useState } from 'react';
 import { Card } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+import { getMentors } from '../../actions/wellness';
 
-const mentors = [
+const DEMO_DRIVER_ID = 'demo-driver-001';
+
+const mockMentors = [
     { id: 1, name: 'David Miller', class: 'CDL-A', exp: '15 Yrs', rating: 4.9, active: true },
     { id: 2, name: 'Sarah Jenkins', class: 'CDL-A', exp: '8 Yrs', rating: 4.8, active: true },
     { id: 3, name: 'Michael Chang', class: 'CDL-B', exp: '5 Yrs', rating: 4.7, active: false },
@@ -16,6 +20,22 @@ const sessions = [
 
 export default function MentorshipPage() {
     const [tab, setTab] = useState('My Mentors');
+
+    const { data: mentorsData } = useApi<Record<string, unknown>>(
+        () => getMentors().then(d => ({ data: d as unknown as Record<string, unknown> })),
+        [DEMO_DRIVER_ID]
+    );
+
+    const mentors = mentorsData && Array.isArray(mentorsData)
+        ? (mentorsData as Array<Record<string, unknown>>).map((m, i) => ({
+            id: i + 1,
+            name: (m.name as string) || (m.full_name as string) || 'Unknown',
+            class: (m.cdl_class as string) || (m.class as string) || 'CDL-A',
+            exp: (m.experience as string) || (m.years_experience ? `${m.years_experience} Yrs` : '5 Yrs'),
+            rating: (m.rating as number) || 4.5,
+            active: m.active !== false,
+        }))
+        : mockMentors;
 
     return (
         <div className="space-y-4">

@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from 'react';
 import { Card, Button, Badge, ProgressBar } from '@/components/ui';
-import { driverApi } from '@/lib/api';
+import { listDocuments, uploadDocument } from '../../actions/documents';
 import { useApi, useMutation } from '@/lib/hooks';
 
 /* ── Constants ── */
@@ -41,12 +41,14 @@ export default function DriverDocumentsPage() {
 
   /* ── API Data ── */
   const { data: docsData, loading, error, refresh } = useApi<Record<string, unknown>>(
-    () => driverApi.getDocuments(DEMO_DRIVER_ID),
+    () => listDocuments(DEMO_DRIVER_ID).then(d => ({ data: { documents: d } as Record<string, unknown> })),
     [DEMO_DRIVER_ID]
   );
 
   const uploadMutation = useMutation<Record<string, unknown>>(
-    useCallback((doc: Record<string, unknown>) => driverApi.registerDocument(DEMO_DRIVER_ID, doc), [])
+    useCallback((doc: Record<string, unknown>) =>
+      uploadDocument(DEMO_DRIVER_ID, doc as { docType: string; fileName: string; fileUrl: string; expirationDate?: string })
+        .then(d => ({ data: d as Record<string, unknown> })), [])
   );
 
   /* ── Derive display values (API data with mock fallback) ── */

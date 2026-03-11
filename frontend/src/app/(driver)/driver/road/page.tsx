@@ -2,21 +2,24 @@
 
 import { useState } from 'react';
 import { Card } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+import { getHealthResources, getHealthTips, searchPetFriendly } from '../../actions/wellness';
 
-const restAreas = [
+/* ── Mock Fallback Data ── */
+const mockRestAreas = [
     { id: 1, name: 'I-20 Rest Stop — Odessa, TX', distance: '12 mi', amenities: ['Showers', 'WiFi', 'Food'], rating: 4.2 },
     { id: 2, name: 'Flying J Travel Center', distance: '24 mi', amenities: ['Diesel', 'Showers', 'WiFi', 'Food'], rating: 4.7 },
     { id: 3, name: 'Pilot Travel Center — Abilene', distance: '47 mi', amenities: ['Diesel', 'Showers', 'Parking'], rating: 4.1 },
 ];
 
-const healthResources = [
+const mockHealthResources = [
     { icon: 'favorite', label: 'Heart Health for Drivers', category: 'Cardio', helpful: 234, time: '5 min read' },
     { icon: 'fitness_center', label: 'Cab Exercises You Can Do Anywhere', category: 'Fitness', helpful: 189, time: '7 min read' },
     { icon: 'psychology', label: 'Managing Loneliness on Long Hauls', category: 'Mental Health', helpful: 312, time: '4 min read' },
     { icon: 'restaurant', label: 'Eating Healthy at Truck Stops', category: 'Nutrition', helpful: 156, time: '6 min read' },
 ];
 
-const petFriendly = [
+const mockPetFriendly = [
     { id: 1, name: 'Petro Stopping Center — Nashville', distance: '8 mi', amenities: ['Pet Walk Area', 'Vet Nearby', 'Pet Food'], rating: 4.6, pets: '✓' },
     { id: 2, name: 'Love\'s Travel Stop — Bowling Green', distance: '31 mi', amenities: ['Pet Walk Area', 'Water Stations'], rating: 4.3, pets: '✓' },
     { id: 3, name: 'TA Travel Center — Cookeville', distance: '55 mi', amenities: ['Pet Area', 'Showers'], rating: 3.9, pets: '✓' },
@@ -27,6 +30,24 @@ const TABS = ['Road Tools', 'Health & Wellness', 'Pet Friendly'];
 export default function RoadWellnessPage() {
     const [tab, setTab] = useState('Road Tools');
     const [hosHours, setHosHours] = useState(7);
+
+    const { data: healthResourcesData } = useApi<Record<string, unknown>[]>(
+        () => getHealthResources().then(d => ({ data: d as unknown as Record<string, unknown>[] })),
+        []
+    );
+    const { data: healthTipsData } = useApi<Record<string, unknown>[]>(
+        () => getHealthTips().then(d => ({ data: d as unknown as Record<string, unknown>[] })),
+        []
+    );
+    // Default coords (Dallas, TX) — pet-friendly search
+    const { data: petFriendlyData } = useApi<Record<string, unknown>[]>(
+        () => searchPetFriendly(32.7767, -96.7970, 50).then(d => ({ data: d as unknown as Record<string, unknown>[] })),
+        []
+    );
+
+    const restAreas = mockRestAreas; // No server action for rest areas yet
+    const healthResources = (healthResourcesData as typeof mockHealthResources) ?? mockHealthResources;
+    const petFriendly = (petFriendlyData as typeof mockPetFriendly) ?? mockPetFriendly;
 
     const hosRemaining = 11 - hosHours;
     const hosPct = Math.round((hosHours / 11) * 100);

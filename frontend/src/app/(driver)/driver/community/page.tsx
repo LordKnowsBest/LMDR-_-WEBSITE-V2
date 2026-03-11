@@ -2,22 +2,27 @@
 
 import { useState } from 'react';
 import { Card } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+import { getForums, getAnnouncements, getSurveys } from '../../actions/community';
 
-const forums = [
+const DEMO_DRIVER_ID = 'demo-driver-001';
+
+/* ── Mock Fallback Data ── */
+const mockForums = [
     { id: 1, title: 'Best carriers for home-weekly OTR?', replies: 23, views: 412, tag: 'OTR', hot: true, time: '2h ago', author: 'trucking_james' },
     { id: 2, title: 'FMCSA compliance tips for new CDL holders', replies: 11, views: 189, tag: 'Compliance', hot: false, time: '5h ago', author: 'road_wisdom' },
     { id: 3, title: 'Werner vs Schneider — pay comparison 2026', replies: 47, views: 891, tag: 'Pay', hot: true, time: '1d ago', author: 'paycheck_pro' },
     { id: 4, title: 'HOS tips for new drivers', replies: 8, views: 134, tag: 'Tips', hot: false, time: '2d ago', author: 'veteran_cdl' },
 ];
 
-const announcements = [
+const mockAnnouncements = [
     { id: 1, carrier: 'Swift Transportation', message: 'New regional routes opening in Dallas, TX — $0.68/mile guaranteed.', time: '1h ago', read: false, logo: 'ST' },
     { id: 2, carrier: 'LMDR Platform', message: 'Your match score increased to 87 — 3 new carriers viewed your profile this week.', time: '3h ago', read: false, logo: 'LM' },
     { id: 3, carrier: 'Werner Enterprises', message: 'Sign-on bonus extended through end of March 2026 — $5,000.', time: '1d ago', read: true, logo: 'WE' },
     { id: 4, carrier: 'Schneider National', message: 'New pet-friendly policy — all regional drivers may bring one pet.', time: '2d ago', read: true, logo: 'SN' },
 ];
 
-const surveys = [
+const mockSurveys = [
     { id: 1, title: 'How are we doing?', desc: 'Rate your LMDR experience this week', questions: 5, xp: 50, completed: false },
     { id: 2, title: 'Pay Satisfaction Survey', desc: 'Help us improve carrier pay matching', questions: 8, xp: 75, completed: false },
     { id: 3, title: 'Feature Feedback', desc: 'New AI matching features — share your thoughts', questions: 4, xp: 40, completed: true },
@@ -28,6 +33,23 @@ const TABS = ['Forums', 'Announcements', 'Surveys'];
 export default function CommunityPage() {
     const [tab, setTab] = useState('Forums');
     const [expandedForum, setExpandedForum] = useState<number | null>(null);
+
+    const { data: forumsData } = useApi<Record<string, unknown>[]>(
+        () => getForums().then(d => ({ data: d as unknown as Record<string, unknown>[] })),
+        []
+    );
+    const { data: announcementsData } = useApi<Record<string, unknown>[]>(
+        () => getAnnouncements().then(d => ({ data: d as unknown as Record<string, unknown>[] })),
+        []
+    );
+    const { data: surveysData } = useApi<Record<string, unknown>[]>(
+        () => getSurveys().then(d => ({ data: d as unknown as Record<string, unknown>[] })),
+        []
+    );
+
+    const forums = (forumsData as typeof mockForums) ?? mockForums;
+    const announcements = (announcementsData as typeof mockAnnouncements) ?? mockAnnouncements;
+    const surveys = (surveysData as typeof mockSurveys) ?? mockSurveys;
 
     return (
         <div className="space-y-4">

@@ -2,6 +2,10 @@
 
 import { useState } from 'react';
 import { Card } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+import { getProgression, getAchievements, getChallenges, getLeaderboard } from '../../actions/gamification';
+
+const DEMO_DRIVER_ID = 'demo-driver-001';
 
 const gamification = {
     level: 3, title: 'Mile Maker', xp: 310, xpNext: 600,
@@ -35,7 +39,72 @@ const TABS = ['Overview', 'Achievements', 'Challenges', 'Leaderboard'];
 
 export default function GamificationPage() {
     const [tab, setTab] = useState('Overview');
-    const xpPct = Math.round((gamification.xp / gamification.xpNext) * 100);
+
+    /* ── API Data ── */
+    const { data: progressionData } = useApi<Record<string, unknown>>(
+        () => getProgression(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+        [DEMO_DRIVER_ID]
+    );
+    const { data: achievementsData } = useApi<unknown[]>(
+        () => getAchievements(DEMO_DRIVER_ID).then(d => ({ data: d })),
+        [DEMO_DRIVER_ID]
+    );
+    const { data: challengesData } = useApi<unknown[]>(
+        () => getChallenges(DEMO_DRIVER_ID).then(d => ({ data: d })),
+        [DEMO_DRIVER_ID]
+    );
+    const { data: leaderboardData } = useApi<unknown[]>(
+        () => getLeaderboard(10).then(d => ({ data: d })),
+        []
+    );
+
+    /* ── Derive display values with mock fallbacks ── */
+    const displayGamification = progressionData
+        ? {
+            level: Number(progressionData.level ?? gamification.level),
+            title: (progressionData.levelName as string) || (progressionData.level_name as string) || gamification.title,
+            xp: Number(progressionData.xp ?? gamification.xp),
+            xpNext: Number(progressionData.xp_next ?? progressionData.xpNext ?? gamification.xpNext),
+            streak: Number(progressionData.streakDays ?? progressionData.streak_days ?? gamification.streak),
+            streakMultiplier: `${Number(progressionData.multiplier ?? 1)}x`,
+            rank: (progressionData.rank as string) || gamification.rank,
+        }
+        : gamification;
+
+    const displayAchievements = achievementsData
+        ? (achievementsData as Record<string, unknown>[]).map((a, i) => ({
+            id: Number(a.id ?? i + 1),
+            icon: (a.icon as string) || 'emoji_events',
+            label: (a.label as string) || (a.name as string) || (a.title as string) || 'Achievement',
+            desc: (a.desc as string) || (a.description as string) || '',
+            earned: Boolean(a.earned ?? a.is_earned ?? a.unlocked ?? false),
+            xp: Number(a.xp ?? a.xp_reward ?? 0),
+        }))
+        : achievements;
+
+    const displayChallenges = challengesData
+        ? (challengesData as Record<string, unknown>[]).map((c, i) => ({
+            id: Number(c.id ?? i + 1),
+            label: (c.label as string) || (c.name as string) || (c.title as string) || 'Challenge',
+            type: (c.type as string) || (c.challenge_type as string) || 'Daily',
+            progress: Number(c.progress ?? c.current_progress ?? 0),
+            total: Number(c.total ?? c.target ?? 1),
+            xp: Number(c.xp ?? c.xp_reward ?? 0),
+            expires: (c.expires as string) || (c.expires_in as string) || '',
+        }))
+        : challenges;
+
+    const displayLeaderboard = leaderboardData
+        ? (leaderboardData as Record<string, unknown>[]).map((e, i) => ({
+            rank: Number(e.rank ?? i + 1),
+            name: (e.name as string) || (e.driver_name as string) || 'Anonymous',
+            xp: Number(e.xp ?? e.total_xp ?? 0),
+            badge: (e.badge as string) || (i === 0 ? '\u{1F3C6}' : i === 1 ? '\u{1F948}' : i === 2 ? '\u{1F949}' : ''),
+            isYou: Boolean(e.is_you ?? e.isYou ?? false),
+        }))
+        : leaderboard;
+
+    const xpPct = Math.round((displayGamification.xp / displayGamification.xpNext) * 100);
 
     return (
         <div className="space-y-4">
@@ -50,9 +119,9 @@ export default function GamificationPage() {
                 <div className="flex items-center justify-between mb-3">
                     <div>
                         <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>
-                            Level {gamification.level}
+                            Level {displayGamification.level}
                         </p>
-                        <p className="text-2xl font-black" style={{ color: 'var(--neu-accent)' }}>{gamification.title}</p>
+                        <p className="text-2xl font-black" style={{ color: 'var(--neu-accent)' }}>{displayGamification.title}</p>
                     </div>
                     <div className="text-right">
                         <div
@@ -60,7 +129,7 @@ export default function GamificationPage() {
                             style={{ background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)' }}
                         >
                             <div className="text-center">
-                                <p className="text-white text-[20px] font-black leading-none">{gamification.level}</p>
+                                <p className="text-white text-[20px] font-black leading-none">{displayGamification.level}</p>
                                 <p className="text-white text-[7px] font-bold opacity-80">LEVEL</p>
                             </div>
                         </div>
@@ -70,8 +139,8 @@ export default function GamificationPage() {
                 {/* XP Bar */}
                 <div className="mb-3">
                     <div className="flex justify-between text-[10px] mb-1" style={{ color: 'var(--neu-text-muted)' }}>
-                        <span>{gamification.xp} XP</span>
-                        <span>{gamification.xpNext} XP to Lv {gamification.level + 1}</span>
+                        <span>{displayGamification.xp} XP</span>
+                        <span>{displayGamification.xpNext} XP to Lv {displayGamification.level + 1}</span>
                     </div>
                     <div className="neu-in rounded-full h-3 overflow-hidden">
                         <div
@@ -90,21 +159,21 @@ export default function GamificationPage() {
                     <div className="neu-x rounded-xl px-3 py-2 flex items-center gap-2 flex-1">
                         <span className="material-symbols-outlined text-[18px] text-orange-400">local_fire_department</span>
                         <div>
-                            <p className="text-[16px] font-black leading-none" style={{ color: 'var(--neu-text)' }}>{gamification.streak}</p>
+                            <p className="text-[16px] font-black leading-none" style={{ color: 'var(--neu-text)' }}>{displayGamification.streak}</p>
                             <p className="text-[9px]" style={{ color: 'var(--neu-text-muted)' }}>Day Streak</p>
                         </div>
                     </div>
                     <div className="neu-x rounded-xl px-3 py-2 flex items-center gap-2 flex-1">
                         <span className="material-symbols-outlined text-[18px] text-yellow-400">bolt</span>
                         <div>
-                            <p className="text-[16px] font-black leading-none" style={{ color: 'var(--neu-text)' }}>{gamification.streakMultiplier}</p>
+                            <p className="text-[16px] font-black leading-none" style={{ color: 'var(--neu-text)' }}>{displayGamification.streakMultiplier}</p>
                             <p className="text-[9px]" style={{ color: 'var(--neu-text-muted)' }}>XP Multiplier</p>
                         </div>
                     </div>
                     <div className="neu-x rounded-xl px-3 py-2 flex items-center gap-2 flex-1">
                         <span className="material-symbols-outlined text-[18px]" style={{ color: 'var(--neu-accent)' }}>military_tech</span>
                         <div>
-                            <p className="text-[13px] font-black leading-none" style={{ color: 'var(--neu-text)' }}>{gamification.rank}</p>
+                            <p className="text-[13px] font-black leading-none" style={{ color: 'var(--neu-text)' }}>{displayGamification.rank}</p>
                             <p className="text-[9px]" style={{ color: 'var(--neu-text-muted)' }}>Rank</p>
                         </div>
                     </div>
@@ -160,7 +229,7 @@ export default function GamificationPage() {
             {/* Achievements */}
             {tab === 'Achievements' && (
                 <div className="grid grid-cols-2 gap-3">
-                    {achievements.map((ach) => (
+                    {displayAchievements.map((ach) => (
                         <Card key={ach.id} elevation={ach.earned ? 'md' : 'sm'} className="!p-3.5" style={{ opacity: ach.earned ? 1 : 0.5 }}>
                             <div
                                 className="w-10 h-10 rounded-xl flex items-center justify-center mb-2"
@@ -187,7 +256,7 @@ export default function GamificationPage() {
             {/* Challenges */}
             {tab === 'Challenges' && (
                 <div className="space-y-3">
-                    {challenges.map((ch) => {
+                    {displayChallenges.map((ch) => {
                         const pct = Math.round((ch.progress / ch.total) * 100);
                         return (
                             <Card key={ch.id} elevation="md" className="!p-4">
@@ -230,7 +299,7 @@ export default function GamificationPage() {
             {tab === 'Leaderboard' && (
                 <div className="space-y-2">
                     <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>Weekly Rankings</p>
-                    {leaderboard.map((entry) => (
+                    {displayLeaderboard.map((entry) => (
                         <Card
                             key={entry.rank}
                             elevation={entry.isYou ? 'lg' : 'sm'}

@@ -2,6 +2,10 @@
 
 import { useState } from 'react';
 import { Card, Badge, ProgressBar } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+import { getApplications, withdrawApplication } from '../../actions/cockpit';
+
+const DEMO_DRIVER_ID = 'demo-driver-001';
 
 /* ── Types ── */
 interface Application {
@@ -68,19 +72,43 @@ export default function ApplicationsPage() {
     const [activeTab, setActiveTab] = useState<TabFilter>('all');
     const [expandedApp, setExpandedApp] = useState<string | null>(null);
 
+    /* ── API Data ── */
+    const { data: apiData, loading, error, refresh } = useApi<{ items: unknown[]; totalCount: number }>(
+        () => getApplications(DEMO_DRIVER_ID, 20, 0).then(d => ({ data: d })),
+        [DEMO_DRIVER_ID]
+    );
+
+    /* ── Map API items to Application interface (snake_case → camelCase), fallback to mock ── */
+    const applications: Application[] = apiData?.items
+        ? (apiData.items as Record<string, unknown>[]).map((item, i) => ({
+            id: (item.id as string) || (item._id as string) || `api-${i}`,
+            carrier: (item.carrier_name as string) || (item.carrier as string) || 'Unknown',
+            position: (item.position as string) || (item.job_title as string) || 'Driver',
+            location: (item.location as string) || '',
+            payRange: (item.pay_range as string) || '',
+            appliedDate: (item.applied_date as string) || (item.created_at as string) || '',
+            lastUpdate: (item.last_update as string) || (item.updated_at as string) || '',
+            status: (item.status as Application['status']) || 'Under Review',
+            matchScore: Number(item.match_score ?? item.matchScore ?? 0),
+            nextStep: (item.next_step as string) || (item.nextStep as string) || undefined,
+            recruiterName: (item.recruiter_name as string) || (item.recruiterName as string) || undefined,
+            interviewDate: (item.interview_date as string) || (item.interviewDate as string) || undefined,
+        }))
+        : mockApplications;
+
     /* ── Filter logic ── */
-    const filtered = mockApplications.filter((app) => {
+    const filtered = applications.filter((app) => {
         if (activeTab === 'all') return true;
         if (activeTab === 'active') return ['Under Review', 'Interview'].includes(app.status);
         if (activeTab === 'offers') return app.status === 'Offered';
         return ['Declined', 'Withdrawn'].includes(app.status);
     });
 
-    const activeCount = mockApplications.filter((a) => ['Under Review', 'Interview'].includes(a.status)).length;
-    const offerCount = mockApplications.filter((a) => a.status === 'Offered').length;
+    const activeCount = applications.filter((a) => ['Under Review', 'Interview'].includes(a.status)).length;
+    const offerCount = applications.filter((a) => a.status === 'Offered').length;
 
     const tabs: { id: TabFilter; label: string; count?: number }[] = [
-        { id: 'all', label: 'All', count: mockApplications.length },
+        { id: 'all', label: 'All', count: applications.length },
         { id: 'active', label: 'Active', count: activeCount },
         { id: 'offers', label: 'Offers', count: offerCount },
         { id: 'closed', label: 'Closed' },
@@ -103,7 +131,7 @@ export default function ApplicationsPage() {
                 {[
                     { label: 'Active', value: activeCount, icon: 'pending_actions' },
                     { label: 'Offers', value: offerCount, icon: 'handshake' },
-                    { label: 'Total', value: mockApplications.length, icon: 'description' },
+                    { label: 'Total', value: applications.length, icon: 'description' },
                 ].map((kpi) => (
                     <Card key={kpi.label} elevation="sm" className="flex-1 !p-3 text-center">
                         <div className="neu-x w-8 h-8 rounded-lg flex items-center justify-center mx-auto mb-1.5">

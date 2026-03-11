@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from 'react';
 import { Card, Button, Badge, ProgressBar } from '@/components/ui';
-import { matchingApi } from '@/lib/api';
+import { findJobs } from '../../actions/matching';
 import { useApi } from '@/lib/hooks';
 
 /* ── Constants ── */
@@ -214,7 +214,7 @@ export default function DriverMatchesPage() {
 
   /* ── API Data ── */
   const fetcher = useCallback(
-    () => matchingApi.findJobsForDriver(DEMO_DRIVER_ID, filters),
+    () => findJobs(DEMO_DRIVER_ID).then(d => ({ data: d as Record<string, unknown> })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [radius, minPay, runType, maxTurnover, maxTruckAge, fleetSize]
   );

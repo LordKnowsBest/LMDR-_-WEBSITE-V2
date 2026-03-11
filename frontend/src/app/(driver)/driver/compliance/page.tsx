@@ -2,15 +2,21 @@
 
 import { useState } from 'react';
 import { Card } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+import { getDocumentStatus } from '../../actions/documents';
+import { getCurrentScores } from '../../actions/scorecard';
 
-const policies = [
+const DEMO_DRIVER_ID = 'demo-driver-001';
+
+/* ── Mock Fallback Data ── */
+const mockPolicies = [
     { id: 1, title: 'FMCSA Hours of Service', carrier: 'Federal', updated: 'Jan 2026', status: 'signed' },
     { id: 2, title: 'Drug and Alcohol Clearinghouse Consent', carrier: 'LMDR Platform', updated: 'Feb 2026', status: 'signed' },
     { id: 3, title: 'Swift Regional Safety Protocol', carrier: 'Swift Transportation', updated: 'Mar 1, 2026', status: 'pending' },
     { id: 4, title: 'Equipment Inspection Requirements', carrier: 'Swift Transportation', updated: 'Mar 1, 2026', status: 'pending' },
 ];
 
-const audits = [
+const mockAudits = [
     { id: 1, type: 'Medical Certificate Verification', status: 'verified', date: 'Jan 15, 2026' },
     { id: 2, type: 'CDL-A License Status', status: 'verified', date: 'Jan 15, 2026' },
     { id: 3, type: 'MVR Check', status: 'pending', date: 'Initiated Mar 8, 2026' },
@@ -18,6 +24,22 @@ const audits = [
 
 export default function CompliancePage() {
     const [activeTab, setActiveTab] = useState('Policies');
+
+    const { data: docStatusData } = useApi<Record<string, unknown>>(
+        () => getDocumentStatus(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+        [DEMO_DRIVER_ID]
+    );
+    const { data: scoresData } = useApi<Record<string, unknown>>(
+        () => getCurrentScores(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+        [DEMO_DRIVER_ID]
+    );
+
+    // Derive pending count from document status API if available
+    const pendingCount = docStatusData
+        ? ((docStatusData.missing as string[])?.length ?? 0) + ((docStatusData.expired as string[])?.length ?? 0)
+        : mockPolicies.filter(p => p.status === 'pending').length;
+    const policies = mockPolicies; // Keep mock layout — API doesn't return policy objects
+    const audits = mockAudits; // Keep mock layout — API doesn't return audit objects
 
     return (
         <div className="space-y-4">
@@ -49,7 +71,7 @@ export default function CompliancePage() {
                         <div className="flex gap-3">
                             <span className="material-symbols-outlined text-[20px] text-orange-500 shrink-0">warning</span>
                             <div>
-                                <p className="text-[12px] font-bold" style={{ color: 'var(--neu-text)' }}>2 Action Items Required</p>
+                                <p className="text-[12px] font-bold" style={{ color: 'var(--neu-text)' }}>{pendingCount} Action Item{pendingCount !== 1 ? 's' : ''} Required</p>
                                 <p className="text-[10px] mt-0.5 mb-2" style={{ color: 'var(--neu-text-muted)' }}>
                                     You have pending policies from Swift Transportation to review and sign before your application can proceed.
                                 </p>

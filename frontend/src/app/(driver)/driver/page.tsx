@@ -6,6 +6,7 @@ import { getProfile } from '../actions/profile';
 import { getDashboard } from '../actions/cockpit';
 import { getProgression } from '../actions/gamification';
 import { getDocumentStatus } from '../actions/documents';
+import { findJobs } from '../actions/matching';
 import { useApi } from '@/lib/hooks';
 
 /* ── Constants ── */
@@ -94,6 +95,13 @@ export default function DriverDashboard() {
     [DEMO_DRIVER_ID]
   );
 
+  const {
+    data: matchesData,
+  } = useApi<Record<string, unknown>>(
+    () => findJobs(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+    [DEMO_DRIVER_ID]
+  );
+
   /* ── Derive display values ── */
   const driver = profileData
     ? {
@@ -130,7 +138,15 @@ export default function DriverDashboard() {
     ]
     : mockKpis;
 
-  const recentMatches = mockRecentMatches;
+  const recentMatches = matchesData?.matches
+    ? (matchesData.matches as Array<Record<string, unknown>>).slice(0, 3).map((m, i) => ({
+        id: String(i + 1),
+        carrier: (m.carrier_name as string) || (m.company_name as string) || 'Unknown',
+        score: (m.match_score as number) || (m.score as number) || 0,
+        location: `${(m.city as string) || ''}, ${(m.state as string) || ''}`.trim().replace(/^,\s*/, ''),
+        truckType: (m.equipment_types as string) || (m.truck_type as string) || 'Dry Van',
+      }))
+    : mockRecentMatches;
 
   // Build onboarding steps from doc status + profile completeness
   const docStatus = docStatusData as { complete?: string[]; missing?: string[]; pendingReview?: string[] } | null;

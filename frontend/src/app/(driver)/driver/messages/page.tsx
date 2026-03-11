@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { Card, Badge } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+// TODO: wire to messages server action when available
 
 /* ── Mock Data ── */
 interface Message {

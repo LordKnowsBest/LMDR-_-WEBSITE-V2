@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Card, Button, Input, Badge } from '@/components/ui';
-import { driverApi } from '@/lib/api';
+import { getProfile, updateProfile } from '../../actions/profile';
 import { useApi, useMutation } from '@/lib/hooks';
 
 /* ── Constants ── */
@@ -38,31 +38,32 @@ export default function DriverProfilePage() {
 
   /* ── API Data ── */
   const { data: profileData, loading, error, refresh } = useApi<Record<string, unknown>>(
-    () => driverApi.getProfile(DEMO_DRIVER_ID),
+    () => getProfile(DEMO_DRIVER_ID).then(d => ({ data: d as Record<string, unknown> })),
     [DEMO_DRIVER_ID]
   );
 
   const saveMutation = useMutation<Record<string, unknown>>(
-    useCallback((data: Record<string, unknown>) => driverApi.updateProfile(DEMO_DRIVER_ID, data), [])
+    useCallback((data: Record<string, unknown>) =>
+      updateProfile(DEMO_DRIVER_ID, data).then(d => ({ data: d as Record<string, unknown> })), [])
   );
 
-  /* ── Sync API data into local state ── */
+  /* ── Sync API data into local state (API returns snake_case fields) ── */
   useEffect(() => {
     if (profileData) {
       setProfile({
-        firstName: (profileData.firstName as string) || mockProfile.firstName,
-        lastName: (profileData.lastName as string) || mockProfile.lastName,
+        firstName: (profileData.first_name as string) || mockProfile.firstName,
+        lastName: (profileData.last_name as string) || mockProfile.lastName,
         email: (profileData.email as string) || mockProfile.email,
         phone: (profileData.phone as string) || mockProfile.phone,
-        cdlClass: (profileData.cdlClass as string) || mockProfile.cdlClass,
-        cdlState: (profileData.cdlState as string) || mockProfile.cdlState,
+        cdlClass: (profileData.cdl_class as string) || mockProfile.cdlClass,
+        cdlState: (profileData.cdl_state as string) || mockProfile.cdlState,
         endorsements: (profileData.endorsements as string[]) || mockProfile.endorsements,
-        yearsExperience: String((profileData.yearsExperience as number) ?? mockProfile.yearsExperience),
-        preferredTruck: (profileData.preferredTruck as string) || mockProfile.preferredTruck,
-        preferredRoute: (profileData.preferredRoute as string) || mockProfile.preferredRoute,
-        homeCity: (profileData.homeCity as string) || mockProfile.homeCity,
-        homeState: (profileData.homeState as string) || mockProfile.homeState,
-        homeZip: (profileData.homeZip as string) || mockProfile.homeZip,
+        yearsExperience: String((profileData.years_experience as number) ?? mockProfile.yearsExperience),
+        preferredTruck: (profileData.preferred_truck_type as string) || mockProfile.preferredTruck,
+        preferredRoute: (profileData.preferred_route_type as string) || mockProfile.preferredRoute,
+        homeCity: (profileData.city as string) || mockProfile.homeCity,
+        homeState: (profileData.state as string) || mockProfile.homeState,
+        homeZip: (profileData.zip as string) || mockProfile.homeZip,
       });
     }
   }, [profileData]);
@@ -93,22 +94,22 @@ export default function DriverProfilePage() {
 
   const handleCancel = () => {
     setEditing(false);
-    // Reset to API data or mock
+    // Reset to API data or mock (API returns snake_case)
     if (profileData) {
       setProfile({
-        firstName: (profileData.firstName as string) || mockProfile.firstName,
-        lastName: (profileData.lastName as string) || mockProfile.lastName,
+        firstName: (profileData.first_name as string) || mockProfile.firstName,
+        lastName: (profileData.last_name as string) || mockProfile.lastName,
         email: (profileData.email as string) || mockProfile.email,
         phone: (profileData.phone as string) || mockProfile.phone,
-        cdlClass: (profileData.cdlClass as string) || mockProfile.cdlClass,
-        cdlState: (profileData.cdlState as string) || mockProfile.cdlState,
+        cdlClass: (profileData.cdl_class as string) || mockProfile.cdlClass,
+        cdlState: (profileData.cdl_state as string) || mockProfile.cdlState,
         endorsements: (profileData.endorsements as string[]) || mockProfile.endorsements,
-        yearsExperience: String((profileData.yearsExperience as number) ?? mockProfile.yearsExperience),
-        preferredTruck: (profileData.preferredTruck as string) || mockProfile.preferredTruck,
-        preferredRoute: (profileData.preferredRoute as string) || mockProfile.preferredRoute,
-        homeCity: (profileData.homeCity as string) || mockProfile.homeCity,
-        homeState: (profileData.homeState as string) || mockProfile.homeState,
-        homeZip: (profileData.homeZip as string) || mockProfile.homeZip,
+        yearsExperience: String((profileData.years_experience as number) ?? mockProfile.yearsExperience),
+        preferredTruck: (profileData.preferred_truck_type as string) || mockProfile.preferredTruck,
+        preferredRoute: (profileData.preferred_route_type as string) || mockProfile.preferredRoute,
+        homeCity: (profileData.city as string) || mockProfile.homeCity,
+        homeState: (profileData.state as string) || mockProfile.homeState,
+        homeZip: (profileData.zip as string) || mockProfile.homeZip,
       });
     } else {
       setProfile(mockProfile);

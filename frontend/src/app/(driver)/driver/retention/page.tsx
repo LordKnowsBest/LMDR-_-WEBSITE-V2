@@ -1,14 +1,36 @@
 'use client';
 
 import { Card, ProgressBar } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+import { getRiskScore, getPerformance } from '../../actions/retention';
 
-const bestPractices = [
+const DEMO_DRIVER_ID = 'demo-driver-001';
+
+/* ── Mock Fallback Data ── */
+const mockRiskData = { riskScore: 8, riskLevel: 'low', satisfactionIndex: 92, carrierName: 'Swift Transportation' };
+const mockBestPractices = [
     { id: 1, title: 'Communicating Home Time Needs', reads: 1420, category: 'Communication', time: '4 min read' },
     { id: 2, title: 'Understanding Your Pay Structure', reads: 890, category: 'Compensation', time: '6 min read' },
     { id: 3, title: 'Building a Relationship with Dispatch', reads: 2100, category: 'Operations', time: '5 min read' },
 ];
 
 export default function RetentionPage() {
+    const { data: riskData } = useApi<Record<string, unknown>>(
+        () => getRiskScore(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+        [DEMO_DRIVER_ID]
+    );
+    const { data: performanceData } = useApi<Record<string, unknown>>(
+        () => getPerformance(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+        [DEMO_DRIVER_ID]
+    );
+
+    const satisfactionIndex = riskData
+        ? 100 - Number(riskData.riskScore ?? 8)
+        : mockRiskData.satisfactionIndex;
+    const carrierName = (performanceData?.carrier_name as string) ?? mockRiskData.carrierName;
+    const riskLevel = (riskData?.riskLevel as string) ?? mockRiskData.riskLevel;
+    const bestPractices = mockBestPractices; // No server action for best practices yet
+
     return (
         <div className="space-y-4">
             <div>
@@ -20,7 +42,7 @@ export default function RetentionPage() {
                 <div className="flex items-start justify-between mb-3 text-white">
                     <div>
                         <h2 className="text-[15px] font-black tracking-tight leading-tight">Career Health Check</h2>
-                        <p className="text-[11px] font-bold opacity-80 mt-0.5">Your relationship with Swift Transportation is strong.</p>
+                        <p className="text-[11px] font-bold opacity-80 mt-0.5">Your relationship with {carrierName} is {riskLevel === 'low' ? 'strong' : riskLevel === 'medium' ? 'moderate' : 'needs attention'}.</p>
                     </div>
                     <span className="material-symbols-outlined text-[28px] opacity-90">health_and_safety</span>
                 </div>
@@ -28,10 +50,10 @@ export default function RetentionPage() {
                 <div className="bg-white/10 rounded-xl p-3 mb-3">
                     <div className="flex justify-between items-center text-white mb-1.5">
                         <span className="text-[10px] font-bold uppercase tracking-wider">Satisfaction Index</span>
-                        <span className="text-[12px] font-black">92%</span>
+                        <span className="text-[12px] font-black">{satisfactionIndex}%</span>
                     </div>
                     <div className="h-2 rounded-full bg-black/20 overflow-hidden">
-                        <div className="h-full bg-white rounded-full transition-all duration-700" style={{ width: '92%' }}></div>
+                        <div className="h-full bg-white rounded-full transition-all duration-700" style={{ width: `${satisfactionIndex}%` }}></div>
                     </div>
                 </div>
 

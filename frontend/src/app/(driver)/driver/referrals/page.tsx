@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { Card } from '@/components/ui';
+// TODO: wire to referrals server action when available
+import { useApi } from '@/lib/hooks';
 
 export default function ReferralsPage() {
     const [activeTab, setActiveTab] = useState('Submit');
