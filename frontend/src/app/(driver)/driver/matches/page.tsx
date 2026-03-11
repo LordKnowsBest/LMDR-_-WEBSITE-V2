@@ -20,11 +20,60 @@ interface Application {
   status: 'Under Review' | 'Interview' | 'Offered' | 'Declined';
 }
 
-/* ── Mock Fallback Data ── */
-const cdlClasses = ['A', 'B', 'C'] as const;
-const expRanges = ['0-1 yr', '2-4 yr', '5-9 yr', '10+ yr'] as const;
-const radiusOptions = ['25 mi', '50 mi', '100 mi', '250 mi', 'Nationwide'] as const;
+/* ══════════════════════════════════════════════════════
+   6 SEARCH FACTORS (from AI_MATCHING.html)
+   ══════════════════════════════════════════════════════ */
 
+/* Factor 1: Location Radius */
+const radiusOptions = [
+  { value: '50', label: '50 mi' },
+  { value: '100', label: '100 mi' },
+  { value: '250', label: '250 mi' },
+  { value: '500', label: '500 mi' },
+  { value: '1000', label: 'National' },
+] as const;
+
+/* Factor 2: Min Pay (CPM) */
+const payOptions = [
+  { value: '0.45', label: '$0.45+' },
+  { value: '0.55', label: '$0.55+' },
+  { value: '0.65', label: '$0.65+' },
+  { value: '0.75', label: '$0.75+' },
+] as const;
+
+/* Factor 3: Run Type */
+const runTypes = [
+  { value: 'any', label: 'Any', icon: 'done_all' },
+  { value: 'OTR', label: 'OTR', icon: 'route' },
+  { value: 'Regional', label: 'Regional', icon: 'map' },
+  { value: 'Local', label: 'Local', icon: 'home' },
+] as const;
+
+/* Factor 4: Max Turnover */
+const turnoverOptions = [
+  { value: '200', label: 'Any' },
+  { value: '90', label: '<90%' },
+  { value: '50', label: '<50%' },
+  { value: '25', label: '<25%' },
+] as const;
+
+/* Factor 5: Max Truck Age */
+const truckAgeOptions = [
+  { value: '99', label: 'Any' },
+  { value: '10', label: '<10yr' },
+  { value: '5', label: '<5yr' },
+  { value: '3', label: '<3yr' },
+] as const;
+
+/* Factor 6: Fleet Size */
+const fleetSizes = [
+  { value: 'any', label: 'Any', icon: 'select_check_box' },
+  { value: 'small', label: 'Small', icon: 'local_shipping' },
+  { value: 'medium', label: 'Medium', icon: 'local_shipping' },
+  { value: 'large', label: 'Large', icon: 'warehouse' },
+] as const;
+
+/* ── Mock Fallback Data ── */
 const mockMatches: MatchResult[] = [
   { id: '1', carrier: 'Swift Transportation', score: 94, breakdown: { safety: 96, pay: 91, culture: 93, location: 97 }, location: 'Phoenix, AZ', payRange: '$0.62 - $0.68/mi', truckType: 'Dry Van', benefits: ['Health Insurance', '401k Match', 'Paid Training', 'Home Weekly'], description: 'OTR lanes with dedicated routes available.' },
   { id: '2', carrier: 'Werner Enterprises', score: 89, breakdown: { safety: 92, pay: 88, culture: 85, location: 90 }, location: 'Omaha, NE', payRange: '$0.58 - $0.64/mi', truckType: 'Reefer', benefits: ['Health Insurance', 'Tuition Reimbursement', 'Sign-On Bonus'], description: 'Regional reefer runs, home every weekend.' },
@@ -64,24 +113,114 @@ function scoreBarColor(s: number): 'green' | 'blue' | 'amber' | 'red' {
   return 'red';
 }
 
+/* ══════════════════════════════════════════════════════
+   Filter Pill Component — reusable across all 6 factors
+   ══════════════════════════════════════════════════════ */
+function FilterPill({
+  icon, label, options, value, onChange, activeColor = 'blue',
+}: {
+  icon: string;
+  label: string;
+  options: readonly { value: string; label: string }[];
+  value: string;
+  onChange: (v: string) => void;
+  activeColor?: 'blue' | 'green' | 'amber' | 'rose';
+}) {
+  const colorMap = {
+    blue: 'bg-blue-500/15 text-blue-400',
+    green: 'bg-green-500/15 text-green-400',
+    amber: 'bg-amber-500/15 text-amber-400',
+    rose: 'bg-rose-500/15 text-rose-400',
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-2">
+        <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-accent)' }}>{icon}</span>
+        <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>{label}</p>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((opt) => (
+          <button
+            key={opt.value}
+            onClick={() => onChange(opt.value)}
+            className={`px-3 py-1.5 rounded-full text-[11px] font-bold transition-all duration-200 ${value === opt.value
+              ? colorMap[activeColor]
+              : 'neu-x'
+              }`}
+            style={value !== opt.value ? { color: 'var(--neu-text-muted)' } : undefined}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   MAIN PAGE COMPONENT
+   ══════════════════════════════════════════════════════ */
+/* ── Weight slider config ── */
+const WEIGHT_DEFAULTS = { location: 25, pay: 20, route: 15, safety: 10, retention: 12, fleetAge: 8 };
+const WEIGHT_SLIDERS = [
+  { key: 'location', label: 'Home Location', icon: 'location_on' },
+  { key: 'pay', label: 'Driver Pay', icon: 'payments' },
+  { key: 'route', label: 'Route Match', icon: 'route' },
+  { key: 'safety', label: 'Safety Record', icon: 'shield' },
+  { key: 'retention', label: 'Driver Retention', icon: 'group' },
+  { key: 'fleetAge', label: 'Fleet Age', icon: 'local_shipping' },
+] as const;
+
+function weightLabel(v: number): string {
+  if (v <= 5) return 'Off';
+  if (v <= 15) return 'Low';
+  if (v <= 30) return 'Standard';
+  if (v <= 60) return 'High';
+  return 'Critical';
+}
+
+function weightColor(v: number): string {
+  if (v <= 5) return 'var(--neu-text-muted)';
+  if (v <= 15) return 'var(--neu-info, #60a5fa)';
+  if (v <= 30) return 'var(--neu-accent)';
+  if (v <= 60) return 'var(--neu-warning, #f59e0b)';
+  return 'var(--neu-danger, #ef4444)';
+}
+
 export default function DriverMatchesPage() {
-  const [selectedCdl, setSelectedCdl] = useState<string>('A');
-  const [selectedExp, setSelectedExp] = useState<string>('5-9 yr');
-  const [selectedRadius, setSelectedRadius] = useState<string>('100 mi');
+  /* ── 6 Filter States ── */
+  const [radius, setRadius] = useState('100');
+  const [minPay, setMinPay] = useState('0.55');
+  const [runType, setRunType] = useState('any');
+  const [maxTurnover, setMaxTurnover] = useState('90');
+  const [maxTruckAge, setMaxTruckAge] = useState('5');
+  const [fleetSize, setFleetSize] = useState('any');
+
+  /* ── Weight States ── */
+  const [weights, setWeights] = useState(WEIGHT_DEFAULTS);
+  const [showPriorities, setShowPriorities] = useState(false);
+
+  const setWeight = (key: string, val: number) =>
+    setWeights((prev) => ({ ...prev, [key]: val }));
+
+  const resetWeights = () => setWeights(WEIGHT_DEFAULTS);
+
   const [expandedCard, setExpandedCard] = useState<string | null>(null);
+  const [showFilters, setShowFilters] = useState(true);
 
   /* ── Build filter object from UI state ── */
-  const filters = { cdlClass: selectedCdl, experience: selectedExp, radius: selectedRadius };
+  const filters = { radius, minPay, runType, maxTurnover, maxTruckAge, fleetSize };
 
   /* ── API Data ── */
   const fetcher = useCallback(
     () => matchingApi.findJobsForDriver(DEMO_DRIVER_ID, filters),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedCdl, selectedExp, selectedRadius]
+    [radius, minPay, runType, maxTurnover, maxTruckAge, fleetSize]
   );
   const { data: matchData, loading, error, refresh } = useApi<Record<string, unknown>>(
     fetcher,
-    [selectedCdl, selectedExp, selectedRadius]
+    [radius, minPay, runType, maxTurnover, maxTruckAge, fleetSize]
   );
 
   /* ── Derive display values (API data with mock fallback) ── */
@@ -93,118 +232,269 @@ export default function DriverMatchesPage() {
     ? (matchData.applications as Application[])
     : mockApplications;
 
+  /* ── Count active filters ── */
+  const activeFilterCount = [
+    radius !== '1000',
+    minPay !== '0.45',
+    runType !== 'any',
+    maxTurnover !== '200',
+    maxTruckAge !== '99',
+    fleetSize !== 'any',
+  ].filter(Boolean).length;
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-5">
       {/* ── Header ── */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 animate-fade-up">
+      <div className="flex items-center justify-between animate-fade-up">
         <div>
-          <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>AI Job Matches</h1>
-          <p className="text-sm mt-1" style={{ color: 'var(--neu-text-muted)' }}>
-            {loading ? 'Searching...' : `${matches.length} carriers matched to your profile`}
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl font-extrabold" style={{ color: 'var(--neu-text)' }}>AI Job Matches</h1>
+            <Badge variant="accent">{matches.length}</Badge>
+          </div>
+          <p className="text-[12px] mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>
+            {loading ? 'Searching...' : 'FMCSA Verified · AI Powered'}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" icon="refresh" onClick={refresh}>Refresh</Button>
-          <Button icon="auto_awesome" onClick={refresh}>Run New Match</Button>
-        </div>
+        <button
+          onClick={refresh}
+          className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-transform active:scale-90"
+          style={{
+            background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)',
+          }}
+        >
+          <span className="material-symbols-outlined text-white text-[18px]">auto_awesome</span>
+        </button>
       </div>
 
       {/* ── Error Banner ── */}
       {error && (
-        <Card elevation="xs" className="!bg-red-50 dark:!bg-red-500/10 border border-red-200 dark:border-red-500/20">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-red-500">warning</span>
-              <p className="text-sm text-red-700 dark:text-red-300">
-                Failed to load matches from server. Showing cached results.
-              </p>
-            </div>
-            <Button variant="ghost" size="sm" icon="refresh" onClick={refresh}>Retry</Button>
-          </div>
-        </Card>
+        <div className="neu-x rounded-xl px-3 py-2.5 flex items-center gap-2 text-[12px]" style={{ color: 'var(--neu-danger, #ef4444)' }}>
+          <span className="material-symbols-outlined text-[16px]">warning</span>
+          <span className="flex-1">Offline — showing cached data</span>
+          <button onClick={refresh} className="font-bold underline" style={{ color: 'var(--neu-accent)' }}>Retry</button>
+        </div>
       )}
 
-      {/* ── Filter Section ── */}
-      <Card elevation="sm" className="animate-fade-up stagger-1">
-        <div className="space-y-4">
-          {/* CDL Class Pills */}
-          <div>
-            <p className="kpi-label mb-2">CDL Class</p>
-            <div className="flex gap-2">
-              {cdlClasses.map(cls => (
-                <button
-                  key={cls}
-                  onClick={() => setSelectedCdl(cls)}
-                  className={`px-5 py-2 rounded-full text-sm font-bold transition-all duration-200 ${
-                    selectedCdl === cls
-                      ? 'btn-glow text-white'
+      {/* ══════════════════════════════════════════
+           FILTER SECTION — 6 Factors
+           ══════════════════════════════════════════ */}
+      <Card elevation="sm" className="animate-fade-up">
+        {/* Toggle Header */}
+        <button
+          onClick={() => setShowFilters(!showFilters)}
+          className="w-full flex items-center justify-between"
+        >
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[18px]" style={{ color: 'var(--neu-accent)' }}>tune</span>
+            <span className="text-[13px] font-bold" style={{ color: 'var(--neu-text)' }}>Search Filters</span>
+            {activeFilterCount > 0 && (
+              <span
+                className="w-5 h-5 rounded-full text-[10px] font-bold flex items-center justify-center text-white"
+                style={{ background: 'var(--neu-accent)' }}
+              >
+                {activeFilterCount}
+              </span>
+            )}
+          </div>
+          <span
+            className="material-symbols-outlined text-[18px] transition-transform"
+            style={{
+              color: 'var(--neu-text-muted)',
+              transform: showFilters ? 'rotate(180deg)' : 'rotate(0deg)',
+            }}
+          >
+            expand_more
+          </span>
+        </button>
+
+        {/* Filters Grid */}
+        {showFilters && (
+          <div className="mt-4 space-y-4 animate-fade-up">
+            {/* Row 1: Location + Pay */}
+            <div className="grid grid-cols-2 gap-4">
+              <FilterPill
+                icon="location_on"
+                label="Radius"
+                options={radiusOptions}
+                value={radius}
+                onChange={setRadius}
+                activeColor="blue"
+              />
+              <FilterPill
+                icon="payments"
+                label="Min Pay (CPM)"
+                options={payOptions}
+                value={minPay}
+                onChange={setMinPay}
+                activeColor="green"
+              />
+            </div>
+
+            {/* Row 2: Run Type (full width) */}
+            <div>
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-accent)' }}>route</span>
+                <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>Run Type</p>
+              </div>
+              <div className="flex gap-2">
+                {runTypes.map((rt) => (
+                  <button
+                    key={rt.value}
+                    onClick={() => setRunType(rt.value)}
+                    className={`flex-1 py-2 rounded-xl text-center transition-all duration-200 ${runType === rt.value
+                      ? 'bg-amber-500/15 text-amber-400'
                       : 'neu-x'
-                  }`}
-                  style={selectedCdl !== cls ? { color: 'var(--neu-text)' } : undefined}
+                      }`}
+                    style={runType !== rt.value ? { color: 'var(--neu-text-muted)' } : undefined}
+                  >
+                    <span className="material-symbols-outlined text-[16px] block mb-0.5">{rt.icon}</span>
+                    <span className="text-[10px] font-bold">{rt.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Row 3: Turnover + Truck Age */}
+            <div className="grid grid-cols-2 gap-4">
+              <FilterPill
+                icon="group"
+                label="Max Turnover"
+                options={turnoverOptions}
+                value={maxTurnover}
+                onChange={setMaxTurnover}
+                activeColor="rose"
+              />
+              <FilterPill
+                icon="local_shipping"
+                label="Truck Age"
+                options={truckAgeOptions}
+                value={maxTruckAge}
+                onChange={setMaxTruckAge}
+                activeColor="amber"
+              />
+            </div>
+
+            {/* Row 4: Fleet Size (full width) */}
+            <div>
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-accent)' }}>warehouse</span>
+                <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>Fleet Size</p>
+              </div>
+              <div className="flex gap-2">
+                {fleetSizes.map((fs) => (
+                  <button
+                    key={fs.value}
+                    onClick={() => setFleetSize(fs.value)}
+                    className={`flex-1 py-2 rounded-xl text-center transition-all duration-200 ${fleetSize === fs.value
+                      ? 'bg-blue-500/15 text-blue-400'
+                      : 'neu-x'
+                      }`}
+                    style={fleetSize !== fs.value ? { color: 'var(--neu-text-muted)' } : undefined}
+                  >
+                    <span className="material-symbols-outlined text-[16px] block mb-0.5">{fs.icon}</span>
+                    <span className="text-[10px] font-bold">{fs.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* ── MATCH PRIORITIES (Weight Sliders) ── */}
+            <div>
+              <button
+                onClick={() => setShowPriorities(!showPriorities)}
+                className="w-full flex items-center justify-between py-2"
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-accent)' }}>tune</span>
+                  <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>Match Priorities</p>
+                </div>
+                <span
+                  className="material-symbols-outlined text-[14px] transition-transform"
+                  style={{
+                    color: 'var(--neu-text-muted)',
+                    transform: showPriorities ? 'rotate(180deg)' : 'rotate(0deg)',
+                  }}
                 >
-                  Class {cls}
-                </button>
-              ))}
-            </div>
-          </div>
+                  expand_more
+                </span>
+              </button>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Experience Range */}
-            <div>
-              <p className="kpi-label mb-2">Experience</p>
-              <div className="flex flex-wrap gap-2">
-                {expRanges.map(exp => (
-                  <button
-                    key={exp}
-                    onClick={() => setSelectedExp(exp)}
-                    className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-200 ${
-                      selectedExp === exp
-                        ? 'bg-green-100 text-green-800 dark:bg-green-500/15 dark:text-green-300'
-                        : 'neu-x'
-                    }`}
-                    style={selectedExp !== exp ? { color: 'var(--neu-text-muted)' } : undefined}
-                  >
-                    {exp}
-                  </button>
-                ))}
-              </div>
+              {showPriorities && (
+                <div className="space-y-3 mt-2 animate-fade-up">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>Adjust what matters most in your match score</p>
+                    <button
+                      onClick={resetWeights}
+                      className="text-[9px] font-bold px-2 py-0.5 rounded-full neu-x active:scale-95 transition-transform"
+                      style={{ color: 'var(--neu-accent)' }}
+                    >
+                      Reset
+                    </button>
+                  </div>
+
+                  {WEIGHT_SLIDERS.map((slider) => {
+                    const val = weights[slider.key as keyof typeof weights];
+                    return (
+                      <div key={slider.key} className="space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="flex items-center gap-1.5">
+                            <span className="material-symbols-outlined text-[12px]" style={{ color: 'var(--neu-accent)' }}>{slider.icon}</span>
+                            <span className="text-[11px] font-semibold" style={{ color: 'var(--neu-text)' }}>{slider.label}</span>
+                          </span>
+                          <span
+                            className="text-[9px] font-bold px-2 py-0.5 rounded-full"
+                            style={{ color: weightColor(val), background: `${weightColor(val)}15` }}
+                          >
+                            {weightLabel(val)}
+                          </span>
+                        </div>
+                        <div className="relative">
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            value={val}
+                            onChange={(e) => setWeight(slider.key, Number(e.target.value))}
+                            className="neu-slider w-full"
+                            style={{
+                              '--slider-pct': `${val}%`,
+                              '--slider-color': weightColor(val),
+                            } as React.CSSProperties}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
-            {/* Location Radius */}
-            <div>
-              <p className="kpi-label mb-2">Location Radius</p>
-              <div className="flex flex-wrap gap-2">
-                {radiusOptions.map(r => (
-                  <button
-                    key={r}
-                    onClick={() => setSelectedRadius(r)}
-                    className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all duration-200 ${
-                      selectedRadius === r
-                        ? 'bg-blue-100 text-blue-800 dark:bg-blue-500/15 dark:text-blue-300'
-                        : 'neu-x'
-                    }`}
-                    style={selectedRadius !== r ? { color: 'var(--neu-text-muted)' } : undefined}
-                  >
-                    {r}
-                  </button>
-                ))}
-              </div>
-            </div>
+            {/* Run Match Button */}
+            <button
+              onClick={refresh}
+              className="w-full py-3 rounded-xl text-[13px] font-bold text-white flex items-center justify-center gap-2 active:scale-[0.98] transition-transform"
+              style={{
+                background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)',
+                boxShadow: '0 4px 16px rgba(37,99,235,0.3)',
+              }}
+            >
+              <span className="material-symbols-outlined text-[18px]">auto_awesome</span>
+              Run AI Match
+            </button>
           </div>
-        </div>
+        )}
       </Card>
 
       {/* ── Loading Skeleton ── */}
       {loading && !matchData && (
-        <div className="space-y-4">
+        <div className="space-y-3">
           {[1, 2, 3].map(i => (
             <Card key={i} elevation="sm" className="animate-pulse">
-              <div className="flex items-start gap-4">
-                <div className="w-16 h-16 rounded-2xl bg-[var(--neu-border)]" />
-                <div className="flex-1 space-y-3">
-                  <div className="h-5 w-48 rounded bg-[var(--neu-border)]" />
-                  <div className="h-4 w-72 rounded bg-[var(--neu-border)]" />
-                  <div className="h-3 w-64 rounded bg-[var(--neu-border)]" />
+              <div className="flex items-start gap-3">
+                <div className="w-12 h-12 rounded-xl" style={{ background: 'var(--neu-border)' }} />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 w-36 rounded" style={{ background: 'var(--neu-border)' }} />
+                  <div className="h-3 w-52 rounded" style={{ background: 'var(--neu-border)' }} />
                 </div>
               </div>
             </Card>
@@ -212,117 +502,126 @@ export default function DriverMatchesPage() {
         </div>
       )}
 
-      {/* ── Match Result Cards ── */}
+      {/* ══════════════════════════════════════════
+           MATCH RESULT CARDS
+           ══════════════════════════════════════════ */}
       {(!loading || matchData) && (
-        <div className="space-y-4">
+        <div className="space-y-3">
           {matches.map((match, i) => (
-            <Card
+            <button
               key={match.id}
-              elevation="sm"
-              hover
-              className={`animate-fade-up stagger-${Math.min(i + 2, 8)}`}
               onClick={() => setExpandedCard(expandedCard === match.id ? null : match.id)}
+              className="w-full text-left animate-fade-up"
+              style={{ animationDelay: `${i * 60}ms` }}
             >
-              <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-                {/* Left: Info */}
-                <div className="flex items-start gap-4 flex-1">
-                  {/* Large Score Circle */}
-                  <div className="neu-ins w-16 h-16 rounded-2xl flex flex-col items-center justify-center shrink-0">
-                    <span className={`text-2xl font-black leading-none ${scoreColor(match.score)}`}>{match.score}</span>
-                    <span className="text-[9px] font-bold" style={{ color: 'var(--neu-text-muted)' }}>MATCH</span>
+              <Card elevation="sm" hover className="!p-3.5">
+                <div className="flex items-start gap-3">
+                  {/* Score Orb */}
+                  <div className="neu-ins w-12 h-12 rounded-xl flex flex-col items-center justify-center shrink-0">
+                    <span className={`text-[17px] font-black leading-none ${scoreColor(match.score)}`}>{match.score}</span>
+                    <span className="text-[7px] font-bold uppercase" style={{ color: 'var(--neu-text-muted)' }}>match</span>
                   </div>
-                  <div className="space-y-2 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>{match.carrier}</h3>
-                      <Badge variant={scoreBadge(match.score)} dot>{match.score}% Match</Badge>
+
+                  {/* Info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-[13px] font-bold truncate" style={{ color: 'var(--neu-text)' }}>{match.carrier}</h3>
+                      <Badge variant={scoreBadge(match.score)}>{match.score}%</Badge>
                     </div>
-                    <p className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>{match.description}</p>
-                    <div className="flex flex-wrap items-center gap-4 text-sm">
-                      <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
-                        <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>location_on</span>
+                    <p className="text-[11px] mt-0.5 truncate" style={{ color: 'var(--neu-text-muted)' }}>{match.description}</p>
+
+                    {/* Meta Pills */}
+                    <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                      <span className="flex items-center gap-0.5 text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>
+                        <span className="material-symbols-outlined text-[11px]">location_on</span>
                         {match.location}
                       </span>
-                      <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
-                        <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>payments</span>
+                      <span className="flex items-center gap-0.5 text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>
+                        <span className="material-symbols-outlined text-[11px]">payments</span>
                         {match.payRange}
                       </span>
-                      <span className="flex items-center gap-1" style={{ color: 'var(--neu-text)' }}>
-                        <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>local_shipping</span>
+                      <span className="flex items-center gap-0.5 text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>
+                        <span className="material-symbols-outlined text-[11px]">local_shipping</span>
                         {match.truckType}
                       </span>
                     </div>
+                  </div>
+
+                  {/* Expand chevron */}
+                  <span
+                    className="material-symbols-outlined text-[16px] mt-1 transition-transform"
+                    style={{
+                      color: 'var(--neu-text-muted)',
+                      transform: expandedCard === match.id ? 'rotate(180deg)' : 'rotate(0deg)',
+                    }}
+                  >
+                    expand_more
+                  </span>
+                </div>
+
+                {/* ── Expanded Details ── */}
+                {expandedCard === match.id && (
+                  <div className="mt-3 pt-3 border-t space-y-3" style={{ borderColor: 'var(--neu-border)' }}>
+                    {/* Score Breakdown */}
+                    <div className="grid grid-cols-2 gap-3">
+                      {([
+                        { key: 'safety', label: 'Safety', icon: 'shield' },
+                        { key: 'pay', label: 'Pay', icon: 'payments' },
+                        { key: 'culture', label: 'Culture', icon: 'groups' },
+                        { key: 'location', label: 'Location', icon: 'location_on' },
+                      ] as const).map(item => {
+                        const val = match.breakdown[item.key];
+                        return (
+                          <div key={item.key} className="space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="flex items-center gap-1 text-[10px] font-semibold" style={{ color: 'var(--neu-text-muted)' }}>
+                                <span className="material-symbols-outlined text-[12px]" style={{ color: 'var(--neu-accent)' }}>{item.icon}</span>
+                                {item.label}
+                              </span>
+                              <span className={`text-[10px] font-black ${scoreColor(val)}`}>{val}</span>
+                            </div>
+                            <ProgressBar value={val} color={scoreBarColor(val)} />
+                          </div>
+                        );
+                      })}
+                    </div>
+
                     {/* Benefits */}
-                    <div className="flex flex-wrap gap-1.5 mt-1">
+                    <div className="flex flex-wrap gap-1.5">
                       {match.benefits.map(b => (
-                        <Badge key={b} variant="accent" icon="check_circle">{b}</Badge>
+                        <span
+                          key={b}
+                          className="neu-x rounded-full px-2 py-0.5 text-[9px] font-semibold"
+                          style={{ color: 'var(--neu-text-muted)' }}
+                        >
+                          {b}
+                        </span>
                       ))}
                     </div>
-                  </div>
-                </div>
 
-                {/* Right: Actions */}
-                <div className="flex gap-2 shrink-0 self-start">
-                  <Button variant="ghost" size="sm" icon="info">Details</Button>
-                  <Button size="sm" icon="send">Apply</Button>
-                </div>
-              </div>
-
-              {/* ── Score Breakdown (expanded) ── */}
-              {expandedCard === match.id && (
-                <div className="mt-5 pt-5 border-t" style={{ borderColor: 'var(--neu-border)' }}>
-                  <p className="kpi-label mb-3">Score Breakdown</p>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    {([
-                      { key: 'safety', label: 'Safety', icon: 'shield' },
-                      { key: 'pay', label: 'Pay', icon: 'payments' },
-                      { key: 'culture', label: 'Culture', icon: 'groups' },
-                      { key: 'location', label: 'Location', icon: 'location_on' },
-                    ] as const).map(item => {
-                      const val = match.breakdown[item.key];
-                      return (
-                        <div key={item.key} className="space-y-1.5">
-                          <div className="flex items-center gap-1.5">
-                            <span className="material-symbols-outlined text-[16px]" style={{ color: 'var(--neu-accent)' }}>{item.icon}</span>
-                            <span className="text-xs font-bold" style={{ color: 'var(--neu-text)' }}>{item.label}</span>
-                            <span className={`text-xs font-black ml-auto ${scoreColor(val)}`}>{val}</span>
-                          </div>
-                          <ProgressBar value={val} color={scoreBarColor(val)} />
-                        </div>
-                      );
-                    })}
+                    {/* Action Buttons */}
+                    <div className="flex gap-2">
+                      <button
+                        className="flex-1 py-2.5 rounded-xl text-[12px] font-bold text-white flex items-center justify-center gap-1.5 active:scale-[0.97] transition-transform"
+                        style={{
+                          background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)',
+                        }}
+                      >
+                        <span className="material-symbols-outlined text-[14px]">send</span>
+                        Apply Now
+                      </button>
+                      <button className="neu-x py-2.5 px-4 rounded-xl text-[12px] font-bold flex items-center gap-1.5 active:scale-[0.97] transition-transform" style={{ color: 'var(--neu-text)' }}>
+                        <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-accent)' }}>bookmark</span>
+                        Save
+                      </button>
+                    </div>
                   </div>
-                </div>
-              )}
-            </Card>
+                )}
+              </Card>
+            </button>
           ))}
         </div>
       )}
-
-      {/* ── My Applications ── */}
-      <Card className="animate-fade-up stagger-8">
-        <div className="flex items-center justify-between mb-5">
-          <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>My Applications</h3>
-          <Badge variant="accent">{applications.length} Active</Badge>
-        </div>
-        <div className="space-y-3">
-          {applications.map(app => (
-            <Card key={app.id} elevation="xs" className="!p-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="neu-x w-10 h-10 rounded-xl flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[20px]" style={{ color: 'var(--neu-accent)' }}>business</span>
-                  </div>
-                  <div>
-                    <p className="text-sm font-bold" style={{ color: 'var(--neu-text)' }}>{app.carrier}</p>
-                    <p className="text-[11px]" style={{ color: 'var(--neu-text-muted)' }}>Applied {app.appliedDate}</p>
-                  </div>
-                </div>
-                <Badge variant={appStatusVariant[app.status]} dot>{app.status}</Badge>
-              </div>
-            </Card>
-          ))}
-        </div>
-      </Card>
     </div>
   );
 }

@@ -62,7 +62,7 @@ export const KNOWN_COLLECTIONS = new Set([
   'challengeDefinitions', 'gamificationEvents', 'seasonalEvents',
   'eventParticipants', 'eventLeaderboard', 'driverReferrals',
   'matchQualityBonuses', 'driverPerformance', 'retentionRiskLogs',
-  'lifecycleEvents', 'terminationLogs', 'surveyDefinitions', 'surveyResponses',
+  'lifecycleEvents', 'driverMatchFeedback', 'terminationLogs', 'surveyDefinitions', 'surveyResponses',
   'matchNotificationLog', 'sourceAttribution', 'recruitingSpend',
   'funnelEvents', 'competitorIntel', 'hiringForecasts',
   'savedSearches', 'savedSearchAlerts', 'callOutcomes', 'callFeedback',
@@ -81,7 +81,16 @@ export const KNOWN_COLLECTIONS = new Set([
   'searchJobs', 'agentConversations', 'agentTurns',
   'voiceCallLogs', 'voiceAssistants', 'voiceCampaigns', 'voiceCampaignContacts',
   'agentRuns', 'agentSteps', 'approvalGates', 'runOutcomes',
-  'voiceAgentTemplates', 'marketSignals',
+  'voiceAgentTemplates', 'marketSignals', 'savedJobs', 'driverNotifications',
+  // Driver OS route collections
+  'driverExpenses', 'driverSurveys', 'driverSurveyResponses',
+  'driverConversations', 'driverActivityFeed',
+  'driverRecognitions', 'driverQuickResponses',
+  // Admin OS route collections (Phase 2)
+  'anomalyAlerts', 'anomalyRules', 'baselineMetrics',
+  'aiProviderCosts', 'costOptimizerConfig',
+  'commissionRules', 'salesReps', 'commissions',
+  'billingAdjustments', 'invoices', 'revenueMetrics',
 ]);
 
 /**

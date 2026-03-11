@@ -118,12 +118,13 @@ export function authenticate({ optional = false } = {}) {
   };
 }
 
-/** Guard that requires admin role */
+/** Guard that requires admin role (also allows internal service keys and API partners) */
 export function requireAdmin() {
   return (req, res, next) => {
-    if (req.auth?.role !== 'admin' && req.auth?.type !== 'apiKey') {
-      return res.status(403).json({ error: 'Admin access required' });
+    const { role, type } = req.auth || {};
+    if (role === 'admin' || type === 'apiKey' || type === 'internal') {
+      return next();
     }
-    next();
+    return res.status(403).json({ error: 'Admin access required' });
   };
 }

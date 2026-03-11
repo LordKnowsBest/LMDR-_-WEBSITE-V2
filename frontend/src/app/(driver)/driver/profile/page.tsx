@@ -240,11 +240,10 @@ export default function DriverProfilePage() {
                   key={end.code}
                   onClick={() => toggleEndorsement(end.code)}
                   disabled={!editing}
-                  className={`px-4 py-2 rounded-full text-xs font-bold transition-all duration-200 ${
-                    active
+                  className={`px-4 py-2 rounded-full text-xs font-bold transition-all duration-200 ${active
                       ? 'btn-glow text-white'
                       : 'neu-x disabled:opacity-50'
-                  }`}
+                    }`}
                   style={!active ? { color: 'var(--neu-text)' } : undefined}
                 >
                   <span className="flex items-center gap-1.5">
@@ -302,6 +301,75 @@ export default function DriverProfilePage() {
             <Input label="State" icon="map" value={profile.homeState} onChange={handleChange('homeState')} disabled={!editing} />
             <Input label="ZIP Code" icon="pin_drop" value={profile.homeZip} onChange={handleChange('homeZip')} disabled={!editing} />
           </div>
+        </div>
+      </Card>
+
+      {/* ── My Documents ── */}
+      <Card className="animate-fade-up stagger-5">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--neu-accent)' }}>folder_open</span>
+            <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>My Documents</h3>
+          </div>
+          <Badge variant="warning" dot>3 of 5</Badge>
+        </div>
+
+        <div className="space-y-2.5">
+          {[
+            { name: 'CDL — Front', icon: 'badge', status: 'verified' as const, date: 'Uploaded Feb 14, 2026', expires: 'Aug 2028' },
+            { name: 'CDL — Back', icon: 'badge', status: 'verified' as const, date: 'Uploaded Feb 14, 2026', expires: 'Aug 2028' },
+            { name: 'Medical Card (DOT)', icon: 'medical_information', status: 'pending' as const, date: 'Uploaded Mar 1, 2026', expires: 'Mar 2028' },
+            { name: 'MVR (Motor Vehicle Report)', icon: 'description', status: 'missing' as const, date: null, expires: null },
+            { name: 'W-9 Tax Form', icon: 'receipt_long', status: 'missing' as const, date: null, expires: null },
+          ].map((doc) => {
+            const statusMap = {
+              verified: { badge: 'success' as const, label: 'Verified', icon: 'check_circle' },
+              pending: { badge: 'warning' as const, label: 'Pending', icon: 'hourglass_top' },
+              missing: { badge: 'error' as const, label: 'Missing', icon: 'error' },
+            };
+            const s = statusMap[doc.status];
+
+            return (
+              <div key={doc.name} className="neu-x rounded-xl p-3 flex items-center gap-3">
+                <div className="neu-ins w-10 h-10 rounded-lg flex items-center justify-center shrink-0">
+                  <span className="material-symbols-outlined text-[18px]" style={{ color: 'var(--neu-accent)' }}>{doc.icon}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[12px] font-bold truncate" style={{ color: 'var(--neu-text)' }}>{doc.name}</p>
+                  <p className="text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>
+                    {doc.date || 'Not uploaded yet'}
+                    {doc.expires && ` · Exp: ${doc.expires}`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Badge variant={s.badge} dot>{s.label}</Badge>
+                  {doc.status === 'missing' && (
+                    <button
+                      className="w-8 h-8 rounded-lg flex items-center justify-center active:scale-90 transition-transform"
+                      style={{ background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)' }}
+                    >
+                      <span className="material-symbols-outlined text-white text-[14px]">upload</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Upload Zone */}
+        <div
+          className="mt-4 rounded-xl p-5 flex flex-col items-center gap-2 cursor-pointer active:scale-[0.99] transition-transform"
+          style={{
+            border: '2px dashed var(--neu-border)',
+            background: 'var(--neu-bg-soft)',
+          }}
+        >
+          <div className="neu-x w-11 h-11 rounded-xl flex items-center justify-center">
+            <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--neu-accent)' }}>cloud_upload</span>
+          </div>
+          <p className="text-[12px] font-bold" style={{ color: 'var(--neu-text)' }}>Drag & drop or tap to upload</p>
+          <p className="text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>PDF, JPG, PNG · Max 10MB</p>
         </div>
       </Card>
 

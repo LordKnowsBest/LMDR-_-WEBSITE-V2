@@ -4,6 +4,8 @@ import collectionRouter from './routes/collection.js';
 import filesRouter from './routes/files.js';
 import searchRouter from './routes/search.js';
 import jobsRouter from './routes/jobs.js';
+import adminRouter from './routes/admin/index.js';
+import driverRouter from './routes/driver/index.js';
 import { authenticate } from './middleware/auth.js';
 import { rateLimiter } from './middleware/rateLimiter.js';
 import { observability } from './middleware/observability.js';
@@ -25,6 +27,8 @@ export function createApp() {
   protectedRouter.use('/files', filesRouter);
   protectedRouter.use('/search', searchRouter);
   protectedRouter.use('/jobs', jobsRouter);
+  protectedRouter.use('/admin', adminRouter);
+  protectedRouter.use('/driver', driverRouter);
   protectedRouter.use('/', collectionRouter);
   app.use('/v1', authenticate(), rateLimiter(), protectedRouter);
 

@@ -2,32 +2,40 @@
 
 import { Card, Badge, KpiCard, ProgressBar, Button } from '@/components/ui';
 import Link from 'next/link';
-import { driverApi } from '@/lib/api';
+import { getProfile } from '../actions/profile';
+import { getDashboard } from '../actions/cockpit';
+import { getProgression } from '../actions/gamification';
+import { getDocumentStatus } from '../actions/documents';
 import { useApi } from '@/lib/hooks';
 
 /* ── Constants ── */
 const DEMO_DRIVER_ID = 'demo-driver-001';
 
 /* ── Mock Fallback Data ── */
-const mockDriver = { firstName: 'Marcus', lastName: 'Thompson', memberSince: 'Jan 2026', profileCompletion: 72 };
+const mockDriver = {
+  firstName: 'Marcus',
+  lastName: 'Thompson',
+  memberSince: 'Jan 2026',
+  profileCompletion: 72,
+};
 
 const mockKpis = [
   { label: 'Match Score', value: '87', icon: 'auto_awesome', trend: '+5 this week', trendUp: true },
-  { label: 'Applications Sent', value: '12', icon: 'send', trend: '+3 this week', trendUp: true },
-  { label: 'Profile Views', value: '48', icon: 'visibility', trend: '+14% vs last week', trendUp: true },
+  { label: 'Apps Sent', value: '12', icon: 'send', trend: '+3 this week', trendUp: true },
+  { label: 'Profile Views', value: '48', icon: 'visibility', trend: '+14%', trendUp: true },
 ];
 
 const quickActions = [
-  { label: 'Find Matches', href: '/driver/matches', icon: 'work', desc: 'AI-powered carrier matching' },
-  { label: 'Upload Docs', href: '/driver/documents', icon: 'upload_file', desc: 'CDL, medical, MVR' },
-  { label: 'Update Profile', href: '/driver/profile', icon: 'person', desc: 'Keep info current' },
-  { label: 'Check Status', href: '/driver/onboarding', icon: 'fact_check', desc: 'Onboarding progress' },
+  { label: 'Find Matches', href: '/driver/matches', icon: 'work', desc: 'AI matching' },
+  { label: 'My Applications', href: '/driver/applications', icon: 'description', desc: 'Track status' },
+  { label: 'Update Profile', href: '/driver/profile', icon: 'person', desc: 'Keep current' },
+  { label: 'Check Status', href: '/driver/onboarding', icon: 'fact_check', desc: 'Onboarding' },
 ];
 
 const mockRecentMatches = [
-  { id: '1', carrier: 'Swift Transportation', score: 94, location: 'Phoenix, AZ', truckType: 'Dry Van', scoreColor: 'text-green-600' },
-  { id: '2', carrier: 'Werner Enterprises', score: 87, location: 'Omaha, NE', truckType: 'Reefer', scoreColor: 'text-blue-600' },
-  { id: '3', carrier: 'Schneider National', score: 79, location: 'Green Bay, WI', truckType: 'Intermodal', scoreColor: 'text-amber-600' },
+  { id: '1', carrier: 'Swift Transportation', score: 94, location: 'Phoenix, AZ', truckType: 'Dry Van' },
+  { id: '2', carrier: 'Werner Enterprises', score: 87, location: 'Omaha, NE', truckType: 'Reefer' },
+  { id: '3', carrier: 'Schneider National', score: 79, location: 'Green Bay, WI', truckType: 'Intermodal' },
 ];
 
 const mockOnboardingSteps = [
@@ -40,124 +48,284 @@ const mockOnboardingSteps = [
   { name: 'Go Active', done: false },
 ];
 
+/* ── Gamification Fallback ── */
+const gamificationFallback = {
+  level: 3,
+  title: 'Mile Maker',
+  xp: 310,
+  xpNext: 600,
+  streak: 5,
+};
+
 export default function DriverDashboard() {
-  /* ── API Data ── */
-  const { data: profileData, loading: profileLoading, error: profileError, refresh: refreshProfile } = useApi<Record<string, unknown>>(
-    () => driverApi.getProfile(DEMO_DRIVER_ID),
-    [DEMO_DRIVER_ID]
-  );
-  const { data: onboardingData, loading: onboardingLoading, error: onboardingError, refresh: refreshOnboarding } = useApi<Record<string, unknown>>(
-    () => driverApi.getOnboardingStatus(DEMO_DRIVER_ID),
+  /* ── API Data (via Cloud Run server actions) ── */
+  const {
+    data: profileData,
+    loading: profileLoading,
+    error: profileError,
+    refresh: refreshProfile,
+  } = useApi<Record<string, unknown>>(
+    () => getProfile(DEMO_DRIVER_ID).then(d => ({ data: d as Record<string, unknown> })),
     [DEMO_DRIVER_ID]
   );
 
-  /* ── Derive display values (API data with mock fallback) ── */
+  const {
+    data: dashboardData,
+    loading: dashboardLoading,
+    error: dashboardError,
+    refresh: refreshDashboard,
+  } = useApi<Record<string, unknown>>(
+    () => getDashboard(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+    [DEMO_DRIVER_ID]
+  );
+
+  const {
+    data: gamificationData,
+    loading: gamLoading,
+  } = useApi<Record<string, unknown>>(
+    () => getProgression(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+    [DEMO_DRIVER_ID]
+  );
+
+  const {
+    data: docStatusData,
+  } = useApi<Record<string, unknown>>(
+    () => getDocumentStatus(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
+    [DEMO_DRIVER_ID]
+  );
+
+  /* ── Derive display values ── */
   const driver = profileData
     ? {
-        firstName: (profileData.firstName as string) || mockDriver.firstName,
-        lastName: (profileData.lastName as string) || mockDriver.lastName,
-        memberSince: (profileData.memberSince as string) || mockDriver.memberSince,
-        profileCompletion: (profileData.profileCompletion as number) ?? mockDriver.profileCompletion,
-      }
+      firstName: (profileData.first_name as string) || (profileData.firstName as string) || mockDriver.firstName,
+      lastName: (profileData.last_name as string) || (profileData.lastName as string) || mockDriver.lastName,
+      memberSince: (profileData.memberSince as string) || mockDriver.memberSince,
+      profileCompletion: (profileData.completeness_score as number) ?? mockDriver.profileCompletion,
+    }
     : mockDriver;
 
-  const kpis = profileData
+  const kpis = dashboardData
     ? [
-        { label: 'Match Score', value: String((profileData.matchScore as number) ?? 87), icon: 'auto_awesome', trend: '+5 this week', trendUp: true },
-        { label: 'Applications Sent', value: String((profileData.applicationsSent as number) ?? 12), icon: 'send', trend: '+3 this week', trendUp: true },
-        { label: 'Profile Views', value: String((profileData.profileViews as number) ?? 48), icon: 'visibility', trend: '+14% vs last week', trendUp: true },
-      ]
+      {
+        label: 'Matches',
+        value: String((dashboardData.matchCount as number) ?? 0),
+        icon: 'auto_awesome',
+        trend: '',
+        trendUp: true,
+      },
+      {
+        label: 'Apps Sent',
+        value: String((dashboardData.applicationCount as number) ?? 0),
+        icon: 'send',
+        trend: '',
+        trendUp: true,
+      },
+      {
+        label: 'Saved Jobs',
+        value: String((dashboardData.savedCount as number) ?? 0),
+        icon: 'bookmark',
+        trend: '',
+        trendUp: true,
+      },
+    ]
     : mockKpis;
 
-  const recentMatches = profileData?.recentMatches
-    ? (profileData.recentMatches as typeof mockRecentMatches)
-    : mockRecentMatches;
+  const recentMatches = mockRecentMatches;
 
-  const onboardingSteps = onboardingData?.steps
-    ? (onboardingData.steps as typeof mockOnboardingSteps)
-    : mockOnboardingSteps;
+  // Build onboarding steps from doc status + profile completeness
+  const docStatus = docStatusData as { complete?: string[]; missing?: string[]; pendingReview?: string[] } | null;
+  const hasName = !!(profileData?.first_name || profileData?.firstName);
+  const hasCdl = !!(profileData?.cdl_class || profileData?.cdlClass);
+  const hasDocs = (docStatus?.complete?.length ?? 0) > 0;
+  const onboardingSteps = [
+    { name: 'Create Account', done: true },
+    { name: 'Personal Info', done: hasName },
+    { name: 'CDL Details', done: hasCdl },
+    { name: 'Upload Documents', done: hasDocs },
+    { name: 'Background Check', done: false },
+    { name: 'Profile Review', done: driver.profileCompletion >= 80 },
+    { name: 'Go Active', done: !!(profileData?.is_discoverable === 'Yes') },
+  ];
 
-  const completedSteps = onboardingSteps.filter(s => s.done).length;
-  const isLoading = profileLoading || onboardingLoading;
-  const hasError = profileError || onboardingError;
+  const completedSteps = onboardingSteps.filter((s) => s.done).length;
+
+  const gamification = gamificationData
+    ? {
+        level: (gamificationData.level as number) ?? gamificationFallback.level,
+        title: (gamificationData.title as string) || (gamificationData.level_title as string) || gamificationFallback.title,
+        xp: (gamificationData.xp as number) ?? (gamificationData.total_xp as number) ?? gamificationFallback.xp,
+        xpNext: (gamificationData.xp_next as number) ?? (gamificationData.xp_to_next_level as number) ?? gamificationFallback.xpNext,
+        streak: (gamificationData.streak as number) ?? (gamificationData.login_streak as number) ?? gamificationFallback.streak,
+      }
+    : gamificationFallback;
+
+  const isLoading = profileLoading || dashboardLoading;
+  const hasError = profileError || dashboardError;
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-5">
       {/* ── Error Banner ── */}
       {hasError && (
-        <Card elevation="xs" className="!bg-red-50 dark:!bg-red-500/10 border border-red-200 dark:border-red-500/20">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-red-500">warning</span>
-              <p className="text-sm text-red-700 dark:text-red-300">
-                Failed to load live data. Showing cached results.
-              </p>
-            </div>
-            <Button variant="ghost" size="sm" icon="refresh" onClick={() => { refreshProfile(); refreshOnboarding(); }}>
-              Retry
-            </Button>
-          </div>
-        </Card>
+        <div
+          className="neu-x rounded-xl px-3 py-2.5 flex items-center gap-2 text-[12px]"
+          style={{ color: 'var(--neu-danger)' }}
+        >
+          <span className="material-symbols-outlined text-[16px]">warning</span>
+          <span className="flex-1">Offline — showing cached data</span>
+          <button
+            onClick={() => {
+              refreshProfile();
+              refreshDashboard();
+            }}
+            className="font-bold underline"
+            style={{ color: 'var(--neu-accent)' }}
+          >
+            Retry
+          </button>
+        </div>
       )}
 
-      {/* ── Welcome Banner ── */}
-      <Card elevation="lg" className="animate-fade-up bg-gradient-to-br from-[var(--neu-bg)] to-[var(--neu-border)]/30">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-          <div className="space-y-2">
-            <div className="flex items-center gap-3">
-              <div className="neu-x w-14 h-14 rounded-2xl flex items-center justify-center shrink-0">
-                <span className="text-xl font-black" style={{ color: 'var(--neu-accent)' }}>LM</span>
-              </div>
-              <div>
-                <h1 className="text-2xl font-bold" style={{ color: 'var(--neu-text)' }}>
-                  {isLoading ? (
-                    <span className="inline-block w-48 h-7 rounded bg-[var(--neu-border)] animate-pulse" />
-                  ) : (
-                    <>Welcome back, {driver.firstName}!</>
-                  )}
-                </h1>
-                <p className="text-sm" style={{ color: 'var(--neu-text-muted)' }}>
-                  Member since {driver.memberSince} &middot; CDL-A Driver
-                </p>
-              </div>
-            </div>
+      {/* ════════════════════════════════════════
+           1. WELCOME CARD
+           ════════════════════════════════════════ */}
+      <Card elevation="lg" className="animate-fade-up">
+        <div className="flex items-start justify-between mb-3">
+          <div>
+            <h1
+              className="text-xl font-extrabold leading-tight"
+              style={{ color: 'var(--neu-text)' }}
+            >
+              {isLoading ? (
+                <span className="inline-block w-48 h-6 rounded-lg animate-pulse" style={{ background: 'var(--neu-border)' }} />
+              ) : (
+                <>Welcome, {driver.firstName}</>
+              )}
+            </h1>
+            <p className="text-[12px] mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>
+              Ready to hit the road?
+            </p>
           </div>
-          <div className="md:w-64">
-            <ProgressBar
-              value={driver.profileCompletion}
-              color="blue"
-              label="Profile Completion"
-              showValue
-            />
-          </div>
+          <Link
+            href="/driver/profile"
+            className="text-[12px] font-bold"
+            style={{ color: 'var(--neu-accent)' }}
+          >
+            Edit
+          </Link>
         </div>
+
+        {/* Profile Completion */}
+        <ProgressBar
+          value={driver.profileCompletion}
+          color="blue"
+          label="Profile Completion"
+          showValue
+        />
+
+        {/* CTA */}
+        <Link href="/driver/profile" className="mt-3 block">
+          <div
+            className="neu-x rounded-xl py-2.5 text-center text-[13px] font-bold transition-all duration-200 hover:scale-[1.02] active:scale-[0.98]"
+            style={{ color: 'var(--neu-accent)' }}
+          >
+            Complete Profile →
+          </div>
+        </Link>
       </Card>
 
-      {/* ── KPI Cards ── */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {kpis.map((kpi, i) => (
-          <div key={kpi.label} className={`stagger-${i + 1}`}>
-            <KpiCard {...kpi} />
-          </div>
-        ))}
+      {/* ════════════════════════════════════════
+           2. KPI HORIZONTAL SCROLL ROW
+           ════════════════════════════════════════ */}
+      <div className="overflow-x-auto -mx-4 px-4 pb-2 no-scrollbar">
+        <div className="flex gap-3" style={{ minWidth: 'max-content' }}>
+          {kpis.map((kpi) => (
+            <div key={kpi.label} className="w-[140px] shrink-0">
+              <Card elevation="sm" className="!p-4 animate-fade-up">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="neu-x w-8 h-8 rounded-lg flex items-center justify-center">
+                    <span
+                      className="material-symbols-outlined text-[16px]"
+                      style={{ color: 'var(--neu-accent)' }}
+                    >
+                      {kpi.icon}
+                    </span>
+                  </div>
+                </div>
+                <p
+                  className="text-[11px] font-semibold mb-0.5"
+                  style={{ color: 'var(--neu-text-muted)' }}
+                >
+                  {kpi.label}
+                </p>
+                <p
+                  className="text-2xl font-black leading-none"
+                  style={{ color: 'var(--neu-text)' }}
+                >
+                  {kpi.value}
+                </p>
+                {kpi.trend && (
+                  <div className="flex items-center gap-1 mt-1.5">
+                    <span
+                      className={`material-symbols-outlined text-[12px] ${kpi.trendUp ? 'text-green-500' : 'text-red-400'
+                        }`}
+                    >
+                      {kpi.trendUp ? 'trending_up' : 'trending_down'}
+                    </span>
+                    <span
+                      className={`text-[10px] font-semibold ${kpi.trendUp ? 'text-green-500' : 'text-red-400'
+                        }`}
+                    >
+                      {kpi.trend}
+                    </span>
+                  </div>
+                )}
+              </Card>
+            </div>
+          ))}
+        </div>
       </div>
 
-      {/* ── Quick Actions (tool orbs) ── */}
+      {/* ════════════════════════════════════════
+           3. QUICK ACTIONS — 2×2 Grid of Orbs
+           ════════════════════════════════════════ */}
       <div>
-        <h2 className="text-lg font-bold mb-4" style={{ color: 'var(--neu-text)' }}>Quick Actions</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <h2
+          className="text-[15px] font-bold mb-3"
+          style={{ color: 'var(--neu-text)' }}
+        >
+          Quick Actions
+        </h2>
+        <div className="grid grid-cols-2 gap-3">
           {quickActions.map((action, i) => (
-            <Link key={action.href} href={action.href} className={`stagger-${i + 1}`}>
-              <Card elevation="sm" hover className="text-center group">
-                <div className="flex flex-col items-center gap-3 py-2">
-                  <div className="neu-x w-14 h-14 rounded-2xl flex items-center justify-center group-hover:scale-105 transition-transform">
-                    <span className="material-symbols-outlined text-[28px]" style={{ color: 'var(--neu-accent)' }}>
+            <Link key={action.href} href={action.href}>
+              <Card
+                elevation="sm"
+                hover
+                className={`text-center group animate-fade-up`}
+                style={{ animationDelay: `${i * 60}ms` }}
+              >
+                <div className="flex flex-col items-center gap-2.5 py-1">
+                  <div className="neu-x w-12 h-12 rounded-2xl flex items-center justify-center group-hover:scale-105 transition-transform">
+                    <span
+                      className="material-symbols-outlined text-[24px]"
+                      style={{ color: 'var(--neu-accent)' }}
+                    >
                       {action.icon}
                     </span>
                   </div>
                   <div>
-                    <p className="text-sm font-bold" style={{ color: 'var(--neu-text)' }}>{action.label}</p>
-                    <p className="text-[11px] mt-0.5" style={{ color: 'var(--neu-text-muted)' }}>{action.desc}</p>
+                    <p
+                      className="text-[13px] font-bold"
+                      style={{ color: 'var(--neu-text)' }}
+                    >
+                      {action.label}
+                    </p>
+                    <p
+                      className="text-[10px] mt-0.5"
+                      style={{ color: 'var(--neu-text-muted)' }}
+                    >
+                      {action.desc}
+                    </p>
                   </div>
                 </div>
               </Card>
@@ -166,97 +334,206 @@ export default function DriverDashboard() {
         </div>
       </div>
 
-      {/* ── Bottom Grid: Recent Matches + Onboarding ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Recent Matches */}
-        <Card className="animate-fade-up stagger-5">
-          <div className="flex items-center justify-between mb-5">
-            <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>Recent Matches</h3>
-            <Link href="/driver/matches">
-              <Button variant="ghost" size="sm" icon="arrow_forward">View All</Button>
-            </Link>
-          </div>
-          <div className="space-y-3">
-            {recentMatches.map((match) => (
-              <Card key={match.id} elevation="xs" className="!p-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="neu-ins w-12 h-12 rounded-xl flex items-center justify-center shrink-0">
-                      <span className={`text-lg font-black ${match.scoreColor}`}>{match.score}</span>
-                    </div>
-                    <div>
-                      <p className="text-sm font-bold" style={{ color: 'var(--neu-text)' }}>{match.carrier}</p>
-                      <div className="flex items-center gap-3 mt-0.5">
-                        <span className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--neu-text-muted)' }}>
-                          <span className="material-symbols-outlined text-[13px]">location_on</span>
-                          {match.location}
-                        </span>
-                        <span className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--neu-text-muted)' }}>
-                          <span className="material-symbols-outlined text-[13px]">local_shipping</span>
-                          {match.truckType}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <Badge variant={match.score >= 90 ? 'success' : match.score >= 80 ? 'info' : 'warning'}>
-                    {match.score}%
-                  </Badge>
-                </div>
-              </Card>
-            ))}
-          </div>
-        </Card>
+      {/* ════════════════════════════════════════
+           4. RECENT MATCHES
+           ════════════════════════════════════════ */}
+      <Card elevation="md" className="animate-fade-up">
+        <div className="flex items-center justify-between mb-4">
+          <h3
+            className="text-[15px] font-bold"
+            style={{ color: 'var(--neu-text)' }}
+          >
+            Recent Matches
+          </h3>
+          <Link href="/driver/matches">
+            <span
+              className="text-[11px] font-bold"
+              style={{ color: 'var(--neu-accent)' }}
+            >
+              View All →
+            </span>
+          </Link>
+        </div>
+        <div className="space-y-2.5">
+          {recentMatches.map((match) => (
+            <div
+              key={match.id}
+              className="neu-x rounded-xl p-3 flex items-center gap-3"
+            >
+              {/* Score Orb */}
+              <div className="neu-ins w-11 h-11 rounded-xl flex items-center justify-center shrink-0">
+                <span
+                  className={`text-[15px] font-black ${match.score >= 90
+                    ? 'text-green-600'
+                    : match.score >= 80
+                      ? 'text-blue-600'
+                      : 'text-amber-600'
+                    }`}
+                >
+                  {match.score}
+                </span>
+              </div>
 
-        {/* Onboarding Progress Checklist */}
-        <Card className="animate-fade-up stagger-6">
-          <div className="flex items-center justify-between mb-5">
-            <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>Onboarding Progress</h3>
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" icon="refresh" onClick={refreshOnboarding}>Refresh</Button>
-              <Badge variant="accent" icon="checklist">
-                {completedSteps}/{onboardingSteps.length}
-              </Badge>
-            </div>
-          </div>
-          <ProgressBar
-            value={completedSteps}
-            max={onboardingSteps.length}
-            color="green"
-            label={`${completedSteps} of ${onboardingSteps.length} steps complete`}
-            showValue
-            className="mb-4"
-          />
-          <div className="space-y-2.5">
-            {onboardingSteps.map((step, i) => (
-              <div key={step.name} className="flex items-center gap-3">
-                <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${
-                  step.done
-                    ? 'bg-green-100 dark:bg-green-500/15'
-                    : 'neu-ins'
-                }`}>
-                  <span className={`material-symbols-outlined text-[16px] ${
-                    step.done ? 'text-green-600' : ''
-                  }`} style={!step.done ? { color: 'var(--neu-text-muted)' } : undefined}>
-                    {step.done ? 'check_circle' : 'radio_button_unchecked'}
+              {/* Info */}
+              <div className="flex-1 min-w-0">
+                <p
+                  className="text-[13px] font-bold truncate"
+                  style={{ color: 'var(--neu-text)' }}
+                >
+                  {match.carrier}
+                </p>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span
+                    className="flex items-center gap-0.5 text-[10px]"
+                    style={{ color: 'var(--neu-text-muted)' }}
+                  >
+                    <span className="material-symbols-outlined text-[11px]">
+                      location_on
+                    </span>
+                    {match.location}
+                  </span>
+                  <span
+                    className="flex items-center gap-0.5 text-[10px]"
+                    style={{ color: 'var(--neu-text-muted)' }}
+                  >
+                    <span className="material-symbols-outlined text-[11px]">
+                      local_shipping
+                    </span>
+                    {match.truckType}
                   </span>
                 </div>
-                <span className={`text-sm font-medium ${step.done ? 'line-through' : ''}`}
-                  style={{ color: step.done ? 'var(--neu-text-muted)' : 'var(--neu-text)' }}>
-                  {i + 1}. {step.name}
-                </span>
-                {step.done && <Badge variant="success" className="ml-auto">Done</Badge>}
               </div>
-            ))}
+
+              {/* Badge */}
+              <Badge
+                variant={
+                  match.score >= 90
+                    ? 'success'
+                    : match.score >= 80
+                      ? 'info'
+                      : 'warning'
+                }
+              >
+                {match.score}%
+              </Badge>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* ════════════════════════════════════════
+           5. ONBOARDING PROGRESS
+           ════════════════════════════════════════ */}
+      <Card elevation="md" className="animate-fade-up">
+        <div className="flex items-center justify-between mb-3">
+          <h3
+            className="text-[15px] font-bold"
+            style={{ color: 'var(--neu-text)' }}
+          >
+            Onboarding
+          </h3>
+          <Badge variant="accent">
+            {completedSteps}/{onboardingSteps.length}
+          </Badge>
+        </div>
+
+        <ProgressBar
+          value={completedSteps}
+          max={onboardingSteps.length}
+          color="green"
+          showValue
+          className="mb-3"
+        />
+
+        <div className="space-y-2">
+          {onboardingSteps.map((step, i) => (
+            <div key={step.name} className="flex items-center gap-2.5">
+              <div
+                className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${step.done ? 'bg-green-100' : 'neu-ins'
+                  }`}
+              >
+                <span
+                  className={`material-symbols-outlined text-[14px] ${step.done ? 'text-green-600' : ''
+                    }`}
+                  style={!step.done ? { color: 'var(--neu-text-muted)' } : undefined}
+                >
+                  {step.done ? 'check_circle' : 'radio_button_unchecked'}
+                </span>
+              </div>
+              <span
+                className={`text-[12px] font-medium ${step.done ? 'line-through' : ''}`}
+                style={{
+                  color: step.done ? 'var(--neu-text-muted)' : 'var(--neu-text)',
+                }}
+              >
+                {i + 1}. {step.name}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <Link href="/driver/onboarding" className="block mt-4">
+          <Button variant="primary" size="sm" icon="arrow_forward" className="w-full">
+            Continue Onboarding
+          </Button>
+        </Link>
+      </Card>
+
+      {/* ════════════════════════════════════════
+           6. GAMIFICATION STRIP
+           ════════════════════════════════════════ */}
+      <Card elevation="sm" className="animate-fade-up">
+        <div className="flex items-center gap-3">
+          {/* Level Badge */}
+          <div
+            className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
+            style={{
+              background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)',
+            }}
+          >
+            <span className="text-white text-[14px] font-black">
+              L{gamification.level}
+            </span>
           </div>
-          <div className="mt-5">
-            <Link href="/driver/onboarding">
-              <Button variant="primary" size="sm" icon="arrow_forward" className="w-full">
-                Continue Onboarding
-              </Button>
-            </Link>
+
+          {/* XP Info */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between mb-1">
+              <span
+                className="text-[12px] font-bold"
+                style={{ color: 'var(--neu-text)' }}
+              >
+                {gamification.title}
+              </span>
+              <span
+                className="text-[10px] font-semibold"
+                style={{ color: 'var(--neu-text-muted)' }}
+              >
+                {gamification.xp}/{gamification.xpNext} XP
+              </span>
+            </div>
+            <ProgressBar
+              value={gamification.xp}
+              max={gamification.xpNext}
+              color="blue"
+            />
           </div>
-        </Card>
-      </div>
+
+          {/* Streak */}
+          <div className="neu-x rounded-xl px-2.5 py-1.5 text-center shrink-0">
+            <span className="text-[14px]">🔥</span>
+            <p
+              className="text-[10px] font-bold"
+              style={{ color: 'var(--neu-text)' }}
+            >
+              {gamification.streak}d
+            </p>
+          </div>
+        </div>
+      </Card>
+
+      {/* ── Bottom Spacer for safe area ── */}
+      <div className="h-4" />
     </div>
   );
 }
