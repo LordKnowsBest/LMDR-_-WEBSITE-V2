@@ -1,30 +1,23 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import { DriverHeader, DriverTabBar, VoiceCommandBar, DriverNavDrawer, DriverChatDrawer, DriverTopBanner } from '@/components/driver';
 import { ThemeProvider } from '@/lib/theme';
-
-/* ── AI mock response simulator ── */
-const AI_RESPONSES: Record<string, string> = {
-  'find me a job': "I found 12 matches near Dallas, TX. Your top match is Swift Transportation at 94% — $0.65/mi OTR with home weekends. Want me to show the full list?",
-  'check my matches': "You have 12 active matches. Top 3:\n1. Swift Transportation — 94%\n2. Werner Enterprises — 87%\n3. Schneider National — 82%\nWant details on any of these?",
-  'upload my cdl': "To upload your CDL, head to Profile → My Documents and tap the upload button on the CDL row, or simply take a photo of your CDL front and back. Want me to take you there?",
-  'find my top matches': "Based on your CDL-A, 8 years of experience, and Dallas home base, here are your best matches today:\n\n🥇 Swift Transportation — 94% match\n🥈 Werner Enterprises — 87%\n🥉 Schneider National — 82%\n\nWould you like to apply to any of these?",
-  'check application status': "You have 5 applications:\n• Swift — Interview scheduled (Thu 3 PM)\n• Werner — Under Review\n• Schneider — Offer received! ($0.68/mi)\n• J.B. Hunt — Closed\n• KLLM — Closed\n\nWant to accept the Schneider offer?",
-};
-
-function getAiResponse(input: string): string {
-  const lower = input.toLowerCase().trim();
-  for (const [key, val] of Object.entries(AI_RESPONSES)) {
-    if (lower.includes(key)) return val;
-  }
-  return `I can help with that! Based on your profile, let me look into "${input}" for you. Here's what I found:\n\nYour CDL-A Class license with H and T endorsements qualifies you for premium routes. I'd recommend checking the AI Job Matches section for the latest opportunities.\n\nWant me to refine your search filters?`;
-}
+import { agentTurn } from './actions/agent';
+import { textToSpeech } from './actions/voice';
 
 function nowTime(): string {
   const d = new Date();
   return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/** Play base64 MP3 audio */
+function playAudio(base64: string) {
+  try {
+    const audio = new Audio(`data:audio/mpeg;base64,${base64}`);
+    audio.play().catch(() => { /* autoplay blocked — silent fail */ });
+  } catch { /* ignore audio errors */ }
 }
 
 interface AiMessage {
@@ -40,6 +33,8 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMode, setChatMode] = useState<'messages' | 'ai'>('messages');
   const [aiMessages, setAiMessages] = useState<AiMessage[]>([]);
+  const conversationRef = useRef<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const voiceTriggeredRef = useRef(false);
 
   /* Hide the command bar on the messages page — it has its own chat input */
   const isMessagesPage = pathname === '/driver/messages';
@@ -50,8 +45,8 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
     setChatOpen(true);
   }, []);
 
-  /* ── Handle AI message ── */
-  const handleAiMessage = useCallback((text: string) => {
+  /* ── Handle AI message — calls real AI service ── */
+  const handleAiMessage = useCallback(async (text: string) => {
     const driverMsg: AiMessage = {
       id: `d-${Date.now()}`,
       from: 'driver',
@@ -63,20 +58,52 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
     setChatMode('ai');
     setChatOpen(true);
 
-    // Simulate AI response after a short delay
-    setTimeout(() => {
-      const aiMsg: AiMessage = {
-        id: `ai-${Date.now()}`,
-        from: 'ai',
-        text: getAiResponse(text),
-        time: nowTime(),
-      };
-      setAiMessages((prev) => [...prev, aiMsg]);
-    }, 1200);
+    // Add a "thinking" indicator
+    const thinkingId = `thinking-${Date.now()}`;
+    setAiMessages((prev) => [...prev, { id: thinkingId, from: 'ai', text: 'Thinking...', time: nowTime() }]);
+
+    try {
+      const result = await agentTurn(text, conversationRef.current);
+
+      // Track conversation history for multi-turn context
+      conversationRef.current.push({ role: 'user', content: text });
+      conversationRef.current.push({ role: 'assistant', content: result.text });
+      // Keep last 10 turns to avoid token bloat
+      if (conversationRef.current.length > 20) {
+        conversationRef.current = conversationRef.current.slice(-20);
+      }
+
+      // Replace thinking indicator with real response
+      setAiMessages((prev) =>
+        prev.map((m) =>
+          m.id === thinkingId
+            ? { id: `ai-${Date.now()}`, from: 'ai' as const, text: result.text, time: nowTime() }
+            : m
+        )
+      );
+
+      // TTS readback for voice-originated messages
+      if (voiceTriggeredRef.current && result.text) {
+        voiceTriggeredRef.current = false;
+        // Truncate long responses for TTS (first 500 chars)
+        const ttsText = result.text.length > 500 ? result.text.slice(0, 500) + '...' : result.text;
+        textToSpeech(ttsText).then(({ audio }) => playAudio(audio)).catch(() => {});
+      }
+    } catch {
+      // Replace thinking with error message
+      setAiMessages((prev) =>
+        prev.map((m) =>
+          m.id === thinkingId
+            ? { id: `ai-${Date.now()}`, from: 'ai' as const, text: "I'm having trouble connecting right now. Try again in a moment!", time: nowTime() }
+            : m
+        )
+      );
+    }
   }, []);
 
-  /* ── Command bar sends → opens AI drawer ── */
+  /* ── Command bar sends → opens AI drawer (voice flag for TTS readback) ── */
   const handleCommand = useCallback((text: string) => {
+    voiceTriggeredRef.current = true;
     handleAiMessage(text);
   }, [handleAiMessage]);
 

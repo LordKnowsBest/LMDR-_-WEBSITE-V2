@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 type VoiceState = 'idle' | 'listening' | 'processing';
 
@@ -14,36 +14,103 @@ const NBA_CHIPS = [
     { label: 'Upload my CDL', icon: 'upload_file' },
 ];
 
+/* ── Web Speech API type shim ── */
+interface SpeechRecognitionEvent extends Event {
+    results: SpeechRecognitionResultList;
+    resultIndex: number;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+    error: string;
+}
+
 export function VoiceCommandBar({ onCommand }: VoiceCommandBarProps) {
     const [voiceState, setVoiceState] = useState<VoiceState>('idle');
     const [inputValue, setInputValue] = useState('');
     const [transcript, setTranscript] = useState('');
     const [expanded, setExpanded] = useState(false);
+    const [speechSupported, setSpeechSupported] = useState(true);
+    const recognitionRef = useRef<unknown>(null);
 
-    /* ── Simulate voice listening ── */
+    /* ── Check browser speech support on mount ── */
+    useEffect(() => {
+        const SpeechRecognition = (window as unknown as Record<string, unknown>).SpeechRecognition
+            || (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            setSpeechSupported(false);
+        }
+    }, []);
+
+    /* ── Start real speech recognition ── */
     const startListening = useCallback(() => {
+        const SpeechRecognition = (window as unknown as Record<string, unknown>).SpeechRecognition
+            || (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
+
+        if (!SpeechRecognition) {
+            setSpeechSupported(false);
+            return;
+        }
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const recognition = new (SpeechRecognition as any)();
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+        recognitionRef.current = recognition;
+
         setVoiceState('listening');
         setTranscript('');
         setExpanded(true);
 
-        // Simulate transcript appearing after 2s
-        const timer = setTimeout(() => {
-            setTranscript('Show me my top matches...');
-            setVoiceState('processing');
+        recognition.onresult = (event: SpeechRecognitionEvent) => {
+            let interim = '';
+            let final = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const result = event.results[i];
+                if (result.isFinal) {
+                    final += result[0].transcript;
+                } else {
+                    interim += result[0].transcript;
+                }
+            }
+            setTranscript(final || interim);
 
-            // Simulate processing result after 1.5s
-            setTimeout(() => {
-                if (onCommand) onCommand('Show me my top matches');
+            if (final) {
+                setVoiceState('processing');
+                setTimeout(() => {
+                    if (onCommand) onCommand(final.trim());
+                    setVoiceState('idle');
+                    setExpanded(false);
+                    setTranscript('');
+                }, 500);
+            }
+        };
+
+        recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+            console.warn('Speech recognition error:', event.error);
+            if (event.error !== 'aborted') {
                 setVoiceState('idle');
                 setExpanded(false);
                 setTranscript('');
-            }, 1500);
-        }, 3000);
+            }
+        };
 
-        return () => clearTimeout(timer);
-    }, [onCommand]);
+        recognition.onend = () => {
+            // If we're still listening (no final result), stop gracefully
+            if (voiceState === 'listening') {
+                setVoiceState('idle');
+                setExpanded(false);
+            }
+        };
+
+        recognition.start();
+    }, [onCommand, voiceState]);
 
     const stopListening = useCallback(() => {
+        if (recognitionRef.current) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (recognitionRef.current as any).stop();
+        }
         setVoiceState('idle');
         setExpanded(false);
         setTranscript('');
@@ -240,14 +307,18 @@ export function VoiceCommandBar({ onCommand }: VoiceCommandBarProps) {
                 <div className="flex items-center gap-2 p-2">
                     {/* Voice Mic Button */}
                     <button
-                        onClick={startListening}
+                        onClick={speechSupported ? startListening : undefined}
                         className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-transform active:scale-90"
                         style={{
-                            background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)',
-                            boxShadow: '0 2px 8px rgba(37,99,235,0.3)',
+                            background: speechSupported
+                                ? 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)'
+                                : 'var(--neu-bg-soft)',
+                            boxShadow: speechSupported ? '0 2px 8px rgba(37,99,235,0.3)' : 'none',
+                            opacity: speechSupported ? 1 : 0.5,
                         }}
+                        title={speechSupported ? 'Voice input' : 'Speech recognition not supported in this browser'}
                     >
-                        <span className="material-symbols-outlined text-white text-[20px]">mic</span>
+                        <span className="material-symbols-outlined text-[20px]" style={{ color: speechSupported ? '#fff' : 'var(--neu-text-muted)' }}>mic</span>
                     </button>
 
                     {/* Text Input */}
