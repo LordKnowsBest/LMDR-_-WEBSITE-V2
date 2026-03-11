@@ -24,13 +24,13 @@
 
 import { Hono }      from 'hono';
 import { streamSSE } from 'hono/streaming';
-import { ClaudeAdapter } from '../runtime/claudeAdapter.js';
+import { getAdapter } from '../runtime/getAdapter.js';
 import { createSession, getSession, pushEvent } from '../lib/streamSessions.js';
 import crypto from 'node:crypto';
 
 export const streamRouter = new Hono();
 
-const adapter = new ClaudeAdapter();
+const adapter = getAdapter();
 
 const POLL_INTERVAL_MS = 50;
 const HEARTBEAT_MS     = 5_000;

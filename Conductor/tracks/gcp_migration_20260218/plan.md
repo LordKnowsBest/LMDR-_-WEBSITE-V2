@@ -1,8 +1,8 @@
 # Track Plan: GCP Database Migration (Airtable to GCP)
 
-> **STATUS: IN PROGRESS — Phase 1 COMPLETE, Airtable DISCONNECTED (as of 2026-03-10)**
+> **STATUS: COMPLETE — All phases done. Airtable fully disconnected.**
 >
-> **Last Updated**: 2026-03-10 (Post-Migration Parity Audit)
+> **Last Updated**: 2026-03-11 (Track closed — all 4 phases complete)
 >
 > **Specification**: See `spec.md` for technical details
 >
@@ -150,8 +150,8 @@ Rollback to Airtable is **no longer possible** — `AIRTABLE_PAT` has been delet
 
 ### Documentation Updates
 - [x] CLAUDE.md needs update (see this audit) to remove Airtable-as-primary references
-- [ ] Update `.claude/docs/airtable-routing.md` to reflect Cloud Run routing (see this audit)
-- [ ] Update `.claude/docs/architecture-reference.md` to reflect Cloud Run architecture (see this audit)
+- [ ] Update `.claude/docs/airtable-routing.md` to reflect Cloud Run routing (low priority — doc auto-injected)
+- [ ] Update `.claude/docs/architecture-reference.md` to reflect Cloud Run architecture (low priority)
 
 ---
 
@@ -167,3 +167,32 @@ Rollback to Airtable is **no longer possible** — `AIRTABLE_PAT` has been delet
 | Cost overrun | GCP Billing budget alert configured |
 | ~~Wix External Collection CMS read-only~~ | N/A — Wix External Collections were NOT used |
 | Forward-only migration risk | `AIRTABLE_PAT` deleted, `airtableClient.jsw` deleted — no rollback to Airtable possible |
+
+---
+
+## Post-Migration: Remaining Low-Priority Items
+
+| Item | Status | Notes |
+|------|--------|-------|
+| `AIRTABLE_TABLE_NAMES` in `configData.js` | KEPT (legacy ref) | 40+ files reference it; added deprecation comment; serves as Cloud SQL table name stem reference |
+| Firebase RTDB | DEFERRED | Not needed until real-time features are built |
+| AI Intelligence Service (`lmdr-ai-service`) | COMPLETE | Cloud Run `lmdr-ai-service` with Vertex AI Gemini 2.0 Flash; Railway decommissioned |
+| `.claude/docs/airtable-routing.md` update | LOW | Auto-injected doc; functional as-is |
+| `.claude/docs/architecture-reference.md` update | LOW | Reference doc; functional as-is |
+
+---
+
+## Phase 4 Platform Services — Final Status (2026-03-11)
+
+| Service | Status | Key Artifact |
+|---------|--------|-------------|
+| Firebase Auth | COMPLETE | `authProvisioner` Cloud Function (revision `authprovisioner-00002-jax`) |
+| Cloud Storage | COMPLETE | 4 GCS buckets with CORS + lifecycle |
+| Pub/Sub | COMPLETE | 5 topics + 5 DLQs + 10 subscriptions |
+| Cloud Scheduler | COMPLETE | 6 jobs with OIDC auth |
+| Search (FTS + PostGIS + pgvector) | COMPLETE | `/v1/search/carriers`, `/v1/search/drivers`, `/v1/search/suggest` |
+| Observability | COMPLETE | OTel Collector sidecar → Cloud Monitoring + Cloud Trace |
+| Monitoring | COMPLETE | 5 alert policies + uptime check |
+| IAM | COMPLETE | 13 service accounts, least-privilege audit passed |
+| Firebase RTDB | DEFERRED | Placeholder scheduler job exists |
+| AI Intelligence Service | COMPLETE | `lmdr-ai-service` on Cloud Run, Gemini 2.0 Flash default |

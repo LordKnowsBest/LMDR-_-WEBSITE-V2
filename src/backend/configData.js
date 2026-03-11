@@ -960,8 +960,11 @@ export const WIX_COLLECTION_NAMES = {
 // =============================================================================
 
 /**
- * Maps camelCase config keys to Airtable table names.
- * All Airtable tables use 'v2_' prefix for the migration.
+ * LEGACY REFERENCE — Airtable is fully disconnected (2026-03-10).
+ * This map is retained because 40+ files (hooks, tests, migration scripts)
+ * still reference it. The values double as Cloud SQL table name stems:
+ * Cloud SQL table = `airtable_` + snake_case(value).
+ * Do NOT delete without updating all consumers.
  */
 export const AIRTABLE_TABLE_NAMES = {
   // Core Business Data

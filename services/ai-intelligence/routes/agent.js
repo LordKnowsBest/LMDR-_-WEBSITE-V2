@@ -48,13 +48,13 @@
  */
 
 import { Hono } from 'hono';
-import { ClaudeAdapter } from '../runtime/claudeAdapter.js';
+import { getAdapter } from '../runtime/getAdapter.js';
 import { retrieveContext } from '../lib/retrieval.js';
 import crypto from 'node:crypto';
 
 export const agentRouter = new Hono();
 
-const adapter = new ClaudeAdapter();
+const adapter = getAdapter();
 const INTERNAL_TIMEOUT_MS = 28_000;
 
 agentRouter.post('/turn', async (c) => {

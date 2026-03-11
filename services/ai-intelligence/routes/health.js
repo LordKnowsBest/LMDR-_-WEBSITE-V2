@@ -5,13 +5,13 @@
  */
 
 import { Hono } from 'hono';
-import { ClaudeAdapter } from '../runtime/claudeAdapter.js';
+import { getAdapter } from '../runtime/getAdapter.js';
 import { checkHealth } from '../lib/pinecone.js';
 import { PINECONE_HOSTS } from '../lib/knowledgeCorpus.js';
 
 export const healthRouter = new Hono();
 
-const adapter = new ClaudeAdapter();
+const adapter = getAdapter();
 
 async function checkRagIndexHealth(hostUrl) {
   if (!hostUrl) return 'not_configured';
@@ -28,7 +28,7 @@ async function checkRagIndexHealth(hostUrl) {
 }
 
 healthRouter.get('/', async (c) => {
-  const [claudeHealth, driversHealth, carriersHealth, knowledgeHealth, memoryHealth] = await Promise.all([
+  const [providerHealth, driversHealth, carriersHealth, knowledgeHealth, memoryHealth] = await Promise.all([
     adapter.health().catch(err => ({ status: 'error', latencyMs: 0, detail: err.message })),
     checkHealth('drivers'),
     checkHealth('carriers'),
@@ -37,7 +37,7 @@ healthRouter.get('/', async (c) => {
   ]);
 
   const checks = {
-    claude:                    claudeHealth,
+    provider:                  providerHealth,
     pinecone_drivers:          driversHealth,
     pinecone_carriers:         carriersHealth,
     voyage_embeddings:         process.env.VOYAGE_API_KEY ? 'configured' : 'missing',
@@ -46,7 +46,7 @@ healthRouter.get('/', async (c) => {
     rag_lmdr_memory_index:     memoryHealth,
   };
 
-  const overall = claudeHealth.status === 'ok' ? 'ok' : 'degraded';
+  const overall = providerHealth.status === 'ok' ? 'ok' : 'degraded';
 
   return c.json({
     status: overall,
