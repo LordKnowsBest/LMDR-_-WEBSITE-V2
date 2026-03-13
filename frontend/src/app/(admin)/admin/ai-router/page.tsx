@@ -7,8 +7,9 @@ import { Button } from '@/components/ui/Button';
 import { DataTable } from '@/components/ui/DataTable';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { AdminAlert } from '@/components/admin';
 import { useApi, useMutation } from '@/lib/hooks';
-import { aiApi } from '@/lib/api';
+import { getProviders, routerComplete } from '../../actions/ai-router';
 
 /* ── Types ── */
 interface Provider {
@@ -119,8 +120,12 @@ export default function AdminAIRouterPage() {
   const [optimizerOn, setOptimizerOn] = useState(true);
 
   /* ── API Calls ── */
-  const { data: apiProviders, loading, error, refresh } = useApi<Provider[]>(() => aiApi.getProviders() as Promise<{ data: Provider[] }>);
-  const { execute: testProvider, loading: testLoading } = useMutation<{ providerId: string; prompt: string }>((input) => aiApi.routerComplete(input) as Promise<{ data: unknown }>);
+  const { data: apiProviders, loading, error, refresh } = useApi<Provider[]>(
+    () => getProviders().then((providers) => ({ data: providers as Provider[] }))
+  );
+  const { execute: testProvider, loading: testLoading } = useMutation<{ providerId: string; prompt: string }>(
+    (input) => routerComplete(input).then((result) => ({ data: result }))
+  );
 
   /* ── Resolve with fallbacks ── */
   const providers: Provider[] = (apiProviders as Provider[] | null) ?? MOCK_PROVIDERS;
@@ -142,11 +147,11 @@ export default function AdminAIRouterPage() {
     <div className="space-y-8">
       {/* ── Error Banner ── */}
       {error && (
-        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
-          <span className="material-symbols-outlined text-[18px]">warning</span>
-          <span>API unavailable — showing cached data. {error}</span>
-          <button onClick={refresh} className="ml-auto font-semibold underline">Retry</button>
-        </div>
+        <AdminAlert
+          message={`API unavailable — showing cached data. ${error}`}
+          actionLabel="Retry"
+          onAction={refresh}
+        />
       )}
 
       {/* ── Header ── */}

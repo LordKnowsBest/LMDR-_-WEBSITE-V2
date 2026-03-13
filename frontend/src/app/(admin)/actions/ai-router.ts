@@ -20,6 +20,17 @@ export async function testProvider(providerId: string) {
   );
 }
 
+export async function getProviders() {
+  return adminFetch<unknown[]>('/ai-router/config');
+}
+
+export async function routerComplete(input: { providerId: string; prompt: string }) {
+  return adminFetch<unknown>('/ai-router/test', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 export async function getProviderCosts() {
   return adminFetch<unknown[]>('/ai-router/costs');
 }

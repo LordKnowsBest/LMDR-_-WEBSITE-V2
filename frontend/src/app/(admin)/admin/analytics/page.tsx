@@ -5,8 +5,9 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { KpiCard } from '@/components/ui/KpiCard';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { AdminAlert } from '@/components/admin';
 import { useApi } from '@/lib/hooks';
-import { analyticsApi } from '@/lib/api';
+import { getAnalyticsDashboard } from '../../actions/dashboard';
 
 /* ── Mock KPI Data (fallback) ── */
 const MOCK_KPIS = [
@@ -52,7 +53,9 @@ const MOCK_FUNNEL = [
 
 export default function AdminAnalyticsPage() {
   /* ── API Call ── */
-  const { data: dashData, loading, error, refresh } = useApi<Record<string, unknown>>(() => analyticsApi.getDashboard() as Promise<{ data: Record<string, unknown> }>);
+  const { data: dashData, loading, error, refresh } = useApi<Record<string, unknown>>(
+    () => getAnalyticsDashboard().then(d => ({ data: d as Record<string, unknown> }))
+  );
 
   /* ── Resolve data with fallbacks ── */
   const kpis = (dashData as Record<string, unknown>)?.kpis as typeof MOCK_KPIS ?? MOCK_KPIS;
@@ -65,11 +68,11 @@ export default function AdminAnalyticsPage() {
     <div className="space-y-8">
       {/* ── Error Banner ── */}
       {error && (
-        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
-          <span className="material-symbols-outlined text-[18px]">warning</span>
-          <span>API unavailable — showing cached data. {error}</span>
-          <button onClick={refresh} className="ml-auto font-semibold underline">Retry</button>
-        </div>
+        <AdminAlert
+          message={`API unavailable — showing cached data. ${error}`}
+          actionLabel="Retry"
+          onAction={refresh}
+        />
       )}
 
       {/* ── Header ── */}

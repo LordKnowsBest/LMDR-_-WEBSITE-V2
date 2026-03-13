@@ -1,4 +1,7 @@
-import { PortalShell } from '@/components/layout';
+'use client';
+
+import { AdminPortalShell } from '@/components/admin';
+import { ThemeProvider } from '@/lib/theme';
 
 const navItems = [
   { label: 'Dashboard', href: '/admin', icon: 'dashboard' },
@@ -12,8 +15,10 @@ const navItems = [
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   return (
-    <PortalShell brand="VelocityMatch" brandIcon="VM" navItems={navItems} pageTitle="Admin Portal">
-      {children}
-    </PortalShell>
+    <ThemeProvider>
+      <AdminPortalShell brand="VelocityMatch" brandIcon="VM" navItems={navItems}>
+        {children}
+      </AdminPortalShell>
+    </ThemeProvider>
   );
 }

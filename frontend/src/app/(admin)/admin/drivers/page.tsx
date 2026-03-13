@@ -7,8 +7,9 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { DataTable } from '@/components/ui/DataTable';
 import { KpiCard } from '@/components/ui/KpiCard';
+import { AdminAlert } from '@/components/admin';
 import { useApi } from '@/lib/hooks';
-import { matchingApi } from '@/lib/api';
+import { listDrivers } from '../../actions/drivers';
 
 /* ── Types ── */
 type DriverStatus = 'active' | 'pending' | 'suspended';
@@ -63,7 +64,9 @@ export default function AdminDriversPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   /* ── API Call ── */
-  const { data: apiDrivers, loading, error, refresh } = useApi<Driver[]>(() => matchingApi.searchDrivers({ limit: 100 }) as Promise<{ data: Driver[] }>);
+  const { data: apiDrivers, loading, error, refresh } = useApi<Driver[]>(
+    () => listDrivers({ limit: 100 }).then((result) => ({ data: result.items as Driver[] }))
+  );
 
   /* ── Resolve with fallback ── */
   const allDrivers: Driver[] = apiDrivers ?? MOCK_DRIVERS;
@@ -183,11 +186,11 @@ export default function AdminDriversPage() {
     <div className="space-y-6">
       {/* ── Error Banner ── */}
       {error && (
-        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
-          <span className="material-symbols-outlined text-[18px]">warning</span>
-          <span>API unavailable — showing cached data. {error}</span>
-          <button onClick={refresh} className="ml-auto font-semibold underline">Retry</button>
-        </div>
+        <AdminAlert
+          message={`API unavailable — showing cached data. ${error}`}
+          actionLabel="Retry"
+          onAction={refresh}
+        />
       )}
 
       {/* ── Header ── */}

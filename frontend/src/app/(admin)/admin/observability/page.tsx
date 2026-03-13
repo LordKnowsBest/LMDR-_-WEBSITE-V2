@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/Button';
 import { DataTable } from '@/components/ui/DataTable';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { AdminAlert } from '@/components/admin';
+import { getServiceHealth } from '../../actions/observability';
 
 /* ── Types ── */
 type ServiceHealth = 'healthy' | 'degraded' | 'down';
@@ -38,14 +40,7 @@ interface RecentError {
   count: number;
 }
 
-/* ── Service URLs for health checks ── */
-const SERVICE_URLS: Record<string, string> = {
-  'api-gateway': process.env.NEXT_PUBLIC_LMDR_DRIVER_SERVICE_URL || 'https://lmdr-driver-service-140035137711.us-central1.run.app',
-  'ai-intelligence': process.env.NEXT_PUBLIC_LMDR_AI_SERVICE_URL || 'https://lmdr-ai-service-140035137711.us-central1.run.app',
-  'matching-engine': process.env.NEXT_PUBLIC_LMDR_MATCHING_SERVICE_URL || 'https://lmdr-matching-engine-140035137711.us-central1.run.app',
-  'notification-svc': process.env.NEXT_PUBLIC_LMDR_NOTIFICATION_SERVICE_URL || 'https://lmdr-notifications-service-140035137711.us-central1.run.app',
-  'analytics-pipe': process.env.NEXT_PUBLIC_LMDR_ANALYTICS_SERVICE_URL || 'https://lmdr-analytics-service-140035137711.us-central1.run.app',
-};
+/* Service health checks are done server-side via getServiceHealth() action */
 
 /* ── Mock Services (fallback) ── */
 const MOCK_SERVICES: Service[] = [
@@ -76,7 +71,7 @@ const MOCK_ALERTS: Alert[] = [
   { id: 1, severity: 'critical', message: 'scheduler service unreachable — 3 consecutive health check failures', service: 'scheduler', time: '2 min ago' },
   { id: 2, severity: 'warning', message: 'enrichment-worker error rate above 1% threshold (currently 1.5%)', service: 'enrichment-worker', time: '15 min ago' },
   { id: 3, severity: 'info', message: 'ai-intelligence auto-scaled to 4 instances (load spike detected)', service: 'ai-intelligence', time: '45 min ago' },
-  { id: 4, severity: 'warning', message: 'Airtable API rate limit approaching — 78% of quota used', service: 'api-gateway', time: '1 hr ago' },
+  { id: 4, severity: 'warning', message: 'admin gateway error budget rising — 78% of threshold consumed', service: 'api-gateway', time: '1 hr ago' },
   { id: 5, severity: 'info', message: 'Scheduled maintenance: Cloud SQL failover test completed successfully', service: 'api-gateway', time: '3 hrs ago' },
 ];
 
@@ -104,7 +99,7 @@ const MOCK_RECENT_ERRORS: RecentError[] = [
   { timestamp: '14:23:07', service: 'scheduler', message: 'Connection refused: Cloud SQL primary endpoint', count: 12 },
   { timestamp: '14:18:45', service: 'enrichment-worker', message: 'Timeout: FMCSA API response exceeded 10s', count: 8 },
   { timestamp: '13:55:12', service: 'ai-intelligence', message: 'Rate limit: OpenAI 429 Too Many Requests', count: 3 },
-  { timestamp: '13:42:30', service: 'api-gateway', message: 'Airtable 422: Invalid field name "status_type"', count: 5 },
+  { timestamp: '13:42:30', service: 'api-gateway', message: 'Cloud Run upstream returned 502 during admin aggregation', count: 5 },
   { timestamp: '12:18:55', service: 'voice-service', message: 'VAPI webhook: assistant-request timeout (5s)', count: 2 },
 ];
 
@@ -152,23 +147,20 @@ export default function AdminObservabilityPage() {
     setLoading(true);
     setError(null);
     try {
-      const results = await Promise.all(
-        MOCK_SERVICES.map(async (svc) => {
-          const url = SERVICE_URLS[svc.name];
-          if (!url) return svc;
-          try {
-            const start = Date.now();
-            const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) });
-            const latency = Date.now() - start;
-            if (res.ok) {
-              return { ...svc, status: 'healthy' as ServiceHealth, latencyP99: `${latency}ms`, instances: svc.instances || 1 };
-            }
-            return { ...svc, status: 'degraded' as ServiceHealth, latencyP99: `${latency}ms` };
-          } catch {
-            return { ...svc, status: 'down' as ServiceHealth, latencyP99: '--', errorRate: 100, instances: 0 };
-          }
-        })
-      );
+      const healthResults = await getServiceHealth();
+      const healthMap = new Map(healthResults.map(r => [r.key, r]));
+
+      const results = MOCK_SERVICES.map((svc) => {
+        const live = healthMap.get(svc.name);
+        if (!live) return svc;
+        return {
+          ...svc,
+          status: live.status as ServiceHealth,
+          latencyP99: live.latencyMs >= 0 ? `${live.latencyMs}ms` : '--',
+          instances: live.status === 'down' ? 0 : svc.instances || 1,
+          errorRate: live.status === 'down' ? 100 : svc.errorRate,
+        };
+      });
       setServices(results);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Health check failed');
@@ -187,11 +179,11 @@ export default function AdminObservabilityPage() {
     <div className="space-y-8">
       {/* ── Error Banner ── */}
       {error && (
-        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
-          <span className="material-symbols-outlined text-[18px]">warning</span>
-          <span>Health check failed — showing cached data. {error}</span>
-          <button onClick={checkHealth} className="ml-auto font-semibold underline">Retry</button>
-        </div>
+        <AdminAlert
+          message={`Health check failed — showing cached data. ${error}`}
+          actionLabel="Retry"
+          onAction={checkHealth}
+        />
       )}
 
       {/* ── Header ── */}

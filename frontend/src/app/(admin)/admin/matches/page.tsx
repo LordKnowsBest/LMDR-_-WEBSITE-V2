@@ -6,8 +6,9 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { DataTable } from '@/components/ui/DataTable';
 import { KpiCard } from '@/components/ui/KpiCard';
+import { AdminAlert } from '@/components/admin';
 import { useApi } from '@/lib/hooks';
-import { matchingApi } from '@/lib/api';
+import { listMatches } from '../../actions/matches';
 
 /* ── Types ── */
 type MatchStatus = 'applied' | 'interviewed' | 'offered' | 'placed' | 'rejected';
@@ -67,7 +68,9 @@ export default function AdminMatchesPage() {
   const [activeTab, setActiveTab] = useState<string>('All');
 
   /* ── API Call ── */
-  const { data: apiMatches, loading, error, refresh } = useApi<Match[]>(() => matchingApi.findDriversForJob('all') as Promise<{ data: Match[] }>);
+  const { data: apiMatches, loading, error, refresh } = useApi<Match[]>(
+    () => listMatches().then((result) => ({ data: result.items as Match[] }))
+  );
 
   /* ── Resolve with fallback ── */
   const allMatches: Match[] = apiMatches ?? MOCK_MATCHES;
@@ -159,11 +162,11 @@ export default function AdminMatchesPage() {
     <div className="space-y-6">
       {/* ── Error Banner ── */}
       {error && (
-        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
-          <span className="material-symbols-outlined text-[18px]">warning</span>
-          <span>API unavailable — showing cached data. {error}</span>
-          <button onClick={refresh} className="ml-auto font-semibold underline">Retry</button>
-        </div>
+        <AdminAlert
+          message={`API unavailable — showing cached data. ${error}`}
+          actionLabel="Retry"
+          onAction={refresh}
+        />
       )}
 
       {/* ── Header ── */}

@@ -8,8 +8,9 @@ import { Input } from '@/components/ui/Input';
 import { DataTable } from '@/components/ui/DataTable';
 import { KpiCard } from '@/components/ui/KpiCard';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { AdminAlert } from '@/components/admin';
 import { useApi } from '@/lib/hooks';
-import { carrierApi } from '@/lib/api';
+import { lookupCarrierByDot } from '../../actions/carriers';
 
 /* ── Types ── */
 type SafetyRating = 'Satisfactory' | 'Conditional' | 'Unsatisfactory' | 'Not Rated';
@@ -58,7 +59,9 @@ export default function AdminCarriersPage() {
 
   /* ── DOT Lookup API ── */
   const { data: dotResult, loading: dotLoading, error: dotError, refresh: dotRefresh } = useApi<Carrier>(
-    () => dotSearch ? carrierApi.lookupByDot(dotSearch) as Promise<{ data: Carrier }> : Promise.resolve({ data: null as unknown as Carrier }),
+    () => dotSearch
+      ? lookupCarrierByDot(dotSearch).then((carrier) => ({ data: carrier as Carrier }))
+      : Promise.resolve({ data: null as unknown as Carrier }),
     [dotSearch]
   );
 
@@ -190,11 +193,11 @@ export default function AdminCarriersPage() {
     <div className="space-y-6">
       {/* ── Error Banner ── */}
       {dotError && dotSearch && (
-        <div className="rounded-xl px-4 py-3 flex items-center gap-3 text-sm" style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
-          <span className="material-symbols-outlined text-[18px]">warning</span>
-          <span>DOT lookup failed — showing cached data. {dotError}</span>
-          <button onClick={dotRefresh} className="ml-auto font-semibold underline">Retry</button>
-        </div>
+        <AdminAlert
+          message={`DOT lookup failed — showing cached data. ${dotError}`}
+          actionLabel="Retry"
+          onAction={dotRefresh}
+        />
       )}
 
       {/* ── Header ── */}
