@@ -1,31 +1,105 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Card } from '@/components/ui';
 
-// Components we will build
+// Components
 import AiSearchForm from '@/components/matching/AiSearchForm';
 import AiResultsList from '@/components/matching/AiResultsList';
 import AiApplicationsTracker from '@/components/matching/AiApplicationsTracker';
+
+// Server actions
+import { findJobs, searchJobs } from '../../actions/matching';
+import { getApplications } from '../../actions/cockpit';
+
+const DEMO_DRIVER_ID = 'demo-driver-001';
+
+export interface MatchResult {
+    position: number;
+    carrierId: string;
+    carrierName: string;
+    score: number;
+    factors: Record<string, number>;
+    dotNumber: number;
+}
 
 export default function AiMatchingPage() {
     const [activeTab, setActiveTab] = useState('Find Matches');
     const [isSearching, setIsSearching] = useState(false);
     const [hasResults, setHasResults] = useState(false);
+    const [results, setResults] = useState<MatchResult[]>([]);
+    const [totalScored, setTotalScored] = useState(0);
+    const [searchError, setSearchError] = useState<string | null>(null);
     const [appCount, setAppCount] = useState(0);
+    const [applications, setApplications] = useState<any[]>([]);
+    const [appsLoading, setAppsLoading] = useState(false);
 
-    const handleSearch = () => {
+    const loadApplications = useCallback(async () => {
+        setAppsLoading(true);
+        try {
+            const data = await getApplications(DEMO_DRIVER_ID, 50);
+            const records = (data as any)?.records ?? (data as any)?.items ?? [];
+            const total = (data as any)?.total ?? (data as any)?.totalCount ?? records.length;
+            setApplications(records);
+            setAppCount(total);
+        } catch (err) {
+            console.error('[AiMatching] Failed to load applications:', err);
+        } finally {
+            setAppsLoading(false);
+        }
+    }, []);
+
+    // Load application count on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => { loadApplications(); }, []);
+
+    const handleSearch = async (filters?: { cdlClass?: string; jobType?: string; state?: string }) => {
         setIsSearching(true);
-        // Simulate API search latency
-        setTimeout(() => {
-            setIsSearching(false);
+        setSearchError(null);
+        try {
+            let data: any;
+            if (filters && (filters.cdlClass || filters.jobType || filters.state)) {
+                // Filter-based search
+                data = await searchJobs({ ...filters, limit: 20 });
+                // searchJobs returns { items, totalCount } — normalize to match format
+                const items = data?.items ?? [];
+                setResults(items.map((item: any, idx: number) => ({
+                    position: idx + 1,
+                    carrierId: item.carrierId ?? item._id ?? String(idx),
+                    carrierName: item.carrierName ?? item.carrier_name ?? 'Unknown Carrier',
+                    score: item.score ?? item.match_score ?? 0,
+                    factors: item.factors ?? {},
+                    dotNumber: item.dotNumber ?? item.dot_number ?? 0,
+                })));
+                setTotalScored(data?.totalCount ?? items.length);
+            } else {
+                // AI-powered matching
+                data = await findJobs(DEMO_DRIVER_ID, 20);
+                const matches = data?.matches ?? [];
+                setResults(matches);
+                setTotalScored(data?.totalScored ?? matches.length);
+            }
             setHasResults(true);
-        }, 2500);
+        } catch (err: any) {
+            console.error('[AiMatching] Search failed:', err);
+            setSearchError(err?.message ?? 'Search failed. Please try again.');
+            setHasResults(false);
+        } finally {
+            setIsSearching(false);
+        }
     };
 
     const handleReset = () => {
         setHasResults(false);
         setIsSearching(false);
+        setResults([]);
+        setSearchError(null);
+    };
+
+    const handleApplyComplete = () => {
+        setAppCount(prev => prev + 1);
+        // Refresh applications list
+        loadApplications();
     };
 
     return (
@@ -65,7 +139,15 @@ export default function AiMatchingPage() {
             {activeTab === 'Find Matches' && (
                 <div className="animate-fade-up">
                     {!isSearching && !hasResults && (
-                        <AiSearchForm onSearch={handleSearch} />
+                        <>
+                            <AiSearchForm onSearch={handleSearch} />
+                            {searchError && (
+                                <Card elevation="flat" className="!p-4 mt-4 text-center">
+                                    <p className="text-[12px] font-bold" style={{ color: '#ef4444' }}>{searchError}</p>
+                                    <button onClick={() => setSearchError(null)} className="text-[11px] font-bold mt-2" style={{ color: '#2563eb' }}>Dismiss</button>
+                                </Card>
+                            )}
+                        </>
                     )}
 
                     {isSearching && (
@@ -97,17 +179,24 @@ export default function AiMatchingPage() {
                     )}
 
                     {hasResults && !isSearching && (
-                        <AiResultsList onReset={handleReset} onApply={() => {
-                            // Example logic: move to application view or increment badge
-                            setAppCount(prev => prev + 1);
-                        }} />
+                        <AiResultsList
+                            results={results}
+                            totalScored={totalScored}
+                            loading={false}
+                            onReset={handleReset}
+                            onApply={handleApplyComplete}
+                        />
                     )}
                 </div>
             )}
 
             {activeTab === 'My Applications' && (
                 <div className="animate-fade-up">
-                    <AiApplicationsTracker />
+                    <AiApplicationsTracker
+                        applications={applications}
+                        loading={appsLoading}
+                        onRefresh={loadApplications}
+                    />
                 </div>
             )}
         </div>

@@ -2,9 +2,20 @@
 
 import { useState } from 'react';
 import { Card } from '@/components/ui';
+import { applyToJob } from '@/app/(driver)/actions/cockpit';
+
+const DEMO_DRIVER_ID = 'demo-driver-001';
 
 interface AiApplicationModalProps {
-    carrier: any;
+    carrier: {
+        carrierId?: string;
+        carrierName: string;
+        dotNumber?: number;
+        score?: number;
+        // Legacy mock fields
+        name?: string;
+        route?: string;
+    };
     onClose: () => void;
     onComplete: () => void;
 }
@@ -13,29 +24,47 @@ export default function AiApplicationModal({ carrier, onClose, onComplete }: AiA
     const [step, setStep] = useState(1);
     const [isUploading, setIsUploading] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
-    
+    const [submitError, setSubmitError] = useState<string | null>(null);
+    const [submitSuccess, setSubmitSuccess] = useState(false);
+
     // Step 2 OCR specific state
     const [uploadedCdl, setUploadedCdl] = useState(false);
 
-    const totalSteps = 4; // Simplified for mockup (Contact -> Documents -> Safety -> Submit)
+    const carrierName = carrier.carrierName ?? carrier.name ?? 'Unknown Carrier';
+    const carrierDot = carrier.dotNumber ? String(carrier.dotNumber) : (carrier.carrierId ?? '');
+
+    const totalSteps = 4; // Contact -> Documents -> Safety -> Submit
 
     const handleNext = () => setStep(s => Math.min(s + 1, totalSteps));
     const handlePrev = () => setStep(s => Math.max(s - 1, 1));
 
     const handleUploadClick = () => {
         setIsUploading(true);
+        // CDL upload is still simulated — real OCR endpoint not yet available
         setTimeout(() => {
             setIsUploading(false);
             setUploadedCdl(true);
         }, 2000);
     };
 
-    const handleSubmit = () => {
+    const handleSubmit = async () => {
         setIsSubmitting(true);
-        setTimeout(() => {
+        setSubmitError(null);
+        try {
+            const result = await applyToJob(DEMO_DRIVER_ID, carrierDot);
+            if ((result as any)?.success === false) {
+                throw new Error('Application was not accepted. Please try again.');
+            }
+            setSubmitSuccess(true);
+            // Brief delay to show success state before closing
+            setTimeout(() => {
+                onComplete();
+            }, 1500);
+        } catch (err: any) {
+            console.error('[AiApplicationModal] Apply failed:', err);
+            setSubmitError(err?.message ?? 'Failed to submit application. Please try again.');
             setIsSubmitting(false);
-            onComplete();
-        }, 2500);
+        }
     };
 
     return (
@@ -45,7 +74,10 @@ export default function AiApplicationModal({ carrier, onClose, onComplete }: AiA
                 <div className="p-4 flex items-center justify-between" style={{ background: '#0f172a' }}>
                     <div>
                         <h3 className="text-[16px] font-black text-white">Express Apply</h3>
-                        <p className="text-[11px] font-medium" style={{ color: '#94a3b8' }}>{carrier.name} • {carrier.route}</p>
+                        <p className="text-[11px] font-medium" style={{ color: '#94a3b8' }}>
+                            {carrierName}
+                            {carrier.dotNumber ? ` • DOT ${carrier.dotNumber}` : ''}
+                        </p>
                     </div>
                     <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center transition-all bg-white/10 text-white hover:bg-white/20">
                         <span className="material-symbols-outlined text-[16px]">close</span>
@@ -81,7 +113,7 @@ export default function AiApplicationModal({ carrier, onClose, onComplete }: AiA
                         <div className="space-y-4 animate-fade-right">
                             <h4 className="text-[14px] font-black mb-2" style={{ color: '#0f172a' }}>CDL Verification</h4>
                             <p className="text-[11px] font-medium mb-4" style={{ color: '#475569' }}>We use AI to automatically extract your details securely.</p>
-                            
+
                             {!uploadedCdl ? (
                                 <button
                                     onClick={handleUploadClick}
@@ -151,14 +183,31 @@ export default function AiApplicationModal({ carrier, onClose, onComplete }: AiA
                         </div>
                     )}
 
-                    {step === 4 && (
+                    {step === 4 && !submitSuccess && (
                         <div className="space-y-4 animate-fade-right text-center flex flex-col items-center py-6">
                             <div className="w-16 h-16 rounded-full flex items-center justify-center mb-4" style={{ background: '#dbeafe', color: '#1e40af' }}>
                                 <span className="material-symbols-outlined text-[32px]">task_alt</span>
                             </div>
                             <h4 className="text-[16px] font-black" style={{ color: '#0f172a' }}>Ready to Submit!</h4>
                             <p className="text-[12px] font-medium max-w-xs" style={{ color: '#475569' }}>
-                                By submitting, {carrier.name} will be notified immediately of your interest. Expected response time: <strong style={{ color: '#0f172a' }}>24 hrs</strong>.
+                                By submitting, {carrierName} will be notified immediately of your interest. Expected response time: <strong style={{ color: '#0f172a' }}>24 hrs</strong>.
+                            </p>
+                            {submitError && (
+                                <div className="w-full p-3 rounded-xl mt-2" style={{ background: '#fef2f2', border: '1px solid #fca5a5' }}>
+                                    <p className="text-[11px] font-bold" style={{ color: '#dc2626' }}>{submitError}</p>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {step === 4 && submitSuccess && (
+                        <div className="space-y-4 animate-fade-right text-center flex flex-col items-center py-6">
+                            <div className="w-16 h-16 rounded-full flex items-center justify-center mb-4" style={{ background: '#dcfce7', color: '#16a34a' }}>
+                                <span className="material-symbols-outlined text-[32px]">check_circle</span>
+                            </div>
+                            <h4 className="text-[16px] font-black" style={{ color: '#16a34a' }}>Application Sent!</h4>
+                            <p className="text-[12px] font-medium max-w-xs" style={{ color: '#475569' }}>
+                                Your application to {carrierName} has been submitted successfully.
                             </p>
                         </div>
                     )}
@@ -166,25 +215,32 @@ export default function AiApplicationModal({ carrier, onClose, onComplete }: AiA
 
                 {/* Footer Actions */}
                 <div className="p-4 pt-3 flex items-center justify-between border-t border-[var(--neu-border)] bg-[var(--neu-bg)]">
-                    <button 
-                        onClick={handlePrev} 
-                        disabled={step === 1 || isSubmitting}
-                        className={`text-[12px] font-bold px-4 py-2 transition-all ${step === 1 ? 'opacity-30' : 'hover:text-[#2563eb]'}`}
+                    <button
+                        onClick={handlePrev}
+                        disabled={step === 1 || isSubmitting || submitSuccess}
+                        className={`text-[12px] font-bold px-4 py-2 transition-all ${step === 1 || submitSuccess ? 'opacity-30' : 'hover:text-[#2563eb]'}`}
                         style={{ color: '#475569' }}
                     >
                         Back
                     </button>
-                    
+
                     {step < totalSteps ? (
-                        <button 
+                        <button
                             onClick={handleNext}
                             className="bg-[#2563eb] text-white text-[12px] font-black px-6 py-2.5 rounded-xl transition-all hover:-translate-y-0.5"
                             style={{ boxShadow: '0 4px 6px -1px rgba(37, 99, 235, 0.3)' }}
                         >
                             Next Step
                         </button>
+                    ) : submitSuccess ? (
+                        <button
+                            onClick={onClose}
+                            className="bg-[#16a34a] text-white text-[12px] font-black px-6 py-2.5 rounded-xl transition-all"
+                        >
+                            Done
+                        </button>
                     ) : (
-                        <button 
+                        <button
                             onClick={handleSubmit}
                             disabled={isSubmitting}
                             className="bg-[#fbbf24] text-[#0f172a] text-[12px] font-black px-6 py-2.5 rounded-xl transition-all hover:-translate-y-0.5 flex items-center justify-center gap-2"
