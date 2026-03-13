@@ -41,6 +41,15 @@ function renderMd(text: string): string {
     return sanitizeHtml(rendered);
 }
 
+export interface ConversationThread {
+    id: string;
+    recruiterName: string;
+    company: string;
+    initials: string;
+    online?: boolean;
+    messages: Array<{ id: string; from: 'driver' | 'recruiter'; text: string; time: string }>;
+}
+
 export interface DriverChatDrawerProps {
     open: boolean;
     onClose: () => void;
@@ -50,6 +59,8 @@ export interface DriverChatDrawerProps {
     aiMessages?: ChatMessage[];
     /** Called when driver types in the AI thread */
     onAiSend?: (text: string) => void;
+    /** Real conversation threads for Messages mode (falls back to mock data) */
+    conversations?: ConversationThread[];
 }
 
 /* ── Mock recruiter thread data ── */
@@ -81,7 +92,7 @@ const MOCK_THREADS = [
     },
 ];
 
-export function DriverChatDrawer({ open, onClose, mode = 'messages', aiMessages = [], onAiSend }: DriverChatDrawerProps) {
+export function DriverChatDrawer({ open, onClose, mode = 'messages', aiMessages = [], onAiSend, conversations }: DriverChatDrawerProps) {
     const [activeThread, setActiveThread] = useState<string | null>(null);
     const [inputValue, setInputValue] = useState('');
     const [voiceActive, setVoiceActive] = useState(false);
@@ -89,7 +100,9 @@ export function DriverChatDrawer({ open, onClose, mode = 'messages', aiMessages 
     const [voiceTranscript, setVoiceTranscript] = useState('');
     const scrollRef = useRef<HTMLDivElement>(null);
 
-    const currentThread = MOCK_THREADS.find((t) => t.id === activeThread);
+    /* Use real conversations when available, fall back to mock */
+    const threads = (conversations && conversations.length > 0) ? conversations : MOCK_THREADS;
+    const currentThread = threads.find((t) => t.id === activeThread);
     const isAiMode = mode === 'ai';
 
     /* Auto-scroll AI messages */
@@ -158,7 +171,7 @@ export function DriverChatDrawer({ open, onClose, mode = 'messages', aiMessages 
         ? 'Powered by LMDR Intelligence'
         : currentThread
             ? currentThread.company
-            : `${MOCK_THREADS.length} conversations`;
+            : `${threads.length} conversations`;
 
     return (
         <>
@@ -485,7 +498,7 @@ export function DriverChatDrawer({ open, onClose, mode = 'messages', aiMessages 
                          RECRUITER THREAD LIST
                          ══════════════════════════════════ */
                     <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                        {MOCK_THREADS.map((thread) => {
+                        {threads.map((thread) => {
                             const lastMsg = thread.messages[thread.messages.length - 1];
                             return (
                                 <button

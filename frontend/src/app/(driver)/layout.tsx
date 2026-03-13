@@ -1,11 +1,15 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
 import { usePathname } from 'next/navigation';
 import { DriverHeader, DriverTabBar, VoiceCommandBar, DriverNavDrawer, DriverChatDrawer, DriverTopBanner } from '@/components/driver';
 import { ThemeProvider } from '@/lib/theme';
+import { useApi } from '@/lib/hooks';
 import { agentTurn } from './actions/agent';
 import { textToSpeech } from './actions/voice';
+import { getProfile } from './actions/profile';
+import { getNotifications } from './actions/cockpit';
+import { getConversations } from './actions/messaging';
 
 function nowTime(): string {
   const d = new Date();
@@ -27,8 +31,60 @@ interface AiMessage {
   time: string;
 }
 
+const DEMO_DRIVER_ID = 'demo-driver-001';
+
 export default function DriverLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+
+  /* ── Fetch shell data from Cloud Run ── */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: profileData } = useApi<Record<string, any>>(
+    () => getProfile(DEMO_DRIVER_ID).then(d => ({ data: d as Record<string, any> })),
+  );
+  const { data: notificationsData } = useApi<unknown[]>(
+    () => getNotifications(DEMO_DRIVER_ID).then(d => ({ data: (Array.isArray(d) ? d : []) })),
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data: conversationsData } = useApi<any>(
+    () => getConversations(DEMO_DRIVER_ID).then(d => ({ data: d })),
+  );
+
+  /* ── Derive shell props with fallbacks ── */
+  const firstName = profileData?.first_name ?? profileData?.firstName ?? '';
+  const lastName = profileData?.last_name ?? profileData?.lastName ?? '';
+  const userName = (firstName && lastName) ? `${firstName} ${lastName}` : '';
+  const userInitials = (firstName && lastName)
+    ? `${firstName[0]}${lastName[0]}`.toUpperCase()
+    : '';
+  const cdlClass = profileData?.cdl_class ?? profileData?.cdlClass ?? '';
+  const yearsExperience = profileData?.years_experience ?? profileData?.yearsExperience ?? undefined;
+  const notificationCount = Array.isArray(notificationsData)
+    ? notificationsData.filter((n: any) => !(n as any)?.read).length || notificationsData.length
+    : undefined;
+
+  /* ── Map API conversations to ChatDrawer thread shape ── */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const chatConversations = useMemo(() => {
+    const raw = conversationsData?.conversations ?? conversationsData;
+    if (!Array.isArray(raw) || raw.length === 0) return undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return raw.map((c: any) => {
+      const name = c.recruiterName ?? c.recipientName ?? c.name ?? 'Recruiter';
+      const parts = name.split(' ');
+      const initials = parts.length >= 2
+        ? `${parts[0][0]}${parts[1][0]}`.toUpperCase()
+        : name.slice(0, 2).toUpperCase();
+      return {
+        id: c._id ?? c.id ?? String(Math.random()),
+        recruiterName: name,
+        company: c.company ?? c.carrierName ?? '',
+        initials,
+        online: c.online ?? false,
+        messages: Array.isArray(c.messages) ? c.messages : [],
+      };
+    });
+  }, [conversationsData]);
+
   const [navOpen, setNavOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMode, setChatMode] = useState<'messages' | 'ai'>('messages');
@@ -117,7 +173,10 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
         />
 
         {/* Mobile Header */}
-        <DriverHeader />
+        <DriverHeader
+          driverInitials={userInitials || undefined}
+          notificationCount={notificationCount}
+        />
 
         {/* Main Content — less bottom padding on messages page since no command bar */}
         <main className={`flex-1 overflow-y-auto ws-grid ${isMessagesPage ? 'pb-20' : 'pb-36'}`}>
@@ -133,7 +192,14 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
         <DriverTabBar />
 
         {/* LEFT Drawer — Navigation */}
-        <DriverNavDrawer open={navOpen} onClose={() => setNavOpen(false)} />
+        <DriverNavDrawer
+          open={navOpen}
+          onClose={() => setNavOpen(false)}
+          userName={userName || undefined}
+          userInitials={userInitials || undefined}
+          cdlClass={cdlClass || undefined}
+          yearsExperience={yearsExperience != null ? Number(yearsExperience) : undefined}
+        />
 
         {/* RIGHT Drawer — Chat (Messages OR AI) */}
         <DriverChatDrawer
@@ -142,6 +208,7 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
           mode={chatMode}
           aiMessages={aiMessages}
           onAiSend={handleAiMessage}
+          conversations={chatConversations}
         />
       </div>
     </ThemeProvider>

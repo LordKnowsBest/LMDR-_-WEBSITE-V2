@@ -8,6 +8,10 @@ import { useTheme } from '@/lib/theme';
 interface DriverNavDrawerProps {
     open: boolean;
     onClose: () => void;
+    userName?: string;
+    userInitials?: string;
+    cdlClass?: string;
+    yearsExperience?: number;
 }
 
 const NAV_SECTIONS = [
@@ -49,7 +53,11 @@ const NAV_SECTIONS = [
     },
 ];
 
-export function DriverNavDrawer({ open, onClose }: DriverNavDrawerProps) {
+export function DriverNavDrawer({ open, onClose, userName, userInitials, cdlClass, yearsExperience }: DriverNavDrawerProps) {
+    const displayName = userName ?? 'Marcus Thompson';
+    const displayInitials = userInitials ?? 'MT';
+    const displayCdl = cdlClass ?? 'CDL-A';
+    const displayExp = yearsExperience != null ? `${yearsExperience}yr exp` : '8yr exp';
     const pathname = usePathname();
     const { theme, themes, setTheme } = useTheme();
 
@@ -110,11 +118,11 @@ export function DriverNavDrawer({ open, onClose }: DriverNavDrawerProps) {
                 <div className="px-4 py-4">
                     <div className="neu-x rounded-xl p-3 flex items-center gap-3">
                         <div className="neu-ins w-10 h-10 rounded-xl flex items-center justify-center shrink-0">
-                            <span className="text-[13px] font-bold" style={{ color: 'var(--neu-accent)' }}>MT</span>
+                            <span className="text-[13px] font-bold" style={{ color: 'var(--neu-accent)' }}>{displayInitials}</span>
                         </div>
                         <div className="flex-1 min-w-0">
-                            <p className="text-[12px] font-bold truncate" style={{ color: 'var(--neu-text)' }}>Marcus Thompson</p>
-                            <p className="text-[9px]" style={{ color: 'var(--neu-text-muted)' }}>CDL-A · 8yr exp</p>
+                            <p className="text-[12px] font-bold truncate" style={{ color: 'var(--neu-text)' }}>{displayName}</p>
+                            <p className="text-[9px]" style={{ color: 'var(--neu-text-muted)' }}>{displayCdl} · {displayExp}</p>
                         </div>
                         <div className="flex flex-col items-center">
                             <span className="text-[13px] font-black" style={{ color: 'var(--neu-accent)' }}>87</span>
