@@ -1,9 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Card } from '@/components/ui';
 import { useApi } from '@/lib/hooks';
-import { getHealthResources, getHealthTips, searchPetFriendly } from '../../actions/wellness';
+import {
+    getHealthResources, getHealthTips, searchPetFriendly,
+    submitPetFriendlyLocation, reviewPetFriendlyLocation, submitHealthTip,
+} from '../../actions/wellness';
+
+const DEMO_DRIVER_ID = 'demo-driver-001';
+const DEFAULT_LAT = 32.7767;
+const DEFAULT_LNG = -96.7970;
 
 /* ── Mock Fallback Data ── */
 const mockRestAreas = [
@@ -31,6 +38,50 @@ export default function RoadWellnessPage() {
     const [tab, setTab] = useState('Road Tools');
     const [hosHours, setHosHours] = useState(7);
 
+    /* ── Geolocation state ── */
+    const [userLat, setUserLat] = useState(DEFAULT_LAT);
+    const [userLng, setUserLng] = useState(DEFAULT_LNG);
+    const [geoStatus, setGeoStatus] = useState<'pending' | 'granted' | 'denied'>('pending');
+
+    /* ── Pet location submission ── */
+    const [showPetSubmit, setShowPetSubmit] = useState(false);
+    const [petName, setPetName] = useState('');
+    const [petAddress, setPetAddress] = useState('');
+    const [petAmenities, setPetAmenities] = useState('');
+    const [petSubmitting, setPetSubmitting] = useState(false);
+
+    /* ── Pet review state ── */
+    const [reviewingPetId, setReviewingPetId] = useState<string | number | null>(null);
+    const [petRating, setPetRating] = useState(4);
+    const [petComment, setPetComment] = useState('');
+    const [reviewSubmitting, setReviewSubmitting] = useState(false);
+
+    /* ── Health tip submission ── */
+    const [showTipForm, setShowTipForm] = useState(false);
+    const [tipTitle, setTipTitle] = useState('');
+    const [tipContent, setTipContent] = useState('');
+    const [tipCategory, setTipCategory] = useState('Fitness');
+    const [tipSubmitting, setTipSubmitting] = useState(false);
+
+    /* ── Request geolocation on mount ── */
+    useEffect(() => {
+        if (typeof navigator === 'undefined' || !navigator.geolocation) {
+            setGeoStatus('denied');
+            return;
+        }
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                setUserLat(pos.coords.latitude);
+                setUserLng(pos.coords.longitude);
+                setGeoStatus('granted');
+            },
+            () => {
+                setGeoStatus('denied');
+            },
+            { timeout: 5000 }
+        );
+    }, []);
+
     const { data: healthResourcesData } = useApi<Record<string, unknown>[]>(
         () => getHealthResources().then(d => ({ data: d as unknown as Record<string, unknown>[] })),
         []
@@ -39,10 +90,9 @@ export default function RoadWellnessPage() {
         () => getHealthTips().then(d => ({ data: d as unknown as Record<string, unknown>[] })),
         []
     );
-    // Default coords (Dallas, TX) — pet-friendly search
     const { data: petFriendlyData } = useApi<Record<string, unknown>[]>(
-        () => searchPetFriendly(32.7767, -96.7970, 50).then(d => ({ data: d as unknown as Record<string, unknown>[] })),
-        []
+        () => searchPetFriendly(userLat, userLng, 50).then(d => ({ data: d as unknown as Record<string, unknown>[] })),
+        [userLat, userLng]
     );
 
     const restAreas = mockRestAreas; // No server action for rest areas yet
@@ -52,11 +102,80 @@ export default function RoadWellnessPage() {
     const hosRemaining = 11 - hosHours;
     const hosPct = Math.round((hosHours / 11) * 100);
 
+    /* ── Pet location submit handler ── */
+    const handlePetSubmit = useCallback(async () => {
+        if (!petName.trim() || !petAddress.trim()) return;
+        setPetSubmitting(true);
+        try {
+            await submitPetFriendlyLocation({
+                name: petName.trim(),
+                lat: userLat,
+                lng: userLng,
+                address: petAddress.trim(),
+                amenities: petAmenities.split(',').map(a => a.trim()).filter(Boolean),
+                driverId: DEMO_DRIVER_ID,
+            });
+            setPetName('');
+            setPetAddress('');
+            setPetAmenities('');
+            setShowPetSubmit(false);
+        } catch (err) {
+            console.error('Failed to submit pet location:', err);
+        } finally {
+            setPetSubmitting(false);
+        }
+    }, [petName, petAddress, petAmenities, userLat, userLng]);
+
+    /* ── Pet review handler ── */
+    const handlePetReview = useCallback(async () => {
+        if (!reviewingPetId) return;
+        setReviewSubmitting(true);
+        try {
+            await reviewPetFriendlyLocation(String(reviewingPetId), {
+                driverId: DEMO_DRIVER_ID,
+                rating: petRating,
+                comment: petComment.trim() || undefined,
+            });
+            setReviewingPetId(null);
+            setPetComment('');
+            setPetRating(4);
+        } catch (err) {
+            console.error('Failed to submit review:', err);
+        } finally {
+            setReviewSubmitting(false);
+        }
+    }, [reviewingPetId, petRating, petComment]);
+
+    /* ── Health tip handler ── */
+    const handleTipSubmit = useCallback(async () => {
+        if (!tipTitle.trim() || !tipContent.trim()) return;
+        setTipSubmitting(true);
+        try {
+            await submitHealthTip({
+                driverId: DEMO_DRIVER_ID,
+                category: tipCategory,
+                title: tipTitle.trim(),
+                content: tipContent.trim(),
+            });
+            setTipTitle('');
+            setTipContent('');
+            setShowTipForm(false);
+        } catch (err) {
+            console.error('Failed to submit health tip:', err);
+        } finally {
+            setTipSubmitting(false);
+        }
+    }, [tipTitle, tipContent, tipCategory]);
+
     return (
         <div className="space-y-4">
             <div>
                 <h1 className="text-xl font-extrabold" style={{ color: 'var(--neu-text)' }}>Road & Wellness</h1>
-                <p className="text-[12px]" style={{ color: 'var(--neu-text-muted)' }}>Road Tools · Health · Pet Friendly Stops</p>
+                <p className="text-[12px]" style={{ color: 'var(--neu-text-muted)' }}>
+                    Road Tools · Health · Pet Friendly Stops
+                    {geoStatus === 'granted' && <span className="ml-1 text-green-500 font-bold">· GPS Active</span>}
+                    {geoStatus === 'denied' && <span className="ml-1 text-yellow-500 font-bold">· Using default location</span>}
+                </p>
             </div>
 
             {/* Tabs */}
@@ -109,7 +228,7 @@ export default function RoadWellnessPage() {
                             className="w-full accent-blue-500"
                         />
                         <p className="text-[10px] mt-1 text-center" style={{ color: hosPct > 80 ? '#ef4444' : 'var(--neu-text-muted)' }}>
-                            {hosPct > 80 ? '⚠ Approaching 11-hour limit' : `Safe to drive ${hosRemaining}h more`}
+                            {hosPct > 80 ? 'Approaching 11-hour limit' : `Safe to drive ${hosRemaining}h more`}
                         </p>
                     </Card>
 
@@ -147,9 +266,61 @@ export default function RoadWellnessPage() {
             {/* Health & Wellness */}
             {tab === 'Health & Wellness' && (
                 <div className="space-y-2.5">
-                    <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>
-                        Resources
-                    </p>
+                    <div className="flex items-center justify-between">
+                        <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>
+                            Resources
+                        </p>
+                        <button
+                            onClick={() => setShowTipForm(v => !v)}
+                            className="text-[10px] font-bold px-2.5 py-1 rounded-lg"
+                            style={{ background: 'var(--neu-accent)', color: '#fff' }}
+                        >
+                            {showTipForm ? 'Cancel' : '+ Share Tip'}
+                        </button>
+                    </div>
+
+                    {/* Health Tip Submission Form */}
+                    {showTipForm && (
+                        <Card elevation="md" className="!p-4 space-y-3">
+                            <input
+                                type="text"
+                                placeholder="Tip title..."
+                                value={tipTitle}
+                                onChange={(e) => setTipTitle(e.target.value)}
+                                className="w-full px-3 py-2 rounded-lg text-[12px] neu-in outline-none"
+                                style={{ background: 'var(--neu-bg-soft)', color: 'var(--neu-text)' }}
+                            />
+                            <textarea
+                                placeholder="Share your health tip with fellow drivers..."
+                                value={tipContent}
+                                onChange={(e) => setTipContent(e.target.value)}
+                                rows={3}
+                                className="w-full px-3 py-2 rounded-lg text-[12px] neu-in outline-none resize-none"
+                                style={{ background: 'var(--neu-bg-soft)', color: 'var(--neu-text)' }}
+                            />
+                            <select
+                                value={tipCategory}
+                                onChange={(e) => setTipCategory(e.target.value)}
+                                className="w-full px-3 py-2 rounded-lg text-[12px] neu-in outline-none"
+                                style={{ background: 'var(--neu-bg-soft)', color: 'var(--neu-text)' }}
+                            >
+                                <option value="Fitness">Fitness</option>
+                                <option value="Nutrition">Nutrition</option>
+                                <option value="Mental Health">Mental Health</option>
+                                <option value="Cardio">Cardio</option>
+                                <option value="Sleep">Sleep</option>
+                            </select>
+                            <button
+                                onClick={handleTipSubmit}
+                                disabled={tipSubmitting || !tipTitle.trim()}
+                                className="w-full py-2 rounded-lg text-[11px] font-bold disabled:opacity-50"
+                                style={{ background: 'var(--neu-accent)', color: '#fff' }}
+                            >
+                                {tipSubmitting ? 'Submitting...' : 'Submit Tip'}
+                            </button>
+                        </Card>
+                    )}
+
                     {healthResources.map((res, i) => (
                         <Card key={i} elevation="sm" className="!p-3.5">
                             <div className="flex items-center gap-3">
@@ -193,6 +364,56 @@ export default function RoadWellnessPage() {
                         </div>
                     </Card>
 
+                    {/* Submit new pet location */}
+                    <button
+                        onClick={() => setShowPetSubmit(v => !v)}
+                        className="w-full py-2 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5"
+                        style={{ background: 'linear-gradient(135deg, var(--neu-accent), var(--neu-accent-deep))', color: '#fff' }}
+                    >
+                        <span className="material-symbols-outlined text-[14px]">{showPetSubmit ? 'close' : 'add_location'}</span>
+                        {showPetSubmit ? 'Cancel' : 'Add Pet-Friendly Location'}
+                    </button>
+
+                    {showPetSubmit && (
+                        <Card elevation="md" className="!p-4 space-y-3">
+                            <input
+                                type="text"
+                                placeholder="Location name..."
+                                value={petName}
+                                onChange={(e) => setPetName(e.target.value)}
+                                className="w-full px-3 py-2 rounded-lg text-[12px] neu-in outline-none"
+                                style={{ background: 'var(--neu-bg-soft)', color: 'var(--neu-text)' }}
+                            />
+                            <input
+                                type="text"
+                                placeholder="Address..."
+                                value={petAddress}
+                                onChange={(e) => setPetAddress(e.target.value)}
+                                className="w-full px-3 py-2 rounded-lg text-[12px] neu-in outline-none"
+                                style={{ background: 'var(--neu-bg-soft)', color: 'var(--neu-text)' }}
+                            />
+                            <input
+                                type="text"
+                                placeholder="Amenities (comma separated)..."
+                                value={petAmenities}
+                                onChange={(e) => setPetAmenities(e.target.value)}
+                                className="w-full px-3 py-2 rounded-lg text-[12px] neu-in outline-none"
+                                style={{ background: 'var(--neu-bg-soft)', color: 'var(--neu-text)' }}
+                            />
+                            <p className="text-[9px]" style={{ color: 'var(--neu-text-muted)' }}>
+                                Using your current GPS coordinates ({userLat.toFixed(4)}, {userLng.toFixed(4)})
+                            </p>
+                            <button
+                                onClick={handlePetSubmit}
+                                disabled={petSubmitting || !petName.trim()}
+                                className="w-full py-2 rounded-lg text-[11px] font-bold disabled:opacity-50"
+                                style={{ background: 'var(--neu-accent)', color: '#fff' }}
+                            >
+                                {petSubmitting ? 'Submitting...' : 'Submit Location'}
+                            </button>
+                        </Card>
+                    )}
+
                     <div className="space-y-2.5">
                         {petFriendly.map((stop) => (
                             <Card key={stop.id} elevation="sm" className="!p-3.5">
@@ -213,8 +434,53 @@ export default function RoadWellnessPage() {
                                         <span className="text-yellow-400 text-[11px]">★</span>
                                         <span className="text-[10px] font-bold" style={{ color: 'var(--neu-text)' }}>{stop.rating}</span>
                                     </div>
-                                    <span className="text-[10px] text-green-500 font-bold">🐾 Pet Friendly</span>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[10px] text-green-500 font-bold">🐾 Pet Friendly</span>
+                                        <button
+                                            onClick={() => setReviewingPetId(reviewingPetId === stop.id ? null : stop.id)}
+                                            className="text-[9px] font-bold px-2 py-1 rounded-lg"
+                                            style={{ background: 'var(--neu-bg-soft)', color: 'var(--neu-accent)' }}
+                                        >
+                                            Review
+                                        </button>
+                                    </div>
                                 </div>
+
+                                {/* Inline Review Form */}
+                                {reviewingPetId === stop.id && (
+                                    <div className="mt-3 pt-3 space-y-2" style={{ borderTop: '1px solid var(--neu-bg-soft)' }}>
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[10px] font-bold" style={{ color: 'var(--neu-text)' }}>Rating:</span>
+                                            <div className="flex gap-1">
+                                                {[1, 2, 3, 4, 5].map(v => (
+                                                    <button
+                                                        key={v}
+                                                        onClick={() => setPetRating(v)}
+                                                        className="text-[14px]"
+                                                    >
+                                                        {v <= petRating ? '★' : '☆'}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <input
+                                            type="text"
+                                            placeholder="Comment (optional)..."
+                                            value={petComment}
+                                            onChange={(e) => setPetComment(e.target.value)}
+                                            className="w-full px-2 py-1.5 rounded-lg text-[11px] neu-in outline-none"
+                                            style={{ background: 'var(--neu-bg-soft)', color: 'var(--neu-text)' }}
+                                        />
+                                        <button
+                                            onClick={handlePetReview}
+                                            disabled={reviewSubmitting}
+                                            className="w-full py-1.5 rounded-lg text-[10px] font-bold disabled:opacity-50"
+                                            style={{ background: 'var(--neu-accent)', color: '#fff' }}
+                                        >
+                                            {reviewSubmitting ? 'Submitting...' : 'Submit Review'}
+                                        </button>
+                                    </div>
+                                )}
                             </Card>
                         ))}
                     </div>
