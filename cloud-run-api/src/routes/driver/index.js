@@ -12,6 +12,7 @@ import scorecardRouter from './scorecard.js';
 import retentionRouter from './retention.js';
 import documentsRouter from './documents.js';
 import ocrRouter from './ocr.js';
+import messagingRouter from './messaging.js';
 
 const router = Router();
 
@@ -54,6 +55,7 @@ router.use('/scorecard', scorecardRouter);
 router.use('/retention', retentionRouter);
 router.use('/documents', documentsRouter);
 router.use('/ocr', ocrRouter);
+router.use('/messaging', messagingRouter);
 
 // ── GET /driver/manifest — AI tool definitions ──
 const TOOL_DEFINITIONS = [

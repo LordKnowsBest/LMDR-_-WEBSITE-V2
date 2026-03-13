@@ -1,12 +1,13 @@
 'use client';
 
-import { useState } from 'react';
-import { Card, Badge } from '@/components/ui';
-import { useApi } from '@/lib/hooks';
-// TODO: wire to messages server action when available
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Card } from '@/components/ui';
+import { getConversations, getMessages, sendMessage, markAsRead } from '../../actions/messaging';
 
-/* ── Mock Data ── */
-interface Message {
+const DEMO_DRIVER_ID = 'demo-driver-001';
+
+/* ── Types ── */
+interface Conversation {
     id: string;
     from: string;
     company: string;
@@ -15,6 +16,7 @@ interface Message {
     time: string;
     unread: boolean;
     online: boolean;
+    recipientId?: string;
 }
 
 interface ChatMessage {
@@ -24,7 +26,8 @@ interface ChatMessage {
     time: string;
 }
 
-const mockConversations: Message[] = [
+/* ── Mock Fallback Data ── */
+const mockConversations: Conversation[] = [
     {
         id: '1',
         from: 'Sarah Chen',
@@ -96,23 +99,167 @@ const mockChatMessages: Record<string, ChatMessage[]> = {
     ],
 };
 
+/* ── Helpers ── */
+function formatRelativeTime(dateStr: string | null): string {
+    if (!dateStr) return '';
+    const now = Date.now();
+    const then = new Date(dateStr).getTime();
+    const diffMs = now - then;
+    const minutes = Math.floor(diffMs / 60000);
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days === 1) return 'Yesterday';
+    return `${days}d ago`;
+}
+
+function formatMessageTime(dateStr: string): string {
+    try {
+        return new Date(dateStr).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    } catch {
+        return dateStr;
+    }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapApiConversation(c: any): Conversation {
+    return {
+        id: c._id || c.id,
+        from: c.recipient_name || c.recipientName || 'Unknown',
+        company: c.company || c.recipient_company || '',
+        avatar: (c.recipient_name || c.recipientName || 'U').split(' ').map((w: string) => w[0]).join('').substring(0, 2).toUpperCase(),
+        preview: c.lastMessage || c.last_message || c.subject || '',
+        time: formatRelativeTime(c.lastMessageAt || c.last_message_at || c._createdAt),
+        unread: (c.unreadCount || c.unread_count || 0) > 0,
+        online: false,
+        recipientId: c.recipient_id || c.recipientId,
+    };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapApiMessage(m: any): ChatMessage {
+    return {
+        id: m._id || m.id,
+        sender: m.sender_id === DEMO_DRIVER_ID || m.senderId === DEMO_DRIVER_ID ? 'driver' : 'recruiter',
+        text: m.content || m.text || '',
+        time: formatMessageTime(m.sent_at || m.sentAt || m._createdAt || ''),
+    };
+}
+
 export default function MessagesPage() {
+    const [conversations, setConversations] = useState<Conversation[]>(mockConversations);
     const [selectedConvo, setSelectedConvo] = useState<string | null>(null);
+    const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
     const [inputValue, setInputValue] = useState('');
     const [voiceActive, setVoiceActive] = useState(false);
     const [voicePhase, setVoicePhase] = useState<'listening' | 'processing'>('listening');
     const [voiceTranscript, setVoiceTranscript] = useState('');
+    const [sending, setSending] = useState(false);
+    const chatEndRef = useRef<HTMLDivElement>(null);
 
-    const activeConvo = mockConversations.find((c) => c.id === selectedConvo);
-    const chatMessages = selectedConvo ? mockChatMessages[selectedConvo] || [] : [];
-    const unreadCount = mockConversations.filter((c) => c.unread).length;
+    const activeConvo = conversations.find((c) => c.id === selectedConvo);
+    const unreadCount = conversations.filter((c) => c.unread).length;
+
+    /* ── Load conversations from API ── */
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await getConversations(DEMO_DRIVER_ID);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const apiConvos = (res as any)?.conversations;
+                if (!cancelled && Array.isArray(apiConvos) && apiConvos.length > 0) {
+                    setConversations(apiConvos.map(mapApiConversation));
+                }
+                // If empty or error, keep mock fallback
+            } catch {
+                // Keep mock fallback data
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
+    /* ── Load messages when conversation selected ── */
+    const loadMessages = useCallback(async (convId: string) => {
+        // First try mock data for instant display
+        const mockMsgs = mockChatMessages[convId];
+        if (mockMsgs) setChatMessages(mockMsgs);
+
+        try {
+            const res = await getMessages(DEMO_DRIVER_ID, convId);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const apiMsgs = (res as any)?.messages;
+            if (Array.isArray(apiMsgs) && apiMsgs.length > 0) {
+                setChatMessages(apiMsgs.map(mapApiMessage));
+            }
+            // If empty API response, keep mock messages shown above
+        } catch {
+            // Keep mock fallback if API fails
+            if (!mockChatMessages[convId]) setChatMessages([]);
+        }
+    }, []);
+
+    /* ── Select conversation ── */
+    const handleSelectConvo = useCallback(async (convId: string) => {
+        setSelectedConvo(convId);
+        await loadMessages(convId);
+
+        // Mark as read
+        try {
+            await markAsRead(DEMO_DRIVER_ID, convId);
+            setConversations(prev =>
+                prev.map(c => c.id === convId ? { ...c, unread: false } : c)
+            );
+        } catch {
+            // Non-critical - still show conversation
+        }
+    }, [loadMessages]);
+
+    /* ── Auto-scroll to bottom ── */
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [chatMessages]);
 
     /* ── Send handler ── */
-    const handleSend = () => {
-        if (!inputValue.trim()) return;
-        // In production this would call messagingService
+    const handleSend = useCallback(async () => {
+        if (!inputValue.trim() || !selectedConvo || sending) return;
+        const content = inputValue.trim();
+        setSending(true);
         setInputValue('');
-    };
+
+        // Optimistic update
+        const optimisticMsg: ChatMessage = {
+            id: `temp-${Date.now()}`,
+            sender: 'driver',
+            text: content,
+            time: new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
+        };
+        setChatMessages(prev => [...prev, optimisticMsg]);
+
+        try {
+            const res = await sendMessage(DEMO_DRIVER_ID, selectedConvo, content);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const messageId = (res as any)?.messageId;
+            if (messageId) {
+                // Replace optimistic with real ID
+                setChatMessages(prev =>
+                    prev.map(m => m.id === optimisticMsg.id ? { ...m, id: messageId } : m)
+                );
+            }
+            // Update conversation preview
+            setConversations(prev =>
+                prev.map(c => c.id === selectedConvo ? { ...c, preview: content, time: 'Just now' } : c)
+            );
+        } catch {
+            // Revert optimistic update on failure
+            setChatMessages(prev => prev.filter(m => m.id !== optimisticMsg.id));
+            setInputValue(content); // Put text back
+        } finally {
+            setSending(false);
+        }
+    }, [inputValue, selectedConvo, sending]);
 
     /* ── Voice handlers ── */
     const startVoice = () => {
@@ -220,6 +367,7 @@ export default function MessagesPage() {
                             </div>
                         </div>
                     ))}
+                    <div ref={chatEndRef} />
                 </div>
 
                 {/* Chat Input */}
@@ -376,9 +524,11 @@ export default function MessagesPage() {
                                     placeholder="Type a message..."
                                     className="flex-1 bg-transparent border-none outline-none text-[13px] font-medium px-1"
                                     style={{ color: 'var(--neu-text)' }}
+                                    disabled={sending}
                                 />
                                 <button
                                     onClick={handleSend}
+                                    disabled={sending}
                                     className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-transform active:scale-90"
                                     style={{
                                         background: inputValue.trim()
@@ -457,10 +607,10 @@ export default function MessagesPage() {
 
             {/* Conversation Cards */}
             <div className="space-y-2.5">
-                {mockConversations.map((convo) => (
+                {conversations.map((convo) => (
                     <button
                         key={convo.id}
-                        onClick={() => setSelectedConvo(convo.id)}
+                        onClick={() => handleSelectConvo(convo.id)}
                         className="w-full text-left animate-fade-up"
                     >
                         <Card
