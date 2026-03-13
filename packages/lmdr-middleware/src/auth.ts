@@ -95,6 +95,13 @@ export function authenticate({ optional = false } = {}) {
     }
 
     try {
+      // Internal service-to-service key bypasses Firebase/API key auth
+      const internalKey = process.env.LMDR_INTERNAL_KEY;
+      if (internalKey && token === internalKey) {
+        req.auth = { type: 'firebase', uid: 'internal-service', role: 'admin' } as FirebaseAuth;
+        return next();
+      }
+
       req.auth = isApiKey(token)
         ? (await resolveApiKey(token)) || undefined
         : await resolveFirebaseToken(token);
