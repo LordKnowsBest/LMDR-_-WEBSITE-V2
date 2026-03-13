@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Card, Button, Input, Badge } from '@/components/ui';
 import { getProfile, updateProfile } from '../../actions/profile';
+import { listDocuments, getSignedUploadUrl, uploadDocument, deleteDocument } from '../../actions/documents';
 import { useApi, useMutation } from '@/lib/hooks';
 
 /* ── Constants ── */
@@ -31,16 +32,119 @@ const mockProfile = {
   homeCity: 'Dallas', homeState: 'TX', homeZip: '75201',
 };
 
+/* ── Document type metadata ── */
+const DOC_TYPE_META: Record<string, { label: string; icon: string }> = {
+  cdl: { label: 'CDL License', icon: 'badge' },
+  medical_card: { label: 'Medical Card (DOT)', icon: 'medical_information' },
+  mvr: { label: 'MVR (Motor Vehicle Report)', icon: 'description' },
+  employment_history: { label: 'Employment History', icon: 'work_history' },
+  drug_test: { label: 'Drug Test Results', icon: 'biotech' },
+  training_cert: { label: 'Training Certificate', icon: 'school' },
+  background_check: { label: 'Background Check', icon: 'fact_check' },
+  w9: { label: 'W-9 Tax Form', icon: 'receipt_long' },
+};
+
+const ACCEPTED_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+
 export default function DriverProfilePage() {
   const [editing, setEditing] = useState(false);
   const [profile, setProfile] = useState(mockProfile);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadDocType, setUploadDocType] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   /* ── API Data ── */
   const { data: profileData, loading, error, refresh } = useApi<Record<string, unknown>>(
     () => getProfile(DEMO_DRIVER_ID).then(d => ({ data: d as Record<string, unknown> })),
     [DEMO_DRIVER_ID]
   );
+
+  /* ── Documents API ── */
+  const { data: docsData, loading: docsLoading, refresh: refreshDocs } = useApi<{ items: Array<Record<string, unknown>>; totalCount: number }>(
+    () => listDocuments(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as { items: Array<Record<string, unknown>>; totalCount: number } })),
+    [DEMO_DRIVER_ID]
+  );
+
+  const documents = (docsData?.items || []) as Array<Record<string, unknown>>;
+
+  /* ── File upload handler ── */
+  const handleFileUpload = useCallback(async (file: File, docType?: string) => {
+    if (!ACCEPTED_TYPES.includes(file.type)) {
+      setUploadError('Unsupported file type. Please upload PDF, JPG, or PNG.');
+      return;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      setUploadError('File too large. Maximum 10 MB.');
+      return;
+    }
+
+    setUploading(true);
+    setUploadError(null);
+
+    try {
+      // 1. Get signed upload URL from Cloud Run
+      const { url, filePath } = await getSignedUploadUrl(file.name, file.type);
+
+      // 2. Upload file directly to GCS
+      const uploadRes = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      if (!uploadRes.ok) throw new Error(`Upload failed (${uploadRes.status})`);
+
+      // 3. Record document in database
+      const resolvedType = docType || uploadDocType || 'training_cert';
+      await uploadDocument(DEMO_DRIVER_ID, {
+        docType: resolvedType,
+        fileName: file.name,
+        fileUrl: filePath,
+      });
+
+      // 4. Refresh document list
+      refreshDocs();
+      setUploadDocType(null);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
+  }, [uploadDocType, refreshDocs]);
+
+  /* ── Drag & drop handlers ── */
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileUpload(file);
+  }, [handleFileUpload]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback(() => setDragOver(false), []);
+
+  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleFileUpload(file);
+    // Reset input so the same file can be re-selected
+    e.target.value = '';
+  }, [handleFileUpload]);
+
+  const handleDeleteDoc = useCallback(async (docId: string) => {
+    try {
+      await deleteDocument(DEMO_DRIVER_ID, docId);
+      refreshDocs();
+    } catch {
+      setUploadError('Failed to delete document');
+    }
+  }, [refreshDocs]);
 
   const saveMutation = useMutation<Record<string, unknown>>(
     useCallback((data: Record<string, unknown>) =>
@@ -312,64 +416,134 @@ export default function DriverProfilePage() {
             <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--neu-accent)' }}>folder_open</span>
             <h3 className="text-lg font-bold" style={{ color: 'var(--neu-text)' }}>My Documents</h3>
           </div>
-          <Badge variant="warning" dot>3 of 5</Badge>
+          <Badge variant={documents.length > 0 ? 'success' : 'warning'} dot>
+            {docsLoading ? '...' : `${documents.length} uploaded`}
+          </Badge>
         </div>
 
-        <div className="space-y-2.5">
-          {[
-            { name: 'CDL — Front', icon: 'badge', status: 'verified' as const, date: 'Uploaded Feb 14, 2026', expires: 'Aug 2028' },
-            { name: 'CDL — Back', icon: 'badge', status: 'verified' as const, date: 'Uploaded Feb 14, 2026', expires: 'Aug 2028' },
-            { name: 'Medical Card (DOT)', icon: 'medical_information', status: 'pending' as const, date: 'Uploaded Mar 1, 2026', expires: 'Mar 2028' },
-            { name: 'MVR (Motor Vehicle Report)', icon: 'description', status: 'missing' as const, date: null, expires: null },
-            { name: 'W-9 Tax Form', icon: 'receipt_long', status: 'missing' as const, date: null, expires: null },
-          ].map((doc) => {
-            const statusMap = {
-              verified: { badge: 'success' as const, label: 'Verified', icon: 'check_circle' },
-              pending: { badge: 'warning' as const, label: 'Pending', icon: 'hourglass_top' },
-              missing: { badge: 'error' as const, label: 'Missing', icon: 'error' },
-            };
-            const s = statusMap[doc.status];
+        {/* Upload error banner */}
+        {uploadError && (
+          <div className="mb-3 rounded-lg px-3 py-2 text-xs bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-500/20 flex items-center gap-2">
+            <span className="material-symbols-outlined text-[14px]">error</span>
+            {uploadError}
+            <button onClick={() => setUploadError(null)} className="ml-auto material-symbols-outlined text-[14px]">close</button>
+          </div>
+        )}
 
-            return (
-              <div key={doc.name} className="neu-x rounded-xl p-3 flex items-center gap-3">
-                <div className="neu-ins w-10 h-10 rounded-lg flex items-center justify-center shrink-0">
-                  <span className="material-symbols-outlined text-[18px]" style={{ color: 'var(--neu-accent)' }}>{doc.icon}</span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[12px] font-bold truncate" style={{ color: 'var(--neu-text)' }}>{doc.name}</p>
-                  <p className="text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>
-                    {doc.date || 'Not uploaded yet'}
-                    {doc.expires && ` · Exp: ${doc.expires}`}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <Badge variant={s.badge} dot>{s.label}</Badge>
-                  {doc.status === 'missing' && (
+        <div className="space-y-2.5">
+          {/* Uploaded documents from API */}
+          {docsLoading ? (
+            <div className="space-y-2.5">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="neu-x rounded-xl p-3 h-14 animate-pulse" />
+              ))}
+            </div>
+          ) : documents.length > 0 ? (
+            documents.map((doc) => {
+              const docType = (doc.doc_type as string) || '';
+              const meta = DOC_TYPE_META[docType] || { label: docType, icon: 'description' };
+              const status = (doc.status as string) || 'pending_review';
+              const isExpired = doc.is_expired as boolean;
+              const uploadedAt = doc.uploaded_at ? new Date(doc.uploaded_at as string).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+              const expDate = doc.expiration_date ? new Date(doc.expiration_date as string).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : null;
+
+              const statusConfig = isExpired
+                ? { badge: 'error' as const, label: 'Expired' }
+                : status === 'verified'
+                  ? { badge: 'success' as const, label: 'Verified' }
+                  : status === 'pending_review'
+                    ? { badge: 'warning' as const, label: 'Pending Review' }
+                    : { badge: 'accent' as const, label: status };
+
+              return (
+                <div key={doc._id as string} className="neu-x rounded-xl p-3 flex items-center gap-3">
+                  <div className="neu-ins w-10 h-10 rounded-lg flex items-center justify-center shrink-0">
+                    <span className="material-symbols-outlined text-[18px]" style={{ color: 'var(--neu-accent)' }}>{meta.icon}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[12px] font-bold truncate" style={{ color: 'var(--neu-text)' }}>{meta.label}</p>
+                    <p className="text-[10px] truncate" style={{ color: 'var(--neu-text-muted)' }}>
+                      {doc.file_name as string}
+                      {uploadedAt && ` · ${uploadedAt}`}
+                      {expDate && ` · Exp: ${expDate}`}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Badge variant={statusConfig.badge} dot>{statusConfig.label}</Badge>
                     <button
-                      className="w-8 h-8 rounded-lg flex items-center justify-center active:scale-90 transition-transform"
-                      style={{ background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)' }}
+                      onClick={() => handleDeleteDoc(doc._id as string)}
+                      className="w-7 h-7 rounded-lg neu-x flex items-center justify-center hover:opacity-70 active:scale-90 transition-all"
+                      aria-label={`Delete ${meta.label}`}
                     >
-                      <span className="material-symbols-outlined text-white text-[14px]">upload</span>
+                      <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-text-muted)' }}>delete</span>
                     </button>
-                  )}
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <p className="text-xs text-center py-4" style={{ color: 'var(--neu-text-muted)' }}>
+              No documents uploaded yet. Use the area below to upload.
+            </p>
+          )}
+
+          {/* Missing doc type quick-upload buttons */}
+          {!docsLoading && (() => {
+            const uploadedTypes = new Set(documents.map(d => d.doc_type as string));
+            const missingTypes = Object.entries(DOC_TYPE_META).filter(([key]) => !uploadedTypes.has(key));
+            if (missingTypes.length === 0) return null;
+            return (
+              <div className="pt-2">
+                <p className="kpi-label mb-2">Missing Documents</p>
+                <div className="flex flex-wrap gap-2">
+                  {missingTypes.map(([key, meta]) => (
+                    <button
+                      key={key}
+                      onClick={() => { setUploadDocType(key); fileInputRef.current?.click(); }}
+                      disabled={uploading}
+                      className="neu-x rounded-lg px-3 py-2 flex items-center gap-2 text-[11px] font-semibold hover:opacity-80 active:scale-95 transition-all disabled:opacity-50"
+                      style={{ color: 'var(--neu-text)' }}
+                    >
+                      <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--neu-accent)' }}>upload</span>
+                      {meta.label}
+                    </button>
+                  ))}
                 </div>
               </div>
             );
-          })}
+          })()}
         </div>
 
-        {/* Upload Zone */}
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,.jpg,.jpeg,.png,.webp"
+          className="hidden"
+          onChange={handleFileInputChange}
+          aria-label="Upload document"
+        />
+
+        {/* Upload Zone — Drag & Drop */}
         <div
-          className="mt-4 rounded-xl p-5 flex flex-col items-center gap-2 cursor-pointer active:scale-[0.99] transition-transform"
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onClick={() => { setUploadDocType(null); fileInputRef.current?.click(); }}
+          className={`mt-4 rounded-xl p-5 flex flex-col items-center gap-2 cursor-pointer active:scale-[0.99] transition-all ${dragOver ? 'scale-[1.01]' : ''}`}
           style={{
-            border: '2px dashed var(--neu-border)',
-            background: 'var(--neu-bg-soft)',
+            border: `2px dashed ${dragOver ? 'var(--neu-accent)' : 'var(--neu-border)'}`,
+            background: dragOver ? 'var(--neu-accent-soft, rgba(37,99,235,0.05))' : 'var(--neu-bg-soft)',
           }}
         >
           <div className="neu-x w-11 h-11 rounded-xl flex items-center justify-center">
-            <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--neu-accent)' }}>cloud_upload</span>
+            <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--neu-accent)' }}>
+              {uploading ? 'hourglass_top' : 'cloud_upload'}
+            </span>
           </div>
-          <p className="text-[12px] font-bold" style={{ color: 'var(--neu-text)' }}>Drag & drop or tap to upload</p>
+          <p className="text-[12px] font-bold" style={{ color: 'var(--neu-text)' }}>
+            {uploading ? 'Uploading...' : 'Drag & drop or tap to upload'}
+          </p>
           <p className="text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>PDF, JPG, PNG · Max 10MB</p>
         </div>
       </Card>
