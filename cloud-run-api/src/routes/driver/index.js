@@ -13,6 +13,7 @@ import retentionRouter from './retention.js';
 import documentsRouter from './documents.js';
 import ocrRouter from './ocr.js';
 import messagingRouter from './messaging.js';
+import referralsRouter from './referrals.js';
 
 const router = Router();
 
@@ -56,6 +57,7 @@ router.use('/retention', retentionRouter);
 router.use('/documents', documentsRouter);
 router.use('/ocr', ocrRouter);
 router.use('/messaging', messagingRouter);
+router.use('/referrals', referralsRouter);
 
 // ── GET /driver/manifest — AI tool definitions ──
 const TOOL_DEFINITIONS = [
