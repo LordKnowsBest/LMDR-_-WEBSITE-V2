@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useCallback, useRef, useMemo } from 'react';
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import { DriverHeader, DriverTabBar, VoiceCommandBar, DriverNavDrawer, DriverChatDrawer, DriverTopBanner } from '@/components/driver';
 import { ThemeProvider } from '@/lib/theme';
 import { useApi } from '@/lib/hooks';
 import { agentTurn } from './actions/agent';
 import { textToSpeech } from './actions/voice';
-import { getProfile } from './actions/profile';
+import { getProfile, getActivity, getProfileStrength, setVisibility } from './actions/profile';
 import { getNotifications } from './actions/cockpit';
 import { getConversations } from './actions/messaging';
 
@@ -48,6 +48,12 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
   const { data: conversationsData } = useApi<any>(
     () => getConversations(DEMO_DRIVER_ID).then(d => ({ data: d })),
   );
+  const { data: activityData } = useApi<{ applicationCount: number; viewCount: number; matchCount: number }>(
+    () => getActivity(DEMO_DRIVER_ID).then(d => ({ data: d as { applicationCount: number; viewCount: number; matchCount: number } })),
+  );
+  const { data: strengthData } = useApi<{ score: number; missingFields: string[] }>(
+    () => getProfileStrength(DEMO_DRIVER_ID).then(d => ({ data: d as { score: number; missingFields: string[] } })),
+  );
 
   /* ── Derive shell props with fallbacks ── */
   const firstName = profileData?.first_name ?? profileData?.firstName ?? '';
@@ -58,9 +64,29 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
     : '';
   const cdlClass = profileData?.cdl_class ?? profileData?.cdlClass ?? '';
   const yearsExperience = profileData?.years_experience ?? profileData?.yearsExperience ?? undefined;
+  const driverEmail = profileData?.email ?? profileData?.contact_email ?? '';
+  const completenessScore = strengthData?.score ?? profileData?.completeness_score ?? undefined;
   const notificationCount = Array.isArray(notificationsData)
     ? notificationsData.filter((n: any) => !(n as any)?.read).length || notificationsData.length
     : undefined;
+
+  /* ── Visibility state (optimistic toggle) ── */
+  const [isDiscoverable, setIsDiscoverable] = useState<boolean | undefined>(undefined);
+  useEffect(() => {
+    if (profileData?.is_discoverable != null) {
+      setIsDiscoverable(Boolean(profileData.is_discoverable));
+    }
+  }, [profileData?.is_discoverable]);
+
+  const handleToggleVisibility = useCallback(async (visible: boolean) => {
+    const prev = isDiscoverable;
+    setIsDiscoverable(visible); // optimistic
+    try {
+      await setVisibility(DEMO_DRIVER_ID, visible);
+    } catch {
+      setIsDiscoverable(prev); // rollback on error
+    }
+  }, [isDiscoverable]);
 
   /* ── Map API conversations to ChatDrawer thread shape ── */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -176,6 +202,13 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
         <DriverHeader
           driverInitials={userInitials || undefined}
           notificationCount={notificationCount}
+          driverName={userName || undefined}
+          driverEmail={driverEmail || undefined}
+          completenessScore={completenessScore != null ? Number(completenessScore) : undefined}
+          applicationCount={activityData?.applicationCount}
+          viewCount={activityData?.viewCount}
+          isDiscoverable={isDiscoverable}
+          onToggleVisibility={handleToggleVisibility}
         />
 
         {/* Main Content — less bottom padding on messages page since no command bar */}
