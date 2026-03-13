@@ -163,11 +163,11 @@ export default function DriverProfilePage() {
         cdlState: (profileData.cdl_state as string) || mockProfile.cdlState,
         endorsements: (profileData.endorsements as string[]) || mockProfile.endorsements,
         yearsExperience: String((profileData.years_experience as number) ?? mockProfile.yearsExperience),
-        preferredTruck: (profileData.preferred_truck_type as string) || mockProfile.preferredTruck,
-        preferredRoute: (profileData.preferred_route_type as string) || mockProfile.preferredRoute,
-        homeCity: (profileData.city as string) || mockProfile.homeCity,
-        homeState: (profileData.state as string) || mockProfile.homeState,
-        homeZip: (profileData.zip as string) || mockProfile.homeZip,
+        preferredTruck: (profileData.preferred_truck as string) || mockProfile.preferredTruck,
+        preferredRoute: (profileData.preferred_route as string) || mockProfile.preferredRoute,
+        homeCity: (profileData.home_city as string) || mockProfile.homeCity,
+        homeState: (profileData.home_state as string) || mockProfile.homeState,
+        homeZip: (profileData.home_zip as string) || mockProfile.homeZip,
       });
     }
   }, [profileData]);
@@ -187,7 +187,23 @@ export default function DriverProfilePage() {
   };
 
   const handleSave = async () => {
-    const result = await saveMutation.execute(profile);
+    // Convert camelCase UI state to snake_case fields the API expects
+    const payload = {
+      first_name: profile.firstName,
+      last_name: profile.lastName,
+      email: profile.email,
+      phone: profile.phone,
+      cdl_class: profile.cdlClass,
+      cdl_state: profile.cdlState,
+      endorsements: profile.endorsements,
+      years_experience: Number(profile.yearsExperience) || 0,
+      preferred_truck: profile.preferredTruck,
+      preferred_route: profile.preferredRoute,
+      home_city: profile.homeCity,
+      home_state: profile.homeState,
+      home_zip: profile.homeZip,
+    };
+    const result = await saveMutation.execute(payload);
     if (result !== null) {
       setSaveSuccess(true);
       setEditing(false);
@@ -209,11 +225,11 @@ export default function DriverProfilePage() {
         cdlState: (profileData.cdl_state as string) || mockProfile.cdlState,
         endorsements: (profileData.endorsements as string[]) || mockProfile.endorsements,
         yearsExperience: String((profileData.years_experience as number) ?? mockProfile.yearsExperience),
-        preferredTruck: (profileData.preferred_truck_type as string) || mockProfile.preferredTruck,
-        preferredRoute: (profileData.preferred_route_type as string) || mockProfile.preferredRoute,
-        homeCity: (profileData.city as string) || mockProfile.homeCity,
-        homeState: (profileData.state as string) || mockProfile.homeState,
-        homeZip: (profileData.zip as string) || mockProfile.homeZip,
+        preferredTruck: (profileData.preferred_truck as string) || mockProfile.preferredTruck,
+        preferredRoute: (profileData.preferred_route as string) || mockProfile.preferredRoute,
+        homeCity: (profileData.home_city as string) || mockProfile.homeCity,
+        homeState: (profileData.home_state as string) || mockProfile.homeState,
+        homeZip: (profileData.home_zip as string) || mockProfile.homeZip,
       });
     } else {
       setProfile(mockProfile);
