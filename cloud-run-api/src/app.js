@@ -7,6 +7,7 @@ import jobsRouter from './routes/jobs.js';
 import adminRouter from './routes/admin/index.js';
 import driverRouter from './routes/driver/index.js';
 import voiceRouter from './routes/voice.js';
+import publicRouter from './routes/public.js';
 import { authenticate } from './middleware/auth.js';
 import { rateLimiter } from './middleware/rateLimiter.js';
 import { observability } from './middleware/observability.js';
@@ -19,8 +20,9 @@ export function createApp() {
   // Observability — traces and logs every request to BigQuery
   app.use(observability());
 
-  // Public routes
+  // Public routes (no auth required)
   app.use('/health', healthRouter);
+  app.use('/v1/public', rateLimiter(), publicRouter);
 
   // Authenticated API routes
   const protectedRouter = express.Router();
