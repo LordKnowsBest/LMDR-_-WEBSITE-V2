@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import { Card } from '@/components/ui';
 import { useApi } from '@/lib/hooks';
-import { getProgression, getAchievements, getChallenges, getLeaderboard } from '../../actions/gamification';
+import { getProgression, getAchievements, getChallenges, getLeaderboard, claimAchievement, checkIn } from '../../actions/gamification';
+import { getTimeline } from '../../actions/lifecycle';
 
 const DEMO_DRIVER_ID = 'demo-driver-001';
 
@@ -37,15 +38,33 @@ const leaderboard = [
 
 const TABS = ['Overview', 'Achievements', 'Challenges', 'Leaderboard'];
 
+function formatRelativeTime(dateStr: string): string {
+    if (!dateStr) return '';
+    try {
+        const diff = Date.now() - new Date(dateStr).getTime();
+        const mins = Math.floor(diff / 60000);
+        if (mins < 1) return 'Just now';
+        if (mins < 60) return `${mins}m ago`;
+        const hours = Math.floor(mins / 60);
+        if (hours < 24) return `${hours}h ago`;
+        const days = Math.floor(hours / 24);
+        if (days === 1) return 'Yesterday';
+        if (days < 7) return `${days}d ago`;
+        return `${Math.floor(days / 7)}w ago`;
+    } catch {
+        return dateStr;
+    }
+}
+
 export default function GamificationPage() {
     const [tab, setTab] = useState('Overview');
 
     /* ── API Data ── */
-    const { data: progressionData } = useApi<Record<string, unknown>>(
+    const { data: progressionData, refresh: progressionRefresh } = useApi<Record<string, unknown>>(
         () => getProgression(DEMO_DRIVER_ID).then(d => ({ data: d as unknown as Record<string, unknown> })),
         [DEMO_DRIVER_ID]
     );
-    const { data: achievementsData } = useApi<unknown[]>(
+    const { data: achievementsData, refresh: achievementsRefresh } = useApi<unknown[]>(
         () => getAchievements(DEMO_DRIVER_ID).then(d => ({ data: d })),
         [DEMO_DRIVER_ID]
     );
@@ -57,6 +76,42 @@ export default function GamificationPage() {
         () => getLeaderboard(10).then(d => ({ data: d })),
         []
     );
+    const { data: timelineData } = useApi<{ items: unknown[] }>(
+        () => getTimeline(DEMO_DRIVER_ID, 10).then(d => ({ data: d })),
+        [DEMO_DRIVER_ID]
+    );
+
+    /* ── Mutation state ── */
+    const [claimingId, setClaimingId] = useState<number | null>(null);
+    const [checkingIn, setCheckingIn] = useState(false);
+
+    /* ── Handlers ── */
+    const handleClaim = async (achievementId: number) => {
+        setClaimingId(achievementId);
+        try {
+            await claimAchievement(DEMO_DRIVER_ID, String(achievementId));
+            // Refresh achievements and progression after claim
+            achievementsRefresh();
+            progressionRefresh();
+        } catch {
+            // Silently degrade — UI stays as-is
+        } finally {
+            setClaimingId(null);
+        }
+    };
+
+    const handleCheckIn = async () => {
+        setCheckingIn(true);
+        try {
+            await checkIn(DEMO_DRIVER_ID);
+            // Refresh progression to update streak data
+            progressionRefresh();
+        } catch {
+            // Silently degrade
+        } finally {
+            setCheckingIn(false);
+        }
+    };
 
     /* ── Derive display values with mock fallbacks ── */
     const displayGamification = progressionData
@@ -103,6 +158,40 @@ export default function GamificationPage() {
             isYou: Boolean(e.is_you ?? e.isYou ?? false),
         }))
         : leaderboard;
+
+    /* ── Activity feed from timeline ── */
+    const mockActivity = [
+        { icon: 'send', label: 'Applied to Swift Transportation', xp: '+75 XP', time: '2h ago', color: 'var(--neu-accent)' },
+        { icon: 'local_fire_department', label: '5-Day Streak Bonus', xp: '+50 XP', time: 'Today', color: '#f97316' },
+        { icon: 'person', label: 'Profile updated', xp: '+25 XP', time: 'Yesterday', color: '#10b981' },
+        { icon: 'visibility', label: 'Swift Transportation viewed your profile', xp: '+10 XP', time: '2d ago', color: '#a78bfa' },
+    ];
+
+    const EVENT_ICON_MAP: Record<string, { icon: string; color: string }> = {
+        application: { icon: 'send', color: 'var(--neu-accent)' },
+        match: { icon: 'handshake', color: 'var(--neu-accent)' },
+        profile_update: { icon: 'person', color: '#10b981' },
+        profile_view: { icon: 'visibility', color: '#a78bfa' },
+        streak: { icon: 'local_fire_department', color: '#f97316' },
+        achievement: { icon: 'emoji_events', color: '#eab308' },
+        xp: { icon: 'bolt', color: '#eab308' },
+        check_in: { icon: 'check_circle', color: '#10b981' },
+    };
+
+    const displayActivity = timelineData?.items
+        ? (timelineData.items as Record<string, unknown>[]).slice(0, 10).map((ev) => {
+            const eventType = ((ev.event_type as string) || (ev.type as string) || '').toLowerCase();
+            const mapped = EVENT_ICON_MAP[eventType] || { icon: 'history', color: 'var(--neu-text-muted)' };
+            const xpVal = ev.xp_earned ?? ev.xp ?? ev.xpEarned;
+            return {
+                icon: mapped.icon,
+                label: (ev.label as string) || (ev.description as string) || (ev.title as string) || (ev.event_type as string) || 'Activity',
+                xp: xpVal ? `+${xpVal} XP` : '',
+                time: formatRelativeTime((ev.created_at as string) || (ev.timestamp as string) || (ev.date as string) || ''),
+                color: mapped.color,
+            };
+        })
+        : mockActivity;
 
     const xpPct = Math.round((displayGamification.xp / displayGamification.xpNext) * 100);
 
@@ -203,13 +292,34 @@ export default function GamificationPage() {
             {/* Overview */}
             {tab === 'Overview' && (
                 <div className="space-y-3">
+                    {/* Daily Check-In */}
+                    <Card elevation="md" className="!p-4">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-xl flex items-center justify-center"
+                                    style={{ background: 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)' }}>
+                                    <span className="material-symbols-outlined text-[20px] text-white">local_fire_department</span>
+                                </div>
+                                <div>
+                                    <p className="text-[13px] font-bold" style={{ color: 'var(--neu-text)' }}>Daily Check-In</p>
+                                    <p className="text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>
+                                        Keep your {displayGamification.streak}-day streak alive!
+                                    </p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={handleCheckIn}
+                                disabled={checkingIn}
+                                className="px-4 py-2 rounded-xl text-[11px] font-bold text-white transition-all duration-200 disabled:opacity-50"
+                                style={{ background: 'linear-gradient(135deg, var(--neu-accent) 0%, var(--neu-accent-deep) 100%)' }}
+                            >
+                                {checkingIn ? 'Checking in...' : 'Check In'}
+                            </button>
+                        </div>
+                    </Card>
+
                     <p className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--neu-text-muted)' }}>Recent Activity</p>
-                    {[
-                        { icon: 'send', label: 'Applied to Swift Transportation', xp: '+75 XP', time: '2h ago', color: 'var(--neu-accent)' },
-                        { icon: 'local_fire_department', label: '5-Day Streak Bonus', xp: '+50 XP', time: 'Today', color: '#f97316' },
-                        { icon: 'person', label: 'Profile updated', xp: '+25 XP', time: 'Yesterday', color: '#10b981' },
-                        { icon: 'visibility', label: 'Swift Transportation viewed your profile', xp: '+10 XP', time: '2d ago', color: '#a78bfa' },
-                    ].map((ev, i) => (
+                    {displayActivity.map((ev, i) => (
                         <Card key={i} elevation="sm" className="!p-3">
                             <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-lg flex items-center justify-center neu-x shrink-0">
@@ -219,10 +329,13 @@ export default function GamificationPage() {
                                     <p className="text-[12px] font-semibold truncate" style={{ color: 'var(--neu-text)' }}>{ev.label}</p>
                                     <p className="text-[10px]" style={{ color: 'var(--neu-text-muted)' }}>{ev.time}</p>
                                 </div>
-                                <span className="text-[11px] font-black" style={{ color: 'var(--neu-accent)' }}>{ev.xp}</span>
+                                {ev.xp && <span className="text-[11px] font-black" style={{ color: 'var(--neu-accent)' }}>{ev.xp}</span>}
                             </div>
                         </Card>
                     ))}
+                    {displayActivity.length === 0 && (
+                        <p className="text-center text-[12px] py-6" style={{ color: 'var(--neu-text-muted)' }}>No recent activity yet. Start earning XP!</p>
+                    )}
                 </div>
             )}
 
@@ -245,9 +358,21 @@ export default function GamificationPage() {
                             </div>
                             <p className="text-[11px] font-bold" style={{ color: 'var(--neu-text)' }}>{ach.label}</p>
                             <p className="text-[9px] mt-0.5 mb-1.5" style={{ color: 'var(--neu-text-muted)' }}>{ach.desc}</p>
-                            <span className="text-[9px] font-black" style={{ color: ach.earned ? 'var(--neu-accent)' : 'var(--neu-text-muted)' }}>
-                                {ach.earned ? `+${ach.xp} XP earned` : `+${ach.xp} XP`}
-                            </span>
+                            <div className="flex items-center justify-between">
+                                <span className="text-[9px] font-black" style={{ color: ach.earned ? 'var(--neu-accent)' : 'var(--neu-text-muted)' }}>
+                                    {ach.earned ? `+${ach.xp} XP earned` : `+${ach.xp} XP`}
+                                </span>
+                                {!ach.earned && (
+                                    <button
+                                        onClick={() => handleClaim(ach.id)}
+                                        disabled={claimingId === ach.id}
+                                        className="px-2 py-0.5 rounded-lg text-[8px] font-bold text-white transition-all duration-200 disabled:opacity-50"
+                                        style={{ background: 'var(--neu-accent)' }}
+                                    >
+                                        {claimingId === ach.id ? '...' : 'Claim'}
+                                    </button>
+                                )}
+                            </div>
                         </Card>
                     ))}
                 </div>
