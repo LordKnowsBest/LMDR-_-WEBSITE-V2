@@ -9,7 +9,7 @@ export async function listDocuments(id: string) {
   return driverFetch<unknown[]>(`/documents/${id}/list`);
 }
 
-export async function getSignedUploadUrl(fileName: string, contentType: string) {
+export async function getSignedUploadUrl(fileName: string, contentType: string): Promise<{ url: string; filePath: string; bucket: string; expiresAt: string }> {
   const res = await fetch(`${CLOUD_RUN_URL}/v1/files/signed-url`, {
     method: 'POST',
     headers: {
@@ -23,10 +23,11 @@ export async function getSignedUploadUrl(fileName: string, contentType: string) 
     }),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to get upload URL (${res.status})`);
+    const body = await res.json().catch(() => ({} as Record<string, string>));
+    const msg = body.error || `Failed to get upload URL (${res.status})`;
+    return Promise.reject(msg);
   }
-  return res.json() as Promise<{ url: string; filePath: string; bucket: string; expiresAt: string }>;
+  return res.json();
 }
 
 export async function uploadDocument(id: string, data: { docType: string; fileName: string; fileUrl: string; expirationDate?: string }) {
