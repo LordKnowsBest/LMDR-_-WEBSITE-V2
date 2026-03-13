@@ -11,6 +11,7 @@ import financialRouter from './financial.js';
 import scorecardRouter from './scorecard.js';
 import retentionRouter from './retention.js';
 import documentsRouter from './documents.js';
+import ocrRouter from './ocr.js';
 
 const router = Router();
 
@@ -52,6 +53,7 @@ router.use('/financial', financialRouter);
 router.use('/scorecard', scorecardRouter);
 router.use('/retention', retentionRouter);
 router.use('/documents', documentsRouter);
+router.use('/ocr', ocrRouter);
 
 // ── GET /driver/manifest — AI tool definitions ──
 const TOOL_DEFINITIONS = [
@@ -102,6 +104,9 @@ const TOOL_DEFINITIONS = [
 
   // Retention (1 tool)
   { name: 'driver_get_risk_score', description: 'Get driver retention risk assessment', input_schema: { type: 'object', properties: { driverId: { type: 'string' } }, required: ['driverId'] }, endpoint: { method: 'GET', path: '/v1/driver/retention/:id/risk' } },
+
+  // Knowledge / RAG (1 tool) — calls AI service internally
+  { name: 'driver_search_knowledge', description: 'Search the LMDR knowledge base for answers about trucking regulations, CDL requirements, FMCSA rules, carrier policies, and platform features', input_schema: { type: 'object', properties: { question: { type: 'string', description: 'The question to search for in the knowledge base' }, context: { type: 'string', description: 'Optional additional context to improve search relevance' } }, required: ['question'] }, endpoint: { method: 'POST', path: '/ai/rag/query' } },
 ];
 
 router.get('/manifest', (req, res) => {
