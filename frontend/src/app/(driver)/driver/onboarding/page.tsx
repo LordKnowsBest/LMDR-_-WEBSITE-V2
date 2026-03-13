@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef, ChangeEvent } from 'react';
 import { Card, Button, Badge, ProgressBar, Input } from '@/components/ui';
-import { useApi, useMutation } from '@/lib/hooks';
+import { useApi } from '@/lib/hooks';
 import { getProfile, getProfileStrength, updateProfile } from '../../actions/profile';
 import { getDocumentStatus, getSignedUploadUrl, uploadDocument } from '../../actions/documents';
 import { getTimeline } from '../../actions/lifecycle';
@@ -371,6 +371,14 @@ export default function DriverOnboardingPage() {
   const [docSlots, setDocSlots] = useState<DocSlot[]>(INITIAL_DOC_SLOTS.map(d => ({ ...d })));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const advanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /* ── Clean up advance-success timer on unmount ── */
+  useEffect(() => {
+    return () => {
+      if (advanceTimerRef.current) clearTimeout(advanceTimerRef.current);
+    };
+  }, []);
 
   /* ── API Data ── */
   const { data: profileData, loading: profileLoading, error: profileError, refresh: refreshProfile } = useApi<Record<string, unknown>>(
@@ -481,7 +489,21 @@ export default function DriverOnboardingPage() {
   }, [form]);
 
   /* ── Document upload handler ── */
+  const MAX_BYTES = 25 * 1024 * 1024; // 25 MB
+  const ALLOWED_TYPES = ['application/pdf', 'image/jpeg', 'image/png'];
+
   const handleFileSelect = useCallback(async (index: number, file: File) => {
+    // Validate file size
+    if (file.size > MAX_BYTES) {
+      setDocSlots(prev => prev.map((s, i) => i === index ? { ...s, error: 'File exceeds 25 MB limit' } : s));
+      return;
+    }
+    // Validate MIME type
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      setDocSlots(prev => prev.map((s, i) => i === index ? { ...s, error: 'Only PDF, JPG, and PNG files are allowed' } : s));
+      return;
+    }
+
     // Mark slot as uploading
     setDocSlots(prev => prev.map((s, i) => i === index ? { ...s, uploading: true, error: undefined } : s));
 
@@ -499,10 +521,14 @@ export default function DriverOnboardingPage() {
         throw new Error(`Upload failed (${uploadRes.status})`);
       }
 
-      // 3. Register document with backend
-      const docSlot = docSlots[index];
+      // 3. Register document with backend (read docType from functional updater)
+      let docType = '';
+      setDocSlots(prev => {
+        docType = prev[index].docType;
+        return prev;
+      });
       await uploadDocument(DEMO_DRIVER_ID, {
-        docType: docSlot.docType,
+        docType,
         fileName: file.name,
         fileUrl: filePath,
       });
@@ -518,7 +544,7 @@ export default function DriverOnboardingPage() {
         : s
       ));
     }
-  }, [docSlots, refreshDocs]);
+  }, [refreshDocs]);
 
   /* ── Background check authorization ── */
   const handleAuthorize = useCallback(async () => {
@@ -537,16 +563,17 @@ export default function DriverOnboardingPage() {
   }, []);
 
   /* ── Next handler: save then advance ── */
-  const handleNext = async () => {
+  const handleNext = useCallback(async () => {
     if (currentStep >= steps.length) return;
     const saved = await saveStepData(currentStep);
     if (saved) {
       setCurrentStep(s => Math.min(steps.length, s + 1));
       setAdvanceSuccess(true);
       refresh();
-      setTimeout(() => setAdvanceSuccess(false), 3000);
+      if (advanceTimerRef.current) clearTimeout(advanceTimerRef.current);
+      advanceTimerRef.current = setTimeout(() => setAdvanceSuccess(false), 3000);
     }
-  };
+  }, [currentStep, saveStepData, refresh]);
 
   /* ── Render step content ── */
   const renderStepContent = () => {
@@ -631,6 +658,7 @@ export default function DriverOnboardingPage() {
               <button
                 key={step.id}
                 onClick={() => setCurrentStep(step.id)}
+                aria-label={`Go to step ${step.id}: ${step.name}`}
                 className="flex flex-col items-center gap-1.5 relative z-10 group"
               >
                 <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 ${
@@ -706,6 +734,7 @@ export default function DriverOnboardingPage() {
             <button
               key={step.id}
               onClick={() => setCurrentStep(step.id)}
+              aria-label={`Step ${step.id}: ${step.name}${step.id < currentStep ? ' (complete)' : step.id === currentStep ? ' (current)' : ''}`}
               className={`w-2 h-2 rounded-full transition-all duration-300 ${
                 step.id === currentStep ? 'w-6 bg-[var(--neu-accent)]' : step.id < currentStep ? 'bg-green-400' : 'bg-[var(--neu-border)]'
               }`}
@@ -732,6 +761,7 @@ export default function DriverOnboardingPage() {
               <button
                 key={step.id}
                 onClick={() => setCurrentStep(step.id)}
+                aria-label={`Go to step ${step.id}: ${step.name}`}
                 className="flex items-center gap-3 w-full text-left py-1.5 group"
               >
                 <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 transition-all ${
