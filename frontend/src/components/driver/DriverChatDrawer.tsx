@@ -9,6 +9,38 @@ interface ChatMessage {
     time: string;
 }
 
+/** Sanitize HTML: strip all tags except allowed inline formatting */
+function sanitizeHtml(html: string): string {
+    const ALLOWED = /^(strong|em|ul|li|br|b|i)$/i;
+    // Replace all tags except allowed ones
+    return html.replace(/<\/?([a-z][a-z0-9]*)\b[^>]*>/gi, (match, tag) => {
+        return ALLOWED.test(tag) ? match : '';
+    });
+}
+
+/** Lightweight markdown → sanitized HTML for short AI chat responses */
+function renderMd(text: string): string {
+    // First escape any HTML in the raw text
+    const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    const rendered = escaped
+        // Bold: **text** or __text__
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/__(.+?)__/g, '<strong>$1</strong>')
+        // Italic: _text_ (single underscores only, after bold is processed)
+        .replace(/\b_(.+?)_\b/g, '<em>$1</em>')
+        // Bullet lists: lines starting with - or •
+        .replace(/^[-•]\s+(.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>[\s\S]*<\/li>)/g, '<ul class="list-disc pl-4 space-y-0.5 my-1">$1</ul>')
+        // Line breaks
+        .replace(/\n/g, '<br/>');
+
+    return sanitizeHtml(rendered);
+}
+
 export interface DriverChatDrawerProps {
     open: boolean;
     onClose: () => void;
@@ -252,12 +284,20 @@ export function DriverChatDrawer({ open, onClose, mode = 'messages', aiMessages 
                                                         : { borderBottomLeftRadius: '6px' }
                                                 }
                                             >
-                                                <p
-                                                    className="text-[11px] leading-relaxed"
-                                                    style={{ color: isDriver ? '#fff' : 'var(--neu-text)' }}
-                                                >
-                                                    {msg.text}
-                                                </p>
+                                                {isDriver ? (
+                                                    <p
+                                                        className="text-[11px] leading-relaxed"
+                                                        style={{ color: '#fff' }}
+                                                    >
+                                                        {msg.text}
+                                                    </p>
+                                                ) : (
+                                                    <div
+                                                        className="text-[11px] leading-relaxed chat-md"
+                                                        style={{ color: 'var(--neu-text)' }}
+                                                        dangerouslySetInnerHTML={{ __html: renderMd(msg.text) }}
+                                                    />
+                                                )}
                                                 <p
                                                     className="text-[8px] mt-1 text-right"
                                                     style={{ color: isDriver ? 'rgba(255,255,255,0.6)' : 'var(--neu-text-muted)' }}

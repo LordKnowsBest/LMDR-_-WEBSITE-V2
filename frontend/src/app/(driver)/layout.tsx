@@ -77,7 +77,7 @@ export default function DriverLayout({ children }: { children: React.ReactNode }
       setAiMessages((prev) =>
         prev.map((m) =>
           m.id === thinkingId
-            ? { id: `ai-${Date.now()}`, from: 'ai' as const, text: result.text, time: nowTime() }
+            ? { id: `ai-${Date.now()}`, from: 'ai' as const, text: result.text || result.error || "I'm having trouble right now. Try again in a moment.", time: nowTime() }
             : m
         )
       );

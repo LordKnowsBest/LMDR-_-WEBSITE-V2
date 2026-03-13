@@ -50,3 +50,22 @@ export async function updateDocument(id: string, docId: string, data: { status?:
 export async function deleteDocument(id: string, docId: string) {
   return driverFetch<{ success: boolean }>(`/documents/${id}/doc/${docId}`, { method: 'DELETE' });
 }
+
+export async function extractDocument(
+  imageBase64: string,
+  docType: 'CDL_FRONT' | 'MED_CARD' | 'MVR'
+): Promise<{ success: boolean; docType: string; extracted: Record<string, unknown> }> {
+  const res = await fetch(`${CLOUD_RUN_URL}/v1/driver/ocr/extract`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${INTERNAL_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ image: imageBase64, docType }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `OCR extraction failed (${res.status})`);
+  }
+  return res.json();
+}
