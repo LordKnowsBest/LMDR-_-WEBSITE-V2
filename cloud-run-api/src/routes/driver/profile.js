@@ -4,6 +4,7 @@ import { getTableName } from '../../db/schema.js';
 import { buildSelectQuery, buildCountQuery } from '../../db/query.js';
 import { insertLog, insertAuditEvent } from '../../db/bigquery.js';
 import { v4 as uuidv4 } from 'uuid';
+import { triggerXP } from '../../lib/xp-trigger.js';
 
 const router = Router();
 
@@ -108,6 +109,10 @@ router.put('/:id', async (req, res) => {
     profile.completeness_score = computeCompleteness(profile);
 
     insertAuditEvent({ actor_id: req.auth?.uid, action: 'DRIVER_PROFILE_UPDATED', resource_type: 'driver', resource_id: req.params.id, after_state: updates });
+
+    // Fire-and-forget XP award for profile update
+    triggerXP(req.params.id, 'update_profile').catch(() => {});
+
     return res.json({ success: true, profile });
   } catch (err) { return handleError(res, 'update-profile', err); }
 });

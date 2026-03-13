@@ -43,10 +43,20 @@ router.post('/find-jobs', async (req, res) => {
     const carriersTable = getTableName('carriers');
     const enrichTable = getTableName('carrierEnrichments');
 
-    // Get driver profile
-    const driverResult = await safeQuery(`SELECT * FROM "${driversTable}" WHERE _id = $1`, [driverId]);
+    // Get driver profile + engagement data from progression table
+    const progressionTable = getTableName('driverProgression');
+    const [driverResult, progressionResult] = await Promise.all([
+      safeQuery(`SELECT * FROM "${driversTable}" WHERE _id = $1`, [driverId]),
+      safeQuery(`SELECT * FROM "${progressionTable}" WHERE _id = $1`, [driverId]),
+    ]);
     if (driverResult.rows.length === 0) return res.status(404).json({ error: 'DRIVER_NOT_FOUND' });
     const driver = driverResult.rows[0].data || {};
+    // Merge engagement data from progression record
+    if (progressionResult.rows.length > 0) {
+      const prog = progressionResult.rows[0].data || {};
+      driver.total_xp = Number(prog.total_xp || 0);
+      driver.streak_days = Number(prog.streak_days || 0);
+    }
 
     // Get carriers (with optional filters)
     let carrierSql = `SELECT c.*, e.data AS enrichment_data FROM "${carriersTable}" c LEFT JOIN "${enrichTable}" e ON c.data->>'dot_number' = e.data->>'dot_number'`;
@@ -90,9 +100,27 @@ router.post('/find-drivers', async (req, res) => {
     if (carrierResult.rows.length === 0) return res.status(404).json({ error: 'CARRIER_NOT_FOUND' });
     const carrier = carrierResult.rows[0].data || {};
 
+    const progressionTable = getTableName('driverProgression');
     const driversResult = await safeQuery(`SELECT * FROM "${driversTable}" WHERE data->>'is_discoverable' = 'Yes' LIMIT $1`, [Math.min(parseInt(limit) * 3, 300)]);
     const weights = await getActiveWeights();
-    const drivers = driversResult.rows.map(r => ({ ...(r.data || {}), _id: r._id }));
+    const driverIds = driversResult.rows.map(r => r._id);
+    // Batch-fetch progression data for all candidate drivers
+    let progressionMap = new Map();
+    if (driverIds.length > 0) {
+      const progResult = await safeQuery(`SELECT * FROM "${progressionTable}" WHERE _id = ANY($1)`, [driverIds]);
+      for (const row of progResult.rows) {
+        progressionMap.set(row._id, row.data || {});
+      }
+    }
+    const drivers = driversResult.rows.map(r => {
+      const d = { ...(r.data || {}), _id: r._id };
+      const prog = progressionMap.get(r._id);
+      if (prog) {
+        d.total_xp = Number(prog.total_xp || 0);
+        d.streak_days = Number(prog.streak_days || 0);
+      }
+      return d;
+    });
 
     const ranked = drivers.map(d => ({ driver: d, ...scoreMatch(d, carrier, weights) })).sort((a, b) => b.score - a.score).slice(0, parseInt(limit));
 
@@ -120,16 +148,24 @@ router.get('/explain/:driverId/:carrierDot', async (req, res) => {
     const carriersTable = getTableName('carriers');
     const enrichTable = getTableName('carrierEnrichments');
 
-    const [driverR, carrierR, enrichR] = await Promise.all([
+    const progressionTable = getTableName('driverProgression');
+    const [driverR, carrierR, enrichR, progR] = await Promise.all([
       safeQuery(`SELECT * FROM "${driversTable}" WHERE _id = $1`, [driverId]),
       safeQuery(`SELECT * FROM "${carriersTable}" WHERE data->>'dot_number' = $1 LIMIT 1`, [carrierDot]),
       safeQuery(`SELECT * FROM "${enrichTable}" WHERE data->>'dot_number' = $1 LIMIT 1`, [carrierDot]),
+      safeQuery(`SELECT * FROM "${progressionTable}" WHERE _id = $1`, [driverId]),
     ]);
 
     if (driverR.rows.length === 0) return res.status(404).json({ error: 'DRIVER_NOT_FOUND' });
     if (carrierR.rows.length === 0) return res.status(404).json({ error: 'CARRIER_NOT_FOUND' });
 
     const driver = driverR.rows[0].data || {};
+    // Merge engagement data
+    if (progR.rows.length > 0) {
+      const prog = progR.rows[0].data || {};
+      driver.total_xp = Number(prog.total_xp || 0);
+      driver.streak_days = Number(prog.streak_days || 0);
+    }
     const carrier = { ...(carrierR.rows[0].data || {}), ...(enrichR.rows[0]?.data || {}) };
     const weights = await getActiveWeights();
     const { score, factors } = scoreMatch(driver, carrier, weights);
@@ -141,6 +177,7 @@ router.get('/explain/:driverId/:carrierDot', async (req, res) => {
       { key: 'culture', label: 'Culture Fit', score: Math.round(factors.culture * 100), status: factors.culture >= 0.7 ? 'good' : 'average' },
       { key: 'routeType', label: 'Route Type', score: Math.round(factors.routeType * 100), status: factors.routeType >= 0.8 ? 'perfect' : 'partial' },
       { key: 'fleetAge', label: 'Fleet Quality', score: Math.round(factors.fleetAge * 100), status: factors.fleetAge >= 0.8 ? 'good' : 'average' },
+      { key: 'engagement', label: 'Engagement', score: Math.round(factors.engagement * 100), status: factors.engagement >= 0.6 ? 'good' : factors.engagement >= 0.3 ? 'average' : 'low' },
     ];
 
     const tier = score >= 85 ? 'Strong' : score >= 70 ? 'Good' : score >= 50 ? 'Potential' : 'Partial';

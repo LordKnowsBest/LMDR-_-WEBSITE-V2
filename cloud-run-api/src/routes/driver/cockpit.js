@@ -3,6 +3,7 @@ import { query } from '../../db/pool.js';
 import { getTableName } from '../../db/schema.js';
 import { insertLog, insertAuditEvent } from '../../db/bigquery.js';
 import { v4 as uuidv4 } from 'uuid';
+import { triggerXP } from '../../lib/xp-trigger.js';
 
 const router = Router();
 
@@ -72,6 +73,9 @@ router.post('/:id/apply/:jobId', async (req, res) => {
     });
 
     insertLog({ service: 'driver', level: 'INFO', message: 'application_submitted', data: { driver_id: id, job_id: jobId } });
+
+    // Fire-and-forget XP award for first application
+    triggerXP(id, 'first_application').catch(() => {});
 
     return res.status(201).json({ _id: newId, ...data });
   } catch (err) {

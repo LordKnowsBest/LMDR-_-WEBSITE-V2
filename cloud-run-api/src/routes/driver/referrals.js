@@ -3,6 +3,7 @@ import { query } from '../../db/pool.js';
 import { getTableName } from '../../db/schema.js';
 import { insertLog, insertAuditEvent } from '../../db/bigquery.js';
 import { v4 as uuidv4 } from 'uuid';
+import { triggerXP } from '../../lib/xp-trigger.js';
 
 const router = Router();
 
@@ -51,6 +52,9 @@ router.post('/:id/submit', async (req, res) => {
     );
 
     insertAuditEvent({ actor: id, action: 'referral_submitted', target: referralId, data: { referred_name: name } });
+
+    // Fire-and-forget XP award for referral signup
+    triggerXP(id, 'referral_signup').catch(() => {});
 
     return res.status(201).json({ referralId, status: 'invited' });
   } catch (err) { return handleError(res, 'submit-referral', err); }

@@ -3,6 +3,7 @@ import { query } from '../../db/pool.js';
 import { getTableName } from '../../db/schema.js';
 import { insertLog, insertAuditEvent } from '../../db/bigquery.js';
 import { v4 as uuidv4 } from 'uuid';
+import { triggerXP } from '../../lib/xp-trigger.js';
 
 const router = Router();
 
@@ -80,6 +81,9 @@ router.post('/:id/upload', async (req, res) => {
 
     insertAuditEvent({ actor_id: req.auth?.uid, action: 'DOCUMENT_UPLOADED', resource_type: 'document', resource_id: docId, after_state: { doc_type: docType, driver_id: req.params.id } });
     insertLog({ service: 'driver', level: 'INFO', message: 'document_uploaded', data: { driver_id: req.params.id, doc_type: docType, doc_id: docId } });
+
+    // Fire-and-forget XP award for document upload
+    triggerXP(req.params.id, 'upload_document').catch(() => {});
 
     return res.status(201).json({ success: true, document: { _id: docId, ...data } });
   } catch (err) { return handleError(res, 'upload-document', err); }

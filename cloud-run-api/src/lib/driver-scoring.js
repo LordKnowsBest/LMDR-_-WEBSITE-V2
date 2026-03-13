@@ -5,12 +5,13 @@
  */
 
 const DEFAULT_WEIGHTS = {
-  location: 0.25,
-  pay: 0.22,
-  safety: 0.20,
-  culture: 0.15,
-  routeType: 0.10,
+  location: 0.23,
+  pay: 0.20,
+  safety: 0.18,
+  culture: 0.14,
+  routeType: 0.09,
   fleetAge: 0.08,
+  engagement: 0.08,
 };
 
 function computeLocationScore(driver, carrier) {
@@ -57,6 +58,33 @@ function computeFleetAgeScore(carrier) {
   return 1.0 - ((age - 2) / 10);
 }
 
+/**
+ * Compute engagement score (0-1) from driver gamification data.
+ * Components:
+ *   total_xp:           0-2000 maps to 0-0.50
+ *   streak_days:        0-30   maps to 0-0.25
+ *   documents_uploaded:  0-5   maps to 0-0.15
+ *   completeness_score: 0-100  maps to 0-0.10
+ * If no engagement data exists, returns 0.3 (neutral default).
+ */
+export function computeEngagementScore(driver) {
+  const totalXp = parseFloat(driver.total_xp) || 0;
+  const streakDays = parseFloat(driver.streak_days) || 0;
+  const docsUploaded = parseFloat(driver.documents_uploaded) || 0;
+  const completeness = parseFloat(driver.completeness_score) || 0;
+
+  // Check if driver has any engagement data at all
+  const hasData = totalXp > 0 || streakDays > 0 || docsUploaded > 0 || completeness > 0;
+  if (!hasData) return 0.3; // neutral default for new drivers
+
+  const xpComponent = Math.min(totalXp / 2000, 1.0) * 0.50;
+  const streakComponent = Math.min(streakDays / 30, 1.0) * 0.25;
+  const docsComponent = Math.min(docsUploaded / 5, 1.0) * 0.15;
+  const completenessComponent = Math.min(completeness / 100, 1.0) * 0.10;
+
+  return Math.min(xpComponent + streakComponent + docsComponent + completenessComponent, 1.0);
+}
+
 export function scoreMatch(driver, carrier, weights = DEFAULT_WEIGHTS) {
   const factors = {
     location: computeLocationScore(driver, carrier),
@@ -65,6 +93,7 @@ export function scoreMatch(driver, carrier, weights = DEFAULT_WEIGHTS) {
     culture: computeCultureScore(driver, carrier),
     routeType: computeRouteScore(driver, carrier),
     fleetAge: computeFleetAgeScore(carrier),
+    engagement: computeEngagementScore(driver),
   };
 
   let total = 0;

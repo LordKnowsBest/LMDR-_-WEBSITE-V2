@@ -3,6 +3,7 @@ import { query } from '../../db/pool.js';
 import { getTableName } from '../../db/schema.js';
 import { insertLog, insertAuditEvent } from '../../db/bigquery.js';
 import { v4 as uuidv4 } from 'uuid';
+import { triggerXP } from '../../lib/xp-trigger.js';
 
 const router = Router();
 
@@ -123,6 +124,9 @@ router.post('/forums/:categoryId/thread', async (req, res) => {
 
     insertAuditEvent({ actor: authorId, action: 'forum_post_created', target: threadId, data: { category_id: categoryId, title } });
 
+    // Fire-and-forget XP award for forum post (thread creation)
+    triggerXP(authorId, 'forum_post').catch(() => {});
+
     return res.status(201).json({ threadId, postId });
   } catch (err) { return handleError(res, 'create-thread', err); }
 });
@@ -144,6 +148,9 @@ router.post('/forums/thread/:threadId/reply', async (req, res) => {
     );
 
     insertAuditEvent({ actor: authorId, action: 'forum_post_created', target: threadId, data: { postId } });
+
+    // Fire-and-forget XP award for forum reply
+    triggerXP(authorId, 'forum_post').catch(() => {});
 
     return res.status(201).json({ postId });
   } catch (err) { return handleError(res, 'reply-thread', err); }
